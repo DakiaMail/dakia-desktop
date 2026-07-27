@@ -1,0 +1,12 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Published SHA-256 digests for classifier assets"
+targetRules = ["generic-api-key"]
+regexTarget = "secret"
+regexes = [
+  '''609d8f4c067cd3950f88594c5a802616cea245823836ef5848ee4fc40aab5b6f''',
+  '''3b66ca84514d9aacf4b90c65a61e561127c6c21d81bbf4e8ba9d46a4c15ac82d''',
+  '''6e3204c5a4004719c185007a745d1940471a6fb02521cfa0a00306dbb6bc5903''',
+]

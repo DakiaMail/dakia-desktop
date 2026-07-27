@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/DakiaMail/dakia-desktop/security/advisories/new
+    about: Report security issues privately.
+  - name: Support
+    url: mailto:support@dakiamail.com
+    about: Ask a private support question.

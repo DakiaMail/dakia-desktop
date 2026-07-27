@@ -1,0 +1,41 @@
+jhu-clsp/mmBERT-small license provenance
+
+Model: jhu-clsp/mmBERT-small
+License-reference revision: abc32620dd4f6ab06f5fbe905dc25f310618e09f
+Model card: https://huggingface.co/jhu-clsp/mmBERT-small/tree/abc32620dd4f6ab06f5fbe905dc25f310618e09f
+Source repository: https://github.com/jhu-clsp/mmBERT
+Publisher: Center for Language and Speech Processing at Johns Hopkins University
+
+The exact upstream model-card metadata declares:
+
+license: mit
+
+The upstream model repository and source repository do not publish a
+standalone LICENSE file or copyright notice at the revision above. This notice
+therefore does not invent or substitute a copyright claim. The model card
+cites the following model authors:
+
+Marc Marone, Orion Weller, William Fleshman, Eugene Yang, Dawn Lawrie, and
+Benjamin Van Durme.
+
+The standard MIT terms identified by the upstream `mit` declaration follow.
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

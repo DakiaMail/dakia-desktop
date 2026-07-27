@@ -1,0 +1,40 @@
+[package]
+name = "dakia-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+chrono.workspace = true
+directories.workspace = true
+fastembed = { version = "=5.13.1", default-features = false, features = ["ort-download-binaries-native-tls"] }
+lettre.workspace = true
+mail-auth = { version = "0.10", default-features = false, features = ["ring"] }
+mail-parser.workspace = true
+mailparse.workspace = true
+percent-encoding.workspace = true
+reqwest.workspace = true
+ring.workspace = true
+ort = { version = "=2.0.0-rc.11", default-features = false, features = ["std"] }
+schemars.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tokenizers = "=0.22.2"
+tracing.workspace = true
+url.workspace = true
+uuid.workspace = true
+webpki-roots.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

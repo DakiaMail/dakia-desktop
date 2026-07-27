@@ -1,0 +1,24 @@
+# The canonical gate is scripts/audit-dependencies.sh. It proves that each
+# ignored advisory is unreachable from Dakia's supported macOS targets before
+# cargo-audit applies these lockfile-level exceptions.
+[advisories]
+ignore = [
+  "RUSTSEC-2023-0071", # rsa 0.9.10: inactive sqlx-mysql feature subgraph
+  "RUSTSEC-2024-0429", # glib 0.18.5: Linux-only Tauri/GTK subgraph
+]
+informational_warnings = ["unmaintained", "unsound"]
+severity_threshold = "low"
+
+[database]
+fetch = true
+stale = false
+
+[output]
+deny = ["unsound", "yanked"]
+format = "terminal"
+quiet = false
+show_tree = true
+
+[yanked]
+enabled = true
+update_index = true
