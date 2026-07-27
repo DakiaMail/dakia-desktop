@@ -68,6 +68,25 @@ function createStaticAppFixture() {
   return { fixtureRoot, app };
 }
 
+test("local installer builds only an app without updater artifacts", () => {
+  const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  const installConfig = JSON.parse(
+    readFileSync(
+      join(root, "apps", "desktop", "src-tauri", "tauri.install.conf.json"),
+      "utf8",
+    ),
+  );
+  const installer = readFileSync(
+    join(root, "scripts", "install-built-app.sh"),
+    "utf8",
+  );
+
+  assert.ok(packageJson.scripts["build:install:bundle"]);
+  assert.match(packageJson.scripts["build:install:bundle"], /--bundles app/);
+  assert.equal(installConfig.bundle.createUpdaterArtifacts, false);
+  assert.match(installer, /npm run build:install:bundle/);
+});
+
 test("publisher rejects incomplete release assets before requiring publication credentials", () => {
   const result = spawnSync(publisher, ["v0.2.8", tmpdir()], {
     encoding: "utf8",

@@ -17,6 +17,7 @@
     "prepare:desktop-assets": "./scripts/prepare-desktop-assets.sh",
     "verify:classifier-assets": "node scripts/verify-classifier-assets.mjs",
     "prepare:onnx-runtime": "./scripts/prepare-onnx-runtime.sh",
+    "build:install:bundle": "npm run prepare:desktop-assets && tauri build --bundles app --config apps/desktop/src-tauri/tauri.install.conf.json",
     "build:install": "./scripts/install-built-app.sh",
     "verify:local": "./scripts/verify-local-release.sh",
     "release:build": "./scripts/build-local-macos-release.sh",

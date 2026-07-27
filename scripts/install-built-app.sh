@@ -10,10 +10,11 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_root"
 
 # ---------------------------------------------------------------------------
-# 1.  Build the release bundle
+# 1.  Build the release app bundle. Local installation does not need a DMG or
+# updater archive, so this intentionally uses the narrow install bundle.
 # ---------------------------------------------------------------------------
 echo "==> Building Dakia (release) …"
-npm run build
+npm run build:install:bundle
 
 # ---------------------------------------------------------------------------
 # 2.  Locate the freshly built .app
