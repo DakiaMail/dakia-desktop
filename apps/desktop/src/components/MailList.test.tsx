@@ -1,5 +1,5 @@
 import { MantineProvider } from "@mantine/core";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import "../i18n";
 import type { PendingMailActions } from "../mailActions";
@@ -251,7 +251,7 @@ describe("MailList action feedback", () => {
     expect(onSelect).toHaveBeenCalledWith(["account:1"], true);
   });
 
-  it("renders explicit unread smart sections without a seen bucket", () => {
+  it("renders Seen last and loads its next page near the scroll end", () => {
     const smartMessages: MailSummary[] = [
       ...["1", "2", "3", "4"].map((id) => ({
         ...messages[0],
@@ -292,6 +292,12 @@ describe("MailList action feedback", () => {
         id: "people",
         threads: groupMessages(smartMessages.slice(0, 4)),
         nextCursor: { received_at: "2026-07-19T09:00:00Z", id: "people-4" },
+        loadingMore: false,
+      },
+      {
+        id: "seen",
+        threads: groupMessages([smartMessages[4]]),
+        nextCursor: { received_at: "2026-07-19T08:00:00Z", id: "seen" },
         loadingMore: false,
       },
     ];
@@ -340,18 +346,26 @@ describe("MailList action feedback", () => {
     expect(screen.getByRole("region", { name: "Starred" })).toHaveTextContent(
       "Starred message",
     );
-    expect(
-      screen.queryByRole("region", { name: "Seen" }),
-    ).not.toBeInTheDocument();
-    expect(screen.queryByText("Seen message")).not.toBeInTheDocument();
+    const seen = screen.getByRole("region", { name: "Seen" });
+    expect(seen).toHaveTextContent("Seen message");
+    const regions = screen.getAllByRole("region");
+    expect(regions.at(-1)).toBe(seen);
     const people = screen.getByRole("region", { name: "People" });
     expect(people.querySelectorAll(".mail-item")).toHaveLength(4);
     expect(
       screen.queryByRole("button", { name: "More actions" }),
     ).not.toBeInTheDocument();
     expect(screen.getAllByText("Starred message")).toHaveLength(1);
-    fireEvent.click(screen.getByRole("button", { name: "Show more" }));
+    fireEvent.click(within(people).getByRole("button", { name: "Show more" }));
     expect(onLoadMoreSmart).toHaveBeenCalledWith("people");
+    const scroller = document.querySelector(".mail-scroll") as HTMLDivElement;
+    Object.defineProperties(scroller, {
+      scrollHeight: { configurable: true, value: 2_000 },
+      scrollTop: { configurable: true, value: 1_300 },
+      clientHeight: { configurable: true, value: 500 },
+    });
+    fireEvent.scroll(scroller);
+    expect(onLoadMoreSmart).toHaveBeenCalledWith("seen");
   });
 
   it("does not retain an active read thread in Smart", () => {

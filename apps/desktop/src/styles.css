@@ -707,6 +707,20 @@ textarea {
 .mail-item[data-unread="true"] .mail-subject {
   font-weight: 670;
 }
+.mail-item[data-smart-exiting="true"] {
+  pointer-events: none;
+  animation: smart-thread-exit 180ms ease-in forwards;
+}
+@keyframes smart-thread-exit {
+  to {
+    opacity: 0;
+    transform: translateX(-10px);
+    max-height: 0;
+    min-height: 0;
+    padding-block: 0;
+    border-width: 0;
+  }
+}
 .mail-check {
   padding-top: 2px;
 }

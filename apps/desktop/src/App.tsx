@@ -90,6 +90,7 @@ const smartSectionIds: SmartSectionId[] = [
   "notifications",
   "newsletters",
   "other",
+  "seen",
 ];
 type MailViewRequest = {
   accountIds: string[];
@@ -159,6 +160,12 @@ export default function App() {
   const [pendingActions, setPendingActions] = useState<PendingMailActions>({});
   const [outbox, setOutbox] = useState<MailSummary[]>([]);
   const [starredCount, setStarredCount] = useState(0);
+  const [exitingSmartThreadIds, setExitingSmartThreadIds] = useState(
+    new Set<string>(),
+  );
+  const [retainedSmartThreads, setRetainedSmartThreads] = useState(
+    new Map<string, { sectionId: SmartSectionId; thread: MailThread }>(),
+  );
   const [actionStatus, setActionStatus] = useState<{
     id: number;
     message: string;
@@ -170,6 +177,7 @@ export default function App() {
   const actionBusyRef = useRef(false);
   const loadRequestIdRef = useRef(0);
   const smartLoadRequestIdRef = useRef(0);
+  const starredCountRequestIdRef = useRef(0);
   const nextCursorRef = useRef<MailCursor | null>(null);
   const loadingMoreRef = useRef(false);
   const smartLoadingMoreRef = useRef(new Set<SmartSectionId>());
@@ -177,6 +185,7 @@ export default function App() {
   const classifyingRef = useRef(false);
   const classificationRequestedRef = useRef(false);
   const manualUpdateCheckInFlightRef = useRef(false);
+  const smartExitTimersRef = useRef(new Map<string, number>());
   const accountsRef = useRef<Account[]>([]);
   const selectedAccountIdRef = useRef<string | undefined>(undefined);
   const removedAccountIdsRef = useRef(new Set<string>());
@@ -184,6 +193,13 @@ export default function App() {
 
   accountsRef.current = accounts;
   selectedAccountIdRef.current = selectedAccountId;
+
+  useEffect(
+    () => () => {
+      smartExitTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    },
+    [],
+  );
 
   const showStatus = useCallback(
     (message: string, tone: "success" | "error" = "success") => {
@@ -341,8 +357,12 @@ export default function App() {
     view: mailListView,
   };
   const refreshStarredCount = useCallback(async (accountIds: string[]) => {
+    const requestId = ++starredCountRequestIdRef.current;
     try {
-      setStarredCount(await api.starredCount(accountIds));
+      const count = await api.starredCount(accountIds);
+      if (requestId === starredCountRequestIdRef.current) {
+        setStarredCount(count);
+      }
     } catch {
       // The message list remains usable if a count refresh fails offline.
     }
@@ -393,16 +413,18 @@ export default function App() {
       if (smartInbox) {
         const pageResults = await Promise.allSettled(
           smartSectionIds.map(async (id) => {
+            const category = !["starred", "seen"].includes(id) ? id : undefined;
             const page = await api.search(
               "",
               accountIds,
               "INBOX",
-              id !== "starred",
+              !["starred", "seen"].includes(id),
               id === "starred",
               smartPageSize,
               null,
-              id === "starred" ? undefined : id,
-              id !== "starred",
+              category,
+              !["starred", "seen"].includes(id),
+              id === "seen",
             );
             return [id, page] as const;
           }),
@@ -658,12 +680,13 @@ export default function App() {
           "",
           currentView.accountIds,
           "INBOX",
-          id !== "starred",
+          !["starred", "seen"].includes(id),
           id === "starred",
           smartMorePageSize,
           section.nextCursor,
-          id === "starred" ? undefined : id,
-          id !== "starred",
+          !["starred", "seen"].includes(id) ? id : undefined,
+          !["starred", "seen"].includes(id),
+          id === "seen",
         );
         if (
           requestId !== smartLoadRequestIdRef.current ||
@@ -1160,7 +1183,6 @@ export default function App() {
           ]),
         ) as Record<SmartSectionId, SmartSection>,
     );
-
     const results = await resultsPromise;
     const failedThreadIds = new Set(
       actionThreads
@@ -1422,14 +1444,29 @@ export default function App() {
               {
                 ...current[id],
                 threads:
-                  read && id !== "starred"
-                    ? sectionThreads.filter((item) => item.unread)
-                    : sectionThreads,
+                  read && !["starred", "seen"].includes(id)
+                    ? sectionThreads.filter(
+                        (item) => item.unread || item.id === thread.id,
+                      )
+                    : !read && id === "seen"
+                      ? sectionThreads.filter((item) => item.unread)
+                      : sectionThreads,
               },
             ];
           }),
         ) as Record<SmartSectionId, SmartSection>,
     );
+    setRetainedSmartThreads((current) => {
+      const next = new Map(current);
+      const retained = next.get(thread.id);
+      if (retained) {
+        next.set(thread.id, {
+          ...retained,
+          thread: updateThreadReadState(retained.thread, ids, read),
+        });
+      }
+      return next;
+    });
     setActive((current) =>
       current ? updateMessageReadState(current, ids, read) : current,
     );
@@ -1776,7 +1813,20 @@ export default function App() {
         mailboxTitle={mailboxTitle}
         view={mailListView}
         smartInbox={smartInboxActive}
-        smartSections={smartSectionIds.map((id) => smartSections[id])}
+        smartSections={smartSectionIds.map((id) => {
+          const section = smartSections[id];
+          const retained = [...retainedSmartThreads.values()]
+            .filter((item) => item.sectionId === id)
+            .map((item) => item.thread)
+            .filter(
+              (thread) =>
+                !section.threads.some((item) => item.id === thread.id),
+            );
+          return retained.length
+            ? { ...section, threads: mergeThreads(section.threads, retained) }
+            : section;
+        })}
+        exitingThreadIds={exitingSmartThreadIds}
         onViewChange={changeMailListView}
         onCategorize={(message, category) => {
           void api
@@ -1818,6 +1868,64 @@ export default function App() {
         onToggleStar={(message, starred) => void toggleStar(message, starred)}
         onQuery={setQuery}
         onOpen={(thread) => {
+          const previousThread = activeThread;
+          if (smartInboxActive) {
+            const sectionId = smartSectionIds.find((id) =>
+              smartSections[id].threads.some((item) => item.id === thread.id),
+            );
+            if (sectionId && !["starred", "seen"].includes(sectionId)) {
+              setRetainedSmartThreads((current) => {
+                const next = new Map(current);
+                next.set(thread.id, { sectionId, thread });
+                return next;
+              });
+            }
+          }
+          if (
+            smartInboxActive &&
+            previousThread &&
+            previousThread.id !== thread.id &&
+            !previousThread.unread
+          ) {
+            const previousId = previousThread.id;
+            setExitingSmartThreadIds((current) =>
+              new Set(current).add(previousId),
+            );
+            const existingTimer = smartExitTimersRef.current.get(previousId);
+            if (existingTimer) window.clearTimeout(existingTimer);
+            smartExitTimersRef.current.set(
+              previousId,
+              window.setTimeout(() => {
+                setSmartSections(
+                  (current) =>
+                    Object.fromEntries(
+                      smartSectionIds.map((id) => [
+                        id,
+                        {
+                          ...current[id],
+                          threads: ["starred", "seen"].includes(id)
+                            ? current[id].threads
+                            : current[id].threads.filter(
+                                (item) => item.id !== previousId,
+                              ),
+                        },
+                      ]),
+                    ) as Record<SmartSectionId, SmartSection>,
+                );
+                setExitingSmartThreadIds((current) => {
+                  const next = new Set(current);
+                  next.delete(previousId);
+                  return next;
+                });
+                setRetainedSmartThreads((current) => {
+                  const next = new Map(current);
+                  next.delete(previousId);
+                  return next;
+                });
+                smartExitTimersRef.current.delete(previousId);
+              }, 180),
+            );
+          }
           setActive(thread.latest);
           setActiveThreadSnapshot(thread);
           setAiResult(undefined);
