@@ -32,6 +32,19 @@ case "$(uname -m)" in
   *) echo "Unsupported Mac architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 
+version_is_before() {
+  local candidate="$1"
+  local boundary="$2"
+  local candidate_major candidate_minor candidate_patch
+  local boundary_major boundary_minor boundary_patch
+  IFS=. read -r candidate_major candidate_minor candidate_patch <<<"$candidate"
+  IFS=. read -r boundary_major boundary_minor boundary_patch <<<"$boundary"
+  ((candidate_major < boundary_major)) ||
+    ((candidate_major == boundary_major && candidate_minor < boundary_minor)) ||
+    ((candidate_major == boundary_major && candidate_minor == boundary_minor &&
+      candidate_patch < boundary_patch))
+}
+
 result_dir="$evidence_root/$arch/$mode"
 if [[ -e "$result_dir/result.json" ]]; then
   echo "Refusing to overwrite existing acceptance evidence: $result_dir/result.json" >&2
@@ -51,7 +64,13 @@ if [[ "${DAKIA_SKIP_FIXTURE_PUBLISH:-0}" != "1" ]]; then
     "$target_tag" "$mode" "$target_assets"
 fi
 
-"$root_dir/scripts/verify-macos-release-dmg.sh" "$baseline_dmg"
+baseline_version="${baseline_tag#v}"
+if version_is_before "$baseline_version" "0.2.9"; then
+  DAKIA_RELEASE_NOTICE_POLICY=legacy-pre-0.2.9 \
+    "$root_dir/scripts/verify-macos-release-dmg.sh" "$baseline_dmg"
+else
+  "$root_dir/scripts/verify-macos-release-dmg.sh" "$baseline_dmg"
+fi
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/dakia-updater-acceptance.XXXXXX")"
 work_dir="$(cd "$work_dir" && pwd -P)"
 mount_point=""
@@ -89,7 +108,6 @@ evidence="$work_dir/evidence.jsonl"
 output="$work_dir/app.log"
 profile_before="$work_dir/profile-before.txt"
 profile_after="$work_dir/profile-after.txt"
-baseline_version="${baseline_tag#v}"
 target_version="${target_tag#v}"
 
 actual_baseline="$(/usr/libexec/PlistBuddy -c \
