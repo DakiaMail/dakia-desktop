@@ -278,6 +278,7 @@ async fn main() -> Result<()> {
                 mailbox: args.mailbox,
                 from: args.from,
                 unread_only: args.unread,
+                read_only: false,
                 flagged_only: false,
                 unflagged_only: false,
                 category: None,
