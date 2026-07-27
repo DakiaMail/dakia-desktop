@@ -82,7 +82,7 @@ export type MailThreadPage = {
   conversations: MailThread[];
   nextCursor: MailCursor | null;
 };
-export type SmartSectionId = "starred" | MailCategory;
+export type SmartSectionId = "starred" | MailCategory | "seen";
 export type SmartSection = {
   id: SmartSectionId;
   threads: MailThread[];

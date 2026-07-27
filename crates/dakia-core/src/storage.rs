@@ -184,6 +184,10 @@ pub struct SearchQuery {
     pub mailbox: Option<String>,
     pub from: Option<String>,
     pub unread_only: bool,
+    /// Include only conversations whose messages in the requested mailbox
+    /// scope have all been read.
+    #[serde(default)]
+    pub read_only: bool,
     pub flagged_only: bool,
     /// Exclude every conversation containing a flagged message. This is kept
     /// separate from `flagged_only` because Smart category views use it to
@@ -1793,6 +1797,9 @@ impl Store {
         if query.unread_only {
             sql.push_str(" AND m.is_read = 0");
         }
+        if query.read_only {
+            sql.push_str(" AND m.is_read = 1");
+        }
         if query.flagged_only {
             sql.push_str(" AND m.is_flagged = 1");
         }
@@ -2030,6 +2037,20 @@ impl Store {
             }
             sql.push(')');
         }
+        // A seen conversation has no unread member in the mailbox scope.
+        if query.read_only {
+            sql.push_str(" AND NOT EXISTS (SELECT 1 FROM messages unread WHERE unread.account_id = matching.account_id AND unread.thread_id = matching.thread_id AND unread.is_read = 0");
+            if let Some(mailbox) = query.mailbox.as_deref() {
+                if is_special_mailbox_family(mailbox) {
+                    sql.push_str(" AND (unread.mailbox = ? OR unread.mailbox LIKE ?)");
+                } else {
+                    sql.push_str(" AND unread.mailbox = ?");
+                }
+            } else {
+                sql.push_str(" AND unread.mailbox NOT IN ('Spam', 'Trash') AND unread.mailbox NOT LIKE 'Spam::%' AND unread.mailbox NOT LIKE 'Trash::%'");
+            }
+            sql.push(')');
+        }
         if query.cursor.is_some() {
             sql.push_str(" AND (received_at < ? OR (received_at = ? AND id < ?))");
         }
@@ -2054,7 +2075,7 @@ impl Store {
         if let Some(category) = &query.category {
             statement = statement.bind(category);
         }
-        if query.unread_only {
+        if query.unread_only || query.read_only {
             if let Some(mailbox) = query.mailbox.as_deref() {
                 statement = statement.bind(mailbox);
                 if is_special_mailbox_family(mailbox) {
@@ -3810,6 +3831,65 @@ mod tests {
             .unwrap();
         assert_eq!(updated.len(), 1);
         assert_eq!(updated[0].message_count, 3);
+    }
+
+    #[tokio::test]
+    async fn seen_conversations_require_every_scoped_message_to_be_read() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+
+        let mut seen = message("Seen", "Read inbox message");
+        seen.id = "seen-inbox".into();
+        seen.account_id = account_id.to_string();
+        seen.thread_id = "seen-thread".into();
+        seen.is_read = true;
+
+        let mut sent_unread = message("Re: Seen", "Unread sent copy");
+        sent_unread.id = "seen-sent".into();
+        sent_unread.account_id = account_id.to_string();
+        sent_unread.thread_id = seen.thread_id.clone();
+        sent_unread.mailbox = "Sent".into();
+        sent_unread.uid = 2;
+        sent_unread.is_read = false;
+
+        let mut mixed_read = message("Mixed", "Read member");
+        mixed_read.id = "mixed-read".into();
+        mixed_read.account_id = account_id.to_string();
+        mixed_read.thread_id = "mixed-thread".into();
+        mixed_read.uid = 3;
+        mixed_read.is_read = true;
+
+        let mut mixed_unread = message("Re: Mixed", "Unread member");
+        mixed_unread.id = "mixed-unread".into();
+        mixed_unread.account_id = account_id.to_string();
+        mixed_unread.thread_id = mixed_read.thread_id.clone();
+        mixed_unread.uid = 4;
+        mixed_unread.is_read = false;
+
+        store
+            .upsert_messages(&[seen, sent_unread, mixed_read, mixed_unread])
+            .await
+            .unwrap();
+
+        let page = store
+            .search_conversation_page(&SearchQuery {
+                account_ids: vec![account_id],
+                mailbox: Some("INBOX".into()),
+                read_only: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(page.conversations.len(), 1);
+        assert!(page.conversations[0]
+            .messages
+            .iter()
+            .any(|message| message.id == "seen-inbox"));
+        assert!(page.conversations[0]
+            .messages
+            .iter()
+            .all(|message| !message.id.starts_with("mixed-")));
     }
 
     #[tokio::test]

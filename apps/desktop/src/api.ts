@@ -51,6 +51,7 @@ const desktopApi = {
     cursor?: MailCursor | null,
     category?: string,
     unflaggedOnly = false,
+    readOnly = false,
   ) =>
     invoke<MailThreadPage>("search", {
       query: {
@@ -59,6 +60,7 @@ const desktopApi = {
         mailbox,
         from: null,
         unread_only: unreadOnly,
+        read_only: readOnly,
         flagged_only: flaggedOnly,
         category,
         unflagged_only: unflaggedOnly,
@@ -403,6 +405,7 @@ const demoApi: typeof desktopApi = {
     _cursor,
     category,
     unflaggedOnly,
+    readOnly,
   ) => {
     const allowedAccounts = new Set(accountIds);
     const matches = demoMessages.filter(
@@ -410,6 +413,7 @@ const demoApi: typeof desktopApi = {
         (!allowedAccounts.size || allowedAccounts.has(message.account_id)) &&
         (!mailbox || mailboxFamily(message.mailbox) === mailbox) &&
         (!unreadOnly || !message.is_read) &&
+        (!readOnly || message.is_read) &&
         (!flaggedOnly || message.is_flagged) &&
         (!unflaggedOnly || !message.is_flagged) &&
         (!category || message.category === category) &&

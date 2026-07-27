@@ -206,6 +206,7 @@ describe("App read state", () => {
       conversations: groupMessages([mocks.message]),
       nextCursor: null,
     });
+    mocks.api.starredCount.mockResolvedValue(0);
     mocks.api.content.mockResolvedValue({
       body_text: "Message body",
       attachments: [],
@@ -471,7 +472,7 @@ describe("App read state", () => {
       </MantineProvider>,
     );
 
-    await waitFor(() => expect(mocks.api.search).toHaveBeenCalledTimes(6));
+    await waitFor(() => expect(mocks.api.search).toHaveBeenCalledTimes(7));
     expect(mocks.api.search).toHaveBeenCalledWith(
       "",
       ["account-1", "account-2"],
@@ -482,6 +483,7 @@ describe("App read state", () => {
       null,
       "people",
       true,
+      false,
     );
     expect(mocks.api.search).toHaveBeenCalledWith(
       "",
@@ -493,7 +495,58 @@ describe("App read state", () => {
       null,
       undefined,
       false,
+      false,
     );
+  });
+
+  it("ignores an older all-account starred count after selecting one account", async () => {
+    const secondAccount = {
+      ...mocks.account,
+      id: "account-2",
+      email: "other@example.com",
+      account_name: "Other",
+    };
+    let resolveAllAccounts: (count: number) => void = () => undefined;
+    let resolveSelectedAccount: (count: number) => void = () => undefined;
+    mocks.api.accounts.mockResolvedValueOnce([mocks.account, secondAccount]);
+    mocks.api.starredCount.mockImplementation((...args: unknown[]) => {
+      const accountIds = args[0] as string[];
+      if (accountIds.length === 0) return Promise.resolve(0);
+      return new Promise<number>((resolve) => {
+        if (accountIds.length === 2) resolveAllAccounts = resolve;
+        else resolveSelectedAccount = resolve;
+      });
+    });
+
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    await waitFor(() =>
+      expect(mocks.api.starredCount).toHaveBeenCalledWith([
+        "account-1",
+        "account-2",
+      ]),
+    );
+    fireEvent.click(await screen.findByTitle("me@example.com"));
+    await waitFor(() =>
+      expect(mocks.api.starredCount).toHaveBeenCalledWith(["account-1"]),
+    );
+
+    await act(async () => resolveSelectedAccount(7));
+    expect(
+      await screen.findByLabelText("7 starred conversations"),
+    ).toHaveTextContent("7");
+
+    await act(async () => resolveAllAccounts(40));
+    expect(screen.getByLabelText("7 starred conversations")).toHaveTextContent(
+      "7",
+    );
+    expect(
+      screen.queryByLabelText("40 starred conversations"),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps successful Smart sections visible when one category fails", async () => {
@@ -612,6 +665,7 @@ describe("App read state", () => {
       firstCursor,
       "people",
       true,
+      false,
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Show more" }));
@@ -703,6 +757,7 @@ describe("App read state", () => {
       null,
       undefined,
       false,
+      false,
     );
 
     fireEvent.click(row.closest("button")!);
@@ -716,13 +771,28 @@ describe("App read state", () => {
     ).toBeVisible();
   });
 
-  it("removes an opened Smart thread as soon as it becomes read", async () => {
+  it("keeps an opened Smart thread until another opens, then animates it out", async () => {
     localStorage.setItem("dakia.mail-list-view", "smart");
     mocks.api.classifyPending.mockImplementationOnce(
       () => new Promise(() => undefined),
     );
     let peopleSearches = 0;
+    const nextMessage = {
+      ...mocks.message,
+      id: "message-2",
+      uid: 2,
+      thread_id: "thread-2",
+      subject: "Next unread thread",
+      received_at: "2026-07-19T09:00:00Z",
+      is_flagged: true,
+    };
     mocks.api.search.mockImplementation(async (...args: unknown[]) => {
+      if (args[4]) {
+        return {
+          conversations: groupMessages([nextMessage]),
+          nextCursor: null,
+        };
+      }
       if (args[7] !== "people") return { conversations: [], nextCursor: null };
       peopleSearches += 1;
       return {
@@ -745,21 +815,21 @@ describe("App read state", () => {
       expect(mocks.api.setRead).toHaveBeenCalledWith("message-1", true),
     );
     expect(
-      within(document.querySelector(".mail-list-panel")!).queryByText(
+      within(document.querySelector(".mail-list-panel")!).getByText(
         "Unread thread",
       ),
-    ).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Reply" }));
-    expect(mocks.openComposeWindow).toHaveBeenCalledWith(
-      expect.objectContaining({
-        accountId: "account-1",
-        to: "sender@example.com",
-        subject: "Re: Unread thread",
-      }),
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Mark as unread" }));
+    ).toBeVisible();
+
+    fireEvent.click(screen.getByText("Next unread thread").closest("button")!);
+    expect(
+      screen.getByText("Unread thread").closest(".mail-item"),
+    ).toHaveAttribute("data-smart-exiting", "true");
     await waitFor(() =>
-      expect(mocks.api.setRead).toHaveBeenCalledWith("message-1", false),
+      expect(
+        within(document.querySelector(".mail-list-panel")!).queryByText(
+          "Unread thread",
+        ),
+      ).not.toBeInTheDocument(),
     );
   });
 

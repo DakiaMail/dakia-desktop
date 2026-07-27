@@ -67,6 +67,7 @@ type Props = {
   onToggleStar: (message: MailSummary, starred: boolean) => void;
   smartInbox: boolean;
   smartSections?: SmartSection[];
+  exitingThreadIds?: Set<string>;
   onQuery: (value: string) => void;
   onOpen: (thread: MailThread) => void;
   onSelect: (ids: string[], checked: boolean) => void;
@@ -110,6 +111,7 @@ export function MailList({
   onToggleStar,
   smartInbox,
   smartSections = [],
+  exitingThreadIds = new Set(),
   onQuery,
   onOpen,
   onSelect,
@@ -141,15 +143,26 @@ export function MailList({
     (event: UIEvent<HTMLDivElement>) => {
       const element = event.currentTarget;
       if (
-        !(view === "smart" && smartInbox) &&
-        hasMore &&
-        !loadingMore &&
-        element.scrollHeight - element.scrollTop - element.clientHeight < 800
+        element.scrollHeight - element.scrollTop - element.clientHeight <
+        800
       ) {
-        onLoadMore();
+        if (view === "smart" && smartInbox) {
+          const seen = smartSections.find((section) => section.id === "seen");
+          if (seen?.nextCursor && !seen.loadingMore) onLoadMoreSmart?.("seen");
+        } else if (hasMore && !loadingMore) {
+          onLoadMore();
+        }
       }
     },
-    [hasMore, loadingMore, onLoadMore, smartInbox, view],
+    [
+      hasMore,
+      loadingMore,
+      onLoadMore,
+      onLoadMoreSmart,
+      smartInbox,
+      smartSections,
+      view,
+    ],
   );
   return (
     <section className="mail-list-panel" aria-label={mailboxTitle}>
@@ -286,6 +299,7 @@ export function MailList({
         {view === "smart" && smartInbox ? (
           <SmartThreadSections
             sections={smartSections}
+            exitingThreadIds={exitingThreadIds}
             activeThreadId={activeThreadId}
             selected={selected}
             pendingActions={pendingActions}
@@ -303,6 +317,7 @@ export function MailList({
         ) : (
           <ThreadRows
             threads={threads}
+            exitingThreadIds={exitingThreadIds}
             activeThreadId={activeThreadId}
             selected={selected}
             pendingActions={pendingActions}
@@ -349,6 +364,7 @@ type RowsProps = Pick<
   | "onActionThread"
   | "onToggleReadThread"
   | "onToggleStarThread"
+  | "exitingThreadIds"
 > & { threads: MailThread[] };
 
 function SmartThreadSections(
@@ -365,6 +381,7 @@ function SmartThreadSections(
     notifications: "inbox.categoryNotifications",
     newsletters: "inbox.categoryNewsletters",
     other: "inbox.categoryOther",
+    seen: "inbox.seen",
   };
   return props.sections.map(({ id, threads, nextCursor, loadingMore }) => {
     if (!threads.length) return null;
@@ -402,6 +419,7 @@ function ThreadRows({
   onActionThread,
   onToggleReadThread,
   onToggleStarThread,
+  exitingThreadIds = new Set(),
 }: RowsProps) {
   const { t } = useTranslation();
   const [context, setContext] = useState<{
@@ -565,6 +583,7 @@ function ThreadRows({
             className="mail-item"
             data-active={activeThreadId === thread.id}
             data-unread={thread.unread}
+            data-smart-exiting={exitingThreadIds.has(thread.id)}
             data-action-phase={pending?.phase}
             data-action-kind={pending?.action}
             style={
