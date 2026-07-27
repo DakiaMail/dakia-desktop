@@ -12,7 +12,7 @@ async-trait.workspace = true
 base64.workspace = true
 chrono.workspace = true
 directories.workspace = true
-fastembed = { version = "=5.13.1", default-features = false, features = ["ort-download-binaries-native-tls"] }
+fastembed = { version = "=5.13.2", default-features = false, features = ["ort-download-binaries-native-tls"] }
 lettre.workspace = true
 mail-auth = { version = "0.10", default-features = false, features = ["ring"] }
 mail-parser.workspace = true
