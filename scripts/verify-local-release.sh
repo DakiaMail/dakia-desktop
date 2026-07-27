@@ -16,7 +16,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 npm run typecheck
 npm run format:check
-npm run test
+NODE_OPTIONS="--localstorage-file=/private/tmp/dakia-release-vitest-localstorage" \
+  npm run test -- --maxWorkers=1
 npm run test:release-scripts
 npm run build:web
 
