@@ -7,14 +7,13 @@ if [ "$(uname -s)" != "Darwin" ]; then
   exit 1
 fi
 
-if [ "$#" -ne 3 ]; then
-  echo "Usage: $0 <aarch64|x64> <version> /path/to/output.dmg" >&2
+if [ "$#" -ne 2 ]; then
+  echo "Usage: $0 <version> /path/to/output.dmg" >&2
   exit 2
 fi
 
-arch=$1
-version=$2
-output_dmg=$3
+version=$1
+output_dmg=$2
 identity=${APPLE_SIGNING_IDENTITY:-}
 notary_profile=${APPLE_NOTARY_PROFILE:-dakia-notary}
 
@@ -25,22 +24,7 @@ fi
 
 root_dir=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 
-case "$arch" in
-  aarch64)
-    if [ -d "$root_dir/target/aarch64-apple-darwin/release/bundle" ]; then
-      bundle_root="$root_dir/target/aarch64-apple-darwin/release/bundle"
-    else
-      bundle_root="$root_dir/target/release/bundle"
-    fi
-    ;;
-  x64)
-    bundle_root="$root_dir/target/x86_64-apple-darwin/release/bundle"
-    ;;
-  *)
-    echo "Unsupported architecture '$arch'. Use 'aarch64' or 'x64'." >&2
-    exit 2
-    ;;
-esac
+bundle_root="$root_dir/target/aarch64-apple-darwin/release/bundle"
 
 bundle_script="$bundle_root/dmg/bundle_dmg.sh"
 app_bundle_dir="$bundle_root/macos"
@@ -74,7 +58,7 @@ ditto "$app_bundle" "$staging_dir/Dakia.app"
   "$output_dmg" \
   "$staging_dir"
 
-expected_name="Dakia_${version}_${arch}.dmg"
+expected_name="Dakia_${version}_aarch64.dmg"
 actual_name=$(basename "$output_dmg")
 if [ "$actual_name" != "$expected_name" ]; then
   echo "Rebuilt DMG at $output_dmg"

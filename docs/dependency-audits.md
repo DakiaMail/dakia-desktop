@@ -20,12 +20,12 @@ transition an immediate release blocker.
 
 `cargo-audit` scans every package recorded in `Cargo.lock`, including inactive
 features and other operating-system subgraphs. `.cargo/audit.toml` therefore has
-two narrow exceptions, and `scripts/audit-dependencies.sh` checks both supported
-release targets before applying them:
+two narrow exceptions, and `scripts/audit-dependencies.sh` checks the supported
+Apple Silicon release target before applying them:
 
 - `RUSTSEC-2023-0071`: `rsa 0.9.10` is present through the inactive
   `sqlx-mysql` feature subgraph. It is absent from both
-  `aarch64-apple-darwin` and `x86_64-apple-darwin`.
+  `aarch64-apple-darwin`.
 - `RUSTSEC-2024-0429`: `glib 0.18.5` is present in Tauri's Linux GTK subgraph.
   It is absent from both supported macOS targets.
 
@@ -42,7 +42,7 @@ On 2026-07-27, `cargo-audit 0.22.2` scanned the locked 730-package graph against
 The unfiltered lockfile scan found one vulnerability,
 `RUSTSEC-2023-0071` in `rsa 0.9.10`, and one unsound advisory,
 `RUSTSEC-2024-0429` in `glib 0.18.5`. The supported-target `cargo tree` checks
-above found neither package reachable on Apple Silicon nor Intel macOS.
+above found neither package reachable on Apple Silicon macOS.
 The scan also reported 17 unmaintained-package warnings; those are tracked as
 warnings under the policy above.
 

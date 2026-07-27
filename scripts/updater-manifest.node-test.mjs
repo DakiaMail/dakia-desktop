@@ -1,10 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  buildManifest,
-  corruptManifestSignatures,
-  validateManifest,
-} from "./updater-manifest.mjs";
+import { buildManifest, validateManifest } from "./updater-manifest.mjs";
 
 const encodedSignature = Buffer.from(
   [
@@ -12,6 +8,12 @@ const encodedSignature = Buffer.from(
     "RWQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     "trusted comment: timestamp:1753444800\tfile:Dakia.app.tar.gz",
     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+  ].join("\n"),
+).toString("base64");
+const matchingPublicKey = Buffer.from(
+  [
+    "untrusted comment: minisign public key",
+    "RWQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
   ].join("\n"),
 ).toString("base64");
 
@@ -22,23 +24,21 @@ const input = {
   aarch64Url:
     "https://downloads.dakiamail.com/macos/v0.2.7/Dakia-aarch64.app.tar.gz",
   aarch64Signature: encodedSignature,
-  x86_64Url:
-    "https://downloads.dakiamail.com/macos/v0.2.7/Dakia-x86_64.app.tar.gz",
-  x86_64Signature: encodedSignature,
 };
 
-test("builds the two required macOS platform entries", () => {
+test("builds the Apple Silicon updater platform entry", () => {
   const manifest = buildManifest(input);
   assert.equal(
     manifest.platforms["darwin-aarch64"].signature,
     encodedSignature,
   );
-  assert.equal(manifest.platforms["darwin-x86_64"].url, input.x86_64Url);
+  assert.deepEqual(Object.keys(manifest.platforms), ["darwin-aarch64"]);
 });
 
 test("rejects architecture swaps", () => {
   const manifest = buildManifest(input);
-  manifest.platforms["darwin-aarch64"].url = input.x86_64Url;
+  manifest.platforms["darwin-aarch64"].url =
+    "https://downloads.dakiamail.com/macos/v0.2.7/Dakia-x86_64.app.tar.gz";
   assert.throws(() => validateManifest(manifest), /architecture mismatch/);
 });
 
@@ -64,17 +64,30 @@ test("rejects non-SemVer versions", () => {
   );
 });
 
-test("creates structurally valid but cryptographically different signatures", () => {
+test("rejects an unsupported Intel platform entry", () => {
   const manifest = buildManifest(input);
-  const corrupted = corruptManifestSignatures(manifest);
+  manifest.platforms["darwin-x86_64"] = {
+    url: "https://downloads.dakiamail.com/macos/v0.2.7/Dakia-x86_64.app.tar.gz",
+    signature: encodedSignature,
+  };
+  assert.throws(() => validateManifest(manifest), /only darwin-aarch64/);
+});
 
-  assert.notEqual(
-    corrupted.platforms["darwin-aarch64"].signature,
-    manifest.platforms["darwin-aarch64"].signature,
+test("rejects a signature from a different updater key", () => {
+  const differentPublicKey = Buffer.from(
+    [
+      "untrusted comment: minisign public key",
+      "RWQBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+    ].join("\n"),
+  ).toString("base64");
+  assert.throws(
+    () => buildManifest({ ...input, updaterPublicKey: differentPublicKey }),
+    /does not match the embedded public key/,
   );
-  assert.notEqual(
-    corrupted.platforms["darwin-x86_64"].signature,
-    manifest.platforms["darwin-x86_64"].signature,
+});
+
+test("accepts a signature with the embedded updater key identifier", () => {
+  assert.doesNotThrow(() =>
+    buildManifest({ ...input, updaterPublicKey: matchingPublicKey }),
   );
-  assert.doesNotThrow(() => validateManifest(corrupted));
 });

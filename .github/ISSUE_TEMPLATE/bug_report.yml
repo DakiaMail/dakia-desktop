@@ -19,7 +19,6 @@ body:
       label: Platform
       options:
         - macOS Apple Silicon
-        - macOS Intel
         - Other
     validations:
       required: true

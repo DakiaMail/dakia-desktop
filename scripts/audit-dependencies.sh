@@ -47,7 +47,7 @@ fi
 
 cd "$repo_root"
 
-supported_targets="aarch64-apple-darwin x86_64-apple-darwin"
+supported_targets="aarch64-apple-darwin"
 
 assert_unreachable() {
   package=$1

@@ -1,93 +1,39 @@
-# Publishing A macOS Release
+# Publishing a macOS Release
 
-Dakia releases are built, signed, notarized, tested, and published from the
-primary Apple Silicon Mac. R2 is the only public artifact host. GitHub Actions
-and GitHub Releases are intentionally not used.
+Dakia releases are built, signed, notarized, and published locally from the
+primary Apple Silicon Mac. R2 is the public artifact host. The release path is
+Apple Silicon only; GitHub Actions and GitHub Releases are not used.
 
-## Preflight
-
-Before release work:
-
-```bash
-git status --short
-security find-identity -v -p codesigning
-xcrun notarytool history --keychain-profile dakia-notary
-rustup target list --installed
-aws --version
-```
-
-Required state:
-
-- the release tree is clean and already contains the intended code;
-- one valid Developer ID Application identity is available;
-- the `dakia-notary` profile can authenticate;
-- `aarch64-apple-darwin` and `x86_64-apple-darwin` are installed;
-- the updater private key and its Keychain password are available;
-- the Google Desktop OAuth client secret is stored in Keychain;
-- bucket-scoped R2 credentials are stored as described in
-  [Signed Desktop Updates](updater-release.md).
-
-Keep the version synchronized in `package.json`, the Cargo workspace and lock
-file, and `apps/desktop/src-tauri/tauri.conf.json`.
+Before a release, ensure the intended code is present and the version matches
+`package.json`, the Cargo workspace, and `apps/desktop/src-tauri/tauri.conf.json`.
+The release commands validate their required signing, notarization, OAuth, and
+R2 credentials directly, so there is no separate manual preflight checklist.
 
 ## Commands
 
-Run the local replacement for CI:
-
 ```bash
 npm run verify:local
+npm run release:build -- vX.Y.Z
+npm run release:publish -- vX.Y.Z "$PWD/release-assets/vX.Y.Z"
 ```
 
-Build staging, perform the two-machine signed update acceptance suite, then
-build and publish production:
+The verification command runs Rust formatting, Clippy, Rust tests, TypeScript,
+formatting, frontend tests, release-script tests, and the frontend build. It no
+longer builds a separate packaged app: the release builder verifies the actual
+signed final artifact instead.
 
-```bash
-npm run release:build -- vX.Y.Z staging
-npm run release:publish:staging -- \
-  vX.Y.Z "$PWD/release-assets/vX.Y.Z/staging"
+The builder:
 
-# Follow the two-machine acceptance sequence in updater-release.md.
+1. assembles, Developer ID signs, and verifies the Apple Silicon app;
+2. verifies packaged executable, classifier resources, and legal notices;
+3. runs the packaged-app startup check on the release Mac;
+4. notarizes and staples the app;
+5. rebuilds, notarizes, staples, mounts, and verifies the DMG;
+6. archives that same final app and signs the exact archive bytes for Tauri.
 
-npm run release:build -- vX.Y.Z production
-npm run release:publish:production -- \
-  vX.Y.Z \
-  "$PWD/release-assets/vX.Y.Z/production" \
-  "$PWD/release-assets/vX.Y.Z/evidence"
-```
+The publisher uses immutable versioned R2 paths, anonymously verifies the
+published bytes, validates the updater manifest, and publishes `latest.json`
+only after all artifact checks pass.
 
-The builder applies the required order independently to both architectures:
-
-1. assemble and Developer ID sign the app;
-2. statically verify the executable, classifier resources, third-party
-   notices, and Dakia MPL 2.0/source-availability notice for **both**
-   architectures;
-3. run the packaged-app startup check when native to the machine;
-4. notarize and staple the app;
-5. rebuild the DMG from that final app;
-6. notarize, staple, mount-verify, and repeat static verification of the DMG;
-7. archive that same final app and sign the exact archive bytes.
-
-The Intel app receives its actual startup and updater/restart proof on the
-Intel MacBook, not under Rosetta. An Intel native-execution waiver never skips
-the architecture-independent app/resource/legal verification.
-
-## Final audit
-
-After production promotion:
-
-```bash
-curl -I https://downloads.dakiamail.com/macos/vX.Y.Z/Dakia-Apple-Silicon.dmg
-curl -I https://downloads.dakiamail.com/macos/vX.Y.Z/Dakia-Intel.dmg
-curl -I https://downloads.dakiamail.com/macos/latest/Dakia-Apple-Silicon.dmg
-curl -I https://downloads.dakiamail.com/macos/latest/Dakia-Intel.dmg
-curl -fsS https://downloads.dakiamail.com/macos/latest/latest.json |
-  node scripts/updater-manifest.mjs validate --manifest /dev/stdin
-```
-
-Also retain the ignored local artifact directory, its `SHA256SUMS.txt`, and all
-six acceptance entries in the encrypted release archive. An explicit waiver is
-an acceptance entry, not a passing test; keep it with the executed evidence and
-complete the deferred verification later.
-
-See [Signed Desktop Updates](updater-release.md) for the full staging fixture,
-Intel handoff, evidence, and atomic publication procedure.
+For updater key custody and artifact details, see
+[Signed Desktop Updates](updater-release.md).

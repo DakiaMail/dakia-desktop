@@ -618,76 +618,6 @@ mod bounded_concurrency_tests {
 }
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct UpdaterAcceptanceConfig {
-    expected_version: String,
-    expect_rejection: bool,
-}
-
-fn updater_acceptance_enabled() -> bool {
-    std::env::var_os("DAKIA_UPDATER_ACCEPTANCE").as_deref() == Some(std::ffi::OsStr::new("1"))
-}
-
-fn required_updater_acceptance_path(name: &str) -> Result<PathBuf, String> {
-    std::env::var_os(name)
-        .map(PathBuf::from)
-        .ok_or_else(|| format!("{name} is required when DAKIA_UPDATER_ACCEPTANCE=1"))
-}
-
-#[tauri::command]
-fn updater_acceptance_config() -> Result<Option<UpdaterAcceptanceConfig>, String> {
-    if !updater_acceptance_enabled() {
-        return Ok(None);
-    }
-    let expected_version =
-        std::env::var("DAKIA_UPDATER_ACCEPTANCE_EXPECTED_VERSION").map_err(|_| {
-            "DAKIA_UPDATER_ACCEPTANCE_EXPECTED_VERSION is required when acceptance mode is enabled"
-                .to_string()
-        })?;
-    if expected_version.trim().is_empty() {
-        return Err("Updater acceptance expected version must not be empty.".into());
-    }
-    Ok(Some(UpdaterAcceptanceConfig {
-        expected_version,
-        expect_rejection: std::env::var_os("DAKIA_UPDATER_ACCEPTANCE_EXPECT_REJECTION").as_deref()
-            == Some(std::ffi::OsStr::new("1")),
-    }))
-}
-
-#[tauri::command]
-fn record_updater_acceptance_event(event: String, detail: Option<String>) -> Result<(), String> {
-    if !updater_acceptance_enabled() {
-        return Err("Updater acceptance recording is disabled.".into());
-    }
-    if event.is_empty()
-        || event.len() > 80
-        || !event
-            .chars()
-            .all(|character| character.is_ascii_lowercase() || character == '-')
-    {
-        return Err("Invalid updater acceptance event name.".into());
-    }
-    if detail.as_ref().is_some_and(|value| value.len() > 2_000) {
-        return Err("Updater acceptance event detail is too long.".into());
-    }
-    let evidence_path = required_updater_acceptance_path("DAKIA_UPDATER_ACCEPTANCE_EVIDENCE")?;
-    let mut options = OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut evidence = options.open(&evidence_path).map_err(error)?;
-    let row = serde_json::json!({
-        "timestamp": chrono::Utc::now().to_rfc3339(),
-        "event": event,
-        "detail": detail,
-    });
-    serde_json::to_writer(&mut evidence, &row).map_err(error)?;
-    evidence.write_all(b"\n").map_err(error)?;
-    evidence.sync_all().map_err(error)?;
-    Ok(())
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct MailRebuildProgress {
     account_id: Uuid,
     phase: String,
@@ -3231,9 +3161,6 @@ pub fn run() {
                             "DAKIA_RELEASE_SMOKE_DATA_DIR is required for release smoke tests"
                         )
                     })?
-            } else if updater_acceptance_enabled() {
-                required_updater_acceptance_path("DAKIA_UPDATER_ACCEPTANCE_DATA_DIR")
-                    .map_err(anyhow::Error::msg)?
             } else {
                 app.path()
                     .app_local_data_dir()
@@ -3333,8 +3260,6 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            updater_acceptance_config,
-            record_updater_acceptance_event,
             provider_presets,
             message_content,
             configure_tray,

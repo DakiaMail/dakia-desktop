@@ -70,7 +70,6 @@ import {
   downloadUpdate,
   installUpdateAndRelaunch,
 } from "./updater";
-import { runUpdaterAcceptanceIfConfigured } from "./updaterAcceptance";
 
 const defaultAi: AiSettings = {
   provider: "ollama",
@@ -202,10 +201,8 @@ export default function App() {
 
   useEffect(() => {
     let current = true;
-    void runUpdaterAcceptanceIfConfigured()
-      .then(async (acceptanceActive) => {
-        if (acceptanceActive || !current) return;
-        const update = await checkForUpdate();
+    void checkForUpdate()
+      .then((update) => {
         if (current && update) setUpdateState({ phase: "available", update });
       })
       .catch((error) => {

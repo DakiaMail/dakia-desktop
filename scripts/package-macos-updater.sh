@@ -7,35 +7,19 @@ if [ "$(uname -s)" != "Darwin" ]; then
   exit 1
 fi
 
-if [ "$#" -ne 3 ]; then
-  echo "Usage: $0 <aarch64|x86_64> <version> /path/to/output-dir" >&2
+if [ "$#" -ne 2 ]; then
+  echo "Usage: $0 <version> /path/to/output-dir" >&2
   exit 2
 fi
 
-arch=$1
-version=$2
-output_dir=$3
+version=$1
+output_dir=$2
 root_dir=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 
-case "$arch" in
-  aarch64)
-    if [ -d "$root_dir/target/aarch64-apple-darwin/release/bundle/macos" ]; then
-      bundle_root="$root_dir/target/aarch64-apple-darwin/release/bundle/macos"
-    else
-      bundle_root="$root_dir/target/release/bundle/macos"
-    fi
-    ;;
-  x86_64)
-    bundle_root="$root_dir/target/x86_64-apple-darwin/release/bundle/macos"
-    ;;
-  *)
-    echo "Unsupported architecture '$arch'." >&2
-    exit 2
-    ;;
-esac
+bundle_root="$root_dir/target/aarch64-apple-darwin/release/bundle/macos"
 
 app="$bundle_root/Dakia.app"
-archive="$output_dir/Dakia-$arch.app.tar.gz"
+archive="$output_dir/Dakia-aarch64.app.tar.gz"
 signature="$archive.sig"
 
 require_sha256() {

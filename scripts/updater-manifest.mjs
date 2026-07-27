@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 
 const SEMVER =
   /^(?:v)?(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
-const PLATFORMS = ["darwin-aarch64", "darwin-x86_64"];
+const PLATFORM = "darwin-aarch64";
 
 function isTauriMinisignSignature(value) {
   if (
@@ -31,7 +31,19 @@ function isTauriMinisignSignature(value) {
   );
 }
 
-export function validateManifest(manifest) {
+function minisignKeyId(value, label) {
+  if (typeof value !== "string") {
+    throw new Error(`${label} must be a base64 minisign value.`);
+  }
+  const lines = Buffer.from(value, "base64").toString("utf8").trimEnd().split("\n");
+  const key = Buffer.from(lines[1] ?? "", "base64");
+  if (key.length < 10) {
+    throw new Error(`Invalid ${label}.`);
+  }
+  return key.subarray(0, 10).toString("hex");
+}
+
+export function validateManifest(manifest, updaterPublicKey) {
   if (!manifest || typeof manifest !== "object") {
     throw new Error("Updater manifest must be a JSON object.");
   }
@@ -59,34 +71,36 @@ export function validateManifest(manifest) {
     throw new Error("Updater notes must be a string.");
   }
 
-  const keys = Object.keys(manifest.platforms).sort();
-  if (keys.join(",") !== [...PLATFORMS].sort().join(",")) {
-    throw new Error(
-      `Updater platforms must be exactly ${PLATFORMS.join(", ")}.`,
-    );
+  const keys = Object.keys(manifest.platforms);
+  if (keys.length !== 1 || keys[0] !== PLATFORM) {
+    throw new Error(`Updater platforms must contain only ${PLATFORM}.`);
   }
 
-  for (const platform of PLATFORMS) {
-    const entry = manifest.platforms[platform];
-    const expectedArch = platform === "darwin-aarch64" ? "aarch64" : "x86_64";
-    if (!entry || typeof entry !== "object") {
-      throw new Error(`Missing updater platform ${platform}.`);
-    }
-    if (!isTauriMinisignSignature(entry.signature?.trim())) {
-      throw new Error(`Invalid updater signature for ${platform}.`);
-    }
-    let url;
-    try {
-      url = new URL(entry.url);
-    } catch {
-      throw new Error(`Invalid updater URL for ${platform}.`);
-    }
-    if (url.protocol !== "https:") {
-      throw new Error(`Updater URL for ${platform} must use HTTPS.`);
-    }
-    if (!url.pathname.endsWith(`/Dakia-${expectedArch}.app.tar.gz`)) {
-      throw new Error(`Updater URL architecture mismatch for ${platform}.`);
-    }
+  const entry = manifest.platforms[PLATFORM];
+  if (!entry || typeof entry !== "object") {
+    throw new Error(`Missing updater platform ${PLATFORM}.`);
+  }
+  if (!isTauriMinisignSignature(entry.signature?.trim())) {
+    throw new Error(`Invalid updater signature for ${PLATFORM}.`);
+  }
+  let url;
+  try {
+    url = new URL(entry.url);
+  } catch {
+    throw new Error(`Invalid updater URL for ${PLATFORM}.`);
+  }
+  if (url.protocol !== "https:") {
+    throw new Error(`Updater URL for ${PLATFORM} must use HTTPS.`);
+  }
+  if (!url.pathname.endsWith("/Dakia-aarch64.app.tar.gz")) {
+    throw new Error(`Updater URL architecture mismatch for ${PLATFORM}.`);
+  }
+  if (
+    updaterPublicKey !== undefined &&
+    minisignKeyId(entry.signature, "updater signature") !==
+      minisignKeyId(updaterPublicKey, "updater public key")
+  ) {
+    throw new Error("Updater signature does not match the embedded public key.");
   }
 
   return manifest;
@@ -98,8 +112,7 @@ export function buildManifest({
   notes,
   aarch64Url,
   aarch64Signature,
-  x86_64Url,
-  x86_64Signature,
+  updaterPublicKey,
 }) {
   return validateManifest({
     version,
@@ -110,27 +123,8 @@ export function buildManifest({
         url: aarch64Url,
         signature: aarch64Signature.trim(),
       },
-      "darwin-x86_64": {
-        url: x86_64Url,
-        signature: x86_64Signature.trim(),
-      },
     },
-  });
-}
-
-export function corruptManifestSignatures(manifest) {
-  const corrupted = structuredClone(validateManifest(manifest));
-  for (const platform of PLATFORMS) {
-    const original = corrupted.platforms[platform].signature;
-    const decoded = Buffer.from(original, "base64").toString("utf8");
-    const lines = decoded.trimEnd().split("\n");
-    const first = lines[1][0];
-    lines[1] = `${first === "A" ? "B" : "A"}${lines[1].slice(1)}`;
-    corrupted.platforms[platform].signature = Buffer.from(
-      `${lines.join("\n")}\n`,
-    ).toString("base64");
-  }
-  return validateManifest(corrupted);
+  }, updaterPublicKey);
 }
 
 function parseArgs(args) {
@@ -151,33 +145,30 @@ async function main() {
   const options = parseArgs(args);
   if (command === "validate") {
     const manifest = JSON.parse(await readFile(options.manifest, "utf8"));
-    validateManifest(manifest);
+    const tauriConfig = options["tauri-config"]
+      ? JSON.parse(await readFile(options["tauri-config"], "utf8"))
+      : undefined;
+    validateManifest(manifest, tauriConfig?.plugins?.updater?.pubkey);
     process.stdout.write(`Valid updater manifest: ${options.manifest}\n`);
     return;
   }
-  if (command === "corrupt-signatures") {
-    const manifest = JSON.parse(await readFile(options.manifest, "utf8"));
-    const corrupted = corruptManifestSignatures(manifest);
-    await writeFile(options.output, `${JSON.stringify(corrupted, null, 2)}\n`);
-    return;
-  }
   if (command !== "create") {
-    throw new Error(
-      "Usage: updater-manifest.mjs <create|validate|corrupt-signatures> [options]",
-    );
+    throw new Error("Usage: updater-manifest.mjs <create|validate> [options]");
   }
 
   const notes = options["notes-file"]
     ? (await readFile(options["notes-file"], "utf8")).trim()
     : options.notes;
+  const tauriConfig = options["tauri-config"]
+    ? JSON.parse(await readFile(options["tauri-config"], "utf8"))
+    : undefined;
   const manifest = buildManifest({
     version: options.version,
     pubDate: options["pub-date"],
     notes,
     aarch64Url: options["aarch64-url"],
     aarch64Signature: await readFile(options["aarch64-signature-file"], "utf8"),
-    x86_64Url: options["x86-64-url"],
-    x86_64Signature: await readFile(options["x86-64-signature-file"], "utf8"),
+    updaterPublicKey: tauriConfig?.plugins?.updater?.pubkey,
   });
   await writeFile(options.output, `${JSON.stringify(manifest, null, 2)}\n`);
 }
