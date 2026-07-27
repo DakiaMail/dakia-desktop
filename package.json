@@ -49,7 +49,7 @@
     "@tauri-apps/plugin-updater": "^2.10.1",
     "date-fns": "^4.1.0",
     "i18next": "^25.3.2",
-    "react": "^19.1.1",
+    "react": "^19.2.8",
     "react-dom": "^19.1.1",
     "react-i18next": "^15.6.0"
   },
