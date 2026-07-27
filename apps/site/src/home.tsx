@@ -54,6 +54,13 @@ export const offlineTranslationStory = {
   ],
 } as const;
 
+export const openSourceStory = {
+  hero: "Dakia is a free, open-source desktop app that brings every account into one fast command center—without putting your mail on someone else’s servers or another subscription on your card. Even email translation runs privately on your Mac and keeps working offline.",
+  title: "Modern email, local by default and open by design.",
+  description:
+    "Dakia’s source code is public, so anyone can inspect how it handles mail, report an issue, or help improve the client.",
+} as const;
+
 function Reveal({
   children,
   className = "",
@@ -149,12 +156,7 @@ export function Home({ Link, DownloadButton }: HomeProps) {
               <br />
               <em>One command center.</em>
             </h1>
-            <p className="hero-summary">
-              Dakia brings every account into one fast desktop app, but without
-              putting your mail on someone else’s servers or putting another
-              subscription on your card. Even email translation runs privately
-              on your Mac and keeps working offline.
-            </p>
+            <p className="hero-summary">{openSourceStory.hero}</p>
             <div className="hero-actions">
               <DownloadButton />
               <Link to="/#features" className="button button-secondary">
@@ -179,14 +181,8 @@ export function Home({ Link, DownloadButton }: HomeProps) {
 
       <section className="manifesto-section">
         <Reveal className="shell manifesto-layout">
-          <h2>
-            The polish you expect from a modern mail client. The privacy and
-            freedom you don’t.
-          </h2>
-          <p>
-            Dakia is built for students, independent professionals, and anyone
-            whose life is split across more than one inbox.
-          </p>
+          <h2>{openSourceStory.title}</h2>
+          <p>{openSourceStory.description}</p>
         </Reveal>
       </section>
 
@@ -414,7 +410,7 @@ export function Home({ Link, DownloadButton }: HomeProps) {
       <section className="final-cta">
         <div className="shell final-cta-inner">
           <div className="final-cta-copy">
-            <p className="eyebrow">Free for macOS</p>
+            <p className="eyebrow">Free and open source for macOS</p>
             <h2>
               Put every inbox
               <br />

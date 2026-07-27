@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { offlineTranslationStory } from "./home";
+import { offlineTranslationStory, openSourceStory } from "./home";
 import { translationSceneCopy } from "./scenes";
 
 describe("public offline translation story", () => {
@@ -28,6 +28,17 @@ describe("public offline translation story", () => {
     );
     expect(translationSceneCopy.status).toBe(
       "Translated from Estonian on this device",
+    );
+  });
+});
+
+describe("public open-source story", () => {
+  it("states that Dakia is open source and invites public inspection", () => {
+    expect(openSourceStory.hero).toContain("open-source desktop app");
+    expect(openSourceStory.title).toContain("open by design");
+    expect(openSourceStory.description).toContain("source code is public");
+    expect(openSourceStory.description).toContain(
+      "inspect how it handles mail",
     );
   });
 });

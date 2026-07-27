@@ -160,6 +160,9 @@ img {
   gap: 24px;
 }
 .nav-links a {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   color: var(--muted);
   font-size: 0.87rem;
   font-weight: 650;

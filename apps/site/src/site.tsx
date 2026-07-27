@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import {
   IconArrowRight,
   IconBrandApple,
+  IconBrandGithub,
   IconChevronDown,
   IconMenu2,
   IconMoon,
@@ -10,7 +11,8 @@ import {
 } from "@tabler/icons-react";
 import { Home } from "./home";
 
-const site = {
+export const site = {
+  githubUrl: "https://github.com/DakiaMail/dakia-desktop",
   redditUrl: "https://www.reddit.com/r/Dakia/",
   supportEmail: "support@dakiamail.com",
   legalEmail: "support@dakiamail.com",
@@ -20,6 +22,22 @@ const site = {
     intel: "https://downloads.dakiamail.com/macos/latest/Dakia-Intel.dmg",
   },
 };
+
+export const headerNavigation = [
+  ["Features", "/#features"],
+  ["Privacy", "/privacy"],
+  ["Pricing", "/pricing"],
+  ["Security", "/security"],
+  ["Support", "/support"],
+  ["About", "/about"],
+  ["GitHub", site.githubUrl],
+] as const;
+
+export const footerCompanyLinks = [
+  ["About", "/about"],
+  ["GitHub", site.githubUrl],
+  ["Reddit", site.redditUrl],
+] as const;
 
 type Theme = "light" | "dark";
 
@@ -174,14 +192,6 @@ function Header({
       document.body.style.overflow = previous;
     };
   }, [open]);
-  const navigation = [
-    ["Features", "/#features"],
-    ["Privacy", "/privacy"],
-    ["Pricing", "/pricing"],
-    ["Security", "/security"],
-    ["Support", "/support"],
-    ["About", "/about"],
-  ];
   return (
     <>
       <header className="site-header">
@@ -191,9 +201,10 @@ function Header({
             className={open ? "nav-links open" : "nav-links"}
             aria-label="Main navigation"
           >
-            {navigation.map(([label, path]) => {
-              const active =
-                path === "/#features"
+            {headerNavigation.map(([label, path]) => {
+              const active = path.startsWith("https:")
+                ? false
+                : path === "/#features"
                   ? location === "/#features"
                   : location.split("#", 1)[0] === path;
               return (
@@ -203,7 +214,13 @@ function Header({
                   aria-current={active ? "page" : undefined}
                   key={path}
                 >
-                  {label}
+                  {label === "GitHub" ? (
+                    <>
+                      <IconBrandGithub size={16} /> {label}
+                    </>
+                  ) : (
+                    label
+                  )}
                 </AppLink>
               );
             })}
@@ -253,8 +270,8 @@ function Footer() {
         <div className="footer-lead">
           <Brand />
           <p>
-            A powerful multi-account email control center that keeps your mail
-            local.
+            A free, open-source multi-account email control center that keeps
+            your mail local.
           </p>
         </div>
         <FooterGroup
@@ -266,13 +283,7 @@ function Footer() {
             ["Support", "/support"],
           ]}
         />
-        <FooterGroup
-          title="Company"
-          links={[
-            ["About", "/about"],
-            ["Reddit", site.redditUrl],
-          ]}
-        />
+        <FooterGroup title="Company" links={footerCompanyLinks} />
         <FooterGroup
           title="Legal"
           links={[
@@ -288,7 +299,13 @@ function Footer() {
   );
 }
 
-function FooterGroup({ title, links }: { title: string; links: string[][] }) {
+function FooterGroup({
+  title,
+  links,
+}: {
+  title: string;
+  links: ReadonlyArray<readonly [string, string]>;
+}) {
   return (
     <div className="footer-group">
       <h2>{title}</h2>
@@ -316,12 +333,13 @@ const standardPages: Record<
     kicker: "About Dakia",
     title: "A postman for every part of your digital life.",
     intro:
-      "Dakia takes its name from the Urdu word for postman. It is built for people whose email life no longer fits neatly into one account—or one browser tab.",
+      "Dakia takes its name from the Urdu word for postman. It is an open-source mail client for people whose email life no longer fits neatly into one account—or one browser tab.",
     highlights: [
       ["Focus", "One personal command center"],
       ["Privacy", "Mail stays on your computer"],
-      ["Availability", "macOS first"],
+      ["Source", "Open on GitHub"],
     ],
+    action: { label: "View source on GitHub", href: site.githubUrl },
     sections: [
       [
         "Why Dakia exists",
@@ -329,7 +347,7 @@ const standardPages: Record<
           Modern email clients often ask people to choose between good design,
           privacy, and a fair price. Dakia is an attempt to remove that
           trade-off: a fast, thoughtful desktop client that keeps your mail
-          local and is free to use.
+          local, is free to use, and develops in public.
         </p>,
       ],
       [
@@ -339,6 +357,15 @@ const standardPages: Record<
           independent-project inboxes. It is not being built as a team
           collaboration suite. The focus is a superb personal command center for
           email.
+        </p>,
+      ],
+      [
+        "Built in the open",
+        <p key="open-source">
+          The source code, issue tracker, and contribution guide are public on{" "}
+          <a href={site.githubUrl}>GitHub</a>. You can inspect the
+          implementation, report a bug, propose an improvement, or build Dakia
+          yourself.
         </p>,
       ],
       [
@@ -724,8 +751,8 @@ function PageRouter() {
     document.title = `${labels[path] ?? "Dakia"} | Dakia`;
     const description =
       path === "/"
-        ? "A free, local-first multi-account email client for macOS. Your mail and credentials stay on your computer."
-        : "Dakia is the free, local-first multi-account email client for macOS.";
+        ? "A free, open-source, local-first multi-account email client for macOS. Your mail and credentials stay on your computer."
+        : "Dakia is the free, open-source, local-first multi-account email client for macOS.";
     document
       .querySelector('meta[name="description"]')
       ?.setAttribute("content", description);
