@@ -1,0 +1,2826 @@
+mod realtime;
+mod translation;
+
+use base64::{engine::general_purpose::STANDARD, Engine};
+use dakia_core::{
+    ai::{AiConfig, AiProvider, AiService},
+    mailbox_action_destination, provider, remote_mailbox, Account, AccountAuth, AccountDraft,
+    Attachment, CachedMessageContent, ComposeMessage, LocalEmailClassifier, MailConversationPage,
+    MailRebuildJob, MailService, MailSummary, MailboxAction, OAuthFlow, OAuthProviderConfig,
+    ProviderPreset, SearchQuery, Store, SyncProgress, SyncResult, UnsubscribeOutcome,
+};
+use secrecy::SecretString;
+use serde::Deserialize;
+use serde::Serialize;
+use std::{
+    collections::HashMap,
+    fs::OpenOptions,
+    future::Future,
+    io::{ErrorKind, Read, Write},
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    time::{Duration, Instant},
+};
+
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+#[cfg(target_os = "macos")]
+use std::process::Command;
+use tauri::{
+    image::Image,
+    ipc::Channel,
+    menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    DragDropEvent, Emitter, Manager, State, WindowEvent,
+};
+use tauri_plugin_opener::OpenerExt;
+use tokio::sync::Semaphore;
+use url::Url;
+use uuid::Uuid;
+
+use realtime::{RealtimeSyncManager, RealtimeSyncStatus};
+use translation::{
+    TranslationDownloadProgress, TranslationLanguageDetection, TranslationModelFiles,
+    TranslationModelStatus,
+};
+
+const REMOTE_SEARCH_CONCURRENCY: usize = 4;
+const MESSAGE_HYDRATION_CONCURRENCY: usize = 4;
+
+struct AppState {
+    store: Store,
+    data_dir: PathBuf,
+    classifier: Mutex<LocalEmailClassifier>,
+    realtime: RealtimeSyncManager,
+    remote_operation_slots: Arc<Semaphore>,
+    mail_rebuilds: Mutex<HashMap<Uuid, MailRebuildProgress>>,
+    translation_downloads: Mutex<HashMap<String, Arc<AtomicBool>>>,
+}
+
+async fn run_bounded_ordered<T, U, F, Fut>(
+    items: Vec<T>,
+    max_in_flight: usize,
+    limiter: Arc<Semaphore>,
+    operation: F,
+) -> Vec<U>
+where
+    T: Send + 'static,
+    U: Send + 'static,
+    F: Fn(T) -> Fut + Clone + Send + 'static,
+    Fut: Future<Output = U> + Send + 'static,
+{
+    assert!(max_in_flight > 0, "bounded work requires a non-zero limit");
+    let mut pending = items.into_iter().enumerate();
+    let mut active = tokio::task::JoinSet::new();
+    let mut completed = Vec::new();
+
+    loop {
+        while active.len() < max_in_flight {
+            let Some((index, item)) = pending.next() else {
+                break;
+            };
+            let operation = operation.clone();
+            let limiter = limiter.clone();
+            active.spawn(async move {
+                let _permit = limiter
+                    .acquire_owned()
+                    .await
+                    .expect("shared operation limiter must remain open");
+                (index, operation(item).await)
+            });
+        }
+        let Some(joined) = active.join_next().await else {
+            break;
+        };
+        completed.push(joined.expect("bounded task must not panic"));
+    }
+
+    completed.sort_by_key(|(index, _)| *index);
+    completed.into_iter().map(|(_, output)| output).collect()
+}
+
+#[cfg(test)]
+mod bounded_concurrency_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    #[tokio::test]
+    async fn caps_work_and_restores_input_order() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let outputs = run_bounded_ordered((0..12).collect(), 3, Arc::new(Semaphore::new(12)), {
+            let active = active.clone();
+            let peak = peak.clone();
+            move |index| {
+                let active = active.clone();
+                let peak = peak.clone();
+                async move {
+                    let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(current, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis((12 - index) as u64)).await;
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    index
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(peak.load(Ordering::SeqCst), 3);
+        assert_eq!(outputs, (0..12).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn keeps_failures_in_input_order() {
+        let outputs = run_bounded_ordered(
+            (0..4).collect(),
+            4,
+            Arc::new(Semaphore::new(4)),
+            |index| async move {
+                tokio::time::sleep(Duration::from_millis((4 - index) as u64)).await;
+                if matches!(index, 1 | 3) {
+                    Err(index)
+                } else {
+                    Ok(index)
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(outputs, vec![Ok(0), Err(1), Ok(2), Err(3)]);
+        assert_eq!(outputs.into_iter().find_map(Result::err), Some(1));
+    }
+
+    #[tokio::test]
+    async fn dropping_bounded_work_aborts_in_flight_tasks() {
+        struct ActiveGuard(Arc<AtomicUsize>);
+        impl Drop for ActiveGuard {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let limiter = Arc::new(Semaphore::new(2));
+        let task = tokio::spawn(run_bounded_ordered(
+            (0..20).collect(),
+            2,
+            limiter.clone(),
+            {
+                let active = active.clone();
+                move |_| {
+                    let active = active.clone();
+                    async move {
+                        active.fetch_add(1, Ordering::SeqCst);
+                        let _guard = ActiveGuard(active);
+                        std::future::pending::<()>().await
+                    }
+                }
+            },
+        ));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while active.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the bounded batch should start");
+
+        task.abort();
+        let _ = task.await;
+        tokio::task::yield_now().await;
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(limiter.available_permits(), 2);
+    }
+
+    #[tokio::test]
+    async fn overlapping_invocations_share_the_application_limit() {
+        let limiter = Arc::new(Semaphore::new(3));
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let invoke = |offset| {
+            let limiter = limiter.clone();
+            let active = active.clone();
+            let peak = peak.clone();
+            tokio::spawn(run_bounded_ordered(
+                (0..8).map(|index| offset + index).collect(),
+                4,
+                limiter,
+                move |index| {
+                    let active = active.clone();
+                    let peak = peak.clone();
+                    async move {
+                        let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(current, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        index
+                    }
+                },
+            ))
+        };
+
+        let (left, right) = tokio::join!(invoke(0), invoke(100));
+        assert_eq!(left.unwrap().len(), 8);
+        assert_eq!(right.unwrap().len(), 8);
+        assert_eq!(peak.load(Ordering::SeqCst), 3);
+        assert_eq!(limiter.available_permits(), 3);
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdaterAcceptanceConfig {
+    expected_version: String,
+    expect_rejection: bool,
+}
+
+fn updater_acceptance_enabled() -> bool {
+    std::env::var_os("DAKIA_UPDATER_ACCEPTANCE").as_deref() == Some(std::ffi::OsStr::new("1"))
+}
+
+fn required_updater_acceptance_path(name: &str) -> Result<PathBuf, String> {
+    std::env::var_os(name)
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("{name} is required when DAKIA_UPDATER_ACCEPTANCE=1"))
+}
+
+#[tauri::command]
+fn updater_acceptance_config() -> Result<Option<UpdaterAcceptanceConfig>, String> {
+    if !updater_acceptance_enabled() {
+        return Ok(None);
+    }
+    let expected_version =
+        std::env::var("DAKIA_UPDATER_ACCEPTANCE_EXPECTED_VERSION").map_err(|_| {
+            "DAKIA_UPDATER_ACCEPTANCE_EXPECTED_VERSION is required when acceptance mode is enabled"
+                .to_string()
+        })?;
+    if expected_version.trim().is_empty() {
+        return Err("Updater acceptance expected version must not be empty.".into());
+    }
+    Ok(Some(UpdaterAcceptanceConfig {
+        expected_version,
+        expect_rejection: std::env::var_os("DAKIA_UPDATER_ACCEPTANCE_EXPECT_REJECTION").as_deref()
+            == Some(std::ffi::OsStr::new("1")),
+    }))
+}
+
+#[tauri::command]
+fn record_updater_acceptance_event(event: String, detail: Option<String>) -> Result<(), String> {
+    if !updater_acceptance_enabled() {
+        return Err("Updater acceptance recording is disabled.".into());
+    }
+    if event.is_empty()
+        || event.len() > 80
+        || !event
+            .chars()
+            .all(|character| character.is_ascii_lowercase() || character == '-')
+    {
+        return Err("Invalid updater acceptance event name.".into());
+    }
+    if detail.as_ref().is_some_and(|value| value.len() > 2_000) {
+        return Err("Updater acceptance event detail is too long.".into());
+    }
+    let evidence_path = required_updater_acceptance_path("DAKIA_UPDATER_ACCEPTANCE_EVIDENCE")?;
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut evidence = options.open(&evidence_path).map_err(error)?;
+    let row = serde_json::json!({
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "event": event,
+        "detail": detail,
+    });
+    serde_json::to_writer(&mut evidence, &row).map_err(error)?;
+    evidence.write_all(b"\n").map_err(error)?;
+    evidence.sync_all().map_err(error)?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MailRebuildProgress {
+    account_id: Uuid,
+    phase: String,
+    completed: usize,
+    total: Option<usize>,
+}
+
+impl From<MailRebuildJob> for MailRebuildProgress {
+    fn from(job: MailRebuildJob) -> Self {
+        Self {
+            account_id: job.account_id,
+            phase: job.phase,
+            completed: job.completed,
+            total: job.total,
+        }
+    }
+}
+
+const MAX_DROPPED_ATTACHMENT_BYTES: u64 = 25 * 1024 * 1024;
+const MAX_DROPPED_ATTACHMENT_TOTAL_BYTES: u64 = 50 * 1024 * 1024;
+const MAX_DROPPED_ATTACHMENTS: usize = 50;
+const DROPPED_FILE_RECEIPT_TTL: Duration = Duration::from_secs(30);
+const DROPPED_FILE_RECEIPT_EVENT: &str = "dakia://dropped-file-receipt";
+const DROPPED_FILE_ERROR_EVENT: &str = "dakia://dropped-file-error";
+#[cfg(target_os = "macos")]
+const TERMINAL_COMMAND_PATH: &str = "/usr/local/bin/dakia";
+
+struct DroppedFileReceipt {
+    window_label: String,
+    files: Vec<OpenDroppedFile>,
+    expires_at: Instant,
+}
+
+#[derive(Default)]
+struct DroppedFileReceiptStore {
+    entries: Mutex<HashMap<String, DroppedFileReceipt>>,
+}
+
+impl DroppedFileReceiptStore {
+    fn issue(&self, window_label: &str, paths: Vec<PathBuf>) -> Result<String, String> {
+        self.issue_at(window_label, paths, Instant::now())
+    }
+
+    fn issue_at(
+        &self,
+        window_label: &str,
+        paths: Vec<PathBuf>,
+        now: Instant,
+    ) -> Result<String, String> {
+        if paths.is_empty() {
+            return Err("No files were dropped".into());
+        }
+        let files = open_dropped_files(paths)?;
+        let receipt = Uuid::new_v4().to_string();
+        let mut entries = self.entries.lock().map_err(error)?;
+        entries.retain(|_, entry| entry.expires_at > now);
+        entries.insert(
+            receipt.clone(),
+            DroppedFileReceipt {
+                window_label: window_label.to_owned(),
+                files,
+                expires_at: now + DROPPED_FILE_RECEIPT_TTL,
+            },
+        );
+        Ok(receipt)
+    }
+
+    fn consume(&self, receipt: &str, window_label: &str) -> Result<Vec<OpenDroppedFile>, String> {
+        self.consume_at(receipt, window_label, Instant::now())
+    }
+
+    fn consume_at(
+        &self,
+        receipt: &str,
+        window_label: &str,
+        now: Instant,
+    ) -> Result<Vec<OpenDroppedFile>, String> {
+        let invalid = || "Dropped-file authorization is invalid or expired".to_owned();
+        let mut entries = self.entries.lock().map_err(error)?;
+        entries.retain(|_, entry| entry.expires_at > now);
+        let entry = entries.get(receipt).ok_or_else(invalid)?;
+        if entry.window_label != window_label {
+            return Err(invalid());
+        }
+        Ok(entries
+            .remove(receipt)
+            .expect("receipt existed while the store lock was held")
+            .files)
+    }
+
+    fn revoke_window(&self, window_label: &str) {
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.retain(|_, entry| entry.window_label != window_label);
+        }
+    }
+
+    fn expire_at(&self, receipt: &str, now: Instant) {
+        if let Ok(mut entries) = self.entries.lock() {
+            if entries
+                .get(receipt)
+                .is_some_and(|entry| entry.expires_at <= now)
+            {
+                entries.remove(receipt);
+            }
+        }
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct DroppedAttachment {
+    filename: String,
+    mime_type: String,
+    content_base64: String,
+    size_bytes: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+enum TerminalCommandStatus {
+    Available,
+    NotSetUp,
+    Conflict,
+}
+
+#[cfg(target_os = "macos")]
+fn bundled_cli_path(_app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let path = std::env::current_exe()
+        .map_err(error)?
+        .parent()
+        .ok_or_else(|| "Dakia could not locate its application directory.".to_string())?
+        .join("dakia");
+    if path.starts_with("/Volumes") {
+        return Err(
+            "Move Dakia to your Applications folder before setting up the terminal command.".into(),
+        );
+    }
+    if path.is_file() {
+        Ok(path)
+    } else {
+        Err("The Dakia terminal command is missing from this app installation.".into())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn terminal_command_status_for(source: &Path) -> TerminalCommandStatus {
+    let destination = Path::new(TERMINAL_COMMAND_PATH);
+    match std::fs::symlink_metadata(destination) {
+        Err(error) if error.kind() == ErrorKind::NotFound => TerminalCommandStatus::NotSetUp,
+        Err(_) => TerminalCommandStatus::Conflict,
+        Ok(metadata) if !metadata.file_type().is_symlink() => TerminalCommandStatus::Conflict,
+        Ok(_) => match std::fs::read_link(destination) {
+            Ok(target) if target == source => TerminalCommandStatus::Available,
+            _ => TerminalCommandStatus::Conflict,
+        },
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn set_terminal_menu_label(app: &tauri::AppHandle, status: &TerminalCommandStatus) {
+    let Some(menu) = app.menu() else {
+        return;
+    };
+    let Some(item) = menu.get("terminal-command") else {
+        return;
+    };
+    let Some(item) = item.as_menuitem() else {
+        return;
+    };
+    let label = match status {
+        TerminalCommandStatus::Available => "Remove Dakia Terminal Command…",
+        _ => "Use Dakia from Terminal…",
+    };
+    let _ = item.set_text(label);
+}
+
+#[cfg(target_os = "macos")]
+fn run_privileged_terminal_command(script: &str, source: &Path) -> Result<(), String> {
+    let output = Command::new("/usr/bin/osascript")
+        .args([
+            "-e",
+            "on run argv",
+            "-e",
+            "set sourcePath to item 1 of argv",
+            "-e",
+            script,
+            "-e",
+            "end run",
+            "--",
+        ])
+        .arg(source)
+        .output()
+        .map_err(error)?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if detail.contains("User canceled") {
+            Err("Setup was canceled.".into())
+        } else {
+            Err(format!(
+                "macOS could not update the terminal command. {detail}"
+            ))
+        }
+    }
+}
+
+#[tauri::command]
+fn terminal_command_status(app: tauri::AppHandle) -> Result<TerminalCommandStatus, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let source = bundled_cli_path(&app)?;
+        Ok(terminal_command_status_for(&source))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Err("Terminal setup from the app is currently available on macOS.".into())
+    }
+}
+
+#[tauri::command]
+async fn install_terminal_command(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let source = bundled_cli_path(&app)?;
+        match terminal_command_status_for(&source) {
+            TerminalCommandStatus::Available => return Ok(()),
+            TerminalCommandStatus::Conflict => {
+                return Err(format!(
+                    "Another item already exists at {TERMINAL_COMMAND_PATH}. It was left unchanged."
+                ))
+            }
+            TerminalCommandStatus::NotSetUp => {}
+        }
+        let install_source = source.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            run_privileged_terminal_command(
+                "do shell script \"/bin/mkdir -p /usr/local/bin && /bin/test ! -e /usr/local/bin/dakia && /bin/test ! -L /usr/local/bin/dakia && /bin/ln -s \" & quoted form of sourcePath & \" /usr/local/bin/dakia\" with administrator privileges",
+                &install_source,
+            )
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+        let status = terminal_command_status_for(&source);
+        if !matches!(status, TerminalCommandStatus::Available) {
+            return Err("The terminal command could not be verified after setup.".into());
+        }
+        set_terminal_menu_label(&app, &status);
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Err("Terminal setup from the app is currently available on macOS.".into())
+    }
+}
+
+#[tauri::command]
+async fn remove_terminal_command(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let source = bundled_cli_path(&app)?;
+        match terminal_command_status_for(&source) {
+            TerminalCommandStatus::NotSetUp => return Ok(()),
+            TerminalCommandStatus::Conflict => {
+                return Err(format!(
+                    "{TERMINAL_COMMAND_PATH} does not belong to this copy of Dakia and was left unchanged."
+                ))
+            }
+            TerminalCommandStatus::Available => {}
+        }
+        let remove_source = source.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            run_privileged_terminal_command(
+                "do shell script \"current=$(/usr/bin/readlink /usr/local/bin/dakia 2>/dev/null); /bin/test \\\"$current\\\" = \" & quoted form of sourcePath & \" && /bin/rm /usr/local/bin/dakia\" with administrator privileges",
+                &remove_source,
+            )
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+        let status = terminal_command_status_for(&source);
+        if !matches!(status, TerminalCommandStatus::NotSetUp) {
+            return Err("The terminal command could not be verified after removal.".into());
+        }
+        set_terminal_menu_label(&app, &status);
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Err("Terminal setup from the app is currently available on macOS.".into())
+    }
+}
+
+#[derive(Serialize)]
+struct MessageContent {
+    body_text: String,
+    body_html: Option<String>,
+    unsubscribe_kind: Option<String>,
+    attachments: Vec<Attachment>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopNotification {
+    title: String,
+    body: String,
+    account_id: Option<String>,
+    message_id: Option<String>,
+    count: usize,
+    sound: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddAccountInput {
+    draft: AccountDraft,
+    password: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateAccountInput {
+    id: Uuid,
+    account_name: String,
+    display_name: String,
+    imap_host: String,
+    imap_port: u16,
+    imap_security: dakia_core::provider::Security,
+    smtp_host: String,
+    smtp_port: u16,
+    smtp_security: dakia_core::provider::Security,
+    archive_mailbox: String,
+    spam_mailbox: String,
+    password: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AiInput {
+    provider: String,
+    base_url: Option<String>,
+    model: String,
+    api_key: Option<String>,
+    executable: Option<PathBuf>,
+    model_path: Option<PathBuf>,
+    message_ids: Vec<String>,
+    instruction: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum UnsubscribeResult {
+    Completed,
+    OpenedWeb,
+}
+
+fn error(error: impl std::fmt::Display) -> String {
+    error.to_string()
+}
+
+fn unsubscribe_email(
+    account_id: Uuid,
+    to: String,
+    subject: String,
+    body: String,
+) -> Result<ComposeMessage, String> {
+    if to.is_empty()
+        || to.len() > 320
+        || to.contains(['\r', '\n', '\0'])
+        || subject.len() > 998
+        || subject.contains(['\r', '\n', '\0'])
+        || body.len() > 64 * 1024
+        || body.contains('\0')
+    {
+        return Err("This message has an invalid unsubscribe email request".into());
+    }
+    Ok(ComposeMessage {
+        account_id,
+        to: vec![to],
+        cc: vec![],
+        bcc: vec![],
+        subject,
+        body_text: body,
+        body_html: None,
+        in_reply_to: None,
+        references: None,
+        attachments: vec![],
+    })
+}
+
+#[cfg(test)]
+mod unsubscribe_email_tests {
+    use super::*;
+
+    #[test]
+    fn builds_a_plain_single_recipient_message() {
+        let draft = unsubscribe_email(
+            Uuid::nil(),
+            "token@unsubscribe.example".into(),
+            "unsubscribe".into(),
+            "Please unsubscribe me".into(),
+        )
+        .expect("valid unsubscribe email");
+
+        assert_eq!(draft.to, ["token@unsubscribe.example"]);
+        assert!(draft.cc.is_empty());
+        assert!(draft.bcc.is_empty());
+        assert_eq!(draft.subject, "unsubscribe");
+        assert_eq!(draft.body_text, "Please unsubscribe me");
+        assert!(draft.body_html.is_none());
+        assert!(draft.attachments.is_empty());
+    }
+
+    #[test]
+    fn rejects_recipient_and_subject_header_injection() {
+        assert!(unsubscribe_email(
+            Uuid::nil(),
+            "token@example.com\r\nBcc: victim@example.com".into(),
+            String::new(),
+            String::new(),
+        )
+        .is_err());
+        assert!(unsubscribe_email(
+            Uuid::nil(),
+            "token@example.com".into(),
+            "unsubscribe\r\nBcc: victim@example.com".into(),
+            String::new(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_oversized_mailto_content() {
+        assert!(unsubscribe_email(
+            Uuid::nil(),
+            "token@example.com".into(),
+            String::new(),
+            "x".repeat(64 * 1024 + 1),
+        )
+        .is_err());
+    }
+}
+
+#[tauri::command]
+async fn message_attachments(
+    state: State<'_, Arc<AppState>>,
+    message_id: String,
+) -> Result<Vec<Attachment>, String> {
+    Ok(fetch_remote_message(state.inner(), &message_id)
+        .await?
+        .attachments
+        .into_iter()
+        .map(|item| item.attachment)
+        .collect())
+}
+
+#[tauri::command]
+async fn message_content(
+    state: State<'_, Arc<AppState>>,
+    message_id: String,
+) -> Result<MessageContent, String> {
+    if let Some((body_text, body_html)) =
+        state.store.starred_body(&message_id).await.map_err(error)?
+    {
+        return Ok(MessageContent {
+            body_text,
+            body_html,
+            unsubscribe_kind: state
+                .store
+                .message(&message_id)
+                .await
+                .map_err(error)?
+                .and_then(|message| message.unsubscribe_kind),
+            attachments: state
+                .store
+                .starred_attachment_metadata(&message_id)
+                .await
+                .map_err(error)?,
+        });
+    }
+    if let Some(cached) = state
+        .store
+        .cached_message_content(&message_id)
+        .await
+        .map_err(error)?
+    {
+        return Ok(MessageContent {
+            body_text: cached.body_text,
+            body_html: cached.body_html,
+            unsubscribe_kind: cached.unsubscribe_kind,
+            attachments: cached.attachments,
+        });
+    }
+    let message = fetch_remote_message(state.inner(), &message_id).await?;
+    let cached = CachedMessageContent {
+        body_text: message.body_text.clone(),
+        body_html: message.body_html.clone(),
+        unsubscribe_kind: message.unsubscribe_kind.clone(),
+        attachments: message
+            .attachments
+            .iter()
+            .map(|item| item.attachment.clone())
+            .collect(),
+    };
+    if let Err(cache_error) = state
+        .store
+        .cache_message_content(&message_id, message.is_flagged, cached.clone())
+        .await
+    {
+        tracing::warn!(%cache_error, %message_id, "could not persist foreground message cache");
+    }
+    Ok(MessageContent {
+        body_text: cached.body_text,
+        body_html: cached.body_html,
+        unsubscribe_kind: cached.unsubscribe_kind,
+        attachments: cached.attachments,
+    })
+}
+
+#[tauri::command]
+async fn save_attachment(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    message_id: String,
+    attachment_id: String,
+) -> Result<String, String> {
+    let attachment = fetch_remote_message(state.inner(), &message_id)
+        .await?
+        .attachments
+        .into_iter()
+        .find(|item| item.attachment.id == attachment_id)
+        .ok_or_else(|| "Attachment not found".to_owned())?;
+    save_to_downloads(&app, &attachment.attachment, &attachment.bytes).map_err(error)
+}
+
+#[tauri::command]
+async fn save_all_attachments(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    message_id: String,
+) -> Result<Vec<String>, String> {
+    let attachments = fetch_remote_message(state.inner(), &message_id)
+        .await?
+        .attachments;
+    let mut saved = Vec::with_capacity(attachments.len());
+    for attachment in attachments {
+        saved.push(
+            save_to_downloads(&app, &attachment.attachment, &attachment.bytes).map_err(error)?,
+        );
+    }
+    Ok(saved)
+}
+
+#[tauri::command]
+async fn forward_attachments(
+    state: State<'_, Arc<AppState>>,
+    message_id: String,
+) -> Result<Vec<DroppedAttachment>, String> {
+    let attachments = fetch_remote_message(state.inner(), &message_id)
+        .await?
+        .attachments;
+    if attachments.len() > MAX_DROPPED_ATTACHMENTS {
+        return Err(format!(
+            "This message has more than {MAX_DROPPED_ATTACHMENTS} attachments"
+        ));
+    }
+    let total_bytes = attachments
+        .iter()
+        .map(|attachment| attachment.bytes.len() as u64)
+        .sum::<u64>();
+    if attachments
+        .iter()
+        .any(|attachment| attachment.bytes.len() as u64 > MAX_DROPPED_ATTACHMENT_BYTES)
+        || total_bytes > MAX_DROPPED_ATTACHMENT_TOTAL_BYTES
+    {
+        return Err("The original attachments exceed the forwarding limit".into());
+    }
+    Ok(attachments
+        .into_iter()
+        .map(|attachment| DroppedAttachment {
+            filename: attachment.attachment.filename,
+            mime_type: attachment.attachment.mime_type,
+            size_bytes: attachment.bytes.len() as u64,
+            content_base64: STANDARD.encode(attachment.bytes),
+        })
+        .collect())
+}
+
+async fn fetch_remote_message(
+    state: &Arc<AppState>,
+    message_id: &str,
+) -> Result<MailSummary, String> {
+    let summary = state
+        .store
+        .messages_by_ids(&[message_id.to_owned()])
+        .await
+        .map_err(error)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "Message not found".to_owned())?;
+    let account_id = Uuid::parse_str(&summary.account_id).map_err(error)?;
+    let account = state
+        .store
+        .account(account_id)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Account not found".to_owned())?;
+    MailService::new(state.store.clone())
+        .fetch_message(&account, &summary.mailbox, summary.uid as u32)
+        .await
+        .map_err(error)
+}
+
+struct OpenDroppedFile {
+    filename: String,
+    file: std::fs::File,
+    metadata_len: u64,
+}
+
+fn open_dropped_file(path: PathBuf, index: usize) -> Result<OpenDroppedFile, String> {
+    let filename = dakia_core::mail::safe_attachment_filename(
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("attachment"),
+        index,
+    );
+    let link_metadata = std::fs::symlink_metadata(&path).map_err(error)?;
+    if link_metadata.file_type().is_symlink() || !link_metadata.is_file() {
+        return Err("Only regular files can be attached".into());
+    }
+
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW);
+    let file = options.open(&path).map_err(|open_error| {
+        #[cfg(unix)]
+        if open_error.raw_os_error() == Some(libc::ELOOP) {
+            "Only regular files can be attached".to_owned()
+        } else {
+            error(open_error)
+        }
+        #[cfg(not(unix))]
+        {
+            error(open_error)
+        }
+    })?;
+    let metadata = file.metadata().map_err(error)?;
+    if !metadata.is_file() {
+        return Err("Only regular files can be attached".into());
+    }
+    Ok(OpenDroppedFile {
+        filename,
+        file,
+        metadata_len: metadata.len(),
+    })
+}
+
+fn open_dropped_files(paths: Vec<PathBuf>) -> Result<Vec<OpenDroppedFile>, String> {
+    if paths.len() > MAX_DROPPED_ATTACHMENTS {
+        return Err(format!(
+            "A message can include at most {MAX_DROPPED_ATTACHMENTS} attachments"
+        ));
+    }
+
+    let mut total_bytes = 0_u64;
+    let mut files = Vec::with_capacity(paths.len());
+    for (index, path) in paths.into_iter().enumerate() {
+        let file = open_dropped_file(path, index)?;
+        if file.metadata_len > MAX_DROPPED_ATTACHMENT_BYTES {
+            return Err(format!(
+                "{} exceeds the {} MiB attachment limit",
+                file.filename,
+                MAX_DROPPED_ATTACHMENT_BYTES / 1024 / 1024
+            ));
+        }
+        total_bytes += file.metadata_len;
+        if total_bytes > MAX_DROPPED_ATTACHMENT_TOTAL_BYTES {
+            return Err(format!(
+                "Attachments exceed the {} MiB total limit",
+                MAX_DROPPED_ATTACHMENT_TOTAL_BYTES / 1024 / 1024
+            ));
+        }
+        files.push(file);
+    }
+    Ok(files)
+}
+
+fn materialize_dropped_files(
+    files: Vec<OpenDroppedFile>,
+) -> Result<Vec<DroppedAttachment>, String> {
+    let mut total_bytes = 0;
+    let mut attachments = Vec::with_capacity(files.len());
+    for mut dropped_file in files {
+        let mut bytes = Vec::with_capacity(dropped_file.metadata_len as usize);
+        Read::by_ref(&mut dropped_file.file)
+            .take(MAX_DROPPED_ATTACHMENT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(error)?;
+        if bytes.len() as u64 > MAX_DROPPED_ATTACHMENT_BYTES {
+            return Err(format!(
+                "{} exceeds the {} MiB attachment limit",
+                dropped_file.filename,
+                MAX_DROPPED_ATTACHMENT_BYTES / 1024 / 1024
+            ));
+        }
+        total_bytes += bytes.len() as u64;
+        if total_bytes > MAX_DROPPED_ATTACHMENT_TOTAL_BYTES {
+            return Err(format!(
+                "Attachments exceed the {} MiB total limit",
+                MAX_DROPPED_ATTACHMENT_TOTAL_BYTES / 1024 / 1024
+            ));
+        }
+        let size_bytes = bytes.len() as u64;
+        attachments.push(DroppedAttachment {
+            mime_type: mime_type_for_filename(&dropped_file.filename).into(),
+            filename: dropped_file.filename,
+            content_base64: STANDARD.encode(bytes),
+            size_bytes,
+        });
+    }
+    Ok(attachments)
+}
+
+#[tauri::command]
+async fn read_dropped_files(
+    window: tauri::WebviewWindow,
+    receipts: State<'_, Arc<DroppedFileReceiptStore>>,
+    receipt: String,
+) -> Result<Vec<DroppedAttachment>, String> {
+    let files = receipts.consume(&receipt, window.label())?;
+    tokio::task::spawn_blocking(move || materialize_dropped_files(files))
+        .await
+        .map_err(error)?
+}
+
+fn mime_type_for_filename(filename: &str) -> &'static str {
+    match filename
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "csv" => "text/csv",
+        "gif" => "image/gif",
+        "jpeg" | "jpg" => "image/jpeg",
+        "json" => "application/json",
+        "md" => "text/markdown",
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "svg" => "image/svg+xml",
+        "txt" => "text/plain",
+        "webp" => "image/webp",
+        "zip" => "application/zip",
+        _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod dropped_file_receipt_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn fixture_path(directory: &tempfile::TempDir, name: &str, bytes: &[u8]) -> PathBuf {
+        let path = directory.path().join(name);
+        std::fs::write(&path, bytes).expect("dropped-file fixture");
+        path
+    }
+
+    fn issue(
+        store: &DroppedFileReceiptStore,
+        window_label: &str,
+        paths: Vec<PathBuf>,
+        now: Instant,
+    ) -> String {
+        store
+            .issue_at(window_label, paths, now)
+            .expect("native drop receipt")
+    }
+
+    #[test]
+    fn rejects_forged_receipts_and_raw_paths() {
+        let store = DroppedFileReceiptStore::default();
+        assert!(store.consume("forged", "compose-1").is_err());
+        assert!(store
+            .consume("/Users/example/private-file", "compose-1")
+            .is_err());
+    }
+
+    #[test]
+    fn consumes_a_receipt_only_once() {
+        let store = DroppedFileReceiptStore::default();
+        let directory = tempdir().expect("tempdir");
+        let now = Instant::now();
+        let path = fixture_path(&directory, "drop.txt", b"original");
+        let receipt = issue(&store, "compose-1", vec![path.clone()], now);
+
+        let files = store
+            .consume_at(&receipt, "compose-1", now)
+            .expect("first redemption");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].filename, "drop.txt");
+        assert!(store.consume_at(&receipt, "compose-1", now).is_err());
+    }
+
+    #[test]
+    fn rejects_expired_receipts() {
+        let store = DroppedFileReceiptStore::default();
+        let directory = tempdir().expect("tempdir");
+        let now = Instant::now();
+        let receipt = issue(
+            &store,
+            "compose-1",
+            vec![fixture_path(&directory, "drop.txt", b"original")],
+            now,
+        );
+
+        assert!(store
+            .consume_at(&receipt, "compose-1", now + DROPPED_FILE_RECEIPT_TTL)
+            .is_err());
+    }
+
+    #[test]
+    fn passive_expiry_drops_an_unredeemed_handle() {
+        let store = DroppedFileReceiptStore::default();
+        let directory = tempdir().expect("tempdir");
+        let now = Instant::now();
+        let receipt = issue(
+            &store,
+            "compose-1",
+            vec![fixture_path(&directory, "drop.txt", b"original")],
+            now,
+        );
+
+        store.expire_at(&receipt, now + DROPPED_FILE_RECEIPT_TTL);
+
+        assert!(store.consume_at(&receipt, "compose-1", now).is_err());
+        assert!(store.entries.lock().expect("receipt store").is_empty());
+    }
+
+    #[test]
+    fn binds_receipts_to_the_originating_window_session() {
+        let store = DroppedFileReceiptStore::default();
+        let directory = tempdir().expect("tempdir");
+        let now = Instant::now();
+        let path = fixture_path(&directory, "drop.txt", b"original");
+        let receipt = issue(&store, "compose-origin", vec![path.clone()], now);
+
+        assert!(store.consume_at(&receipt, "compose-attacker", now).is_err());
+        let files = store
+            .consume_at(&receipt, "compose-origin", now)
+            .expect("originating window can still redeem");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].filename, "drop.txt");
+    }
+
+    #[test]
+    fn revokes_receipts_when_the_window_session_is_destroyed() {
+        let store = DroppedFileReceiptStore::default();
+        let directory = tempdir().expect("tempdir");
+        let receipt = store
+            .issue(
+                "compose-closed",
+                vec![fixture_path(&directory, "drop.txt", b"original")],
+            )
+            .expect("receipt");
+
+        store.revoke_window("compose-closed");
+
+        assert!(store.consume(&receipt, "compose-closed").is_err());
+    }
+
+    #[test]
+    fn rejects_more_than_the_attachment_count_limit_at_issuance() {
+        let store = DroppedFileReceiptStore::default();
+        let paths = (0..=MAX_DROPPED_ATTACHMENTS)
+            .map(|index| PathBuf::from(format!("/native/{index}")))
+            .collect();
+
+        assert!(store.issue("compose-1", paths).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinks_without_following_them() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempdir().expect("tempdir");
+        let target = directory.path().join("private.txt");
+        let link = directory.path().join("dropped.txt");
+        std::fs::write(&target, b"secret").expect("target");
+        symlink(&target, &link).expect("symlink");
+
+        let error = DroppedFileReceiptStore::default()
+            .issue("compose-1", vec![link])
+            .expect_err("symlink rejected at native drop");
+
+        assert!(error.contains("regular files"));
+    }
+
+    #[test]
+    fn rejects_total_size_before_reading_file_contents() {
+        let directory = tempdir().expect("tempdir");
+        let each_size = 18 * 1024 * 1024;
+        let paths = (0..3)
+            .map(|index| {
+                let path = directory.path().join(format!("{index}.bin"));
+                std::fs::File::create(&path)
+                    .expect("sparse file")
+                    .set_len(each_size)
+                    .expect("sparse size");
+                path
+            })
+            .collect();
+
+        let error = DroppedFileReceiptStore::default()
+            .issue("compose-1", paths)
+            .expect_err("aggregate attachment size rejected at native drop");
+
+        assert!(error.contains("total limit"));
+    }
+
+    #[test]
+    fn rejects_a_file_over_the_per_attachment_limit() {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join("oversized.bin");
+        std::fs::File::create(&path)
+            .expect("sparse file")
+            .set_len(MAX_DROPPED_ATTACHMENT_BYTES + 1)
+            .expect("sparse size");
+
+        let error = DroppedFileReceiptStore::default()
+            .issue("compose-1", vec![path])
+            .expect_err("per-file size limit rejected at native drop");
+
+        assert!(error.contains("attachment limit"));
+    }
+
+    #[test]
+    fn reads_the_opened_regular_file_handle() {
+        let directory = tempdir().expect("tempdir");
+        let path = fixture_path(&directory, "notes.txt", b"hello");
+        let store = DroppedFileReceiptStore::default();
+        let receipt = store
+            .issue("compose-1", vec![path])
+            .expect("native drop receipt");
+        let files = store
+            .consume(&receipt, "compose-1")
+            .expect("receipt redemption");
+
+        let attachments = materialize_dropped_files(files).expect("attachment");
+
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].filename, "notes.txt");
+        assert_eq!(attachments[0].mime_type, "text/plain");
+        assert_eq!(attachments[0].size_bytes, 5);
+        assert_eq!(
+            STANDARD
+                .decode(&attachments[0].content_base64)
+                .expect("base64"),
+            b"hello"
+        );
+    }
+
+    #[test]
+    fn path_replacement_after_issuance_cannot_change_the_opened_file() {
+        let directory = tempdir().expect("tempdir");
+        let path = fixture_path(&directory, "drop.txt", b"original bytes");
+        let moved_original = directory.path().join("moved-original.txt");
+        let store = DroppedFileReceiptStore::default();
+        let receipt = store
+            .issue("compose-1", vec![path.clone()])
+            .expect("native drop receipt");
+
+        std::fs::rename(&path, moved_original).expect("move original inode");
+        std::fs::write(&path, b"replacement secret").expect("replace dropped path");
+
+        let files = store
+            .consume(&receipt, "compose-1")
+            .expect("receipt redemption");
+        let attachments = materialize_dropped_files(files).expect("attachment");
+
+        assert_eq!(
+            STANDARD
+                .decode(&attachments[0].content_base64)
+                .expect("base64"),
+            b"original bytes"
+        );
+    }
+}
+
+fn save_to_downloads(
+    app: &tauri::AppHandle,
+    attachment: &Attachment,
+    bytes: &[u8],
+) -> anyhow::Result<String> {
+    let downloads = app.path().download_dir()?;
+    std::fs::create_dir_all(&downloads)?;
+    let filename = dakia_core::mail::safe_attachment_filename(&attachment.filename, 0);
+    for counter in 0..10_000 {
+        let candidate = downloads.join(download_name(&filename, counter));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        match options.open(&candidate) {
+            Ok(mut file) => {
+                if let Err(write_error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
+                    let _ = std::fs::remove_file(&candidate);
+                    return Err(write_error.into());
+                }
+                #[cfg(unix)]
+                std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o600))?;
+                return Ok(candidate.to_string_lossy().into_owned());
+            }
+            Err(open_error) if open_error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(open_error) => return Err(open_error.into()),
+        }
+    }
+    Err(anyhow::anyhow!(
+        "could not choose a safe filename in Downloads"
+    ))
+}
+
+fn download_name(filename: &str, counter: usize) -> String {
+    if counter == 0 {
+        return filename.to_owned();
+    }
+    let path = Path::new(filename);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("attachment");
+    let extension = path.extension().and_then(|value| value.to_str());
+    match extension {
+        Some(extension) if !extension.is_empty() => format!("{stem} ({counter}).{extension}"),
+        _ => format!("{stem} ({counter})"),
+    }
+}
+
+fn install_app_menu(app: &tauri::App) -> tauri::Result<()> {
+    let settings = MenuItemBuilder::with_id("settings", "Settings…")
+        .accelerator("CmdOrCtrl+,")
+        .build(app)?;
+    let check_for_updates =
+        MenuItemBuilder::with_id("check-for-updates", "Check for Updates…").build(app)?;
+    let new_message = MenuItemBuilder::with_id("new-message", "New Message")
+        .accelerator("CmdOrCtrl+N")
+        .build(app)?;
+    let add_account = MenuItemBuilder::with_id("add-account", "Add Account…").build(app)?;
+    let search = MenuItemBuilder::with_id("search", "Find in Mailbox")
+        .accelerator("CmdOrCtrl+F")
+        .build(app)?;
+    let sync = MenuItemBuilder::with_id("sync", "Get New Mail")
+        .accelerator("CmdOrCtrl+Shift+N")
+        .build(app)?;
+    let reply = MenuItemBuilder::with_id("reply", "Reply")
+        .accelerator("CmdOrCtrl+R")
+        .build(app)?;
+    let forward = MenuItemBuilder::with_id("forward", "Forward")
+        .accelerator("CmdOrCtrl+Shift+F")
+        .build(app)?;
+    let archive = MenuItemBuilder::with_id("archive", "Archive")
+        .accelerator("CmdOrCtrl+Shift+A")
+        .build(app)?;
+    let spam = MenuItemBuilder::with_id("spam", "Mark as Junk")
+        .accelerator("CmdOrCtrl+Shift+J")
+        .build(app)?;
+    let keyboard_shortcuts =
+        MenuItemBuilder::with_id("keyboard-shortcuts", "Keyboard Shortcuts").build(app)?;
+    #[cfg(target_os = "macos")]
+    let terminal_command = {
+        let label = app
+            .path()
+            .resource_dir()
+            .ok()
+            .and_then(|_| std::env::current_exe().ok())
+            .and_then(|path| path.parent().map(|parent| parent.join("dakia")))
+            .filter(|path| {
+                matches!(
+                    terminal_command_status_for(path),
+                    TerminalCommandStatus::Available
+                )
+            })
+            .map(|_| "Remove Dakia Terminal Command…")
+            .unwrap_or("Use Dakia from Terminal…");
+        MenuItemBuilder::with_id("terminal-command", label).build(app)?
+    };
+
+    let app_menu_builder = SubmenuBuilder::new(app, "Dakia")
+        .about(None)
+        .separator()
+        .item(&settings)
+        .item(&check_for_updates);
+    #[cfg(target_os = "macos")]
+    let app_menu_builder = app_menu_builder.separator().item(&terminal_command);
+    let app_menu = app_menu_builder
+        .separator()
+        .services()
+        .separator()
+        .hide()
+        .hide_others()
+        .show_all()
+        .separator()
+        .quit()
+        .build()?;
+    let file_menu = SubmenuBuilder::new(app, "File")
+        .item(&new_message)
+        .item(&add_account)
+        .separator()
+        .close_window()
+        .build()?;
+    let edit_menu = SubmenuBuilder::new(app, "Edit")
+        .undo()
+        .redo()
+        .separator()
+        .cut()
+        .copy()
+        .paste()
+        .select_all()
+        .build()?;
+    let mailbox_menu = SubmenuBuilder::new(app, "Mailbox")
+        .item(&sync)
+        .separator()
+        .item(&search)
+        .build()?;
+    let message_menu = SubmenuBuilder::new(app, "Message")
+        .item(&reply)
+        .item(&forward)
+        .separator()
+        .item(&archive)
+        .item(&spam)
+        .build()?;
+    let window_menu = SubmenuBuilder::with_id(app, "window", "Window")
+        .minimize()
+        .maximize()
+        .fullscreen()
+        .separator()
+        .bring_all_to_front()
+        .build()?;
+    let help_menu = SubmenuBuilder::new(app, "Help")
+        .item(&keyboard_shortcuts)
+        .build()?;
+
+    let menu = MenuBuilder::new(app)
+        .items(&[
+            &app_menu,
+            &file_menu,
+            &edit_menu,
+            &mailbox_menu,
+            &message_menu,
+            &window_menu,
+            &help_menu,
+        ])
+        .build()?;
+    app.set_menu(menu)?;
+    Ok(())
+}
+
+fn install_tray(app: &tauri::AppHandle, open_label: &str, quit_label: &str) -> tauri::Result<()> {
+    let open = MenuItemBuilder::with_id("tray-open", open_label).build(app)?;
+    let quit = MenuItemBuilder::with_id("tray-quit", quit_label).build(app)?;
+    let menu = MenuBuilder::new(app).items(&[&open, &quit]).build()?;
+    if let Some(tray) = app.tray_by_id("dakia-tray") {
+        tray.set_menu(Some(menu))?;
+        return Ok(());
+    }
+    let tray_icon = Image::from_bytes(include_bytes!("../icons/tray-template.png"))?;
+    let builder = TrayIconBuilder::with_id("dakia-tray")
+        .icon(tray_icon)
+        .icon_as_template(true)
+        .tooltip("Dakia")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "tray-open" => show_main_window(app),
+            "tray-quit" => {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    app.state::<Arc<AppState>>().realtime.stop_all().await;
+                    app.exit(0);
+                });
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if matches!(
+                event,
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                }
+            ) {
+                show_main_window(tray.app_handle());
+            }
+        });
+    builder.build(app)?;
+    Ok(())
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+#[tauri::command]
+async fn provider_presets() -> Vec<ProviderPreset> {
+    provider::all().to_vec()
+}
+
+#[tauri::command]
+fn configure_tray(
+    app: tauri::AppHandle,
+    open_label: String,
+    quit_label: String,
+) -> Result<(), String> {
+    if open_label.trim().is_empty() || quit_label.trim().is_empty() {
+        return Err("Tray labels are required".into());
+    }
+    install_tray(&app, open_label.trim(), quit_label.trim()).map_err(error)
+}
+
+#[tauri::command]
+async fn accounts(state: State<'_, Arc<AppState>>) -> Result<Vec<Account>, String> {
+    state.store.accounts().await.map_err(error)
+}
+
+#[tauri::command]
+async fn update_account(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    input: UpdateAccountInput,
+) -> Result<Account, String> {
+    if input.account_name.trim().is_empty() {
+        return Err("Account name is required".into());
+    }
+    if input.display_name.trim().is_empty() {
+        return Err("Your name is required".into());
+    }
+    if input.imap_host.trim().is_empty() || input.smtp_host.trim().is_empty() {
+        return Err("IMAP and SMTP hosts are required".into());
+    }
+    let mut account = state
+        .store
+        .account(input.id)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Account not found".to_owned())?;
+    account.account_name = input.account_name.trim().to_owned();
+    account.display_name = input.display_name.trim().to_owned();
+    account.imap_host = input.imap_host.trim().to_owned();
+    account.imap_port = input.imap_port;
+    account.imap_security = input.imap_security;
+    account.smtp_host = input.smtp_host.trim().to_owned();
+    account.smtp_port = input.smtp_port;
+    account.smtp_security = input.smtp_security;
+    account.archive_mailbox = input.archive_mailbox.trim().to_owned();
+    account.spam_mailbox = input.spam_mailbox.trim().to_owned();
+    if let Some(password) = input.password.filter(|value| !value.is_empty()) {
+        if !matches!(account.auth, AccountAuth::Password { .. }) {
+            return Err("OAuth accounts must be reconnected through their provider".into());
+        }
+        MailService::new(state.store.clone())
+            .credentials()
+            .set_password(&account, &password)
+            .await
+            .map_err(error)?;
+    }
+    state.store.save_account(&account).await.map_err(error)?;
+    state.realtime.reconcile(app).await.map_err(error)?;
+    Ok(account)
+}
+
+#[tauri::command]
+async fn show_account_context_menu(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    account_id: Uuid,
+    rename_label: String,
+) -> Result<(), String> {
+    if state
+        .store
+        .account(account_id)
+        .await
+        .map_err(error)?
+        .is_none()
+    {
+        return Err("Account not found".into());
+    }
+    let rename = MenuItemBuilder::with_id(format!("rename-account:{account_id}"), rename_label)
+        .build(&window)
+        .map_err(error)?;
+    let menu = MenuBuilder::new(&window)
+        .item(&rename)
+        .build()
+        .map_err(error)?;
+    window.popup_menu(&menu).map_err(error)
+}
+
+#[tauri::command]
+async fn remove_account(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    account_id: Uuid,
+) -> Result<(), String> {
+    let account = state
+        .store
+        .account(account_id)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Account not found".to_owned())?;
+    MailService::new(state.store.clone())
+        .credentials()
+        .delete(&account)
+        .await
+        .map_err(error)?;
+    state
+        .store
+        .delete_account(account_id)
+        .await
+        .map_err(error)?;
+    state.realtime.reconcile(app).await.map_err(error)
+}
+
+#[tauri::command]
+fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    let parsed = Url::parse(&url).map_err(error)?;
+    if !matches!(parsed.scheme(), "http" | "https" | "mailto") {
+        return Err("Only web and email links can be opened".into());
+    }
+    app.opener().open_url(url, None::<&str>).map_err(error)
+}
+
+#[tauri::command]
+async fn add_account(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    input: AddAccountInput,
+) -> Result<Account, String> {
+    let preset = input
+        .draft
+        .provider_id
+        .as_deref()
+        .and_then(provider::by_id)
+        .unwrap_or_else(|| provider::detect(&input.draft.email));
+    if preset.id == "custom"
+        && (input
+            .draft
+            .imap_host
+            .as_deref()
+            .unwrap_or_default()
+            .is_empty()
+            || input
+                .draft
+                .smtp_host
+                .as_deref()
+                .unwrap_or_default()
+                .is_empty())
+    {
+        return Err("Custom accounts require IMAP and SMTP hosts".into());
+    }
+    let mut account = input.draft.into_account(preset);
+    let stored_accounts = state.store.accounts().await.map_err(error)?;
+    if let Some(existing) = stored_accounts.into_iter().find(|stored| {
+        stored
+            .email
+            .trim()
+            .eq_ignore_ascii_case(account.email.trim())
+    }) {
+        account.id = existing.id;
+        account.created_at = existing.created_at;
+        account.account_name = existing.account_name;
+    }
+    let mail = MailService::new(state.store.clone());
+    mail.credentials()
+        .set_password(&account, &input.password)
+        .await
+        .map_err(error)?;
+    state.store.save_account(&account).await.map_err(error)?;
+    state.realtime.reconcile(app).await.map_err(error)?;
+    Ok(account)
+}
+
+#[tauri::command]
+async fn add_oauth_account(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    draft: AccountDraft,
+) -> Result<Account, String> {
+    let preset = draft
+        .provider_id
+        .as_deref()
+        .and_then(provider::by_id)
+        .unwrap_or_else(|| provider::detect(&draft.email));
+    if !preset.oauth {
+        return Err("The selected provider does not offer OAuth sign-in".into());
+    }
+    let client_id = oauth_client_id(preset.id)?;
+    let username = draft
+        .username
+        .clone()
+        .unwrap_or_else(|| draft.email.clone());
+    let email = draft.email.clone();
+    let client_secret = oauth_client_secret(preset.id)?;
+    let config = OAuthProviderConfig::for_provider(preset.id, client_id)
+        .map_err(error)?
+        .with_client_secret(client_secret);
+    let (flow, authorization_url) = OAuthFlow::start(config, Some(&email))
+        .await
+        .map_err(error)?;
+    app.opener()
+        .open_url(authorization_url.as_str(), None::<&str>)
+        .map_err(error)?;
+    let tokens = flow.finish().await.map_err(error)?;
+    let mut account = draft.into_account(preset);
+    account.auth = AccountAuth::OAuth2 {
+        username,
+        provider: preset.id.into(),
+        access_token_expires_at: tokens.expires_at,
+    };
+    let mail = MailService::new(state.store.clone());
+    mail.credentials()
+        .set_oauth_tokens(&account, &tokens)
+        .await
+        .map_err(error)?;
+    state.store.save_account(&account).await.map_err(error)?;
+    state.realtime.reconcile(app.clone()).await.map_err(error)?;
+    Ok(account)
+}
+
+const GOOGLE_DESKTOP_CLIENT_ID: &str =
+    "77400090557-np3jvrl1d13oec7i9evs0i9c89u7q3hg.apps.googleusercontent.com";
+
+fn oauth_client_id(provider: &str) -> Result<String, String> {
+    let (key, compiled, default) = match provider {
+        "gmail" => (
+            "DAKIA_GOOGLE_CLIENT_ID",
+            option_env!("DAKIA_GOOGLE_CLIENT_ID"),
+            Some(GOOGLE_DESKTOP_CLIENT_ID),
+        ),
+        "outlook" => (
+            "DAKIA_MICROSOFT_CLIENT_ID",
+            option_env!("DAKIA_MICROSOFT_CLIENT_ID"),
+            None,
+        ),
+        "yahoo" => (
+            "DAKIA_YAHOO_CLIENT_ID",
+            option_env!("DAKIA_YAHOO_CLIENT_ID"),
+            None,
+        ),
+        _ => {
+            return Err(format!(
+                "OAuth client registration is unavailable for {provider}"
+            ))
+        }
+    };
+    std::env::var(key)
+        .ok()
+        .or_else(|| compiled.map(str::to_owned))
+        .or_else(|| default.map(str::to_owned))
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("This build is missing {key}"))
+}
+
+fn oauth_client_secret(provider: &str) -> Result<Option<String>, String> {
+    if provider != "gmail" {
+        return Ok(None);
+    }
+    let key = "DAKIA_GOOGLE_CLIENT_SECRET";
+    std::env::var(key)
+        .ok()
+        .or_else(|| option_env!("DAKIA_GOOGLE_CLIENT_SECRET").map(str::to_owned))
+        .filter(|value| !value.is_empty())
+        .map(Some)
+        .ok_or_else(|| format!("This build is missing {key}"))
+}
+
+#[cfg(test)]
+mod oauth_client_id_tests {
+    use super::*;
+
+    #[test]
+    fn gmail_uses_the_configured_desktop_client_by_default() {
+        assert!(!oauth_client_id("gmail")
+            .expect("Gmail OAuth client")
+            .is_empty());
+    }
+}
+
+#[tauri::command]
+async fn search(
+    state: State<'_, Arc<AppState>>,
+    query: SearchQuery,
+) -> Result<MailConversationPage, String> {
+    state
+        .store
+        .search_conversation_page(&query)
+        .await
+        .map_err(error)
+}
+
+#[tauri::command]
+async fn search_remote(
+    state: State<'_, Arc<AppState>>,
+    query: SearchQuery,
+) -> Result<Vec<MailSummary>, String> {
+    if query.text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let limit = query.limit.unwrap_or(100).min(500) as usize;
+    let mut results = Vec::new();
+    let search_state = state.inner().clone();
+    let search_text = query.text.clone();
+    let search_mailbox = query.mailbox.clone();
+    let searches = run_bounded_ordered(
+        query.account_ids.clone(),
+        REMOTE_SEARCH_CONCURRENCY,
+        state.remote_operation_slots.clone(),
+        move |account_id| {
+            let state = search_state.clone();
+            let text = search_text.clone();
+            let mailbox = search_mailbox.clone();
+            async move {
+                let account = state
+                    .store
+                    .account(account_id)
+                    .await
+                    .map_err(error)?
+                    .ok_or_else(|| "Account not found".to_owned())?;
+                MailService::new(state.store.clone())
+                    .search_remote(&account, &text, mailbox.as_deref(), limit)
+                    .await
+                    .map_err(error)
+            }
+        },
+    )
+    .await;
+    // Reassemble completion results in requested account order. This makes the
+    // first returned failure deterministic and preserves stable tie ordering.
+    for hits in searches {
+        let hits = hits?;
+        for message in hits {
+            if query.mailbox.is_none()
+                && matches!(message.mailbox.split("::").next(), Some("Spam" | "Trash"))
+            {
+                continue;
+            }
+            if (!query.unread_only || !message.is_read)
+                && (!query.flagged_only || message.is_flagged)
+            {
+                results.push(message);
+            }
+        }
+    }
+    results.sort_by_key(|result| std::cmp::Reverse(result.received_at));
+    results.truncate(limit);
+    Ok(results)
+}
+
+#[tauri::command]
+async fn set_message_category(
+    state: State<'_, Arc<AppState>>,
+    message_id: String,
+    category: String,
+) -> Result<(), String> {
+    state
+        .store
+        .set_message_category(&message_id, &category)
+        .await
+        .map_err(error)
+}
+
+#[tauri::command]
+async fn set_message_starred(
+    state: State<'_, Arc<AppState>>,
+    message_id: String,
+    starred: bool,
+) -> Result<dakia_core::MailSummary, String> {
+    let message = state
+        .store
+        .message(&message_id)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Message not found".to_owned())?;
+    let account_id = Uuid::parse_str(&message.account_id).map_err(error)?;
+    let account = state
+        .store
+        .account(account_id)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Account not found".to_owned())?;
+    MailService::new(state.store.clone())
+        .set_flagged(&account, &message.mailbox, message.uid as u32, starred)
+        .await
+        .map_err(error)?;
+    state
+        .store
+        .set_message_flagged(&message_id, starred)
+        .await
+        .map_err(error)?;
+    if starred {
+        match MailService::new(state.store.clone())
+            .hydrate_message(&account, &message.mailbox, message.uid as u32)
+            .await
+        {
+            Ok(hydrated) => Ok(hydrated),
+            Err(_) => state
+                .store
+                .message(&message_id)
+                .await
+                .map_err(error)?
+                .ok_or_else(|| "Message not found".to_owned()),
+        }
+    } else {
+        state
+            .store
+            .message(&message_id)
+            .await
+            .map_err(error)?
+            .ok_or_else(|| "Message not found".to_owned())
+    }
+}
+
+#[tauri::command]
+async fn set_message_read(
+    state: State<'_, Arc<AppState>>,
+    message_id: String,
+    read: bool,
+) -> Result<(), String> {
+    let message = state
+        .store
+        .message(&message_id)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Message not found".to_owned())?;
+    let account_id = Uuid::parse_str(&message.account_id).map_err(error)?;
+    let account = state
+        .store
+        .account(account_id)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Account not found".to_owned())?;
+    MailService::new(state.store.clone())
+        .set_read(&account, &message.mailbox, message.uid as u32, read)
+        .await
+        .map_err(error)?;
+    state
+        .store
+        .set_message_read(&message_id, read)
+        .await
+        .map_err(error)
+}
+
+#[tauri::command]
+async fn starred_conversation_count(
+    state: State<'_, Arc<AppState>>,
+    account_ids: Vec<Uuid>,
+) -> Result<u64, String> {
+    state
+        .store
+        .starred_conversation_count(&account_ids)
+        .await
+        .map_err(error)
+}
+
+async fn classify_pending_messages(state: Arc<AppState>) -> anyhow::Result<usize> {
+    let messages = state.store.messages_for_model_classification().await?;
+    if messages.is_empty() {
+        return Ok(0);
+    }
+    let ids: Vec<String> = messages.iter().map(|message| message.id.clone()).collect();
+    let inputs: Vec<String> = messages
+        .iter()
+        .map(|message| {
+            dakia_core::classification::email_text(
+                message.from_name.as_deref(),
+                &message.from_address,
+                &message.subject,
+                &message.snippet,
+                &message.classification_signals,
+            )
+        })
+        .collect();
+    let classifier_state = state.clone();
+    let classifications = tauri::async_runtime::spawn_blocking(move || {
+        let mut classifier = classifier_state
+            .classifier
+            .lock()
+            .map_err(|_| anyhow::anyhow!("email classifier lock is unavailable"))?;
+        classifier.classify(&inputs)
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("email classifier task failed: {error}"))??;
+    let updates: Vec<(String, String, f64)> = ids
+        .into_iter()
+        .zip(classifications)
+        .map(|(id, result)| (id, result.category, result.confidence))
+        .collect();
+    let count = updates.len();
+    state.store.apply_model_classifications(&updates).await?;
+    Ok(count)
+}
+
+#[tauri::command]
+async fn classify_pending(state: State<'_, Arc<AppState>>) -> Result<usize, String> {
+    classify_pending_messages(state.inner().clone())
+        .await
+        .map_err(error)
+}
+
+#[tauri::command]
+async fn start_realtime_sync(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    state.realtime.reconcile(app).await.map_err(error)
+}
+
+#[tauri::command]
+async fn reconcile_realtime_sync(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    state.realtime.reconcile(app).await.map_err(error)
+}
+
+#[tauri::command]
+async fn realtime_sync_status(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<RealtimeSyncStatus>, String> {
+    Ok(state.realtime.statuses().await)
+}
+
+#[tauri::command]
+fn record_notification_delivered(
+    account_id: Uuid,
+    event_id: Uuid,
+    detected_at: String,
+) -> Result<(), String> {
+    let detected_at = chrono::DateTime::parse_from_rfc3339(&detected_at).map_err(error)?;
+    let latency_ms = chrono::Utc::now()
+        .signed_duration_since(detected_at.with_timezone(&chrono::Utc))
+        .num_milliseconds()
+        .max(0);
+    tracing::info!(
+        account_id = %account_id,
+        event_id = %event_id,
+        notification_latency_ms = latency_ms,
+        "new mail notification delivered"
+    );
+    Ok(())
+}
+
+#[tauri::command]
+async fn hydrate_message(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    message_id: String,
+) -> Result<dakia_core::MailSummary, String> {
+    let message = state
+        .store
+        .message(&message_id)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Message not found".to_owned())?;
+    if matches!(message.content_state.as_str(), "complete" | "hydrating") {
+        return Ok(message);
+    }
+    let account_id = Uuid::parse_str(&message.account_id).map_err(error)?;
+    let account = state
+        .store
+        .account(account_id)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Account not found".to_owned())?;
+    if !state
+        .store
+        .claim_message_hydration(&message_id)
+        .await
+        .map_err(error)?
+    {
+        return state
+            .store
+            .message(&message_id)
+            .await
+            .map_err(error)?
+            .ok_or_else(|| "Message not found".to_owned());
+    }
+    match MailService::new(state.store.clone())
+        .hydrate_message(&account, &message.mailbox, message.uid as u32)
+        .await
+    {
+        Ok(hydrated) => {
+            let _ = app.emit(
+                "mail-hydrated",
+                serde_json::json!({
+                    "accountId": account_id,
+                    "messageId": hydrated.id,
+                }),
+            );
+            Ok(hydrated)
+        }
+        Err(failure) => {
+            let _ = state
+                .store
+                .set_message_content_state(&message_id, "failed")
+                .await;
+            Err(error(failure))
+        }
+    }
+}
+
+fn publish_mail_rebuild_progress(
+    app: &tauri::AppHandle,
+    state: &Arc<AppState>,
+    account_id: Uuid,
+    progress: SyncProgress,
+) {
+    let update = MailRebuildProgress {
+        account_id,
+        phase: progress.phase.to_owned(),
+        completed: progress.completed,
+        total: progress.total,
+    };
+    state
+        .mail_rebuilds
+        .lock()
+        .expect("mail rebuild lock poisoned")
+        .insert(account_id, update.clone());
+    let _ = app.emit("mail-rebuild-progress", &update);
+}
+
+async fn run_mail_rebuild(
+    app: tauri::AppHandle,
+    state: Arc<AppState>,
+    account: Account,
+    reset_before_sync: bool,
+) -> anyhow::Result<SyncResult> {
+    state.realtime.stop_account(account.id).await;
+    let initial = MailRebuildJob {
+        account_id: account.id,
+        phase: "connecting".to_owned(),
+        completed: 0,
+        total: None,
+    };
+    state.store.save_mail_rebuild_job(&initial).await?;
+    state
+        .mail_rebuilds
+        .lock()
+        .expect("mail rebuild lock poisoned")
+        .insert(account.id, initial.into());
+
+    let service = MailService::new(state.store.clone());
+    let progress_app = app.clone();
+    let progress_state = state.clone();
+    let account_id = account.id;
+    let result = if reset_before_sync {
+        service
+            .rebuild_all_with_progress(&account, 250, move |progress| {
+                publish_mail_rebuild_progress(&progress_app, &progress_state, account_id, progress);
+            })
+            .await
+    } else {
+        service
+            .resume_rebuild_all_with_progress(&account, 250, move |progress| {
+                publish_mail_rebuild_progress(&progress_app, &progress_state, account_id, progress);
+            })
+            .await
+    };
+
+    if result.is_ok() {
+        state.store.delete_mail_rebuild_job(account.id).await?;
+        state
+            .mail_rebuilds
+            .lock()
+            .expect("mail rebuild lock poisoned")
+            .remove(&account.id);
+        let _ = app.emit(
+            "mail-index-rebuilt",
+            serde_json::json!({ "accountId": account.id }),
+        );
+    } else {
+        if let Err(error) = state.store.delete_mail_rebuild_job(account.id).await {
+            tracing::warn!(
+                account_id = %account.id,
+                error = %error,
+                "could not clear failed mail rebuild job"
+            );
+        }
+        state
+            .mail_rebuilds
+            .lock()
+            .expect("mail rebuild lock poisoned")
+            .remove(&account.id);
+    }
+    if account.enabled {
+        state.realtime.start_account(app, account).await;
+    }
+    result
+}
+
+#[tauri::command]
+async fn mail_rebuild_status(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<MailRebuildProgress>, String> {
+    Ok(state
+        .mail_rebuilds
+        .lock()
+        .map_err(error)?
+        .values()
+        .cloned()
+        .collect())
+}
+
+#[tauri::command]
+async fn sync_account(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    account_id: Uuid,
+    limit: Option<u32>,
+    full: Option<bool>,
+    on_progress: Channel<SyncProgress>,
+) -> Result<SyncResult, String> {
+    let account = state
+        .store
+        .account(account_id)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Account not found".to_owned())?;
+    let result = if full.unwrap_or(false) {
+        if state
+            .mail_rebuilds
+            .lock()
+            .map_err(error)?
+            .contains_key(&account_id)
+        {
+            return Err("A mail re-index is already running for this account".to_owned());
+        }
+        let result =
+            run_mail_rebuild(app.clone(), state.inner().clone(), account.clone(), true).await;
+        if result.is_ok() {
+            let _ = on_progress.send(SyncProgress {
+                phase: "complete",
+                completed: 1,
+                total: Some(1),
+            });
+        }
+        result
+    } else {
+        state.realtime.stop_account(account_id).await;
+        let service = MailService::new(state.store.clone());
+        service
+            .refresh_inbox_with_progress(&account, limit.unwrap_or(50), |progress| {
+                let _ = on_progress.send(progress);
+            })
+            .await
+    };
+    if !full.unwrap_or(false) && account.enabled {
+        // Restarting the owned watcher also starts its cancellable hydration
+        // worker, which revisits uncached starred bodies under the manager-wide
+        // limiter. Do not create an untracked post-sync batch here.
+        state.realtime.start_account(app, account).await;
+    }
+    let synced = result.map_err(error)?;
+    classify_pending_messages(state.inner().clone())
+        .await
+        .map_err(error)?;
+    Ok(synced)
+}
+
+#[tauri::command]
+async fn send_message(
+    state: State<'_, Arc<AppState>>,
+    draft: ComposeMessage,
+) -> Result<String, String> {
+    let account = state
+        .store
+        .account(draft.account_id)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Account not found".to_owned())?;
+    MailService::new(state.store.clone())
+        .send(&account, &draft)
+        .await
+        .map_err(error)
+}
+
+#[tauri::command]
+async fn apply_mailbox_action(
+    state: State<'_, Arc<AppState>>,
+    account_id: Uuid,
+    mailbox: String,
+    uid: u32,
+    action: MailboxAction,
+) -> Result<(), String> {
+    let account = state
+        .store
+        .account(account_id)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Account not found".to_owned())?;
+    let source_mailbox = remote_mailbox(&account, &mailbox);
+    let destination_uid = MailService::new(state.store.clone())
+        .apply_action(&account, &source_mailbox, uid, action)
+        .await
+        .map_err(error)?;
+    state
+        .store
+        .move_message(
+            account.id,
+            &mailbox,
+            uid,
+            mailbox_action_destination(action).unwrap_or_default(),
+            destination_uid,
+        )
+        .await
+        .map_err(error)
+}
+
+#[tauri::command]
+async fn unsubscribe_message(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    message_id: String,
+) -> Result<UnsubscribeResult, String> {
+    // Unsubscribe metadata is parsed, verified, and persisted when the message
+    // is synced. Do not make an unrelated IMAP round trip before acting on it:
+    // that made otherwise valid unsubscribe actions fail whenever the mailbox
+    // could not be fetched again.
+    let message = state
+        .store
+        .message(&message_id)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Message not found".to_owned())?;
+    let account_id = Uuid::parse_str(&message.account_id).map_err(error)?;
+    let service = MailService::new(state.store.clone());
+    let outcome = match service.unsubscribe(&message).await {
+        Ok(outcome) => outcome,
+        // Older catalogue rows may contain an action selected by a previous
+        // parser version. Refresh only malformed, side-effect-free web/mailto
+        // metadata so a later valid fallback in the header can be selected.
+        // Never retry a one-click POST: its failure may be ambiguous.
+        Err(_) if message.unsubscribe_kind.as_deref() != Some("one_click") => {
+            let refreshed = fetch_remote_message(state.inner(), &message_id).await?;
+            service.unsubscribe(&refreshed).await.map_err(error)?
+        }
+        Err(failure) => return Err(error(failure)),
+    };
+    match outcome {
+        UnsubscribeOutcome::Completed => Ok(UnsubscribeResult::Completed),
+        UnsubscribeOutcome::Web(url) => {
+            open_external_url(app, url)?;
+            Ok(UnsubscribeResult::OpenedWeb)
+        }
+        UnsubscribeOutcome::Mailto { to, subject, body } => {
+            let account = state
+                .store
+                .account(account_id)
+                .await
+                .map_err(error)?
+                .ok_or_else(|| "Account not found".to_owned())?;
+            let draft = unsubscribe_email(account_id, to, subject, body)?;
+            MailService::new(state.store.clone())
+                .send(&account, &draft)
+                .await
+                .map_err(error)?;
+            Ok(UnsubscribeResult::Completed)
+        }
+    }
+}
+
+#[tauri::command]
+async fn ai_summarize(state: State<'_, Arc<AppState>>, input: AiInput) -> Result<String, String> {
+    let messages = hydrate_messages(state.inner(), &input.message_ids).await?;
+    ai_service(&state.store, input)
+        .await?
+        .summarize(&messages)
+        .await
+        .map_err(error)
+}
+
+#[tauri::command]
+async fn ai_draft(state: State<'_, Arc<AppState>>, input: AiInput) -> Result<String, String> {
+    let messages = hydrate_messages(state.inner(), &input.message_ids).await?;
+    let instruction = input.instruction.clone().unwrap_or_default();
+    ai_service(&state.store, input)
+        .await?
+        .draft(&instruction, &messages)
+        .await
+        .map_err(error)
+}
+
+async fn hydrate_messages(
+    state: &Arc<AppState>,
+    message_ids: &[String],
+) -> Result<Vec<MailSummary>, String> {
+    let hydration_state = state.clone();
+    run_bounded_ordered(
+        message_ids.to_vec(),
+        MESSAGE_HYDRATION_CONCURRENCY,
+        state.remote_operation_slots.clone(),
+        move |message_id| {
+            let state = hydration_state.clone();
+            async move { fetch_remote_message(&state, &message_id).await }
+        },
+    )
+    .await
+    .into_iter()
+    .collect()
+}
+
+#[tauri::command]
+async fn ai_available(state: State<'_, Arc<AppState>>, input: AiInput) -> Result<bool, String> {
+    Ok(ai_service(&state.store, input).await?.is_available().await)
+}
+
+#[tauri::command]
+async fn send_desktop_notification(
+    app: tauri::AppHandle,
+    notification: DesktopNotification,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut builder = notify_rust::Notification::new();
+        builder
+            .summary(&notification.title)
+            .body(&notification.body)
+            .auto_icon();
+        if let Some(sound) = &notification.sound {
+            builder.sound_name(sound);
+        }
+        let handle = builder.show().map_err(error)?;
+        let action_app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            handle.wait_for_action(move |action| {
+                if action == "__closed" {
+                    return;
+                }
+                if let Some(window) = action_app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+                let _ = action_app.emit("notification-action", notification);
+            });
+        });
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        let _ = notification;
+        Err("Native desktop notifications are only used on macOS".to_owned())
+    }
+}
+
+async fn ai_service(store: &Store, input: AiInput) -> Result<AiService, String> {
+    let provider = match input.provider.as_str() {
+        "ollama" => AiProvider::Ollama {
+            base_url: Url::parse(
+                input
+                    .base_url
+                    .as_deref()
+                    .unwrap_or("http://127.0.0.1:11434/"),
+            )
+            .map_err(error)?,
+            model: input.model,
+        },
+        "openai" => AiProvider::OpenAiCompatible {
+            base_url: Url::parse(
+                input
+                    .base_url
+                    .as_deref()
+                    .unwrap_or("https://api.openai.com/v1/"),
+            )
+            .map_err(error)?,
+            model: input.model,
+        },
+        "local" => AiProvider::LocalCommand {
+            executable: input
+                .executable
+                .ok_or_else(|| "Local AI executable is required".to_owned())?,
+            model_path: input
+                .model_path
+                .ok_or_else(|| "Local model path is required".to_owned())?,
+            extra_args: Vec::new(),
+        },
+        _ => return Err("Unknown AI provider".into()),
+    };
+    let api_key = match input.api_key.filter(|value| !value.is_empty()) {
+        Some(value) => Some(value),
+        None => store
+            .secret("dev.dakia.mail:ai:api-key")
+            .await
+            .map_err(error)?,
+    }
+    .map(SecretString::from);
+    Ok(AiService::new(AiConfig { provider, api_key }))
+}
+
+#[tauri::command]
+async fn set_ai_api_key(state: State<'_, Arc<AppState>>, api_key: String) -> Result<(), String> {
+    if api_key.is_empty() {
+        state
+            .store
+            .delete_secret("dev.dakia.mail:ai:api-key")
+            .await
+            .map_err(error)?;
+    } else {
+        state
+            .store
+            .set_secret("dev.dakia.mail:ai:api-key", &api_key)
+            .await
+            .map_err(error)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn translation_models(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<TranslationModelStatus>, String> {
+    translation::statuses(&state.data_dir)
+}
+
+#[tauri::command]
+fn translation_model_files(
+    state: State<'_, Arc<AppState>>,
+    source: String,
+) -> Result<TranslationModelFiles, String> {
+    translation::files(&state.data_dir, &source)
+}
+
+#[tauri::command]
+fn translation_detect_language(text: String) -> TranslationLanguageDetection {
+    translation::detect_language(&text)
+}
+
+#[tauri::command]
+async fn translation_install_model(
+    state: State<'_, Arc<AppState>>,
+    source: String,
+    on_progress: Channel<TranslationDownloadProgress>,
+) -> Result<TranslationModelFiles, String> {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    state
+        .translation_downloads
+        .lock()
+        .map_err(error)?
+        .insert(source.clone(), cancelled.clone());
+    let result = translation::install(&state.data_dir, &source, on_progress, cancelled).await;
+    state
+        .translation_downloads
+        .lock()
+        .map_err(error)?
+        .remove(&source);
+    result
+}
+
+#[tauri::command]
+fn translation_cancel_install(
+    state: State<'_, Arc<AppState>>,
+    source: String,
+) -> Result<(), String> {
+    if let Some(cancelled) = state
+        .translation_downloads
+        .lock()
+        .map_err(error)?
+        .get(&source)
+    {
+        cancelled.store(true, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn translation_remove_model(
+    state: State<'_, Arc<AppState>>,
+    source: String,
+) -> Result<(), String> {
+    translation::remove(&state.data_dir, &source).await
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .try_init();
+    let dropped_file_receipts = Arc::new(DroppedFileReceiptStore::default());
+    let event_receipts = dropped_file_receipts.clone();
+    let window_receipts = dropped_file_receipts.clone();
+    tauri::Builder::default()
+        .manage(dropped_file_receipts)
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--background"]),
+        ))
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .on_menu_event(|app, event| {
+            let _ = app.emit("menu-action", event.id().as_ref());
+        })
+        .on_window_event(move |window, event| match event {
+            WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. }) => {
+                match event_receipts.issue(window.label(), paths.clone()) {
+                    Ok(receipt) => {
+                        let expiry_receipts = event_receipts.clone();
+                        let expiry_receipt = receipt.clone();
+                        tauri::async_runtime::spawn(async move {
+                            tokio::time::sleep(DROPPED_FILE_RECEIPT_TTL).await;
+                            expiry_receipts.expire_at(&expiry_receipt, Instant::now());
+                        });
+                        if let Err(emit_error) = window.emit(DROPPED_FILE_RECEIPT_EVENT, receipt) {
+                            tracing::warn!(
+                                error = %emit_error,
+                                window = window.label(),
+                                "could not deliver dropped-file receipt"
+                            );
+                        }
+                    }
+                    Err(drop_error) => {
+                        if let Err(emit_error) = window.emit(DROPPED_FILE_ERROR_EVENT, drop_error) {
+                            tracing::warn!(
+                                error = %emit_error,
+                                window = window.label(),
+                                "could not deliver dropped-file error"
+                            );
+                        }
+                    }
+                }
+            }
+            WindowEvent::Destroyed => {
+                window_receipts.revoke_window(window.label());
+            }
+            WindowEvent::CloseRequested { api, .. } if window.label() == "main" => {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+            _ => {}
+        })
+        .setup(|app| {
+            #[cfg(target_os = "macos")]
+            {
+                // notify-rust uses process-global state for the application identity. It
+                // rejects subsequent calls, so initialize it once before either the
+                // frontend notification plugin or realtime mail notifications run.
+                let application = if tauri::is_dev() {
+                    "com.apple.Terminal"
+                } else {
+                    app.config().identifier.as_str()
+                };
+                notify_rust::set_application(application)
+                    .map_err(|error| anyhow::anyhow!("notification application: {error}"))?;
+            }
+            install_app_menu(app).map_err(|error| anyhow::anyhow!("app menu: {error}"))?;
+            let release_smoke_test = std::env::var_os("DAKIA_RELEASE_SMOKE_TEST").as_deref()
+                == Some(std::ffi::OsStr::new("1"));
+            let data_dir = if release_smoke_test {
+                std::env::var_os("DAKIA_RELEASE_SMOKE_DATA_DIR")
+                    .map(std::path::PathBuf::from)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "DAKIA_RELEASE_SMOKE_DATA_DIR is required for release smoke tests"
+                        )
+                    })?
+            } else if updater_acceptance_enabled() {
+                required_updater_acceptance_path("DAKIA_UPDATER_ACCEPTANCE_DATA_DIR")
+                    .map_err(anyhow::Error::msg)?
+            } else {
+                app.path()
+                    .app_local_data_dir()
+                    .map_err(|error| anyhow::anyhow!("local data directory: {error}"))?
+            };
+            let resource_dir = match app.path().resource_dir() {
+                Ok(path) => path,
+                Err(_) => std::env::current_exe()?
+                    .parent()
+                    .ok_or_else(|| anyhow::anyhow!("development executable has no parent"))?
+                    .to_path_buf(),
+            };
+            let classifier_dir = resource_dir.join("resources/email-classifier-v2");
+            let state = tauri::async_runtime::block_on(async {
+                let store = Store::open(data_dir.join("dakia.db")).await?;
+                let classifier = LocalEmailClassifier::from_dir(&classifier_dir)?;
+                let mail_rebuilds = store
+                    .mail_rebuild_jobs()
+                    .await?
+                    .into_iter()
+                    .map(|job| (job.account_id, job.into()))
+                    .collect();
+                anyhow::Ok(Arc::new(AppState {
+                    realtime: RealtimeSyncManager::new(store.clone()),
+                    store,
+                    data_dir,
+                    classifier: Mutex::new(classifier),
+                    mail_rebuilds: Mutex::new(mail_rebuilds),
+                    remote_operation_slots: Arc::new(Semaphore::new(MESSAGE_HYDRATION_CONCURRENCY)),
+                    translation_downloads: Mutex::new(HashMap::new()),
+                }))
+            })?;
+            app.manage(state.clone());
+            if release_smoke_test {
+                eprintln!("DAKIA_RELEASE_SMOKE_TEST_OK");
+                app.handle().exit(0);
+                return Ok(());
+            }
+            // Real-time mail is a native application responsibility. Starting
+            // it here keeps delivery alive even when the webview is slow to
+            // mount, hidden by --background, or temporarily unavailable.
+            let realtime_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let rebuilding: std::collections::HashSet<_> = state
+                    .mail_rebuilds
+                    .lock()
+                    .expect("mail rebuild lock poisoned")
+                    .keys()
+                    .copied()
+                    .collect();
+                match state.store.accounts().await {
+                    Ok(accounts) => {
+                        for account in accounts {
+                            if rebuilding.contains(&account.id) {
+                                let rebuild_app = realtime_app.clone();
+                                let rebuild_state = state.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    if let Err(error) =
+                                        run_mail_rebuild(rebuild_app, rebuild_state, account, false)
+                                            .await
+                                    {
+                                        tracing::error!(
+                                            error = %error,
+                                            "could not resume interrupted mail rebuild"
+                                        );
+                                    }
+                                });
+                            } else if account.enabled {
+                                state
+                                    .realtime
+                                    .start_account(realtime_app.clone(), account)
+                                    .await;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!(error = %error, "could not start native mail tasks");
+                    }
+                }
+            });
+            if std::env::args().any(|argument| argument == "--background") {
+                if let Some(window) = app.get_webview_window("main") {
+                    window.hide()?;
+                }
+            }
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            updater_acceptance_config,
+            record_updater_acceptance_event,
+            provider_presets,
+            message_content,
+            configure_tray,
+            terminal_command_status,
+            install_terminal_command,
+            remove_terminal_command,
+            message_attachments,
+            save_attachment,
+            save_all_attachments,
+            forward_attachments,
+            read_dropped_files,
+            accounts,
+            update_account,
+            show_account_context_menu,
+            remove_account,
+            open_external_url,
+            add_account,
+            add_oauth_account,
+            search,
+            search_remote,
+            set_message_category,
+            set_message_starred,
+            set_message_read,
+            starred_conversation_count,
+            classify_pending,
+            start_realtime_sync,
+            reconcile_realtime_sync,
+            realtime_sync_status,
+            record_notification_delivered,
+            hydrate_message,
+            mail_rebuild_status,
+            sync_account,
+            send_message,
+            apply_mailbox_action,
+            unsubscribe_message,
+            ai_summarize,
+            ai_draft,
+            ai_available,
+            send_desktop_notification,
+            set_ai_api_key,
+            translation_models,
+            translation_model_files,
+            translation_detect_language,
+            translation_install_model,
+            translation_cancel_install,
+            translation_remove_model
+        ])
+        .run(tauri::generate_context!())
+        .expect("Dakia desktop runtime failed");
+}
