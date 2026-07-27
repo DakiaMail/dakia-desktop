@@ -14,7 +14,7 @@ chrono.workspace = true
 directories.workspace = true
 fastembed = { version = "=5.13.1", default-features = false, features = ["ort-download-binaries-native-tls"] }
 lettre.workspace = true
-mail-auth = { version = "0.10", default-features = false, features = ["ring"] }
+mail-auth = { version = "0.11", default-features = false, features = ["ring"] }
 mail-parser.workspace = true
 mailparse.workspace = true
 percent-encoding.workspace = true
