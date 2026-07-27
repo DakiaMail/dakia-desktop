@@ -1,0 +1,9 @@
+{
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://downloads.dakiamail.com/macos/staging/latest.json"
+      ]
+    }
+  }
+}

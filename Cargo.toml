@@ -1,0 +1,42 @@
+[workspace]
+members = [
+  "crates/dakia-core",
+  "crates/dakia-cli",
+  "apps/desktop/src-tauri",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.2.8"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/DakiaMail/dakia-desktop"
+rust-version = "1.82"
+
+[workspace.dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+directories = "6"
+lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "pool", "smtp-transport", "tokio1-rustls-tls"] }
+mail-parser = "0.11"
+mailparse = "0.16"
+percent-encoding = "2"
+reqwest = { version = "0.12", default-features = false, features = ["gzip", "json", "rustls-tls", "stream"] }
+ring = "0.17"
+schemars = { version = "0.8", features = ["chrono", "uuid1"] }
+secrecy = { version = "0.10", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["chrono", "macros", "migrate", "runtime-tokio-rustls", "sqlite", "uuid"] }
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "macros", "process", "rt-multi-thread", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+url = { version = "2", features = ["serde"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+webpki-roots = "1"

@@ -1,0 +1,7 @@
+* @ArsalanDotMe
+
+# Security-sensitive release and desktop boundaries
+/.github/ @ArsalanDotMe
+/apps/desktop/src-tauri/ @ArsalanDotMe
+/scripts/ @ArsalanDotMe
+/SECURITY.md @ArsalanDotMe

@@ -1,0 +1,58 @@
+{
+  "checkpoint": "/content/ml/models/mmbert-small-classifier-v8/seed-1",
+  "output_dir": "/content/ml/models/mmbert-small-classifier-v8/seed-1/onnx_experiments",
+  "model_type": "classifier",
+  "base_model": "jhu-clsp/mmBERT-small",
+  "original_size_mb": 1240.51,
+  "onnx_size_mb": 135.3,
+  "quantization": "INT8",
+  "quant_recipe": "dynamic_per_channel",
+  "opset_version": 14,
+  "max_seq_length": 384,
+  "pooling": "mean",
+  "categories": [
+    "ALERT",
+    "NEWSLETTER",
+    "PERSONAL",
+    "PROMOTIONAL",
+    "SOCIAL",
+    "TRANSACTION"
+  ],
+  "action_threshold_int8": 0.175,
+  "action_threshold_fp32_pt": 0.375,
+  "action_metrics_at_int8_threshold": {
+    "precision": 0.9231,
+    "recall": 0.8451,
+    "f1": 0.8824,
+    "n_positive_predicted": 65,
+    "n_positive_actual": 71
+  },
+  "metrics": {
+    "test_set": "/content/ml/data/splits/classifier_test.jsonl",
+    "test_set_n": 321,
+    "cat_acc": 93.15,
+    "act_acc": 93.46,
+    "cat_acc_en": 93.49,
+    "cat_acc_fr": 92.45,
+    "act_acc_en": 93.95,
+    "act_acc_fr": 92.45,
+    "argmax_match_pt": 96.57,
+    "by_class_recall": {
+      "ALERT": 85.0,
+      "NEWSLETTER": 94.0,
+      "PERSONAL": 98.0,
+      "PROMOTIONAL": 95.0,
+      "SOCIAL": 87.8,
+      "TRANSACTION": 98.33
+    },
+    "action_threshold_used_for_eval": 0.175
+  },
+  "model_inputs": [
+    "input_ids",
+    "attention_mask"
+  ],
+  "model_outputs": [
+    "category_probs",
+    "action_prob"
+  ]
+}

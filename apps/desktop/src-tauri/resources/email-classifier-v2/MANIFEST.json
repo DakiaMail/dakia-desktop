@@ -1,0 +1,20 @@
+{
+  "model": "Ippoboi/mmbert-s-email-classifier",
+  "revision": "72de7110305b5e1d98d26aa0578482a230739c0c",
+  "license": "Apache-2.0",
+  "category_mapping": {
+    "ALERT": "notifications",
+    "NEWSLETTER": "newsletters",
+    "PERSONAL": "people",
+    "PROMOTIONAL": "newsletters",
+    "SOCIAL": "notifications",
+    "TRANSACTION": "transactions"
+  },
+  "files": {
+    "model.onnx": "48c7ea833f547661a2462e580015373ad3bebeaaca88b53cdb9eb1740fb8e7f5",
+    "tokenizer.json": "609d8f4c067cd3950f88594c5a802616cea245823836ef5848ee4fc40aab5b6f",
+    "tokenizer_config.json": "3b66ca84514d9aacf4b90c65a61e561127c6c21d81bbf4e8ba9d46a4c15ac82d",
+    "special_tokens_map.json": "6e3204c5a4004719c185007a745d1940471a6fb02521cfa0a00306dbb6bc5903",
+    "export_metadata.json": "7be647b1e81f868f3a88ff023b2a676d52bb0b4f85ccb41133c345b1615183e1"
+  }
+}
