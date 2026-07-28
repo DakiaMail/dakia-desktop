@@ -15,6 +15,7 @@ import { AI_FEATURES_VISIBLE } from "../features";
 import { api } from "../api";
 import type { ComposeSeed } from "../composeWindow";
 import type { Account, ComposeAttachment } from "../types";
+import { splitAddressValues } from "../recipients";
 import { RichTextEditor } from "./RichTextEditor";
 import {
   isRichTextEmpty,
@@ -48,13 +49,13 @@ export function Composer({
     seed?.accountId ?? accounts[0]?.id,
   );
   const [to, setTo] = useState(seed?.to ?? "");
-  const [cc, setCc] = useState("");
+  const [cc, setCc] = useState(seed?.cc ?? "");
   const [bcc, setBcc] = useState("");
   const [subject, setSubject] = useState(seed?.subject ?? "");
   const [bodyHtml, setBodyHtml] = useState(() =>
     richTextFromPlainText(seed?.body ?? ""),
   );
-  const [showCopies, setShowCopies] = useState(false);
+  const [showCopies, setShowCopies] = useState(Boolean(seed?.cc));
   const [aiLoading, setAiLoading] = useState(false);
   const [attachments, setAttachments] = useState<ComposeAttachment[]>(
     seed?.attachments ?? [],
@@ -489,11 +490,7 @@ export function Composer({
   );
 }
 
-const splitAddresses = (value: string) =>
-  value
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
+const splitAddresses = (value: string) => splitAddressValues(value);
 
 async function fileToAttachment(file: File): Promise<ComposeAttachment> {
   const bytes = new Uint8Array(await file.arrayBuffer());

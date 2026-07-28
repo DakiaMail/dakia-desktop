@@ -887,6 +887,55 @@ textarea {
   color: var(--mantine-color-dimmed);
   font-size: 12px;
 }
+.recipient-summary {
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  overflow: hidden;
+  border: 0;
+  color: var(--mantine-color-dimmed);
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.recipient-summary span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.recipient-summary-chevron {
+  flex: none;
+  transition: transform 140ms ease;
+}
+.recipient-summary[aria-expanded="true"] .recipient-summary-chevron {
+  transform: rotate(180deg);
+}
+.recipient-details {
+  margin: 7px 0 0;
+  display: grid;
+  gap: 3px;
+  color: var(--mantine-color-dimmed);
+  font-size: 12px;
+}
+.recipient-detail-row {
+  display: grid;
+  grid-template-columns: minmax(54px, auto) 1fr;
+  gap: 8px;
+}
+.recipient-detail-row dt {
+  font-weight: 650;
+}
+.recipient-detail-row dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: light-dark(#3e4441, #d4d9d6);
+}
 .reader-date {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -901,6 +950,30 @@ textarea {
   line-height: 1.72;
   color: light-dark(#363a38, #d9dedb);
   text-wrap: pretty;
+}
+.quoted-history {
+  margin-top: 14px;
+}
+.quoted-history summary {
+  width: fit-content;
+  color: var(--mantine-color-ember-7);
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.quoted-history[open] .history-show,
+.quoted-history:not([open]) .history-hide {
+  display: none;
+}
+.quoted-history-content {
+  margin-top: 10px;
+  color: var(--mantine-color-dimmed);
+  white-space: pre-wrap;
+}
+.reader-reply-actions {
+  margin-top: 22px;
+  display: flex;
+  gap: 8px;
 }
 
 .translation-status {
@@ -941,7 +1014,6 @@ textarea {
   border: 0;
   background: #fff;
   color-scheme: light;
-  overflow: auto;
 }
 .html-message--dark {
   background: var(--dakia-paper);

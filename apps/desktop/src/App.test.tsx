@@ -1016,6 +1016,45 @@ describe("App read state", () => {
     );
   });
 
+  it("opens Reply All with Reply-To and deduplicated non-self Cc recipients", async () => {
+    mocks.api.search.mockResolvedValue({
+      conversations: groupMessages([
+        {
+          ...mocks.message,
+          reply_to_addresses: "Replies <reply@example.com>",
+          to_addresses: "Me <me@example.com>, Peer <peer@example.com>",
+          cc_addresses: "PEER@example.com, Other <other@example.com>",
+          bcc_addresses: "hidden@example.com",
+        },
+      ]),
+      nextCursor: null,
+    });
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(
+      (await screen.findByText("Unread thread")).closest("button")!,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Reply all" }));
+
+    await waitFor(() =>
+      expect(mocks.openComposeWindow).toHaveBeenCalledWith(
+        expect.objectContaining({
+          accountId: "account-1",
+          to: "Replies <reply@example.com>, Peer <peer@example.com>",
+          cc: "Other <other@example.com>",
+          subject: "Re: Unread thread",
+        }),
+      ),
+    );
+    expect(mocks.openComposeWindow.mock.calls.at(-1)?.[0].cc).not.toContain(
+      "hidden@example.com",
+    );
+  });
+
   it("shows the backend unsubscribe error returned by Tauri", async () => {
     mocks.api.search.mockResolvedValue({
       conversations: groupMessages([

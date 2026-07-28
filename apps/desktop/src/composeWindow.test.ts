@@ -61,6 +61,7 @@ describe("composeWindow seed handoff", () => {
       `dakia.compose-seed.${token}`,
       JSON.stringify({
         subject: "Re: Weekly notes",
+        cc: "team@example.com",
         contextMessageIds: ["message-1", "message-2"],
       }),
     );
@@ -70,6 +71,7 @@ describe("composeWindow seed handoff", () => {
 
     expect(readComposeSeed()).toEqual({
       subject: "Re: Weekly notes",
+      cc: "team@example.com",
       contextMessageIds: ["message-1", "message-2"],
     });
     expect(localStorage.getItem(`dakia.compose-seed.${token}`)).toBeNull();
