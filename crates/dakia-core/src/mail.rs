@@ -408,13 +408,8 @@ impl MailService {
                 quote_imap(&remote_mailbox(account, mailbox))
             ))
             .await?;
-        let fields = if account.provider_id == "gmail" {
-            "FLAGS INTERNALDATE X-GM-LABELS RFC822"
-        } else {
-            "FLAGS INTERNALDATE RFC822"
-        };
         let response = client
-            .command_with_literal(&format!("UID FETCH {uid} ({fields})"))
+            .command_with_literal(&hydration_fetch_command(account, uid))
             .await?;
         let raw = response
             .literal
@@ -479,14 +474,7 @@ impl MailService {
                 quote_imap(&remote_mailbox(account, mailbox))
             ))
             .await?;
-        let operation = if read {
-            "+FLAGS.SILENT"
-        } else {
-            "-FLAGS.SILENT"
-        };
-        client
-            .command(&format!("UID STORE {uid} {operation} (\\Seen)"))
-            .await?;
+        client.command(&set_read_command(uid, read)).await?;
         let _ = client.command("LOGOUT").await;
         Ok(())
     }
@@ -1711,6 +1699,30 @@ fn smtp_saves_sent_copy(account: &Account) -> bool {
         .eq_ignore_ascii_case("smtp.gmail.com")
 }
 
+/// Fetch a complete message without changing its `\Seen` flag. IMAP's
+/// `RFC822` data item is equivalent to `BODY[]`, which may set that flag;
+/// `BODY.PEEK[]` returns the same complete message read-neutrally.
+fn hydration_fetch_fields(account: &Account) -> &'static str {
+    if account.provider_id == "gmail" {
+        "FLAGS INTERNALDATE X-GM-LABELS BODY.PEEK[]"
+    } else {
+        "FLAGS INTERNALDATE BODY.PEEK[]"
+    }
+}
+
+fn hydration_fetch_command(account: &Account, uid: u32) -> String {
+    format!("UID FETCH {uid} ({})", hydration_fetch_fields(account))
+}
+
+fn set_read_command(uid: u32, read: bool) -> String {
+    let operation = if read {
+        "+FLAGS.SILENT"
+    } else {
+        "-FLAGS.SILENT"
+    };
+    format!("UID STORE {uid} {operation} (\\Seen)")
+}
+
 fn gmail_all_mail_is_archive(lines: &[String]) -> bool {
     let metadata = lines.join(" ");
     !["\\Inbox", "\\Sent", "\\Draft", "\\Spam", "\\Trash"]
@@ -2850,6 +2862,67 @@ mod tests {
 
         assert_eq!(sent_mailbox(&custom, &listing), "Sent Messages");
         assert_eq!(sent_mailbox(&custom, &[]), "Sent");
+    }
+
+    #[test]
+    fn automatic_hydration_fetches_are_read_neutral_for_gmail_and_generic_imap() {
+        let gmail = AccountDraft {
+            email: "person@gmail.com".into(),
+            display_name: "Person".into(),
+            provider_id: Some("gmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("gmail").unwrap());
+        let generic = AccountDraft {
+            email: "person@example.com".into(),
+            display_name: "Person".into(),
+            provider_id: Some("custom".into()),
+            username: None,
+            imap_host: Some("imap.example.com".into()),
+            imap_port: Some(993),
+            imap_security: Some(Security::Tls),
+            smtp_host: Some("smtp.example.com".into()),
+            smtp_port: Some(465),
+            smtp_security: Some(Security::Tls),
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("custom").unwrap());
+
+        let gmail_command = hydration_fetch_command(&gmail, 42);
+        let generic_command = hydration_fetch_command(&generic, 42);
+        assert_eq!(
+            gmail_command,
+            "UID FETCH 42 (FLAGS INTERNALDATE X-GM-LABELS BODY.PEEK[])"
+        );
+        assert_eq!(
+            generic_command,
+            "UID FETCH 42 (FLAGS INTERNALDATE BODY.PEEK[])"
+        );
+        for command in [gmail_command, generic_command] {
+            assert!(command.contains("BODY.PEEK[]"));
+            assert!(!command.contains("RFC822"));
+        }
+    }
+
+    #[test]
+    fn explicit_read_changes_still_update_the_seen_flag() {
+        assert_eq!(
+            set_read_command(42, true),
+            "UID STORE 42 +FLAGS.SILENT (\\Seen)"
+        );
+        assert_eq!(
+            set_read_command(42, false),
+            "UID STORE 42 -FLAGS.SILENT (\\Seen)"
+        );
     }
 
     #[test]
