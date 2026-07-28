@@ -2,19 +2,27 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { buildManifest, validateManifest } from "./updater-manifest.mjs";
 
+const keyId = Buffer.from("0123456789abcdef", "hex");
+const signatureRecord = Buffer.concat([
+  Buffer.from("ED"),
+  keyId,
+  Buffer.alloc(64, 1),
+]).toString("base64");
+const publicKeyRecord = Buffer.concat([
+  Buffer.from("Ed"),
+  keyId,
+  Buffer.alloc(32, 2),
+]).toString("base64");
 const encodedSignature = Buffer.from(
   [
     "untrusted comment: signature from minisign secret key",
-    "RWQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    signatureRecord,
     "trusted comment: timestamp:1753444800\tfile:Dakia.app.tar.gz",
-    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+    Buffer.alloc(64, 3).toString("base64"),
   ].join("\n"),
 ).toString("base64");
 const matchingPublicKey = Buffer.from(
-  [
-    "untrusted comment: minisign public key",
-    "RWQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-  ].join("\n"),
+  ["untrusted comment: minisign public key", publicKeyRecord].join("\n"),
 ).toString("base64");
 
 const input = {
@@ -74,10 +82,12 @@ test("rejects an unsupported Intel platform entry", () => {
 });
 
 test("rejects a signature from a different updater key", () => {
+  const differentRecord = Buffer.from(publicKeyRecord, "base64");
+  differentRecord[2] ^= 1;
   const differentPublicKey = Buffer.from(
     [
       "untrusted comment: minisign public key",
-      "RWQBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+      differentRecord.toString("base64"),
     ].join("\n"),
   ).toString("base64");
   assert.throws(
@@ -89,5 +99,33 @@ test("rejects a signature from a different updater key", () => {
 test("accepts a signature with the embedded updater key identifier", () => {
   assert.doesNotThrow(() =>
     buildManifest({ ...input, updaterPublicKey: matchingPublicKey }),
+  );
+});
+
+test("rejects truncated or mistyped minisign records", () => {
+  const truncatedSignature = Buffer.from(encodedSignature, "base64")
+    .toString("utf8")
+    .replace(signatureRecord, signatureRecord.slice(0, -4));
+  assert.throws(
+    () =>
+      buildManifest({
+        ...input,
+        aarch64Signature: Buffer.from(truncatedSignature).toString("base64"),
+        updaterPublicKey: matchingPublicKey,
+      }),
+    /Invalid updater signature/,
+  );
+
+  const mistypedPublicRecord = Buffer.from(publicKeyRecord, "base64");
+  mistypedPublicRecord[1] = "D".charCodeAt(0);
+  const mistypedPublicKey = Buffer.from(
+    [
+      "untrusted comment: minisign public key",
+      mistypedPublicRecord.toString("base64"),
+    ].join("\n"),
+  ).toString("base64");
+  assert.throws(
+    () => buildManifest({ ...input, updaterPublicKey: mistypedPublicKey }),
+    /Invalid updater public key/,
   );
 });

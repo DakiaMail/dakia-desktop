@@ -48,21 +48,6 @@ apple_dmg_key="$release_prefix/Dakia-Apple-Silicon.dmg"
 apple_update_key="$release_prefix/Dakia-aarch64.app.tar.gz"
 apple_signature_key="$apple_update_key.sig"
 
-immutable_keys=(
-  "$apple_dmg_key"
-  "$apple_update_key"
-  "$apple_signature_key"
-)
-for key in "${immutable_keys[@]}"; do
-  status="$(curl --silent --show-error --head --output /dev/null \
-    --write-out '%{http_code}' \
-    "$download_origin/$key?immutable-preflight=$tag")"
-  if [[ "$status" != "404" ]]; then
-    echo "Refusing to overwrite immutable object $key (HTTP $status)." >&2
-    exit 1
-  fi
-done
-
 upload() {
   local key="$1"
   local file="$2"
@@ -79,6 +64,57 @@ upload() {
       --content-disposition "attachment; filename=\"$filename\"" \
       --cache-control "$cache_control" \
       --no-progress
+}
+
+immutable_object_matches() {
+  local key="$1"
+  local source="$2"
+  local existing="$work_dir/$(basename "$key").authenticated"
+  AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" \
+    AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" \
+    AWS_DEFAULT_REGION="auto" \
+    aws s3api get-object \
+      --bucket "$bucket" \
+      --key "$key" \
+      --endpoint-url "$r2_endpoint" \
+      --no-cli-pager \
+      "$existing" >/dev/null 2>&1 &&
+    cmp -s "$source" "$existing"
+}
+
+upload_immutable() {
+  local key="$1"
+  local file="$2"
+  local content_type="$3"
+  local filename="$4"
+  local cache_control="$5"
+
+  if immutable_object_matches "$key" "$file"; then
+    return
+  fi
+
+  if AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" \
+    AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" \
+    AWS_DEFAULT_REGION="auto" \
+    aws s3api put-object \
+      --bucket "$bucket" \
+      --key "$key" \
+      --body "$file" \
+      --content-type "$content_type" \
+      --content-disposition "attachment; filename=\"$filename\"" \
+      --cache-control "$cache_control" \
+      --if-none-match "*" \
+      --endpoint-url "$r2_endpoint" \
+      --no-cli-pager >/dev/null; then
+    return
+  fi
+
+  # A concurrent publisher may have created the key after our first read.
+  if immutable_object_matches "$key" "$file"; then
+    return
+  fi
+  echo "Refusing to replace immutable object with different or unreadable bytes: $key" >&2
+  exit 1
 }
 
 verify_public_copy() {
@@ -99,12 +135,14 @@ verify_public_copy() {
 }
 
 immutable_cache="public, max-age=31536000, immutable"
-upload "$apple_dmg_key" "$apple_dmg" "application/x-apple-diskimage" \
-  "Dakia-$version-Apple-Silicon.dmg" "$immutable_cache"
-upload "$apple_update_key" "$apple_update" "application/gzip" \
-  "Dakia-$version-aarch64.app.tar.gz" "$immutable_cache"
-upload "$apple_signature_key" "$apple_signature" "text/plain; charset=utf-8" \
-  "Dakia-$version-aarch64.app.tar.gz.sig" "$immutable_cache"
+upload_immutable "$apple_dmg_key" "$apple_dmg" \
+  "application/x-apple-diskimage" "Dakia-$version-Apple-Silicon.dmg" \
+  "$immutable_cache"
+upload_immutable "$apple_update_key" "$apple_update" \
+  "application/gzip" "Dakia-$version-aarch64.app.tar.gz" "$immutable_cache"
+upload_immutable "$apple_signature_key" "$apple_signature" \
+  "text/plain; charset=utf-8" "Dakia-$version-aarch64.app.tar.gz.sig" \
+  "$immutable_cache"
 
 # Anonymous downloads must return the exact bytes that were signed before the
 # stable updater feed is allowed to move.

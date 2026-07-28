@@ -22,25 +22,45 @@ function isTauriMinisignSignature(value) {
     return false;
   }
   const lines = decoded.trimEnd().split("\n");
+  const signatureRecord = Buffer.from(lines[1] ?? "", "base64");
+  const trustedSignature = Buffer.from(lines[3] ?? "", "base64");
   return (
     lines.length === 4 &&
     lines[0].startsWith("untrusted comment:") &&
     /^[A-Za-z0-9+/]+={0,2}$/.test(lines[1]) &&
+    signatureRecord.length === 74 &&
+    signatureRecord.subarray(0, 2).equals(Buffer.from("ED")) &&
     lines[2].startsWith("trusted comment:") &&
-    /^[A-Za-z0-9+/]+={0,2}$/.test(lines[3])
+    /^[A-Za-z0-9+/]+={0,2}$/.test(lines[3]) &&
+    trustedSignature.length === 64
   );
 }
 
-function minisignKeyId(value, label) {
-  if (typeof value !== "string") {
+function minisignKeyId(value, label, marker, recordLength, lineCount) {
+  if (
+    typeof value !== "string" ||
+    !/^[A-Za-z0-9+/]+={0,2}$/.test(value) ||
+    value.length % 4 !== 0
+  ) {
     throw new Error(`${label} must be a base64 minisign value.`);
   }
-  const lines = Buffer.from(value, "base64").toString("utf8").trimEnd().split("\n");
+  const lines = Buffer.from(value, "base64")
+    .toString("utf8")
+    .trimEnd()
+    .split("\n");
   const key = Buffer.from(lines[1] ?? "", "base64");
-  if (key.length < 10) {
+  if (
+    lines.length !== lineCount ||
+    !/^[A-Za-z0-9+/]+={0,2}$/.test(lines[1] ?? "") ||
+    key.length !== recordLength ||
+    !key.subarray(0, 2).equals(Buffer.from(marker))
+  ) {
     throw new Error(`Invalid ${label}.`);
   }
-  return key.subarray(0, 10).toString("hex");
+  // Minisign records begin with a two-byte algorithm/type marker. Public keys
+  // use "Ed", while signatures use "ED"; the following eight bytes are the
+  // shared key identifier.
+  return key.subarray(2, 10).toString("hex");
 }
 
 export function validateManifest(manifest, updaterPublicKey) {
@@ -97,10 +117,12 @@ export function validateManifest(manifest, updaterPublicKey) {
   }
   if (
     updaterPublicKey !== undefined &&
-    minisignKeyId(entry.signature, "updater signature") !==
-      minisignKeyId(updaterPublicKey, "updater public key")
+    minisignKeyId(entry.signature, "updater signature", "ED", 74, 4) !==
+      minisignKeyId(updaterPublicKey, "updater public key", "Ed", 42, 2)
   ) {
-    throw new Error("Updater signature does not match the embedded public key.");
+    throw new Error(
+      "Updater signature does not match the embedded public key.",
+    );
   }
 
   return manifest;
@@ -114,17 +136,20 @@ export function buildManifest({
   aarch64Signature,
   updaterPublicKey,
 }) {
-  return validateManifest({
-    version,
-    pub_date: pubDate,
-    notes,
-    platforms: {
-      "darwin-aarch64": {
-        url: aarch64Url,
-        signature: aarch64Signature.trim(),
+  return validateManifest(
+    {
+      version,
+      pub_date: pubDate,
+      notes,
+      platforms: {
+        "darwin-aarch64": {
+          url: aarch64Url,
+          signature: aarch64Signature.trim(),
+        },
       },
     },
-  }, updaterPublicKey);
+    updaterPublicKey,
+  );
 }
 
 function parseArgs(args) {

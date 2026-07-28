@@ -69,7 +69,9 @@ function createStaticAppFixture() {
 }
 
 test("local installer builds only an app without updater artifacts", () => {
-  const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  const packageJson = JSON.parse(
+    readFileSync(join(root, "package.json"), "utf8"),
+  );
   const installConfig = JSON.parse(
     readFileSync(
       join(root, "apps", "desktop", "src-tauri", "tauri.install.conf.json"),
@@ -94,6 +96,18 @@ test("publisher rejects incomplete release assets before requiring publication c
   });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /AWS CLI is required|R2_ACCESS_KEY_ID/);
+});
+
+test("publisher resumes only when immutable public bytes match", () => {
+  const script = readFileSync(publisher, "utf8");
+  assert.match(script, /aws s3api get-object/);
+  assert.match(script, /cmp -s "\$source" "\$existing"/);
+  assert.match(script, /aws s3api put-object/);
+  assert.match(script, /--if-none-match "\*"/);
+  assert.match(
+    script,
+    /Refusing to replace immutable object with different or unreadable bytes/,
+  );
 });
 
 test("static packaged-app verification covers legal resources without native startup", () => {
