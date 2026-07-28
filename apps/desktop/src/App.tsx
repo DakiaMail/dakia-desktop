@@ -25,6 +25,7 @@ import {
   type MailAction,
   type PendingMailActions,
 } from "./mailActions";
+import { replyRecipients } from "./recipients";
 import { confirmNativeAction, showNativeMessage } from "./nativeFeedback";
 import { groupMessages } from "./threads";
 import { forwardBody, forwardSubject } from "./forward";
@@ -1261,7 +1262,10 @@ export default function App() {
       setAiLoading(false);
     }
   };
-  const openReply = (thread: MailThread | undefined = activeThread) => {
+  const openReply = (
+    thread: MailThread | undefined = activeThread,
+    replyAll = false,
+  ) => {
     if (!thread) return;
     const account = accounts.find(
       (item) => item.id === thread.latest.account_id,
@@ -1274,10 +1278,13 @@ export default function App() {
             !account ||
             message.from_address.toLowerCase() !== account.email.toLowerCase(),
         ) ?? thread.latest;
+    const recipients = replyRecipients(replyMessage, account?.email, replyAll);
+    if (!recipients) return;
     const prefix = t("reader.replyPrefix");
     openComposeWindow({
       accountId: replyMessage.account_id,
-      to: replyMessage.from_address,
+      to: recipients.to,
+      ...(recipients.cc ? { cc: recipients.cc } : {}),
       subject: replyMessage.subject
         .toLowerCase()
         .startsWith(prefix.toLowerCase())
@@ -1970,6 +1977,7 @@ export default function App() {
         }
         onTrash={() => void applyAction("trash")}
         onReply={openReply}
+        onReplyAll={() => openReply(activeThread, true)}
         onForward={() => void openForward()}
         onToggleRead={(read) =>
           activeThread ? void setThreadReadState(activeThread, read) : undefined

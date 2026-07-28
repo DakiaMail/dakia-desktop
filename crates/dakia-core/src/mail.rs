@@ -45,6 +45,9 @@ const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 const MAX_ATTACHMENT_COUNT: usize = 50;
 const MAX_OUTBOUND_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 const MAX_OUTBOUND_ATTACHMENT_TOTAL_BYTES: usize = 50 * 1024 * 1024;
+/// Existing databases are enriched gradually during ordinary catalogue syncs.
+/// The durable scanned bit makes a provider's truthful empty headers terminal.
+const RECIPIENT_HEADER_BACKFILL_BATCH: u32 = 50;
 const GMAIL_CATEGORY_SIGNAL_PREFIX: &str = "Gmail category: ";
 // IDLE is the fast path, but providers and network intermediaries can delay or
 // lose EXISTS notifications while leaving the connection open. Reconcile the
@@ -362,10 +365,23 @@ impl MailService {
         self.store
             .reconcile_mailbox_uids(account.id, "INBOX", &remote_set)
             .await?;
-        let uids = sync_uids(remote_uids, state.highest_uid, max_messages);
+        let mut uids = sync_uids(remote_uids, state.highest_uid, max_messages);
+        let mut scheduled = uids
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        for uid in self
+            .store
+            .unscanned_recipient_header_uids(account.id, "INBOX", RECIPIENT_HEADER_BACKFILL_BATCH)
+            .await?
+        {
+            if remote_set.contains(&uid) && scheduled.insert(uid) {
+                uids.push(uid);
+            }
+        }
         let mut messages = Vec::with_capacity(uids.len());
         for uid in uids {
-            let fields = "FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES CONTENT-TYPE LIST-ID PRECEDENCE AUTO-SUBMITTED)]";
+            let fields = "FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES CONTENT-TYPE LIST-ID PRECEDENCE AUTO-SUBMITTED)]";
             let response = client
                 .command_with_literal(&format!("UID FETCH {uid} ({fields})"))
                 .await?;
@@ -712,6 +728,19 @@ impl MailService {
                     missing.push(uid);
                 }
             }
+            for uid in self
+                .store
+                .unscanned_recipient_header_uids(
+                    account.id,
+                    &plan.storage,
+                    RECIPIENT_HEADER_BACKFILL_BATCH,
+                )
+                .await?
+            {
+                if remote_set.contains(&uid) && scheduled.insert(uid) {
+                    missing.push(uid);
+                }
+            }
             // Newest-first means the useful end of every mailbox appears
             // immediately. Every committed batch is resumable because the
             // remaining work is derived from the catalogue on reconnect.
@@ -760,9 +789,9 @@ impl MailService {
                 let mut messages = Vec::with_capacity(batch.len());
                 for uid in batch {
                     let fields = if account.provider_id == "gmail" {
-                        "FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE X-GM-LABELS BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED REPLY-TO)]"
+                        "FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE X-GM-LABELS BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)]"
                     } else {
-                        "FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED REPLY-TO)]"
+                        "FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)]"
                     };
                     let response = client
                         .command_with_literal(&format!("UID FETCH {uid} ({fields})"))
@@ -967,9 +996,9 @@ impl MailService {
                     // metadata for an online-only hit immediately without
                     // retaining its body.
                     let fields = if account.provider_id == "gmail" {
-                        "FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE X-GM-LABELS BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED REPLY-TO)]"
+                        "FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE X-GM-LABELS BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)]"
                     } else {
-                        "FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED REPLY-TO)]"
+                        "FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)]"
                     };
                     let response = client
                         .command_with_literal(&format!("UID FETCH {uid} ({fields})"))
@@ -2134,6 +2163,9 @@ async fn parse_message(
         from_name,
         from_address,
         to_addresses: header("To"),
+        cc_addresses: header("Cc"),
+        bcc_addresses: header("Bcc"),
+        reply_to_addresses: header("Reply-To"),
         received_at,
         snippet: clean_snippet(&body_text),
         body_text,
@@ -2203,6 +2235,9 @@ fn parse_catalog_message(
         from_name,
         from_address,
         to_addresses: header("To"),
+        cc_addresses: header("Cc"),
+        bcc_addresses: header("Bcc"),
+        reply_to_addresses: header("Reply-To"),
         received_at,
         snippet,
         body_text: String::new(),
@@ -2335,6 +2370,9 @@ fn parse_header_message(
         from_name,
         from_address,
         to_addresses: header("To"),
+        cc_addresses: header("Cc"),
+        bcc_addresses: header("Bcc"),
+        reply_to_addresses: header("Reply-To"),
         received_at: message_received_at(&parsed, response_lines)?,
         snippet: String::new(),
         body_text: String::new(),
@@ -2790,10 +2828,81 @@ mod tests {
     use super::*;
     use crate::{provider, AccountDraft};
 
+    fn test_account() -> Account {
+        AccountDraft {
+            email: "reader@example.test".into(),
+            display_name: "Reader".into(),
+            provider_id: Some("fastmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("fastmail").unwrap())
+    }
+
     #[tokio::test]
     async fn configures_the_dkim_resolver_with_the_app_crypto_provider() {
         let service = MailService::new(Store::in_memory().await.unwrap());
         assert!(service.dkim_authenticator.is_some());
+    }
+
+    #[tokio::test]
+    async fn retains_decoded_recipient_headers_in_complete_catalogue_and_header_messages() {
+        let account = test_account();
+        let raw = concat!(
+            "Date: Tue, 21 Jul 2026 10:00:00 +0000\r\n",
+            "From: Sender <sender@example.test>\r\n",
+            "To: Primary <primary@example.test>,\r\n",
+            " Team: second@example.test, Third <third@example.test>;\r\n",
+            "Cc: =?UTF-8?B?TcOkcmE=?= <mara@example.test>,\r\n",
+            " Other <other@example.test>\r\n",
+            "Bcc: Hidden <hidden@example.test>\r\n",
+            "Reply-To: Replies <replies@example.test>\r\n",
+            "Subject: Recipients\r\n\r\n",
+            "Hello"
+        );
+
+        let complete = parse_message(&account, "INBOX", 1, &[], raw.as_bytes(), None)
+            .await
+            .unwrap();
+        let catalogue =
+            parse_catalog_message(&account, "INBOX", 2, &[], raw.as_bytes(), String::new())
+                .unwrap();
+        let headers = parse_header_message(&account, "INBOX", 3, &[], raw.as_bytes()).unwrap();
+
+        for message in [complete, catalogue, headers] {
+            assert_eq!(message.to_addresses, "Primary <primary@example.test>, Team: second@example.test, Third <third@example.test>;");
+            assert_eq!(
+                message.cc_addresses,
+                "Mära <mara@example.test>, Other <other@example.test>"
+            );
+            assert_eq!(message.bcc_addresses, "Hidden <hidden@example.test>");
+            assert_eq!(message.reply_to_addresses, "Replies <replies@example.test>");
+        }
+    }
+
+    #[test]
+    fn missing_recipient_headers_remain_empty_without_fallbacks() {
+        let account = test_account();
+        let message = parse_header_message(
+            &account,
+            "INBOX",
+            1,
+            &[],
+            b"From: Sender <sender@example.test>\r\nDate: Tue, 21 Jul 2026 10:00:00 +0000\r\n\r\n",
+        )
+        .unwrap();
+
+        assert!(message.to_addresses.is_empty());
+        assert!(message.cc_addresses.is_empty());
+        assert!(message.bcc_addresses.is_empty());
+        assert!(message.reply_to_addresses.is_empty());
     }
 
     #[test]

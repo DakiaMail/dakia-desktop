@@ -108,25 +108,25 @@ For example, an email-link test should prove that:
 1. The tested window is the current Tauri dev app at
    `127.0.0.1:1420/`.
 2. A real HTML email containing links is open.
-3. A normal link click leaves the email iframe at `about:srcdoc`.
+3. A normal link click leaves the Dakia webview at `127.0.0.1:1420/`.
 4. The operating system's registered default browser opens the expected URL.
 5. The browser's window or tab tree shows the new destination.
 
-Checking only that the iframe did not navigate is incomplete. Checking only
-that a browser tab opened is also incomplete.
+Checking only that the Dakia webview did not navigate is incomplete. Checking
+only that a browser tab opened is also incomplete.
 
 ## Other lessons from the email-link investigation
 
-- A sandboxed iframe without `allow-scripts` suppresses trusted event callbacks
-  installed by the parent in macOS WebKit. Dakia permits those callbacks while
-  continuing to remove email-authored scripts, inline `on*` handlers, nested
-  frames, forms, and `srcdoc`; the iframe CSP still uses `default-src 'none'`.
-- Preserve a harmless fragment `href` for sanitized anchors and store the real
-  URL separately. If interception fails, only the iframe fragment changes.
-- Prefer a direct handler captured for each static email anchor over delegated
-  cross-realm `composedPath()` logic.
-- Construct `ResizeObserver` from the iframe's own `defaultView` when observing
-  iframe elements in WebKit.
+- HTML email renders in a layout-contained nested Shadow DOM so it participates
+  in normal reader flow without a measured iframe height. Continue to remove
+  email-authored scripts, inline `on*` handlers, frames, forms, `srcdoc`, and
+  SVG mutation elements before mounting it.
+- Remove every sanitized anchor's navigable `href`, store the validated
+  destination in a Dakia data attribute, and validate it again when activating
+  the link. This keeps a missed or mutated handler from navigating the app
+  webview.
+- When changing the renderer boundary, test hostile sender CSS and dynamic SVG
+  URL mutation as well as static active-content attributes.
 - Browser-only Playwright verification cannot establish that Tauri's opener
   plugin reached the macOS default browser.
 

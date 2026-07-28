@@ -48,6 +48,7 @@ const props = {
   onSpam: vi.fn(),
   onTrash: vi.fn(),
   onReply: vi.fn(),
+  onReplyAll: vi.fn(),
   onForward: vi.fn(),
   onToggleRead: vi.fn(),
   onSummarize: vi.fn(),
@@ -201,9 +202,73 @@ describe("Reader unsubscribe action", () => {
         <Reader {...props} message={message} messages={[message]} />
       </MantineProvider>,
     );
-    fireEvent.click(screen.getByRole("button", { name: "Reply" }));
+    fireEvent.click(screen.getByRole("button", { name: "Quick reply" }));
     expect(props.onReply).toHaveBeenCalledOnce();
     expect(props.onReply.mock.calls[0]).toEqual([]);
+  });
+
+  it("expands complete recipient details without inventing missing rows", () => {
+    render(
+      <MantineProvider>
+        <Reader
+          {...props}
+          message={{
+            ...message,
+            from_name: "Mail Sender",
+            cc_addresses: '"Doe, Jane" <jane@example.com>',
+            reply_to_addresses: "replies@example.com",
+          }}
+        />
+      </MantineProvider>,
+    );
+
+    const disclosure = screen.getByRole("button", {
+      name: "Show full recipient details",
+    });
+    expect(disclosure).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(disclosure);
+    expect(
+      screen.getByRole("button", { name: "Hide full recipient details" }),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("Mail Sender <list@example.com>")).toBeVisible();
+    expect(screen.getByText('"Doe, Jane" <jane@example.com>')).toBeVisible();
+    expect(screen.getByText("replies@example.com")).toBeVisible();
+    expect(screen.queryByText("Bcc")).not.toBeInTheDocument();
+  });
+
+  it("offers Reply All at the bottom and in the message menu", async () => {
+    render(
+      <MantineProvider>
+        <Reader {...props} message={message} />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Reply all" }));
+    expect(props.onReplyAll).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Reply all" }));
+    expect(props.onReplyAll).toHaveBeenCalledTimes(2);
+  });
+
+  it("collapses strong quoted plain-text history", async () => {
+    vi.mocked(api.content).mockResolvedValueOnce({
+      body_text: "Fresh answer\n\nOn Monday, Pat wrote:\n> Old\n> Message",
+      attachments: [],
+    });
+    render(
+      <MantineProvider>
+        <Reader {...props} message={message} />
+      </MantineProvider>,
+    );
+
+    expect(
+      await screen.findByText("Fresh answer", { exact: false }),
+    ).toBeVisible();
+    const details = screen.getByText("Show history").closest("details");
+    expect(details).not.toHaveAttribute("open");
+    fireEvent.click(screen.getByText("Show history"));
+    expect(details).toHaveAttribute("open");
+    expect(screen.getByText(/On Monday, Pat wrote/)).toBeVisible();
   });
 
   it("runs delete from the reader toolbar", () => {
@@ -408,7 +473,7 @@ describe("Reader unsubscribe action", () => {
     );
   });
 
-  it("translates HTML as HTML and keeps rendering through the sanitized email iframe", async () => {
+  it("translates HTML as HTML and renders it through the sanitized shadow tree", async () => {
     vi.mocked(api.content).mockResolvedValue({
       body_text: "Tere",
       body_html: "<p>Tere <strong>maailm</strong></p>",
@@ -427,20 +492,24 @@ describe("Reader unsubscribe action", () => {
       screen.getByRole("button", { name: "Translate to English" }),
     );
 
-    const frame = await screen.findByTitle("Weekly notes");
+    const renderedMessage = await screen.findByRole("document", {
+      name: "Weekly notes",
+    });
+    const emailSurface = renderedMessage.shadowRoot
+      ?.firstElementChild as HTMLElement | null;
     expect(translationMocks.translate).toHaveBeenLastCalledWith(
       "et",
       "<p>Tere <strong>maailm</strong></p>",
       true,
     );
-    expect(frame).toHaveAttribute(
-      "srcdoc",
-      expect.stringContaining("<strong>world</strong>"),
+    await waitFor(() =>
+      expect(
+        emailSurface?.shadowRoot?.querySelector("strong")?.textContent,
+      ).toBe("world"),
     );
-    expect(frame).toHaveAttribute(
-      "srcdoc",
-      expect.stringContaining("Content-Security-Policy"),
-    );
+    expect(
+      emailSurface?.shadowRoot?.querySelector("script, iframe, form"),
+    ).toBeNull();
   });
 
   it("downloads a missing pack with progress before translating", async () => {

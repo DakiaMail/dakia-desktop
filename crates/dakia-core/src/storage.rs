@@ -63,6 +63,14 @@ pub struct MailSummary {
     pub from_name: Option<String>,
     pub from_address: String,
     pub to_addresses: String,
+    /// Decoded RFC 5322 Cc header, retained exactly as supplied by the provider.
+    /// Empty means the header was absent; recipients are never inferred.
+    pub cc_addresses: String,
+    /// Decoded RFC 5322 Bcc header. Providers normally omit this for received
+    /// mail, so an empty value is intentionally distinct from inferred data.
+    pub bcc_addresses: String,
+    /// Decoded RFC 5322 Reply-To header, retained without falling back to From.
+    pub reply_to_addresses: String,
     pub received_at: DateTime<Utc>,
     pub snippet: String,
     pub body_text: String,
@@ -323,7 +331,7 @@ impl Store {
         for statement in [
             "CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, data TEXT NOT NULL, created_at TEXT NOT NULL)",
             "CREATE TABLE IF NOT EXISTS credentials (name TEXT PRIMARY KEY, nonce BLOB NOT NULL, ciphertext BLOB NOT NULL, updated_at TEXT NOT NULL)",
-            "CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, account_id TEXT NOT NULL, mailbox TEXT NOT NULL, uid INTEGER NOT NULL, message_id TEXT, in_reply_to TEXT, reference_ids TEXT, thread_id TEXT NOT NULL, threading_scanned INTEGER NOT NULL DEFAULT 1, subject TEXT NOT NULL, from_name TEXT, from_address TEXT NOT NULL, to_addresses TEXT NOT NULL, received_at TEXT NOT NULL, snippet TEXT NOT NULL, body_text TEXT NOT NULL, unsubscribe_kind TEXT, unsubscribe_url TEXT, unsubscribe_scanned INTEGER NOT NULL DEFAULT 0, is_read INTEGER NOT NULL DEFAULT 0, is_flagged INTEGER NOT NULL DEFAULT 0, has_attachments INTEGER NOT NULL DEFAULT 0, category TEXT, classification_confidence REAL, classification_source TEXT, classification_signals TEXT NOT NULL DEFAULT '', UNIQUE(account_id, mailbox, uid))",
+            "CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, account_id TEXT NOT NULL, mailbox TEXT NOT NULL, uid INTEGER NOT NULL, message_id TEXT, in_reply_to TEXT, reference_ids TEXT, thread_id TEXT NOT NULL, threading_scanned INTEGER NOT NULL DEFAULT 1, recipient_headers_scanned INTEGER NOT NULL DEFAULT 1, subject TEXT NOT NULL, from_name TEXT, from_address TEXT NOT NULL, to_addresses TEXT NOT NULL, cc_addresses TEXT NOT NULL DEFAULT '', bcc_addresses TEXT NOT NULL DEFAULT '', reply_to_addresses TEXT NOT NULL DEFAULT '', received_at TEXT NOT NULL, snippet TEXT NOT NULL, body_text TEXT NOT NULL, unsubscribe_kind TEXT, unsubscribe_url TEXT, unsubscribe_scanned INTEGER NOT NULL DEFAULT 0, is_read INTEGER NOT NULL DEFAULT 0, is_flagged INTEGER NOT NULL DEFAULT 0, has_attachments INTEGER NOT NULL DEFAULT 0, category TEXT, classification_confidence REAL, classification_source TEXT, classification_signals TEXT NOT NULL DEFAULT '', UNIQUE(account_id, mailbox, uid))",
             "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(subject, from_name, from_address, to_addresses, body_text, content='messages', content_rowid='rowid')",
             "CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN INSERT INTO messages_fts(rowid, subject, from_name, from_address, to_addresses, body_text) VALUES (new.rowid, new.subject, new.from_name, new.from_address, new.to_addresses, new.body_text); END",
             "CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN INSERT INTO messages_fts(messages_fts, rowid, subject, from_name, from_address, to_addresses, body_text) VALUES ('delete', old.rowid, old.subject, old.from_name, old.from_address, old.to_addresses, old.body_text); END",
@@ -386,6 +394,32 @@ impl Store {
             .execute(&self.pool)
             .await?;
         }
+        for name in ["cc_addresses", "bcc_addresses", "reply_to_addresses"] {
+            if !columns.iter().any(|column| column.1 == name) {
+                sqlx::query(&format!(
+                    "ALTER TABLE messages ADD COLUMN {name} TEXT NOT NULL DEFAULT ''"
+                ))
+                .execute(&self.pool)
+                .await?;
+            }
+        }
+        if !columns
+            .iter()
+            .any(|column| column.1 == "recipient_headers_scanned")
+        {
+            // Existing local rows predate durable recipient metadata. Mark
+            // them pending even though the new columns themselves default to
+            // empty: an empty Cc/Bcc/Reply-To is only authoritative after a
+            // provider header fetch has observed it.
+            sqlx::query(
+                "ALTER TABLE messages ADD COLUMN recipient_headers_scanned INTEGER NOT NULL DEFAULT 0",
+            )
+            .execute(&self.pool)
+            .await?;
+        }
+        sqlx::query("CREATE INDEX IF NOT EXISTS messages_recipient_header_backfill ON messages(account_id, mailbox, recipient_headers_scanned, received_at DESC)")
+            .execute(&self.pool)
+            .await?;
         let sync_columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
             sqlx::query_as("PRAGMA table_info(mailbox_sync_state)")
                 .fetch_all(&self.pool)
@@ -693,7 +727,7 @@ impl Store {
         for legacy in messages {
             let received_at = legacy_received_at(legacy.date.as_deref());
             let flags = legacy.flags.to_ascii_lowercase();
-            sqlx::query("INSERT INTO messages(id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, threading_scanned, subject, from_name, from_address, to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, unsubscribe_scanned, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?, ?, ?, ?, '', NULL, 'headers_only', NULL, NULL, 0, ?, ?, 0, NULL, NULL, NULL, '')")
+            sqlx::query("INSERT INTO messages(id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, threading_scanned, recipient_headers_scanned, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, unsubscribe_scanned, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, NULL, ?, ?, '', '', '', ?, ?, '', NULL, 'headers_only', NULL, NULL, 0, ?, ?, 0, NULL, NULL, NULL, '')")
                 .bind(&legacy.id)
                 .bind(&legacy.account_id)
                 .bind(&legacy.mailbox)
@@ -1316,7 +1350,7 @@ impl Store {
     }
 
     pub async fn message(&self, id: &str) -> Result<Option<MailSummary>> {
-        const SQL: &str = "SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE id = ?";
+        const SQL: &str = "SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE id = ?";
         let mut message = sqlx::query_as::<_, MailSummary>(SQL)
             .bind(id)
             .fetch_optional(&self.pool)
@@ -1533,7 +1567,7 @@ impl Store {
         account_id: AccountId,
         limit: u32,
     ) -> Result<Vec<MailSummary>> {
-        const SQL: &str = "SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE account_id = ? AND mailbox = 'INBOX' AND content_state != 'complete' ORDER BY received_at DESC LIMIT ?";
+        const SQL: &str = "SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE account_id = ? AND mailbox = 'INBOX' AND content_state != 'complete' ORDER BY received_at DESC LIMIT ?";
         Ok(sqlx::query_as::<_, MailSummary>(SQL)
             .bind(account_id.to_string())
             .bind(i64::from(limit))
@@ -1546,7 +1580,7 @@ impl Store {
         account_id: AccountId,
         limit: u32,
     ) -> Result<Vec<MailSummary>> {
-        const SQL: &str = "SELECT m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.received_at, m.snippet, m.body_text, m.body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, m.classification_signals FROM messages m LEFT JOIN starred_message_bodies b ON b.message_id = m.id WHERE m.account_id = ? AND m.is_flagged = 1 AND b.message_id IS NULL ORDER BY m.received_at DESC LIMIT ?";
+        const SQL: &str = "SELECT m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, m.body_text, m.body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, m.classification_signals FROM messages m LEFT JOIN starred_message_bodies b ON b.message_id = m.id WHERE m.account_id = ? AND m.is_flagged = 1 AND b.message_id IS NULL ORDER BY m.received_at DESC LIMIT ?";
         Ok(sqlx::query_as::<_, MailSummary>(SQL)
             .bind(account_id.to_string())
             .bind(i64::from(limit))
@@ -1592,6 +1626,51 @@ impl Store {
             .into_iter()
             .filter_map(|(uid,)| u32::try_from(uid).ok())
             .collect())
+    }
+
+    /// Returns a bounded, newest-first recipient-header upgrade batch. Rows
+    /// are marked complete only after their actual provider headers are
+    /// saved, including the truthful case where Cc, Bcc, and Reply-To are all
+    /// absent.
+    pub async fn unscanned_recipient_header_uids(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        limit: u32,
+    ) -> Result<Vec<u32>> {
+        let rows: Vec<(i64,)> = sqlx::query_as(
+            "SELECT uid FROM messages WHERE account_id = ? AND mailbox = ? AND recipient_headers_scanned = 0 ORDER BY received_at DESC, uid DESC LIMIT ?",
+        )
+        .bind(account_id.to_string())
+        .bind(mailbox)
+        .bind(limit.clamp(1, 100) as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(uid,)| u32::try_from(uid).ok())
+            .collect())
+    }
+
+    pub async fn save_recipient_headers(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        uid: u32,
+        cc_addresses: &str,
+        bcc_addresses: &str,
+        reply_to_addresses: &str,
+    ) -> Result<()> {
+        sqlx::query("UPDATE messages SET cc_addresses = ?, bcc_addresses = ?, reply_to_addresses = ?, recipient_headers_scanned = 1 WHERE account_id = ? AND mailbox = ? AND uid = ?")
+            .bind(cc_addresses)
+            .bind(bcc_addresses)
+            .bind(reply_to_addresses)
+            .bind(account_id.to_string())
+            .bind(mailbox)
+            .bind(uid)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn save_threading_headers(
@@ -1754,7 +1833,7 @@ impl Store {
     pub async fn search(&self, query: &SearchQuery) -> Result<Vec<MailSummary>> {
         self.search_with_projection(
             query,
-            "m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.received_at, m.snippet, m.body_text, m.body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, m.classification_signals",
+            "m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, m.body_text, m.body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, m.classification_signals",
         )
         .await
     }
@@ -1899,7 +1978,7 @@ impl Store {
         // one hydration query per conversation.
         for chunk in keys.chunks(300) {
             let predicates = vec!["(account_id = ? AND thread_id = ?)"; chunk.len()].join(" OR ");
-            let sql = format!("SELECT m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.received_at, m.snippet, '' AS body_text, NULL AS body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, '' AS classification_signals FROM messages m WHERE ({predicates}) ORDER BY m.received_at, m.id");
+            let sql = format!("SELECT m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, '' AS body_text, NULL AS body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, '' AS classification_signals FROM messages m WHERE ({predicates}) ORDER BY m.received_at, m.id");
             let mut statement = sqlx::query_as::<_, MailSummary>(&sql);
             for (account_id, thread_id) in chunk {
                 statement = statement.bind(account_id).bind(thread_id);
@@ -1977,7 +2056,7 @@ impl Store {
         // internal query intentionally accepts 501 while the public page size
         // remains capped at 500.
         let limit = query.limit.unwrap_or(100).clamp(1, 501) as i64;
-        let projection = "m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.received_at, m.snippet, '' AS body_text, NULL AS body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, '' AS classification_signals";
+        let projection = "m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, '' AS body_text, NULL AS body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, '' AS classification_signals";
         let mut sql = format!("WITH matching AS (SELECT {projection}, ROW_NUMBER() OVER (PARTITION BY m.account_id, m.thread_id ORDER BY m.received_at DESC, m.id DESC) AS thread_rank FROM messages m");
         if !query.text.trim().is_empty() {
             sql.push_str(" JOIN messages_fts f ON f.rowid=m.rowid");
@@ -2097,7 +2176,7 @@ impl Store {
             return Ok(Vec::new());
         }
         let placeholders = vec!["?"; ids.len()].join(",");
-        let sql = format!("SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE id IN ({placeholders}) ORDER BY received_at");
+        let sql = format!("SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE id IN ({placeholders}) ORDER BY received_at");
         let mut query = sqlx::query_as::<_, MailSummary>(&sql);
         for id in ids {
             query = query.bind(id);
@@ -2111,7 +2190,7 @@ impl Store {
         mailbox: &str,
         uid: u32,
     ) -> Result<Option<MailSummary>> {
-        Ok(sqlx::query_as::<_, MailSummary>("SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?")
+        Ok(sqlx::query_as::<_, MailSummary>("SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?")
             .bind(account_id.to_string())
             .bind(mailbox)
             .bind(uid)
@@ -2136,7 +2215,7 @@ impl Store {
 
     /// Newly synced messages that have not yet been classified.
     pub async fn messages_for_model_classification(&self) -> Result<Vec<MailSummary>> {
-        const SQL: &str = "SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE classification_source IS NULL AND content_state = 'complete' ORDER BY received_at DESC";
+        const SQL: &str = "SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE classification_source IS NULL AND content_state = 'complete' ORDER BY received_at DESC";
         Ok(sqlx::query_as::<_, MailSummary>(SQL)
             .fetch_all(&self.pool)
             .await?)
@@ -2149,7 +2228,7 @@ impl Store {
         &self,
         limit: usize,
     ) -> Result<Vec<MailSummary>> {
-        const SQL: &str = "SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE classification_source IS NULL AND content_state = 'complete' ORDER BY received_at DESC, id DESC LIMIT ?";
+        const SQL: &str = "SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE classification_source IS NULL AND content_state = 'complete' ORDER BY received_at DESC, id DESC LIMIT ?";
         Ok(sqlx::query_as::<_, MailSummary>(SQL)
             .bind(limit.clamp(1, 1_000) as i64)
             .fetch_all(&self.pool)
@@ -2159,7 +2238,7 @@ impl Store {
     /// Messages eligible for an explicitly requested model reclassification.
     /// User-selected categories are deliberately excluded.
     pub async fn messages_for_model_reclassification(&self) -> Result<Vec<MailSummary>> {
-        const SQL: &str = "SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE content_state = 'complete' AND (classification_source IS NULL OR classification_source = 'model') ORDER BY received_at DESC";
+        const SQL: &str = "SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE content_state = 'complete' AND (classification_source IS NULL OR classification_source = 'model') ORDER BY received_at DESC";
         Ok(sqlx::query_as::<_, MailSummary>(SQL)
             .fetch_all(&self.pool)
             .await?)
@@ -2468,11 +2547,13 @@ async fn persist_message(
     if suppressed {
         return Ok(());
     }
-    sqlx::query("INSERT INTO messages(id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, threading_scanned, subject, from_name, from_address, to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, unsubscribe_scanned, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(account_id, mailbox, uid) DO UPDATE SET message_id=excluded.message_id, in_reply_to=excluded.in_reply_to, reference_ids=excluded.reference_ids, threading_scanned=1, subject=excluded.subject, from_name=excluded.from_name, from_address=excluded.from_address, to_addresses=excluded.to_addresses, received_at=excluded.received_at, snippet=CASE WHEN excluded.content_state = 'complete' THEN excluded.snippet ELSE messages.snippet END, body_text=CASE WHEN excluded.content_state = 'complete' THEN excluded.body_text ELSE messages.body_text END, body_html=CASE WHEN excluded.content_state = 'complete' THEN excluded.body_html ELSE messages.body_html END, content_state=CASE WHEN messages.content_state = 'complete' THEN messages.content_state ELSE excluded.content_state END, unsubscribe_kind=CASE WHEN excluded.content_state = 'complete' THEN excluded.unsubscribe_kind ELSE messages.unsubscribe_kind END, unsubscribe_url=CASE WHEN excluded.content_state = 'complete' THEN excluded.unsubscribe_url ELSE messages.unsubscribe_url END, unsubscribe_scanned=CASE WHEN excluded.content_state = 'complete' THEN 1 ELSE messages.unsubscribe_scanned END, is_read=excluded.is_read, is_flagged=excluded.is_flagged, has_attachments=CASE WHEN excluded.content_state = 'complete' THEN excluded.has_attachments ELSE messages.has_attachments END, classification_signals=excluded.classification_signals")
+    sqlx::query("INSERT INTO messages(id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, threading_scanned, recipient_headers_scanned, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, unsubscribe_scanned, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(account_id, mailbox, uid) DO UPDATE SET message_id=excluded.message_id, in_reply_to=excluded.in_reply_to, reference_ids=excluded.reference_ids, threading_scanned=1, recipient_headers_scanned=1, subject=excluded.subject, from_name=excluded.from_name, from_address=excluded.from_address, to_addresses=excluded.to_addresses, cc_addresses=excluded.cc_addresses, bcc_addresses=excluded.bcc_addresses, reply_to_addresses=excluded.reply_to_addresses, received_at=excluded.received_at, snippet=CASE WHEN excluded.content_state = 'complete' THEN excluded.snippet ELSE messages.snippet END, body_text=CASE WHEN excluded.content_state = 'complete' THEN excluded.body_text ELSE messages.body_text END, body_html=CASE WHEN excluded.content_state = 'complete' THEN excluded.body_html ELSE messages.body_html END, content_state=CASE WHEN messages.content_state = 'complete' THEN messages.content_state ELSE excluded.content_state END, unsubscribe_kind=CASE WHEN excluded.content_state = 'complete' THEN excluded.unsubscribe_kind ELSE messages.unsubscribe_kind END, unsubscribe_url=CASE WHEN excluded.content_state = 'complete' THEN excluded.unsubscribe_url ELSE messages.unsubscribe_url END, unsubscribe_scanned=CASE WHEN excluded.content_state = 'complete' THEN 1 ELSE messages.unsubscribe_scanned END, is_read=excluded.is_read, is_flagged=excluded.is_flagged, has_attachments=CASE WHEN excluded.content_state = 'complete' THEN excluded.has_attachments ELSE messages.has_attachments END, classification_signals=excluded.classification_signals")
         .bind(&message.id).bind(&message.account_id).bind(&message.mailbox).bind(message.uid)
         .bind(&message.message_id).bind(&message.in_reply_to).bind(&message.reference_ids).bind(&message.thread_id)
         .bind(&message.subject).bind(&message.from_name)
-        .bind(&message.from_address).bind(&message.to_addresses).bind(message.received_at)
+        .bind(&message.from_address).bind(&message.to_addresses)
+        .bind(&message.cc_addresses).bind(&message.bcc_addresses).bind(&message.reply_to_addresses)
+        .bind(message.received_at)
         // Message content is deliberately transient. The legacy columns stay
         // present for a backwards-compatible migration, but catalogue writes
         // can never repopulate them.
@@ -2706,6 +2787,9 @@ mod tests {
             from_name: Some("Mara Vaher".into()),
             from_address: "mara@example.com".into(),
             to_addresses: "you@example.com".into(),
+            cc_addresses: String::new(),
+            bcc_addresses: String::new(),
+            reply_to_addresses: String::new(),
             received_at: Utc::now(),
             snippet: body.into(),
             body_text: body.into(),
@@ -2731,6 +2815,41 @@ mod tests {
             unsubscribe_kind: None,
             attachments: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn recipient_headers_round_trip_and_refresh_without_inference() {
+        let store = Store::in_memory().await.unwrap();
+        let mut message = message("Recipients", "preview");
+        message.to_addresses = "Primary <primary@example.test>".into();
+        message.cc_addresses = "Cc <cc@example.test>".into();
+        message.bcc_addresses = "Hidden <hidden@example.test>".into();
+        message.reply_to_addresses = "Replies <replies@example.test>".into();
+        let id = message.id.clone();
+        let account_id = uuid::Uuid::parse_str(&message.account_id).unwrap();
+
+        store
+            .upsert_messages(std::slice::from_ref(&message))
+            .await
+            .unwrap();
+        let stored = store.message(&id).await.unwrap().unwrap();
+        assert_eq!(stored.cc_addresses, "Cc <cc@example.test>");
+        assert_eq!(stored.bcc_addresses, "Hidden <hidden@example.test>");
+        assert_eq!(stored.reply_to_addresses, "Replies <replies@example.test>");
+        assert!(store
+            .unscanned_recipient_header_uids(account_id, "INBOX", 1)
+            .await
+            .unwrap()
+            .is_empty());
+
+        message.cc_addresses.clear();
+        message.bcc_addresses.clear();
+        message.reply_to_addresses.clear();
+        store.upsert_messages(&[message]).await.unwrap();
+        let refreshed = store.message(&id).await.unwrap().unwrap();
+        assert!(refreshed.cc_addresses.is_empty());
+        assert!(refreshed.bcc_addresses.is_empty());
+        assert!(refreshed.reply_to_addresses.is_empty());
     }
 
     #[tokio::test]
@@ -4342,6 +4461,62 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].thread_id, results[1].thread_id);
         assert!(results.iter().all(|message| message.body_text.is_empty()));
+        assert!(results.iter().all(|message| {
+            message.cc_addresses.is_empty()
+                && message.bcc_addresses.is_empty()
+                && message.reply_to_addresses.is_empty()
+        }));
+        let recipient_columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('messages') WHERE name IN ('cc_addresses', 'bcc_addresses', 'recipient_headers_scanned', 'reply_to_addresses') ORDER BY name")
+            .fetch_all(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            recipient_columns,
+            [
+                "bcc_addresses",
+                "cc_addresses",
+                "recipient_headers_scanned",
+                "reply_to_addresses"
+            ]
+        );
+        assert_eq!(
+            store
+                .unscanned_recipient_header_uids(account.id, "INBOX", 10)
+                .await
+                .unwrap(),
+            [2, 1]
+        );
+        // This is the durable end of a normal-sync header backfill: an
+        // upgraded row receives the actual values, while an observed absence
+        // is also terminal and will not be fetched again.
+        store
+            .save_recipient_headers(
+                account.id,
+                "INBOX",
+                2,
+                "Copy <copy@example.com>",
+                "Hidden <hidden@example.com>",
+                "Replies <replies@example.com>",
+            )
+            .await
+            .unwrap();
+        store
+            .save_recipient_headers(account.id, "INBOX", 1, "", "", "")
+            .await
+            .unwrap();
+        let upgraded = store
+            .message_by_locator(account.id, "INBOX", 2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(upgraded.cc_addresses, "Copy <copy@example.com>");
+        assert_eq!(upgraded.bcc_addresses, "Hidden <hidden@example.com>");
+        assert_eq!(upgraded.reply_to_addresses, "Replies <replies@example.com>");
+        assert!(store
+            .unscanned_recipient_header_uids(account.id, "INBOX", 10)
+            .await
+            .unwrap()
+            .is_empty());
         let pending: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE threading_scanned = 0")
                 .fetch_one(&store.pool)
