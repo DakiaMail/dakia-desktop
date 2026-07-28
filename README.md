@@ -2,6 +2,9 @@
 
 Dakia is a privacy-minded desktop mail application for macOS. It combines multiple IMAP/SMTP accounts, local full-text search, downloadable offline email translation, and a scriptable CLI.
 
+> [!NOTE]
+> Dakia is still under rapid development, and bugs are expected.
+
 ## Current architecture
 
 - `crates/dakia-core` — accounts, provider discovery, SQLite/FTS search, mail transport, translation, and optional AI integrations
