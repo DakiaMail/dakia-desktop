@@ -65,6 +65,7 @@ const mocks = vi.hoisted(() => {
     account,
     message,
     api: {
+      action: vi.fn(async () => undefined),
       aiAvailable: vi.fn(async () => false),
       accounts: vi.fn(async () => [account]),
       classifyPending: vi.fn(async () => 0),
@@ -200,6 +201,7 @@ describe("App read state", () => {
     mocks.accountUpdatedHandlers.length = 0;
     localStorage.clear();
     mocks.api.accounts.mockResolvedValue([mocks.account]);
+    mocks.api.action.mockResolvedValue(undefined);
     localStorage.setItem("dakia.mail-list-view", "list");
     mocks.api.classifyPending.mockResolvedValue(0);
     mocks.api.search.mockResolvedValue({
@@ -689,7 +691,7 @@ describe("App read state", () => {
     mocks.api.classifyPending.mockImplementationOnce(
       () => new Promise(() => undefined),
     );
-    mocks.api.search.mockImplementation((...args: unknown[]) => {
+    mocks.api.search.mockImplementation(async (...args: unknown[]) => {
       if (args[7] !== "people") {
         return Promise.resolve({ conversations: [], nextCursor: null });
       }
@@ -831,6 +833,75 @@ describe("App read state", () => {
         ),
       ).not.toBeInTheDocument(),
     );
+  });
+
+  it("does not reinsert a retained Smart thread after deleting it", async () => {
+    localStorage.setItem("dakia.mail-list-view", "smart");
+    mocks.api.classifyPending.mockImplementationOnce(
+      () => new Promise(() => undefined),
+    );
+    let peopleSearches = 0;
+    let resolveStalePeople:
+      | ((page: {
+          conversations: ReturnType<typeof groupMessages>;
+          nextCursor: null;
+        }) => void)
+      | undefined;
+    mocks.api.search.mockImplementation(async (...args: unknown[]) => {
+      if (args[7] !== "people") return { conversations: [], nextCursor: null };
+      peopleSearches += 1;
+      if (peopleSearches === 2) {
+        return new Promise((resolve) => {
+          resolveStalePeople = resolve;
+        });
+      }
+      return {
+        conversations:
+          peopleSearches === 1 ? groupMessages([mocks.message]) : [],
+        nextCursor: null,
+      };
+    });
+
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const list = document.querySelector<HTMLElement>(".mail-list-panel")!;
+    fireEvent.click(
+      (await within(list).findByText("Unread thread")).closest("button")!,
+    );
+    await waitFor(() =>
+      expect(mocks.api.setRead).toHaveBeenCalledWith("message-1", true),
+    );
+    await waitFor(() => expect(resolveStalePeople).toBeTypeOf("function"));
+    expect(within(list).getByText("Unread thread")).toBeVisible();
+
+    fireEvent.contextMenu(
+      within(list).getByText("Unread thread").closest("button")!,
+    );
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Delete", hidden: true }),
+    );
+
+    await waitFor(() =>
+      expect(within(list).queryByText("Unread thread")).not.toBeInTheDocument(),
+    );
+    expect(mocks.api.action).toHaveBeenCalledWith(
+      "account-1",
+      "INBOX",
+      1,
+      "trash",
+    );
+
+    await act(async () =>
+      resolveStalePeople!({
+        conversations: groupMessages([mocks.message]),
+        nextCursor: null,
+      }),
+    );
+    expect(within(list).queryByText("Unread thread")).not.toBeInTheDocument();
   });
 
   it("ignores an out-of-order Smart result after the view changes", async () => {

@@ -1108,8 +1108,13 @@ export default function App() {
       .filter((target) => target.messages.length > 0);
     if (!actionThreads.length || actionBusyRef.current) return;
     actionBusyRef.current = true;
+    // An open/read transition may already be refreshing Smart sections with
+    // the pre-action INBOX row. Make that result stale before moving the row.
+    loadRequestIdRef.current += 1;
+    smartLoadRequestIdRef.current += 1;
     const originalThreads = [...displayedThreads];
     const originalSmartSections = smartSections;
+    const originalRetainedSmartThreads = retainedSmartThreads;
     const actionTargets = actionThreads.flatMap((target) => target.messages);
     const targetIds = new Set(actionTargets.map((message) => message.id));
     const targetThreadIds = new Set(
@@ -1183,6 +1188,11 @@ export default function App() {
           ]),
         ) as Record<SmartSectionId, SmartSection>,
     );
+    setRetainedSmartThreads((current) => {
+      const next = new Map(current);
+      for (const id of targetThreadIds) next.delete(id);
+      return next;
+    });
     const results = await resultsPromise;
     const failedThreadIds = new Set(
       actionThreads
@@ -1228,6 +1238,14 @@ export default function App() {
             ]),
           ) as Record<SmartSectionId, SmartSection>,
       );
+      setRetainedSmartThreads((current) => {
+        const next = new Map(current);
+        for (const id of failedThreadIds) {
+          const retained = originalRetainedSmartThreads.get(id);
+          if (retained) next.set(id, retained);
+        }
+        return next;
+      });
       showStatus(
         actionOutcome(t, action, succeeded, failedThreadIds.size),
         "error",
