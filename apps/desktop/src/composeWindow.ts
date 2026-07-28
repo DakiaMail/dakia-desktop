@@ -6,6 +6,7 @@ import type { ComposeAttachment, MailSummary } from "./types";
 export type ComposeSeed = {
   accountId?: string;
   to?: string;
+  cc?: string;
   subject?: string;
   body?: string;
   inReplyTo?: string;

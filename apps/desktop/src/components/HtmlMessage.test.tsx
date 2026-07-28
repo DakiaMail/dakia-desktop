@@ -1,6 +1,12 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
+import appleMailReplySection from "../test/fixtures/apple-mail-reply-section.html?raw";
 import { buildEmailDocument, HtmlMessage } from "./HtmlMessage";
+
+function renderedEmailRoot(message: HTMLElement) {
+  const surface = message.shadowRoot?.firstElementChild as HTMLElement | null;
+  return surface?.shadowRoot ?? null;
+}
 
 describe("HTML email appearance", () => {
   it("uses a legible sans-serif font by default", () => {
@@ -79,6 +85,7 @@ describe("HTML email appearance", () => {
         '<video poster="file:///etc/passwd" onanimationstart="alert(1)"></video>',
         '<div srcdoc="<script>alert(1)</script>"></div>',
         '<svg><foreignObject><iframe srcdoc="<script>alert(1)</script>"></iframe></foreignObject></svg>',
+        '<svg><a href="#safe"><animate attributeName="href" values="#safe;javascript:alert(1)"></animate><set attributeName="href" to="https://evil.example"></set><text>Open</text></a></svg>',
         "<math><script>alert(1)</script></math>",
         '<a href="javascript:alert(1)" onclick="alert(1)">Open</a>',
       ].join(""),
@@ -90,7 +97,9 @@ describe("HTML email appearance", () => {
     );
 
     expect(
-      document.querySelectorAll("script, iframe, object, form, input, base"),
+      document.querySelectorAll(
+        "script, iframe, object, form, input, base, animate, set",
+      ),
     ).toHaveLength(0);
     expect(document.querySelectorAll("meta")).toHaveLength(1);
     for (const element of document.querySelectorAll("*")) {
@@ -101,6 +110,7 @@ describe("HTML email appearance", () => {
       ).toBe(false);
     }
     expect(document.querySelector("[srcdoc]")).toBeNull();
+    expect(document.querySelector("[attributeName]")).toBeNull();
     expect(document.querySelector("a")?.hasAttribute("href")).toBe(false);
     expect(document.querySelector("img")?.hasAttribute("src")).toBe(false);
     expect(document.querySelector("video")?.hasAttribute("poster")).toBe(false);
@@ -113,12 +123,198 @@ describe("HTML email appearance", () => {
     expect(policy?.getAttribute("content")).toContain("form-action 'none'");
   });
 
-  it("does not grant scripts to the email iframe", () => {
-    render(<HtmlMessage html="<p>Hello</p>" title="Secure message" />);
+  it("renders sanitized email in a layout-contained shadow tree", () => {
+    render(
+      <HtmlMessage
+        html="<script>bad()</script><p>Hello</p>"
+        title="Secure message"
+        showHistoryLabel="Show history"
+        hideHistoryLabel="Hide history"
+      />,
+    );
 
-    const frame = screen.getByTitle("Secure message");
-    expect(frame).toHaveAttribute("sandbox", "allow-same-origin");
-    expect(frame.getAttribute("sandbox")).not.toContain("allow-scripts");
+    const message = screen.getByRole("document", { name: "Secure message" });
+    expect(message.tagName).toBe("DIV");
+    expect(message.shadowRoot).not.toBeNull();
+    expect(renderedEmailRoot(message)).not.toBeNull();
+    expect(renderedEmailRoot(message)?.querySelector("script")).toBeNull();
+    expect(message.style.contain).toBe("layout paint");
+    expect(message.style.height).toBe("");
+    expect(document.querySelector("iframe")).toBeNull();
+  });
+
+  it("collapses recognized quoted history without treating generic quotes as history", () => {
+    const gmail = buildEmailDocument(
+      '<p>Fresh</p><div class="gmail_quote"><script>bad()</script><p>Old</p></div>',
+      false,
+      { show: "Näita ajalugu", hide: "Peida ajalugu" },
+    );
+    const gmailDocument = new DOMParser().parseFromString(
+      gmail.source,
+      "text/html",
+    );
+    const details = gmailDocument.querySelector("details.dakia-quoted-history");
+    expect(details).not.toBeNull();
+    expect(details?.hasAttribute("open")).toBe(false);
+    expect(details?.textContent).toContain("Näita ajalugu");
+    expect(details?.textContent).toContain("Peida ajalugu");
+    expect(details?.querySelector("script")).toBeNull();
+
+    const generic = buildEmailDocument(
+      "<p>Fresh</p><blockquote>A deliberate quotation</blockquote>",
+      false,
+    );
+    const genericDocument = new DOMParser().parseFromString(
+      generic.source,
+      "text/html",
+    );
+    expect(
+      genericDocument.querySelector("details.dakia-quoted-history"),
+    ).toBeNull();
+  });
+
+  it("does not show history for empty or citation-only provider containers", () => {
+    for (const html of [
+      '<p>Fresh</p><div class="gmail_quote"> \n </div>',
+      '<p>Fresh</p><div class="gmail_quote">On 19 Feb 2026 at 21:00 +0200, Romario Verbran &lt;romario@example.com&gt;, wrote:</div>',
+      '<p>Fresh</p><blockquote type="cite">On 19 Feb 2026 at 21:00 +0200, Romario Verbran &lt;romario@example.com&gt;, wrote:</blockquote>',
+    ]) {
+      const email = buildEmailDocument(html, false);
+      const document = new DOMParser().parseFromString(
+        email.source,
+        "text/html",
+      );
+      expect(document.querySelector("details.dakia-quoted-history")).toBeNull();
+    }
+  });
+
+  it("moves an adjacent wrote citation into the collapsed history", () => {
+    const email = buildEmailDocument(
+      [
+        "<p>Current reply</p>",
+        "<div>On 19 Feb 2026 at 21:00 +0200, Romario Verbran &lt;romario.verbran@gmail.com&gt;, wrote:</div>",
+        '<blockquote type="cite"><p>Earlier message</p></blockquote>',
+      ].join(""),
+      false,
+    );
+    const document = new DOMParser().parseFromString(email.source, "text/html");
+    const details = document.querySelector("details.dakia-quoted-history");
+
+    expect(document.body.firstElementChild?.textContent).toBe("Current reply");
+    expect(details?.textContent).toContain(
+      "On 19 Feb 2026 at 21:00 +0200, Romario Verbran",
+    );
+    expect(details?.textContent).toContain("Earlier message");
+    expect(
+      document.body.textContent?.replace(details?.textContent ?? "", ""),
+    ).not.toContain("wrote:");
+  });
+
+  it("collapses Apple Mail reply sections with their attribution", () => {
+    const email = buildEmailDocument(
+      [
+        "<p>Current reply</p>",
+        '<div name="messageReplySection">',
+        "On 19 Feb 2026 at 21:00 +0200, Romario Verbran &lt;romario.verbran@gmail.com&gt;, wrote:<br>",
+        '<blockquote type="cite"><div>Earlier message</div></blockquote>',
+        "</div>",
+      ].join(""),
+      false,
+    );
+    const document = new DOMParser().parseFromString(email.source, "text/html");
+    const details = document.querySelector("details.dakia-quoted-history");
+
+    expect(details?.textContent).toContain(
+      "On 19 Feb 2026 at 21:00 +0200, Romario Verbran",
+    );
+    expect(details?.textContent).toContain("Earlier message");
+    expect(
+      document.body.querySelector(":scope > [name='messageReplySection']"),
+    ).toBeNull();
+  });
+
+  it("does not show history for an empty Apple Mail reply section", () => {
+    const email = buildEmailDocument(
+      [
+        "<p>Current reply</p>",
+        '<div name="messageReplySection">',
+        "On 19 Feb 2026 at 21:00 +0200, Romario Verbran &lt;romario@example.com&gt;, wrote:<br>",
+        '<blockquote type="cite"><div name="messageBodySection"></div></blockquote>',
+        "</div>",
+      ].join(""),
+      false,
+    );
+    const document = new DOMParser().parseFromString(email.source, "text/html");
+
+    expect(document.querySelector("details.dakia-quoted-history")).toBeNull();
+  });
+
+  it("captures Outlook history from its separator through the remaining siblings", () => {
+    const email = buildEmailDocument(
+      '<p>Fresh</p><div id="divRplyFwdMsg">From: Old Sender</div><blockquote>Old body</blockquote><p>Authored footer</p>',
+      false,
+    );
+    const document = new DOMParser().parseFromString(email.source, "text/html");
+    const details = document.querySelector("details.dakia-quoted-history");
+    expect(details?.textContent).toContain("From: Old Sender");
+    expect(details?.textContent).toContain("Old body");
+    expect(details?.textContent).not.toContain("Authored footer");
+    expect(document.body.textContent).toContain("Authored footer");
+    expect(document.body.firstElementChild?.textContent).toBe("Fresh");
+  });
+
+  it("keeps the trusted history disclosure visible against hostile message CSS", () => {
+    const email = buildEmailDocument(
+      '<style>summary { display:none!important; visibility:hidden!important }</style><p>Fresh</p><div class="gmail_quote">Old</div>',
+      false,
+    );
+    const document = new DOMParser().parseFromString(email.source, "text/html");
+    const summary = document.querySelector<HTMLElement>("details > summary");
+    expect(summary?.style.getPropertyValue("display")).toBe("list-item");
+    expect(summary?.style.getPropertyPriority("display")).toBe("important");
+    expect(summary?.style.getPropertyValue("visibility")).toBe("visible");
+    expect(summary?.style.getPropertyPriority("visibility")).toBe("important");
+    expect(summary?.style.getPropertyValue("all")).toBe("revert");
+    expect(summary?.style.getPropertyPriority("all")).toBe("important");
+    expect(summary?.style.getPropertyValue("position")).toBe("static");
+    expect(summary?.style.getPropertyPriority("position")).toBe("important");
+    expect(summary?.style.getPropertyValue("transform")).toBe("none");
+    expect(summary?.style.getPropertyPriority("transform")).toBe("important");
+  });
+
+  it("uses normal document flow through repeated history toggles", () => {
+    render(
+      <HtmlMessage
+        html={appleMailReplySection}
+        title="Apple Mail history sizing"
+        showHistoryLabel="Show history"
+        hideHistoryLabel="Hide history"
+      />,
+    );
+
+    const message = screen.getByRole("document", {
+      name: "Apple Mail history sizing",
+    });
+    const details = renderedEmailRoot(
+      message,
+    )?.querySelector<HTMLDetailsElement>("details.dakia-quoted-history");
+    expect(details).not.toBeNull();
+    if (!details) return;
+    expect(details.open).toBe(false);
+    expect(message.style.height).toBe("");
+
+    for (let cycle = 0; cycle < 2; cycle += 1) {
+      fireEvent.click(details.querySelector("summary")!);
+      expect(details.open).toBe(true);
+      expect(message.style.height).toBe("");
+      expect(details.textContent).toContain(
+        "The earlier message belongs inside history.",
+      );
+
+      fireEvent.click(details.querySelector("summary")!);
+      expect(details.open).toBe(false);
+      expect(message.style.height).toBe("");
+    }
   });
 
   it("keeps external links usable only through Dakia's system-browser handler", () => {
@@ -129,7 +325,9 @@ describe("HTML email appearance", () => {
     const document = new DOMParser().parseFromString(email.source, "text/html");
     const anchor = document.querySelector("a");
 
-    expect(anchor?.getAttribute("href")).toBe("#dakia-external-link");
+    expect(anchor?.getAttribute("href")).toBeNull();
+    expect(anchor?.getAttribute("role")).toBe("link");
+    expect(anchor?.getAttribute("tabindex")).toBe("0");
     expect(anchor?.dataset.dakiaExternalHref).toBe(
       "https://example.test/details",
     );
@@ -148,7 +346,7 @@ describe("HTML email appearance", () => {
 
     expect(document.querySelector("area")).toBeNull();
     expect(svgAnchor?.getAttribute("xlink:href")).toBeNull();
-    expect(svgAnchor?.getAttribute("href")).toBe("#dakia-external-link");
+    expect(svgAnchor?.getAttribute("href")).toBeNull();
     expect((svgAnchor as HTMLElement | null)?.dataset.dakiaExternalHref).toBe(
       "https://example.test/vector",
     );

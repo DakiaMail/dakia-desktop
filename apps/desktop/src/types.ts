@@ -49,6 +49,9 @@ export type MailSummary = {
   from_name?: string;
   from_address: string;
   to_addresses: string;
+  cc_addresses?: string;
+  bcc_addresses?: string;
+  reply_to_addresses?: string;
   received_at: string;
   snippet: string;
   body_text: string;

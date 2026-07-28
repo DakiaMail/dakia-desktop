@@ -185,6 +185,45 @@ describe("Composer send feedback", () => {
     );
   });
 
+  it("initializes and sends Reply All Cc recipients from the compose seed", () => {
+    const onSend = vi.fn();
+    render(
+      <Composer
+        {...props}
+        seed={{ to: "sender@example.com", cc: "peer@example.com" }}
+        onSend={onSend}
+        sendState="idle"
+      />,
+    );
+
+    expect(screen.getByLabelText("Cc")).toHaveValue("peer@example.com");
+    fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
+    expect(onSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: ["sender@example.com"],
+        cc: ["peer@example.com"],
+      }),
+    );
+  });
+
+  it("keeps quoted display-name commas intact when sending", () => {
+    const onSend = vi.fn();
+    render(
+      <Composer
+        {...props}
+        seed={{ to: '"Doe, Jane" <jane@example.com>' }}
+        onSend={onSend}
+        sendState="idle"
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
+    expect(onSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: ['"Doe, Jane" <jane@example.com>'],
+      }),
+    );
+  });
+
   it("adds a selected file once and silently ignores a duplicate", async () => {
     const onSend = vi.fn();
     const { container } = render(

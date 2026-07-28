@@ -10,6 +10,7 @@ import {
   IconArchive,
   IconArrowBackUp,
   IconCopy,
+  IconChevronDown,
   IconDownload,
   IconDots,
   IconFile,
@@ -21,6 +22,7 @@ import {
   IconSparkles,
   IconStar,
   IconTrash,
+  IconUsers,
   IconAlertTriangle,
   IconShieldCheck,
   IconShieldX,
@@ -37,6 +39,8 @@ import {
 } from "../offlineTranslation";
 import { translateConversation } from "../translationWorkflow";
 import type { Attachment, MailSummary, MessageContent } from "../types";
+import { formatAddress, messageRecipients } from "../recipients";
+import { splitQuotedText } from "../quotedHistory";
 import { EmptyState } from "./EmptyState";
 import { HtmlMessage } from "./HtmlMessage";
 
@@ -52,6 +56,7 @@ type Props = {
   onSpam: () => void;
   onTrash: () => void;
   onReply: () => void;
+  onReplyAll: () => void;
   onForward: () => void;
   onToggleRead: (read: boolean) => void;
   onSummarize: () => void;
@@ -73,6 +78,7 @@ export function Reader({
   onSpam,
   onTrash,
   onReply,
+  onReplyAll,
   onForward,
   onToggleRead,
   onSummarize,
@@ -387,6 +393,7 @@ export function Reader({
             onSpam={onSpam}
             onTrash={onTrash}
             onReply={onReply}
+            onReplyAll={onReplyAll}
             onForward={onForward}
             threadUnread={threadUnread}
             onToggleRead={onToggleRead}
@@ -410,6 +417,7 @@ function ThreadMessage({
   onSpam,
   onTrash,
   onReply,
+  onReplyAll,
   onForward,
   threadUnread,
   onToggleRead,
@@ -426,6 +434,7 @@ function ThreadMessage({
   onSpam: () => void;
   onTrash: () => void;
   onReply: () => void;
+  onReplyAll: () => void;
   onForward: () => void;
   threadUnread: boolean;
   onToggleRead: (read: boolean) => void;
@@ -444,7 +453,9 @@ function ThreadMessage({
   const [saving, setSaving] = useState<string>();
   const [saveStatus, setSaveStatus] = useState<string>();
   const [hydrationRequested, setHydrationRequested] = useState(false);
+  const [recipientsExpanded, setRecipientsExpanded] = useState(false);
   const displayContent = translatedContent ?? content;
+  const recipients = useMemo(() => messageRecipients(message), [message]);
 
   useEffect(() => {
     if (
@@ -526,10 +537,42 @@ function ThreadMessage({
               <span className="sent-by-you">{t("reader.sentByYou")}</span>
             ) : null}
           </div>
-          <div className="sender-address">
-            {message.from_address} ·{" "}
-            {t("reader.to", { recipient: message.to_addresses })}
-          </div>
+          <button
+            type="button"
+            className="recipient-summary"
+            aria-expanded={recipientsExpanded}
+            aria-label={t(
+              recipientsExpanded
+                ? "reader.hideRecipientDetails"
+                : "reader.showRecipientDetails",
+            )}
+            onClick={() => setRecipientsExpanded((value) => !value)}
+          >
+            <IconChevronDown
+              size={14}
+              className="recipient-summary-chevron"
+              aria-hidden="true"
+            />
+            <span>
+              {message.from_address} ·{" "}
+              {t("reader.to", { recipient: message.to_addresses })}
+            </span>
+          </button>
+          {recipientsExpanded ? (
+            <dl className="recipient-details">
+              <RecipientRow
+                label={t("composer.from")}
+                values={recipients.from}
+              />
+              <RecipientRow label={t("composer.to")} values={recipients.to} />
+              <RecipientRow label={t("composer.cc")} values={recipients.cc} />
+              <RecipientRow label={t("composer.bcc")} values={recipients.bcc} />
+              <RecipientRow
+                label={t("reader.replyTo")}
+                values={recipients.replyTo}
+              />
+            </dl>
+          ) : null}
           {isLatest &&
           (displayContent?.unsubscribe_kind ?? message.unsubscribe_kind) ? (
             <Button
@@ -553,7 +596,7 @@ function ThreadMessage({
               variant="subtle"
               color="gray"
               onClick={() => onReply()}
-              aria-label={t("actions.reply")}
+              aria-label={t("reader.quickReply")}
             >
               <IconArrowBackUp size={19} stroke={1.7} />
             </ActionIcon>
@@ -573,6 +616,14 @@ function ThreadMessage({
             </Tooltip>
           </Menu.Target>
           <Menu.Dropdown>
+            {isLatest ? (
+              <Menu.Item
+                leftSection={<IconUsers size={16} />}
+                onClick={() => onReplyAll()}
+              >
+                {t("actions.replyAll")}
+              </Menu.Item>
+            ) : null}
             <Menu.Item
               leftSection={<IconMailForward size={16} />}
               onClick={() => onForward()}
@@ -629,9 +680,14 @@ function ThreadMessage({
           </Button>
         </div>
       ) : displayContent?.body_html ? (
-        <HtmlMessage html={displayContent.body_html} title={message.subject} />
+        <HtmlMessage
+          html={displayContent.body_html}
+          title={message.subject}
+          showHistoryLabel={t("reader.showHistory")}
+          hideHistoryLabel={t("reader.hideHistory")}
+        />
       ) : (
-        <div className="message-body">{displayContent?.body_text ?? ""}</div>
+        <PlainTextMessage text={displayContent?.body_text ?? ""} />
       )}
       {message.has_attachments || attachments.length ? (
         <section
@@ -711,7 +767,60 @@ function ThreadMessage({
           ) : null}
         </section>
       ) : null}
+      {isLatest ? (
+        <div className="reader-reply-actions">
+          <Button
+            variant="default"
+            leftSection={<IconArrowBackUp size={17} />}
+            onClick={() => onReply()}
+          >
+            {t("actions.reply")}
+          </Button>
+          <Button
+            variant="default"
+            leftSection={<IconUsers size={17} />}
+            onClick={() => onReplyAll()}
+          >
+            {t("actions.replyAll")}
+          </Button>
+        </div>
+      ) : null}
     </section>
+  );
+}
+
+function RecipientRow({
+  label,
+  values,
+}: {
+  label: string;
+  values: ReturnType<typeof messageRecipients>["to"];
+}) {
+  if (!values.length) return null;
+  return (
+    <div className="recipient-detail-row">
+      <dt>{label}</dt>
+      <dd>{values.map(formatAddress).join(", ")}</dd>
+    </div>
+  );
+}
+
+function PlainTextMessage({ text }: { text: string }) {
+  const { t } = useTranslation();
+  const split = useMemo(() => splitQuotedText(text), [text]);
+  return (
+    <div className="message-body">
+      {split.visible}
+      {split.history ? (
+        <details className="quoted-history">
+          <summary>
+            <span className="history-show">{t("reader.showHistory")}</span>
+            <span className="history-hide">{t("reader.hideHistory")}</span>
+          </summary>
+          <div className="quoted-history-content">{split.history}</div>
+        </details>
+      ) : null}
+    </div>
   );
 }
 
