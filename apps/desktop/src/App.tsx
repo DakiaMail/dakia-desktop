@@ -1012,10 +1012,7 @@ export default function App() {
       const clickedThread = inbox.conversations.find((thread) =>
         thread.messages.some((message) => message.id === messageId),
       );
-      const clickedMessage = clickedThread?.messages.find(
-        (message) => message.id === messageId,
-      );
-      setActive(clickedMessage);
+      setActive(clickedThread?.latest);
       setActiveThreadSnapshot(clickedThread);
       if (clickedThread) {
         void setThreadReadState(clickedThread, true, { silent: true });
@@ -1551,11 +1548,11 @@ export default function App() {
     }
     if (smartInboxActive) await loadMessages();
   };
-  const unsubscribe = async () => {
-    if (!active || unsubscribeLoading) return;
+  const unsubscribe = async (message: MailSummary) => {
+    if (unsubscribeLoading) return;
     setUnsubscribeLoading(true);
     try {
-      const result = await api.unsubscribe(active.id);
+      const result = await api.unsubscribe(message.id);
       if (result.kind === "opened_web") {
         showStatus(t("feedback.unsubscribeWeb"));
       } else {
@@ -2032,7 +2029,7 @@ export default function App() {
             )
         }
         unsubscribeLoading={unsubscribeLoading}
-        onUnsubscribe={() => void unsubscribe()}
+        onUnsubscribe={(message) => void unsubscribe(message)}
         onToggleStar={(message, starred) => void toggleStar(message, starred)}
       />
       {actionStatus ? (

@@ -132,7 +132,7 @@ describe("Reader unsubscribe action", () => {
   });
 
   it("disables unsubscribe while the request is in progress", () => {
-    render(
+    const { rerender } = render(
       <MantineProvider>
         <Reader
           {...props}
@@ -206,6 +206,291 @@ describe("Reader unsubscribe action", () => {
     fireEvent.click(screen.getByRole("button", { name: "Quick reply" }));
     expect(props.onReply).toHaveBeenCalledOnce();
     expect(props.onReply.mock.calls[0]).toEqual([]);
+  });
+
+  it("opens a conversation on its final message and fetches earlier messages only when expanded", async () => {
+    const earliest = {
+      ...message,
+      id: "message-0",
+      uid: 0,
+      from_name: "Earlier Sender",
+      received_at: "2026-07-19T08:00:00Z",
+      snippet: "Earlier preview",
+      has_attachments: true,
+    };
+    const middle = {
+      ...message,
+      id: "message-middle",
+      uid: 2,
+      from_name: "Middle Sender",
+      received_at: "2026-07-19T09:00:00Z",
+      snippet: "Middle preview",
+    };
+    const latest = {
+      ...message,
+      id: "message-latest",
+      uid: 3,
+      from_name: "Latest Sender",
+      received_at: "2026-07-19T11:00:00Z",
+      snippet: "Latest preview",
+      unsubscribe_kind: "one_click" as const,
+    };
+    vi.mocked(api.content).mockImplementation(async (id) => ({
+      body_text:
+        id === earliest.id
+          ? "Earlier full body"
+          : id === middle.id
+            ? "Middle full body"
+            : "Latest full body",
+      attachments: [],
+    }));
+
+    const { rerender } = render(
+      <MantineProvider>
+        <Reader
+          {...props}
+          message={earliest}
+          messages={[earliest, middle, latest]}
+        />
+      </MantineProvider>,
+    );
+
+    const earliestDisclosure = screen.getByRole("button", {
+      name: "Expand message from Earlier Sender",
+    });
+    expect(earliestDisclosure).toHaveAttribute("aria-expanded", "false");
+    expect(earliestDisclosure).toHaveAccessibleDescription(
+      /Earlier preview.*19 Jul at.*Has attachments/,
+    );
+    expect(screen.getByText("Earlier preview")).toBeVisible();
+    expect(screen.getByText("Middle preview")).toBeVisible();
+    expect(screen.getByLabelText("Has attachments")).toBeVisible();
+    expect(
+      screen.getByRole("button", {
+        name: "Collapse message from Latest Sender",
+      }),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(await screen.findByText("Latest full body")).toBeVisible();
+    expect(api.content).toHaveBeenCalledTimes(1);
+    expect(api.content).toHaveBeenCalledWith(latest.id);
+
+    fireEvent.click(earliestDisclosure);
+    expect(await screen.findByText("Earlier full body")).toBeVisible();
+    expect(screen.queryByText("Latest full body")).not.toBeInTheDocument();
+    expect(api.content).toHaveBeenCalledTimes(2);
+    expect(api.content).toHaveBeenCalledWith(earliest.id);
+    expect(api.content).not.toHaveBeenCalledWith(middle.id);
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Collapse message from Earlier Sender",
+      }),
+    );
+    expect(screen.queryByText("Earlier full body")).not.toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Expand message from Earlier Sender",
+      }),
+    );
+    expect(await screen.findByText("Earlier full body")).toBeVisible();
+    expect(api.content).toHaveBeenCalledTimes(2);
+
+    rerender(
+      <MantineProvider>
+        <Reader
+          {...props}
+          message={earliest}
+          messages={[
+            { ...earliest, snippet: "Updated earlier preview" },
+            middle,
+            latest,
+          ]}
+        />
+      </MantineProvider>,
+    );
+    expect(
+      screen.getByRole("button", {
+        name: "Collapse message from Earlier Sender",
+      }),
+    ).toHaveAttribute("aria-expanded", "true");
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Expand message from Latest Sender",
+      }),
+    );
+    expect(await screen.findByText("Latest full body")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Quick reply" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Unsubscribe" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Unsubscribe" }));
+    expect(props.onUnsubscribe).toHaveBeenCalledWith(latest);
+    expect(api.content).toHaveBeenCalledTimes(2);
+    fireEvent.click(screen.getByText("Latest Sender"));
+    expect(screen.queryByText("Latest full body")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "Expand message from Latest Sender",
+      }),
+    ).toHaveAttribute("aria-expanded", "false");
+
+    const nextEarlier = {
+      ...earliest,
+      id: "message-next-earlier",
+      thread_id: "thread-next",
+      from_name: "Next earlier sender",
+    };
+    const nextLatest = {
+      ...latest,
+      id: "message-next-latest",
+      thread_id: "thread-next",
+      from_name: "Next latest sender",
+    };
+    rerender(
+      <MantineProvider>
+        <Reader
+          {...props}
+          message={nextEarlier}
+          messages={[nextEarlier, nextLatest]}
+        />
+      </MantineProvider>,
+    );
+    expect(
+      screen.getByRole("button", {
+        name: "Expand message from Next earlier sender",
+      }),
+    ).toHaveAttribute("aria-expanded", "false");
+    expect(await screen.findByText("Latest full body")).toBeVisible();
+    expect(api.content).toHaveBeenCalledTimes(3);
+    expect(api.content).toHaveBeenLastCalledWith(nextLatest.id);
+  });
+
+  it("keeps the selected expanded message open when a newer message arrives", async () => {
+    const earlier = {
+      ...message,
+      id: "message-earlier",
+      from_name: "Earlier Sender",
+    };
+    const latest = {
+      ...message,
+      id: "message-latest",
+      from_name: "Latest Sender",
+    };
+    const newer = {
+      ...message,
+      id: "message-newer",
+      from_name: "Newer Sender",
+    };
+    vi.mocked(api.content).mockResolvedValue({
+      body_text: "Full message body",
+      attachments: [],
+    });
+
+    const { rerender } = render(
+      <MantineProvider>
+        <Reader {...props} message={earlier} messages={[earlier, latest]} />
+      </MantineProvider>,
+    );
+    await screen.findByText("Full message body");
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Expand message from Earlier Sender",
+      }),
+    );
+    await screen.findByText("Full message body");
+
+    rerender(
+      <MantineProvider>
+        <Reader
+          {...props}
+          message={earlier}
+          messages={[earlier, latest, newer]}
+        />
+      </MantineProvider>,
+    );
+
+    expect(
+      screen.getByRole("button", {
+        name: "Collapse message from Earlier Sender",
+      }),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(
+      screen.getByRole("button", {
+        name: "Expand message from Newer Sender",
+      }),
+    ).toHaveAttribute("aria-expanded", "false");
+    expect(api.content).toHaveBeenCalledTimes(2);
+    expect(api.content).not.toHaveBeenCalledWith(newer.id);
+  });
+
+  it("resets expanded state for the same thread ID in another account", async () => {
+    const firstAccountEarlier = {
+      ...message,
+      id: "account-one-earlier",
+      account_id: "account-one",
+      from_name: "First account earlier",
+    };
+    const firstAccountLatest = {
+      ...message,
+      id: "account-one-latest",
+      account_id: "account-one",
+      from_name: "First account latest",
+    };
+    const secondAccountEarlier = {
+      ...message,
+      id: "account-two-earlier",
+      account_id: "account-two",
+      from_name: "Second account earlier",
+    };
+    const secondAccountLatest = {
+      ...message,
+      id: "account-two-latest",
+      account_id: "account-two",
+      from_name: "Second account latest",
+    };
+    vi.mocked(api.content).mockResolvedValue({
+      body_text: "Account-scoped body",
+      attachments: [],
+    });
+
+    const { rerender } = render(
+      <MantineProvider>
+        <Reader
+          {...props}
+          message={firstAccountLatest}
+          messages={[firstAccountEarlier, firstAccountLatest]}
+        />
+      </MantineProvider>,
+    );
+    await screen.findByText("Account-scoped body");
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Expand message from First account earlier",
+      }),
+    );
+
+    rerender(
+      <MantineProvider>
+        <Reader
+          {...props}
+          message={secondAccountLatest}
+          messages={[secondAccountEarlier, secondAccountLatest]}
+        />
+      </MantineProvider>,
+    );
+
+    expect(
+      screen.getByRole("button", {
+        name: "Collapse message from Second account latest",
+      }),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(
+      screen.getByRole("button", {
+        name: "Expand message from Second account earlier",
+      }),
+    ).toHaveAttribute("aria-expanded", "false");
+    await waitFor(() =>
+      expect(api.content).toHaveBeenCalledWith(secondAccountLatest.id),
+    );
   });
 
   it("expands complete recipient details without inventing missing rows", () => {
@@ -506,6 +791,7 @@ describe("Reader unsubscribe action", () => {
       ...message,
       id: "message-0",
       uid: 0,
+      from_name: "Earlier Sender",
       body_text: "Varasem kiri",
     };
     vi.mocked(api.content).mockImplementation(async (id) => ({
@@ -522,8 +808,7 @@ describe("Reader unsubscribe action", () => {
       screen.getByRole("button", { name: "Translate to English" }),
     );
 
-    expect(await screen.findByText("EN: Esimene kiri")).toBeVisible();
-    expect(screen.getByText("EN: Teine kiri")).toBeVisible();
+    expect(await screen.findByText("EN: Teine kiri")).toBeVisible();
     expect(api.content).toHaveBeenCalledTimes(2);
     expect(api.content).toHaveBeenCalledWith("message-0");
     expect(api.content).toHaveBeenCalledWith("message-1");
@@ -537,6 +822,12 @@ describe("Reader unsubscribe action", () => {
       "Teine kiri",
       false,
     );
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Expand message from Earlier Sender",
+      }),
+    );
+    expect(await screen.findByText("EN: Esimene kiri")).toBeVisible();
   });
 
   it("translates HTML as HTML and renders it through the sanitized shadow tree", async () => {

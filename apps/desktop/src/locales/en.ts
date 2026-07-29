@@ -122,6 +122,8 @@ export const en = {
       showHistory: "Show history",
       hideHistory: "Hide history",
       messageFrom: "Message from {{sender}}",
+      expandMessage: "Expand message from {{sender}}",
+      collapseMessage: "Collapse message from {{sender}}",
       sentByYou: "Sent by you",
       originalMessage: "Original message",
       translation: "English translation",

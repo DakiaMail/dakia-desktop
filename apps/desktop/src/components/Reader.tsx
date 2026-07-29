@@ -29,7 +29,14 @@ import {
 } from "@tabler/icons-react";
 import { AI_FEATURES_VISIBLE } from "../features";
 import { format } from "date-fns";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../api";
 import { confirmNativeAction } from "../nativeFeedback";
@@ -62,7 +69,7 @@ type Props = {
   onSummarize: () => void;
   onCopyAi: () => void;
   unsubscribeLoading: boolean;
-  onUnsubscribe: () => void;
+  onUnsubscribe: (message: MailSummary) => void;
   onToggleStar: (message: MailSummary, starred: boolean) => void;
 };
 
@@ -106,9 +113,33 @@ export function Reader({
     () => (messages?.length ? messages : message ? [message] : []),
     [message, messages],
   );
+  const latestMessage = threadMessages.at(-1);
+  const threadKey = latestMessage
+    ? `${latestMessage.account_id}:${latestMessage.thread_id || latestMessage.id}`
+    : message
+      ? `${message.account_id}:${message.thread_id || message.id}`
+      : undefined;
+  const [expandedMessage, setExpandedMessage] = useState<{
+    threadKey?: string;
+    id?: string;
+  }>(() => ({ threadKey, id: latestMessage?.id }));
+  // Render the final chronological message immediately when a new conversation
+  // arrives. Keeping the chosen ID in state means later mailbox updates do not
+  // interrupt someone reading an earlier message.
+  const expandedMessageId =
+    expandedMessage?.threadKey === threadKey
+      ? expandedMessage?.id
+      : latestMessage?.id;
+  useEffect(() => {
+    setExpandedMessage((current) =>
+      current.threadKey === threadKey
+        ? current
+        : { threadKey, id: latestMessage?.id },
+    );
+  }, [threadKey]);
   const contentRequests = useMemo(
     () => new Map<string, Promise<MessageContent>>(),
-    [message?.thread_id],
+    [threadKey],
   );
   const loadContent = useCallback(
     (messageId: string) => {
@@ -131,6 +162,16 @@ export function Reader({
     setTranslationError(undefined);
     setTranslationProgress(undefined);
   }, [message?.thread_id, message?.id]);
+
+  const toggleExpandedMessage = useCallback(
+    (messageId: string) => {
+      setExpandedMessage({
+        threadKey,
+        id: expandedMessageId === messageId ? undefined : messageId,
+      });
+    },
+    [expandedMessageId, threadKey],
+  );
 
   if (!message)
     return (
@@ -387,7 +428,9 @@ export function Reader({
               threadMessage.from_address.toLowerCase() ===
                 accountEmail?.toLowerCase()
             }
-            isLatest={threadMessage.id === message.id}
+            isLatest={threadMessage.id === latestMessage?.id}
+            isExpanded={threadMessage.id === expandedMessageId}
+            onToggleExpanded={() => toggleExpandedMessage(threadMessage.id)}
             actionsDisabled={actionsDisabled}
             onArchive={onArchive}
             onSpam={onSpam}
@@ -412,6 +455,8 @@ function ThreadMessage({
   message,
   isSent,
   isLatest,
+  isExpanded,
+  onToggleExpanded,
   actionsDisabled,
   onArchive,
   onSpam,
@@ -429,6 +474,8 @@ function ThreadMessage({
   message: MailSummary;
   isSent: boolean;
   isLatest: boolean;
+  isExpanded: boolean;
+  onToggleExpanded: () => void;
   actionsDisabled: boolean;
   onArchive: () => void;
   onSpam: () => void;
@@ -439,7 +486,7 @@ function ThreadMessage({
   threadUnread: boolean;
   onToggleRead: (read: boolean) => void;
   unsubscribeLoading: boolean;
-  onUnsubscribe: () => void;
+  onUnsubscribe: (message: MailSummary) => void;
   translatedContent?: MessageContent;
   loadContent: (messageId: string) => Promise<MessageContent>;
 }) {
@@ -454,11 +501,13 @@ function ThreadMessage({
   const [saveStatus, setSaveStatus] = useState<string>();
   const [hydrationRequested, setHydrationRequested] = useState(false);
   const [recipientsExpanded, setRecipientsExpanded] = useState(false);
+  const summaryDescriptionId = useId();
   const displayContent = translatedContent ?? content;
   const recipients = useMemo(() => messageRecipients(message), [message]);
 
   useEffect(() => {
     if (
+      !isExpanded ||
       !message.content_state ||
       message.content_state === "complete" ||
       message.content_state === "hydrating" ||
@@ -467,11 +516,11 @@ function ThreadMessage({
       return;
     setHydrationRequested(true);
     void api.hydrateMessage(message.id).catch(() => undefined);
-  }, [hydrationRequested, message.content_state, message.id]);
+  }, [hydrationRequested, isExpanded, message.content_state, message.id]);
 
   useEffect(() => {
+    if (!isExpanded) return;
     let current = true;
-    setContent(undefined);
     setContentError(false);
     setLoadingContent(true);
     setLoadingAttachments(true);
@@ -492,7 +541,7 @@ function ThreadMessage({
     return () => {
       current = false;
     };
-  }, [contentAttempt, loadContent, message.id]);
+  }, [contentAttempt, isExpanded, loadContent, message.id]);
 
   const saveOne = async (attachment: Attachment) => {
     if (saving) return;
@@ -519,14 +568,84 @@ function ThreadMessage({
     }
   };
 
+  if (!isExpanded) {
+    return (
+      <section
+        className="thread-message thread-message-collapsed"
+        aria-label={t("reader.messageFrom", {
+          sender: message.from_name || message.from_address,
+        })}
+      >
+        <button
+          type="button"
+          className="thread-message-summary"
+          aria-expanded="false"
+          aria-label={t("reader.expandMessage", {
+            sender: message.from_name || message.from_address,
+          })}
+          aria-describedby={summaryDescriptionId}
+          onClick={onToggleExpanded}
+        >
+          <Avatar
+            className="sender-avatar thread-message-summary-avatar"
+            color="ember"
+            radius="md"
+            aria-hidden="true"
+          >
+            {(message.from_name || message.from_address)[0]?.toUpperCase()}
+          </Avatar>
+          <span className="thread-message-summary-meta">
+            <span className="thread-message-summary-sender">
+              {message.from_name || message.from_address}
+              {isSent ? (
+                <span className="sent-by-you">{t("reader.sentByYou")}</span>
+              ) : null}
+            </span>
+            <span className="thread-message-summary-snippet">
+              {message.snippet}
+            </span>
+            <span className="reader-visually-hidden" id={summaryDescriptionId}>
+              {message.snippet}.{" "}
+              {format(new Date(message.received_at), "EEEE d MMM 'at' HH:mm")}
+              {message.has_attachments ? `. ${t("inbox.attachment")}` : ""}
+            </span>
+          </span>
+          {message.has_attachments ? (
+            <span
+              className="thread-message-summary-attachment"
+              role="img"
+              aria-label={t("inbox.attachment")}
+            >
+              <IconPaperclip size={16} aria-hidden="true" />
+            </span>
+          ) : null}
+          <time className="reader-date">
+            {format(new Date(message.received_at), "EEEE d MMM 'at' HH:mm")}
+          </time>
+        </button>
+      </section>
+    );
+  }
+
   return (
     <section
-      className="thread-message"
+      className="thread-message thread-message-expanded"
       aria-label={t("reader.messageFrom", {
         sender: message.from_name || message.from_address,
       })}
     >
-      <div className="sender-card" data-sent={isSent}>
+      <div
+        className="sender-card sender-card-collapsible"
+        data-sent={isSent}
+        onClick={(event) => {
+          if (
+            event.target instanceof Element &&
+            event.target.closest("button, a, [role='menuitem']")
+          )
+            return;
+          onToggleExpanded();
+        }}
+      >
         <Avatar className="sender-avatar" color="ember" radius="md">
           {(message.from_name || message.from_address)[0]?.toUpperCase()}
         </Avatar>
@@ -580,7 +699,7 @@ function ThreadMessage({
               color="gray"
               size="compact-xs"
               loading={unsubscribeLoading}
-              onClick={onUnsubscribe}
+              onClick={() => onUnsubscribe(message)}
             >
               {t("actions.unsubscribe")}
             </Button>
@@ -660,6 +779,24 @@ function ThreadMessage({
             </Menu.Item>
           </Menu.Dropdown>
         </Menu>
+        <Tooltip
+          label={t("reader.collapseMessage", {
+            sender: message.from_name || message.from_address,
+          })}
+        >
+          <ActionIcon
+            className="reader-header-action"
+            variant="subtle"
+            color="gray"
+            aria-expanded="true"
+            aria-label={t("reader.collapseMessage", {
+              sender: message.from_name || message.from_address,
+            })}
+            onClick={onToggleExpanded}
+          >
+            <IconChevronDown size={19} stroke={1.9} />
+          </ActionIcon>
+        </Tooltip>
       </div>
       {loadingContent ? (
         <div className="message-body" role="status">
