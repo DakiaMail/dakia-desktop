@@ -3,6 +3,7 @@ import { MantineProvider } from "@mantine/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import "../i18n";
 import { api } from "../api";
+import freshdeskReplySection from "../test/fixtures/freshdesk-reply-section.html?raw";
 import type { MailSummary } from "../types";
 import { Reader } from "./Reader";
 
@@ -269,6 +270,71 @@ describe("Reader unsubscribe action", () => {
     fireEvent.click(screen.getByText("Show history"));
     expect(details).toHaveAttribute("open");
     expect(screen.getByText(/On Monday, Pat wrote/)).toBeVisible();
+  });
+
+  it("collapses Freshdesk history in the latest message of a thread", async () => {
+    const older = {
+      ...message,
+      id: "message-older",
+      received_at: "2026-07-19T09:00:00Z",
+      subject: "Earlier reply",
+    };
+    const latest = {
+      ...message,
+      id: "message-latest",
+      received_at: "2026-07-19T10:00:00Z",
+      subject: "Latest Freshdesk reply",
+    };
+    vi.mocked(api.content).mockImplementation(async (messageId) =>
+      messageId === latest.id
+        ? {
+            body_text: "Latest fallback",
+            body_html: freshdeskReplySection,
+            attachments: [],
+          }
+        : {
+            body_text: "Earlier message remains independently visible.",
+            attachments: [],
+          },
+    );
+
+    render(
+      <MantineProvider>
+        <Reader {...props} message={latest} messages={[older, latest]} />
+      </MantineProvider>,
+    );
+
+    expect(
+      await screen.findByText("Earlier message remains independently visible."),
+    ).toBeVisible();
+    const latestMessage = await screen.findByRole("document", {
+      name: "Latest Freshdesk reply",
+    });
+    const surface = latestMessage.shadowRoot
+      ?.firstElementChild as HTMLElement | null;
+    const root = surface?.shadowRoot;
+    const details = root?.querySelector<HTMLDetailsElement>(
+      "details.dakia-quoted-history",
+    );
+
+    expect(details).not.toBeNull();
+    if (!details) return;
+    const visible = root?.textContent?.replace(details.textContent ?? "", "");
+    expect(visible).toContain("Good afternoon, Customer");
+    expect(visible).toContain("Thank you for letting us know.");
+    expect(visible).not.toContain("Earlier support reply.");
+    expect(details.open).toBe(false);
+
+    for (let cycle = 0; cycle < 2; cycle += 1) {
+      fireEvent.click(details.querySelector("summary")!);
+      expect(details.open).toBe(true);
+      expect(details.textContent).toContain("Earlier support reply.");
+
+      fireEvent.click(details.querySelector("summary")!);
+      expect(details.open).toBe(false);
+    }
+    expect(api.content).toHaveBeenCalledWith("message-older");
+    expect(api.content).toHaveBeenCalledWith("message-latest");
   });
 
   it("runs delete from the reader toolbar", () => {
