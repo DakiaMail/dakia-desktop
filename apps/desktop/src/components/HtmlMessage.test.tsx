@@ -193,7 +193,7 @@ describe("HTML email appearance", () => {
     const email = buildEmailDocument(
       [
         "<p>Current reply</p>",
-        "<div>On 19 Feb 2026 at 21:00 +0200, Romario Verbran &lt;romario.verbran@gmail.com&gt;, wrote:</div>",
+        "<div>On 19 Feb 2026 at 21:00 +0200, Rowan Example &lt;rowan@example.test&gt;, wrote:</div>",
         '<blockquote type="cite"><p>Earlier message</p></blockquote>',
       ].join(""),
       false,
@@ -203,7 +203,7 @@ describe("HTML email appearance", () => {
 
     expect(document.body.firstElementChild?.textContent).toBe("Current reply");
     expect(details?.textContent).toContain(
-      "On 19 Feb 2026 at 21:00 +0200, Romario Verbran",
+      "On 19 Feb 2026 at 21:00 +0200, Rowan Example",
     );
     expect(details?.textContent).toContain("Earlier message");
     expect(
@@ -215,7 +215,7 @@ describe("HTML email appearance", () => {
     const email = buildEmailDocument(
       [
         "<p>Current reply</p>",
-        '<div class="moz-cite-prefix">On 19 Feb 2026 at 21:00 +0200, Romario Verbran &lt;romario.verbran@gmail.com&gt;, wrote:</div>',
+        '<div class="moz-cite-prefix">On 19 Feb 2026 at 21:00 +0200, Rowan Example &lt;rowan@example.test&gt;, wrote:</div>',
         '<blockquote type="cite"><p>Earlier message</p></blockquote>',
       ].join(""),
       false,
@@ -225,7 +225,7 @@ describe("HTML email appearance", () => {
 
     expect(document.body.firstElementChild?.textContent).toBe("Current reply");
     expect(details?.textContent).toContain(
-      "On 19 Feb 2026 at 21:00 +0200, Romario Verbran",
+      "On 19 Feb 2026 at 21:00 +0200, Rowan Example",
     );
     expect(details?.textContent).toContain("Earlier message");
     expect(
@@ -238,7 +238,7 @@ describe("HTML email appearance", () => {
       [
         "<p>Current reply</p>",
         '<div name="messageReplySection">',
-        "On 19 Feb 2026 at 21:00 +0200, Romario Verbran &lt;romario.verbran@gmail.com&gt;, wrote:<br>",
+        "On 19 Feb 2026 at 21:00 +0200, Rowan Example &lt;rowan@example.test&gt;, wrote:<br>",
         '<blockquote type="cite"><div>Earlier message</div></blockquote>',
         "</div>",
       ].join(""),
@@ -248,7 +248,7 @@ describe("HTML email appearance", () => {
     const details = document.querySelector("details.dakia-quoted-history");
 
     expect(details?.textContent).toContain(
-      "On 19 Feb 2026 at 21:00 +0200, Romario Verbran",
+      "On 19 Feb 2026 at 21:00 +0200, Rowan Example",
     );
     expect(details?.textContent).toContain("Earlier message");
     expect(
