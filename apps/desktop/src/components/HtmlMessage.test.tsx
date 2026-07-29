@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import appleMailReplySection from "../test/fixtures/apple-mail-reply-section.html?raw";
+import freshdeskReplySection from "../test/fixtures/freshdesk-reply-section.html?raw";
 import outlookWordReplySection from "../test/fixtures/outlook-word-reply-section.html?raw";
 import { buildEmailDocument, HtmlMessage } from "./HtmlMessage";
 
@@ -174,10 +175,45 @@ describe("HTML email appearance", () => {
     ).toBeNull();
   });
 
+  it("recognizes established provider markers without matching lookalike classes", () => {
+    for (const marker of [
+      '<div class="gmail_quote">Old Gmail reply</div>',
+      '<div class="yahoo_quoted">Old Yahoo reply</div>',
+      '<div id="AOLMsgPart_4f8c2d16">Old AOL reply</div>',
+      '<div id="AOLMsgPart_6a3b91e0">Another AOL reply</div>',
+    ]) {
+      const email = buildEmailDocument(`<p>Fresh</p>${marker}`, false);
+      const document = new DOMParser().parseFromString(
+        email.source,
+        "text/html",
+      );
+      expect(
+        document.querySelectorAll("details.dakia-quoted-history"),
+      ).toHaveLength(1);
+    }
+
+    for (const lookalike of [
+      '<div class="gmail_quote_extra">Authored content</div>',
+      '<div class="yahoo_quoted-note">Authored content</div>',
+      '<div id="NotAOLMsgPart_4f8c2d16">Authored content</div>',
+      '<div id="AOLMsgPartialSummary">Authored content</div>',
+      '<div id="AOLMsgPartHeader">Authored content</div>',
+    ]) {
+      const email = buildEmailDocument(`<p>Fresh</p>${lookalike}`, false);
+      const document = new DOMParser().parseFromString(
+        email.source,
+        "text/html",
+      );
+      expect(document.querySelector("details.dakia-quoted-history")).toBeNull();
+      expect(document.body.textContent).toContain("Authored content");
+    }
+  });
+
   it("does not show history for empty or citation-only provider containers", () => {
     for (const html of [
       '<p>Fresh</p><div class="gmail_quote"> \n </div>',
       '<p>Fresh</p><div class="gmail_quote">On 19 Feb 2026 at 21:00 +0200, Romario Verbran &lt;romario@example.com&gt;, wrote:</div>',
+      '<p>Fresh</p><div class="freshdesk_quote"><div class="freshdesk_attr">On 19 Feb 2026 at 21:00 +0200, Romario Verbran &lt;romario@example.com&gt; wrote:</div></div>',
       '<p>Fresh</p><blockquote type="cite">On 19 Feb 2026 at 21:00 +0200, Romario Verbran &lt;romario@example.com&gt;, wrote:</blockquote>',
     ]) {
       const email = buildEmailDocument(html, false);
@@ -187,6 +223,54 @@ describe("HTML email appearance", () => {
       );
       expect(document.querySelector("details.dakia-quoted-history")).toBeNull();
     }
+  });
+
+  it("skips empty provider markers before meaningful quoted history", () => {
+    const email = buildEmailDocument(
+      [
+        "<p>Fresh</p>",
+        '<div class="gmail_quote gmail_quote_container"><div class="gmail_attr"></div></div>',
+        '<div class="yahoo_quoted">Meaningful older reply</div>',
+      ].join(""),
+      false,
+    );
+    const document = new DOMParser().parseFromString(email.source, "text/html");
+    const details = document.querySelector("details.dakia-quoted-history");
+
+    expect(details).not.toBeNull();
+    expect(details?.textContent).toContain("Meaningful older reply");
+    expect(
+      document.body.textContent?.replace(details?.textContent ?? "", ""),
+    ).not.toContain("Meaningful older reply");
+  });
+
+  it("collapses adjacent provider markers as one history chain", () => {
+    const email = buildEmailDocument(
+      [
+        "<p>Fresh</p>",
+        '<div class="gmail_quote">On Monday, Pat wrote:</div>',
+        '<div class="freshdesk_quote">First older reply</div>',
+        '<div class="yahoo_quoted">Second older reply</div>',
+        "<p>Authored footer</p>",
+      ].join(""),
+      false,
+    );
+    const document = new DOMParser().parseFromString(email.source, "text/html");
+    const disclosures = document.querySelectorAll(
+      "details.dakia-quoted-history",
+    );
+    const details = disclosures[0];
+    const visible =
+      document.body.textContent?.replace(details?.textContent ?? "", "") ?? "";
+
+    expect(disclosures).toHaveLength(1);
+    expect(details?.textContent).toContain("On Monday, Pat wrote:");
+    expect(details?.textContent).toContain("First older reply");
+    expect(details?.textContent).toContain("Second older reply");
+    expect(visible).not.toContain("wrote:");
+    expect(visible).not.toContain("older reply");
+    expect(visible).toContain("Fresh");
+    expect(visible).toContain("Authored footer");
   });
 
   it("moves an adjacent wrote citation into the collapsed history", () => {
@@ -254,6 +338,64 @@ describe("HTML email appearance", () => {
     expect(
       document.body.querySelector(":scope > [name='messageReplySection']"),
     ).toBeNull();
+  });
+
+  it("collapses a Freshdesk mixed-provider quote without hiding the latest reply", () => {
+    const email = buildEmailDocument(freshdeskReplySection, false);
+    const document = new DOMParser().parseFromString(email.source, "text/html");
+    const disclosures = document.querySelectorAll(
+      "details.dakia-quoted-history",
+    );
+
+    expect(disclosures).toHaveLength(1);
+    const details = disclosures[0];
+    expect(details.hasAttribute("open")).toBe(false);
+
+    const visible =
+      document.body.textContent?.replace(details.textContent ?? "", "") ?? "";
+    expect(visible).toContain("Good afternoon, Customer");
+    expect(visible).toContain("Thank you for letting us know.");
+    expect(visible).toContain("Support Agent");
+    expect(visible).not.toContain("Please cancel the earlier request.");
+    expect(visible).not.toContain("Earlier support reply.");
+    expect(visible).not.toContain("Oldest customer request.");
+
+    expect(details.textContent).toContain("Customer <customer@example.test>");
+    expect(details.textContent).toContain("Please cancel the earlier request.");
+    expect(details.textContent).toContain("Earlier support reply.");
+    expect(details.textContent).toContain("Oldest customer request.");
+  });
+
+  it("expands, collapses, and re-expands a Freshdesk quote", () => {
+    render(
+      <HtmlMessage
+        html={freshdeskReplySection}
+        title="Freshdesk history sizing"
+        showHistoryLabel="Show history"
+        hideHistoryLabel="Hide history"
+      />,
+    );
+
+    const message = screen.getByRole("document", {
+      name: "Freshdesk history sizing",
+    });
+    const root = renderedEmailRoot(message);
+    const details = root?.querySelector<HTMLDetailsElement>(
+      "details.dakia-quoted-history",
+    );
+    expect(details).not.toBeNull();
+    if (!details) return;
+
+    expect(details.open).toBe(false);
+    expect(root?.textContent).toContain("Thank you for letting us know.");
+    for (let cycle = 0; cycle < 2; cycle += 1) {
+      fireEvent.click(details.querySelector("summary")!);
+      expect(details.open).toBe(true);
+      expect(details.textContent).toContain("Oldest customer request.");
+
+      fireEvent.click(details.querySelector("summary")!);
+      expect(details.open).toBe(false);
+    }
   });
 
   it("does not show history for an empty Apple Mail reply section", () => {
