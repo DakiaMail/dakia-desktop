@@ -25,6 +25,12 @@ const mocks = vi.hoisted(() => {
   > = [];
   const hydratedHandlers: Array<() => void> = [];
   const nativeMenuHandlers: Array<(action: string) => void> = [];
+  const notificationActionHandlers: Array<
+    (extra: Record<string, unknown>) => void | Promise<void>
+  > = [];
+  const desktopNotificationActionHandlers: Array<
+    (extra: Record<string, unknown>) => void | Promise<void>
+  > = [];
   const accountRemovedHandlers: Array<(event: { accountId: string }) => void> =
     [];
   const accountUpdatedHandlers: Array<(account: Account) => void> = [];
@@ -70,10 +76,14 @@ const mocks = vi.hoisted(() => {
       accounts: vi.fn(async () => [account]),
       classifyPending: vi.fn(async () => 0),
       configureTray: vi.fn(async () => undefined),
-      content: vi.fn(async (): Promise<import("./types").MessageContent> => ({
-        body_text: "Message body",
-        attachments: [],
-      })),
+      content: vi.fn(
+        async (
+          _messageId: string,
+        ): Promise<import("./types").MessageContent> => ({
+          body_text: "Message body",
+          attachments: [],
+        }),
+      ),
       mailRebuildStatus: vi.fn(async () => []),
       recordNotificationDelivered: vi.fn(async () => undefined),
       search: vi.fn(async () => ({
@@ -82,6 +92,7 @@ const mocks = vi.hoisted(() => {
       })),
       searchRemote: vi.fn(async () => []),
       setRead: vi.fn(async () => undefined),
+      setStarred: vi.fn(async () => undefined),
       starredCount: vi.fn(async () => 0),
       startRealtimeSync: vi.fn(async () => undefined),
       sync: vi.fn(async () => ({ syncedCount: 0, newMessages: [] })),
@@ -122,6 +133,24 @@ const mocks = vi.hoisted(() => {
     rebuildProgressHandlers,
     hydratedHandlers,
     nativeMenuHandlers,
+    notificationActionHandlers,
+    desktopNotificationActionHandlers,
+    onNotificationAction: vi.fn(
+      async (
+        handler: (extra: Record<string, unknown>) => void | Promise<void>,
+      ) => {
+        notificationActionHandlers.push(handler);
+        return unlisten;
+      },
+    ),
+    onDesktopNotificationAction: vi.fn(
+      async (
+        handler: (extra: Record<string, unknown>) => void | Promise<void>,
+      ) => {
+        desktopNotificationActionHandlers.push(handler);
+        return unlisten;
+      },
+    ),
     onMailRebuildProgress: vi.fn(
       async (handler: (progress: MailRebuildProgress) => void) => {
         rebuildProgressHandlers.push(handler);
@@ -157,7 +186,7 @@ vi.mock("./nativeFeedback", () => ({
 }));
 
 vi.mock("./notifications", () => ({
-  onNotificationAction: mocks.noopListener,
+  onNotificationAction: mocks.onNotificationAction,
   readNotificationSettings: () => ({
     enabled: true,
     soundEnabled: true,
@@ -176,7 +205,7 @@ vi.mock("./nativeWindows", () => ({
   onMailIndexRebuilt: mocks.noopListener,
   onMailRebuildProgress: mocks.onMailRebuildProgress,
   onMailSyncState: mocks.noopListener,
-  onDesktopNotificationAction: mocks.noopListener,
+  onDesktopNotificationAction: mocks.onDesktopNotificationAction,
   onNativeMenuAction: mocks.onNativeMenuAction,
   onNotificationSettingsChanged: mocks.noopListener,
   onSettingsChanged: mocks.noopListener,
@@ -197,6 +226,8 @@ describe("App read state", () => {
     mocks.rebuildProgressHandlers.length = 0;
     mocks.hydratedHandlers.length = 0;
     mocks.nativeMenuHandlers.length = 0;
+    mocks.notificationActionHandlers.length = 0;
+    mocks.desktopNotificationActionHandlers.length = 0;
     mocks.accountRemovedHandlers.length = 0;
     mocks.accountUpdatedHandlers.length = 0;
     localStorage.clear();
@@ -293,6 +324,102 @@ describe("App read state", () => {
 
     await waitFor(() =>
       expect(mocks.api.setRead).toHaveBeenCalledWith("message-1", true),
+    );
+  });
+
+  it("opens a conversation with its newest message focused", async () => {
+    const older = {
+      ...mocks.message,
+      id: "message-older",
+      uid: 1,
+      received_at: "2026-07-19T09:00:00Z",
+      snippet: "Earlier preview",
+    };
+    const latest = {
+      ...mocks.message,
+      id: "message-latest",
+      uid: 2,
+      received_at: "2026-07-19T10:00:00Z",
+      snippet: "Newest preview",
+    };
+    mocks.api.search.mockResolvedValue({
+      conversations: groupMessages([latest, older]),
+      nextCursor: null,
+    });
+    mocks.api.content.mockImplementation(async (id: string) => ({
+      body_text: id === latest.id ? "Newest body" : "Earlier body",
+      attachments: [],
+    }));
+
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const row = await screen.findByText("Unread thread");
+    fireEvent.click(row.closest("button")!);
+
+    expect(await screen.findByText("Newest body")).toBeVisible();
+    expect(mocks.api.content).toHaveBeenCalledWith(latest.id);
+    expect(mocks.api.content).not.toHaveBeenCalledWith(older.id);
+  });
+
+  it("focuses the newest thread message when an older notification is opened", async () => {
+    const older = {
+      ...mocks.message,
+      id: "message-notified",
+      uid: 1,
+      received_at: "2026-07-19T09:00:00Z",
+      snippet: "Notified preview",
+    };
+    const latest = {
+      ...mocks.message,
+      id: "message-after-notification",
+      uid: 2,
+      received_at: "2026-07-19T10:00:00Z",
+      snippet: "Newest preview",
+      unsubscribe_kind: "one_click" as const,
+    };
+    mocks.api.search.mockResolvedValue({
+      conversations: groupMessages([latest, older]),
+      nextCursor: null,
+    });
+    mocks.api.content.mockImplementation(async (id: string) => ({
+      body_text: id === latest.id ? "Newest notification body" : "Older body",
+      attachments: [],
+    }));
+
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    await waitFor(() =>
+      expect(mocks.notificationActionHandlers).not.toHaveLength(0),
+    );
+    await act(async () => {
+      await mocks.notificationActionHandlers.at(-1)!({
+        accountId: mocks.account.id,
+        messageId: older.id,
+      });
+    });
+
+    expect(await screen.findByText("Newest notification body")).toBeVisible();
+    expect(mocks.api.content).toHaveBeenCalledWith(latest.id);
+    expect(mocks.api.content).not.toHaveBeenCalledWith(older.id);
+    fireEvent.click(
+      screen
+        .getAllByRole("button", { name: "Star conversation" })
+        .find((element) => element.tagName === "BUTTON")!,
+    );
+    await waitFor(() =>
+      expect(mocks.api.setStarred).toHaveBeenCalledWith(latest.id, true),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Unsubscribe" }));
+    await waitFor(() =>
+      expect(mocks.api.unsubscribe).toHaveBeenCalledWith(latest.id),
     );
   });
 
