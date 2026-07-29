@@ -21,6 +21,7 @@ import {
   isRichTextEmpty,
   plainTextFromRichText,
   richTextFromPlainText,
+  sanitizeRichText,
 } from "./richText";
 
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
@@ -53,7 +54,7 @@ export function Composer({
   const [bcc, setBcc] = useState("");
   const [subject, setSubject] = useState(seed?.subject ?? "");
   const [bodyHtml, setBodyHtml] = useState(() =>
-    richTextFromPlainText(seed?.body ?? ""),
+    sanitizeRichText(seed?.bodyHtml ?? richTextFromPlainText(seed?.body ?? "")),
   );
   const [showCopies, setShowCopies] = useState(Boolean(seed?.cc));
   const [aiLoading, setAiLoading] = useState(false);

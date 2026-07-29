@@ -9,6 +9,7 @@ export type ComposeSeed = {
   cc?: string;
   subject?: string;
   body?: string;
+  bodyHtml?: string;
   inReplyTo?: string;
   references?: string;
   contextMessageIds?: string[];
