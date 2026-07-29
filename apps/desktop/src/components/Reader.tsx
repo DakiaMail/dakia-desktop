@@ -499,6 +499,9 @@ function ThreadMessage({
   const [loadingAttachments, setLoadingAttachments] = useState(false);
   const [saving, setSaving] = useState<string>();
   const [saveStatus, setSaveStatus] = useState<string>();
+  const [exporting, setExporting] = useState(false);
+  const [exportStatus, setExportStatus] = useState<string>();
+  const exportInFlight = useRef(false);
   const [hydrationRequested, setHydrationRequested] = useState(false);
   const [recipientsExpanded, setRecipientsExpanded] = useState(false);
   const summaryDescriptionId = useId();
@@ -565,6 +568,21 @@ function ThreadMessage({
       setSaveStatus(t("attachments.saveError"));
     } finally {
       setSaving(undefined);
+    }
+  };
+  const exportMessage = async () => {
+    if (exportInFlight.current) return;
+    exportInFlight.current = true;
+    setExporting(true);
+    setExportStatus(undefined);
+    try {
+      const path = await api.exportMessage(message.id);
+      setExportStatus(t("reader.exportSuccess", { path }));
+    } catch {
+      setExportStatus(t("reader.exportError"));
+    } finally {
+      exportInFlight.current = false;
+      setExporting(false);
     }
   };
 
@@ -750,6 +768,15 @@ function ThreadMessage({
               {t("actions.forward")}
             </Menu.Item>
             <Menu.Item
+              leftSection={
+                exporting ? <Loader size={16} /> : <IconDownload size={16} />
+              }
+              onClick={() => void exportMessage()}
+              disabled={exporting}
+            >
+              {t("actions.exportMessage")}
+            </Menu.Item>
+            <Menu.Item
               leftSection={<IconArchive size={16} />}
               onClick={onArchive}
               disabled={actionsDisabled}
@@ -798,6 +825,11 @@ function ThreadMessage({
           </ActionIcon>
         </Tooltip>
       </div>
+      {exportStatus ? (
+        <p className="attachment-status" role="status">
+          {exportStatus}
+        </p>
+      ) : null}
       {loadingContent ? (
         <div className="message-body" role="status">
           <Loader size="xs" />{" "}
