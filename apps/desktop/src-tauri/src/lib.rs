@@ -52,6 +52,8 @@ const MESSAGE_HYDRATION_CONCURRENCY: usize = 4;
 const CLASSIFICATION_BATCH_SIZE: usize = 64;
 const CLASSIFICATION_RETRY_DELAYS: [Duration; 2] =
     [Duration::from_millis(100), Duration::from_millis(500)];
+const MAX_EXPORT_FILENAME_BYTES: usize = 255;
+const MAX_DOWNLOAD_COLLISION_SUFFIX_BYTES: usize = " (9999)".len();
 
 struct AppState {
     store: Store,
@@ -1156,6 +1158,51 @@ async fn save_attachment(
 }
 
 #[tauri::command]
+async fn export_message(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    message_id: String,
+) -> Result<String, String> {
+    let initial_message = state
+        .store
+        .message(&message_id)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Message not found".to_owned())?;
+    let account_id = Uuid::parse_str(&initial_message.account_id).map_err(error)?;
+    let _operation = state.account_operations.acquire(account_id).await;
+    let message = state
+        .store
+        .message(&message_id)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Message changed while it was being exported".to_owned())?;
+    if !same_export_identity(&initial_message, &message) {
+        return Err("Message changed while it was being exported".to_owned());
+    }
+    let account = state
+        .store
+        .account(account_id)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Account not found".to_owned())?;
+    let uid = u32::try_from(message.uid).map_err(|_| "Message UID is invalid".to_owned())?;
+    let bytes = MailService::new(state.store.clone())
+        .fetch_raw_message(&account, &message.mailbox, uid)
+        .await
+        .map_err(error)?;
+    save_eml_to_downloads(&app, &message.subject, &bytes).map_err(error)
+}
+
+fn same_export_identity(before: &MailSummary, after: &MailSummary) -> bool {
+    before.account_id == after.account_id
+        && before.mailbox == after.mailbox
+        && before.uid == after.uid
+        && before.message_id == after.message_id
+        && before.received_at == after.received_at
+}
+
+#[tauri::command]
 async fn save_all_attachments(
     app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
@@ -1618,8 +1665,64 @@ fn save_to_downloads(
     bytes: &[u8],
 ) -> anyhow::Result<String> {
     let downloads = app.path().download_dir()?;
-    std::fs::create_dir_all(&downloads)?;
     let filename = dakia_core::mail::safe_attachment_filename(&attachment.filename, 0);
+    Ok(save_private_download(&downloads, &filename, bytes)?
+        .to_string_lossy()
+        .into_owned())
+}
+
+fn save_eml_to_downloads(
+    app: &tauri::AppHandle,
+    subject: &str,
+    bytes: &[u8],
+) -> anyhow::Result<String> {
+    let downloads = app.path().download_dir()?;
+    Ok(
+        save_private_download(&downloads, &eml_export_filename(subject), bytes)?
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+fn eml_export_filename(subject: &str) -> String {
+    let sanitized = dakia_core::mail::safe_attachment_filename(subject, 0);
+    let fallback = subject
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .all(|character| {
+            character.is_control()
+                || character.is_whitespace()
+                || matches!(character, '.' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
+        });
+    let stem = if fallback { "message" } else { &sanitized };
+    format!("{}.eml", truncate_utf8_filename_stem(stem))
+}
+
+fn truncate_utf8_filename_stem(stem: &str) -> &str {
+    let maximum_stem_bytes =
+        MAX_EXPORT_FILENAME_BYTES - ".eml".len() - MAX_DOWNLOAD_COLLISION_SUFFIX_BYTES;
+    if stem.len() <= maximum_stem_bytes {
+        return stem;
+    }
+    let mut end = 0;
+    for (index, character) in stem.char_indices() {
+        let next = index + character.len_utf8();
+        if next > maximum_stem_bytes {
+            break;
+        }
+        end = next;
+    }
+    &stem[..end]
+}
+
+fn save_private_download(
+    downloads: &Path,
+    filename: &str,
+    bytes: &[u8],
+) -> anyhow::Result<PathBuf> {
+    std::fs::create_dir_all(downloads)?;
     for counter in 0..10_000 {
         let candidate = downloads.join(download_name(&filename, counter));
         let mut options = OpenOptions::new();
@@ -1633,8 +1736,13 @@ fn save_to_downloads(
                     return Err(write_error.into());
                 }
                 #[cfg(unix)]
-                std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o600))?;
-                return Ok(candidate.to_string_lossy().into_owned());
+                if let Err(permission_error) =
+                    std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o600))
+                {
+                    let _ = std::fs::remove_file(&candidate);
+                    return Err(permission_error.into());
+                }
+                return Ok(candidate);
             }
             Err(open_error) if open_error.kind() == ErrorKind::AlreadyExists => continue,
             Err(open_error) => return Err(open_error.into()),
@@ -1658,6 +1766,110 @@ fn download_name(filename: &str, counter: usize) -> String {
     match extension {
         Some(extension) if !extension.is_empty() => format!("{stem} ({counter}).{extension}"),
         _ => format!("{stem} ({counter})"),
+    }
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::*;
+    use chrono::Utc;
+    use tempfile::tempdir;
+
+    #[test]
+    fn eml_export_filename_sanitizes_subjects_and_has_a_safe_fallback() {
+        assert_eq!(
+            eml_export_filename("Quarterly report: Tallinn"),
+            "Quarterly report Tallinn.eml"
+        );
+        assert_eq!(eml_export_filename("../../\r\n"), "message.eml");
+    }
+
+    #[test]
+    fn eml_export_filename_stays_within_the_filesystem_byte_limit() {
+        let filename = eml_export_filename(&"€".repeat(180));
+
+        assert!(filename.len() <= MAX_EXPORT_FILENAME_BYTES);
+        assert!(filename.ends_with(".eml"));
+        assert_eq!(filename.trim_end_matches(".eml").chars().count(), 81);
+        assert!(
+            download_name(&filename, 9999).len() <= MAX_EXPORT_FILENAME_BYTES,
+            "the longest collision suffix must still fit"
+        );
+    }
+
+    #[test]
+    fn private_download_keeps_bytes_and_chooses_a_unique_eml_name() {
+        let directory = tempdir().expect("temporary Downloads directory");
+        let raw = b"From: sender@example.test\r\nSubject: folded\r\n value\r\n\r\nopaque\0\xff";
+        let first =
+            save_private_download(directory.path(), "status.eml", raw).expect("first export");
+        let second = save_private_download(directory.path(), "status.eml", b"second")
+            .expect("second export");
+
+        assert_eq!(
+            first.file_name().and_then(|name| name.to_str()),
+            Some("status.eml")
+        );
+        assert_eq!(
+            second.file_name().and_then(|name| name.to_str()),
+            Some("status (1).eml")
+        );
+        assert_eq!(std::fs::read(&first).expect("first export bytes"), raw);
+        assert_eq!(
+            std::fs::read(&second).expect("second export bytes"),
+            b"second"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::metadata(&first)
+                .expect("first export metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn export_identity_rejects_uid_reuse_after_a_mailbox_epoch_change() {
+        let before = MailSummary {
+            id: "message".into(),
+            account_id: Uuid::nil().to_string(),
+            mailbox: "INBOX".into(),
+            uid: 42,
+            message_id: Some("<old@example.test>".into()),
+            in_reply_to: None,
+            reference_ids: None,
+            thread_id: "thread".into(),
+            subject: "Old".into(),
+            from_name: None,
+            from_address: "old@example.test".into(),
+            to_addresses: "me@example.test".into(),
+            cc_addresses: String::new(),
+            bcc_addresses: String::new(),
+            reply_to_addresses: String::new(),
+            received_at: Utc::now(),
+            snippet: String::new(),
+            body_text: String::new(),
+            body_html: None,
+            content_state: "headers_only".into(),
+            unsubscribe_kind: None,
+            unsubscribe_url: None,
+            is_read: false,
+            is_flagged: false,
+            has_attachments: false,
+            category: None,
+            classification_confidence: None,
+            classification_source: None,
+            classification_signals: String::new(),
+            attachments: vec![],
+        };
+        let mut reused_uid = before.clone();
+        reused_uid.message_id = Some("<new@example.test>".into());
+        reused_uid.received_at += chrono::Duration::seconds(1);
+
+        assert!(same_export_identity(&before, &before));
+        assert!(!same_export_identity(&before, &reused_uid));
     }
 }
 
@@ -3268,6 +3480,7 @@ pub fn run() {
             remove_terminal_command,
             message_attachments,
             save_attachment,
+            export_message,
             save_all_attachments,
             forward_attachments,
             read_dropped_files,

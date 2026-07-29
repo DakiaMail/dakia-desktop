@@ -93,6 +93,9 @@ describe("Reader unsubscribe action", () => {
       config: {},
     });
     vi.spyOn(api, "cancelTranslationModelInstall").mockResolvedValue();
+    vi.spyOn(api, "exportMessage").mockResolvedValue(
+      "/Users/alex/Downloads/weekly-notes.eml",
+    );
   });
 
   it("keeps AI controls and results hidden even when connected", () => {
@@ -185,6 +188,79 @@ describe("Reader unsubscribe action", () => {
     fireEvent.click(await screen.findByRole("menuitem", { name: "Forward" }));
     expect(props.onForward).toHaveBeenCalledOnce();
     expect(props.onForward.mock.calls[0]).toEqual([]);
+  });
+
+  it("exports the selected message once and reports the saved path", async () => {
+    render(
+      <MantineProvider>
+        <Reader {...props} message={message} />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Export message (.eml)" }),
+    );
+
+    await waitFor(() =>
+      expect(api.exportMessage).toHaveBeenCalledWith("message-1"),
+    );
+    expect(
+      await screen.findByText(
+        "Message exported to /Users/alex/Downloads/weekly-notes.eml",
+      ),
+    ).toBeVisible();
+  });
+
+  it("prevents a second export while the current export is pending", async () => {
+    let finishExport: ((path: string) => void) | undefined;
+    vi.mocked(api.exportMessage).mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          finishExport = resolve;
+        }),
+    );
+    render(
+      <MantineProvider>
+        <Reader {...props} message={message} />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    const pendingExport = await screen.findByRole("menuitem", {
+      name: "Export message (.eml)",
+    });
+    fireEvent.click(pendingExport);
+    await waitFor(() => expect(pendingExport).toBeDisabled());
+    expect(pendingExport).toBeDisabled();
+    fireEvent.click(pendingExport);
+    expect(api.exportMessage).toHaveBeenCalledOnce();
+
+    finishExport?.("/Users/alex/Downloads/weekly-notes.eml");
+    expect(
+      await screen.findByText(
+        "Message exported to /Users/alex/Downloads/weekly-notes.eml",
+      ),
+    ).toBeVisible();
+  });
+
+  it("reports an export failure without claiming the message was saved", async () => {
+    vi.mocked(api.exportMessage).mockRejectedValueOnce(new Error("cancelled"));
+    render(
+      <MantineProvider>
+        <Reader {...props} message={message} />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Export message (.eml)" }),
+    );
+
+    expect(
+      await screen.findByText("Could not export this message."),
+    ).toBeVisible();
+    expect(screen.queryByText(/Message exported to/)).not.toBeInTheDocument();
   });
 
   it("runs archive from the reader toolbar", () => {
