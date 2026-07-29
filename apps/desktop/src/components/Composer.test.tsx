@@ -185,6 +185,115 @@ describe("Composer send feedback", () => {
     );
   });
 
+  it("preserves edited Thunderbird quote markers and their plain-text alternative", () => {
+    const onSend = vi.fn();
+    const bodyHtml = [
+      "<p><br></p>",
+      '<div class="moz-cite-prefix">On July 19, Mara wrote:</div>',
+      '<blockquote type="cite">Original body</blockquote>',
+    ].join("");
+    render(
+      <Composer
+        {...props}
+        seed={{
+          to: "sender@example.com",
+          body: "Plain seed fallback",
+          bodyHtml,
+        }}
+        onSend={onSend}
+        sendState="idle"
+      />,
+    );
+
+    const editor = screen.getByLabelText("Write your message…");
+    expect(editor.innerHTML).toBe(bodyHtml);
+    editor.innerHTML = `<p>Authored text</p>${bodyHtml}`;
+    fireEvent.input(editor);
+    fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
+
+    expect(onSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body_html: expect.stringContaining('class="moz-cite-prefix"'),
+      }),
+    );
+    expect(onSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body_html: expect.stringContaining(
+          '<blockquote type="cite">Original body</blockquote>',
+        ),
+        body_text: expect.stringContaining("Authored text"),
+      }),
+    );
+    expect(onSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body_text: expect.stringContaining("On July 19, Mara wrote:"),
+      }),
+    );
+    expect(onSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body_text: expect.stringContaining("> Original body"),
+      }),
+    );
+  });
+
+  it("sanitizes a hostile seeded reply before rendering and sends that unchanged sanitized HTML", () => {
+    const onSend = vi.fn();
+    const bodyHtml = [
+      "<p>Valid <strong>text</strong></p>",
+      '<div class="moz-cite-prefix" onclick="alert(\'xss\')">On July 19, Mara wrote:</div>',
+      '<blockquote type="cite" onmouseover="alert(\'xss\')">Quoted plain text</blockquote>',
+      "<script>alert('xss')</script>",
+      '<img src="https://example.com/tracker.png" onerror="alert(\'xss\')">',
+      "<p onfocus=\"alert('xss')\">Safe body text</p>",
+      "<a href=\"javascript:alert('xss')\">Dangerous link</a>",
+    ].join("");
+    const sanitizedBodyHtml = [
+      "<p>Valid <strong>text</strong></p>",
+      '<div class="moz-cite-prefix">On July 19, Mara wrote:</div>',
+      '<blockquote type="cite">Quoted plain text</blockquote>',
+      "<p>Safe body text</p>",
+      "Dangerous link",
+    ].join("");
+
+    render(
+      <Composer
+        {...props}
+        seed={{ to: "sender@example.com", bodyHtml }}
+        onSend={onSend}
+        sendState="idle"
+      />,
+    );
+
+    const editor = screen.getByLabelText("Write your message…");
+    expect(editor.innerHTML).toBe(sanitizedBodyHtml);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
+
+    expect(onSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body_html: sanitizedBodyHtml,
+        body_text:
+          "Valid text\nOn July 19, Mara wrote:\n> Quoted plain text\nSafe body text\nDangerous link",
+      }),
+    );
+  });
+
+  it("keeps an empty bodyHtml seed instead of falling back to its plain-text body", () => {
+    render(
+      <Composer
+        {...props}
+        seed={{
+          to: "sender@example.com",
+          body: "Plain seed fallback",
+          bodyHtml: "",
+        }}
+        sendState="idle"
+      />,
+    );
+
+    expect(screen.getByLabelText("Write your message…").innerHTML).toBe("");
+  });
+
   it("initializes and sends Reply All Cc recipients from the compose seed", () => {
     const onSend = vi.fn();
     render(

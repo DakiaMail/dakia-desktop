@@ -127,8 +127,10 @@ export const en = {
       translation: "English translation",
       summary: "Summary",
       replyPrefix: "Re:",
+      replyCitation: "On {{date}}, {{sender}} wrote:",
       forwardPrefix: "Fwd:",
       date: "Date",
+      replyErrorTitle: "Could not reply to message",
       forwardErrorTitle: "Could not forward message",
       loadingContent: "Fetching message…",
       loadContentError:
