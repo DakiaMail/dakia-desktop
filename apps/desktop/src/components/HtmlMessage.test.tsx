@@ -210,6 +210,28 @@ describe("HTML email appearance", () => {
     ).not.toContain("wrote:");
   });
 
+  it("moves an adjacent Thunderbird citation into the collapsed history", () => {
+    const email = buildEmailDocument(
+      [
+        "<p>Current reply</p>",
+        '<div class="moz-cite-prefix">On 19 Feb 2026 at 21:00 +0200, Romario Verbran &lt;romario.verbran@gmail.com&gt;, wrote:</div>',
+        '<blockquote type="cite"><p>Earlier message</p></blockquote>',
+      ].join(""),
+      false,
+    );
+    const document = new DOMParser().parseFromString(email.source, "text/html");
+    const details = document.querySelector("details.dakia-quoted-history");
+
+    expect(document.body.firstElementChild?.textContent).toBe("Current reply");
+    expect(details?.textContent).toContain(
+      "On 19 Feb 2026 at 21:00 +0200, Romario Verbran",
+    );
+    expect(details?.textContent).toContain("Earlier message");
+    expect(
+      document.body.textContent?.replace(details?.textContent ?? "", ""),
+    ).not.toContain("wrote:");
+  });
+
   it("collapses Apple Mail reply sections with their attribution", () => {
     const email = buildEmailDocument(
       [
