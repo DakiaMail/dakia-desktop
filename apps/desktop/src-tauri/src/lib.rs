@@ -1091,7 +1091,7 @@ async fn message_content(
     if let Some((body_text, body_html)) =
         state.store.starred_body(&message_id).await.map_err(error)?
     {
-        return Ok(MessageContent {
+        let content = MessageContent {
             body_text,
             body_html,
             unsubscribe_kind: state
@@ -1108,6 +1108,21 @@ async fn message_content(
                 .into_iter()
                 .filter(is_downloadable_attachment)
                 .collect(),
+        };
+        if !looks_like_misclassified_text_body(&content) {
+            return Ok(content);
+        }
+        let message = refetch_and_persist_message(state.inner(), &message_id).await?;
+        return Ok(MessageContent {
+            body_text: message.body_text,
+            body_html: message.body_html,
+            unsubscribe_kind: message.unsubscribe_kind,
+            attachments: message
+                .attachments
+                .into_iter()
+                .map(|item| item.attachment)
+                .filter(is_downloadable_attachment)
+                .collect(),
         });
     }
     if let Some(cached) = state
@@ -1116,7 +1131,7 @@ async fn message_content(
         .await
         .map_err(error)?
     {
-        return Ok(MessageContent {
+        let content = MessageContent {
             body_text: cached.body_text,
             body_html: cached.body_html,
             unsubscribe_kind: cached.unsubscribe_kind,
@@ -1125,7 +1140,10 @@ async fn message_content(
                 .into_iter()
                 .filter(is_downloadable_attachment)
                 .collect(),
-        });
+        };
+        if !looks_like_misclassified_text_body(&content) {
+            return Ok(content);
+        }
     }
     let message = fetch_remote_message(state.inner(), &message_id).await?;
     let cached = CachedMessageContent {
@@ -1155,6 +1173,69 @@ async fn message_content(
         unsubscribe_kind: cached.unsubscribe_kind,
         attachments: cached.attachments,
     })
+}
+
+fn looks_like_misclassified_text_body(content: &MessageContent) -> bool {
+    content.body_text.trim().is_empty()
+        && content
+            .body_html
+            .as_deref()
+            .is_none_or(|html| html.trim().is_empty())
+        && content.attachments.iter().any(|attachment| {
+            attachment.is_inline
+                && attachment.filename == "attachment"
+                && matches!(attachment.mime_type.as_str(), "text/plain" | "text/html")
+        })
+}
+
+#[cfg(test)]
+mod message_content_repair_tests {
+    use super::*;
+    use dakia_core::AttachmentPresentation;
+
+    fn attachment(filename: &str, mime_type: &str, is_inline: bool) -> Attachment {
+        Attachment {
+            id: "message-1:0".into(),
+            message_id: "message-1".into(),
+            filename: filename.into(),
+            mime_type: mime_type.into(),
+            size_bytes: 42,
+            is_inline,
+            presentation: AttachmentPresentation::Downloadable,
+            is_potentially_unsafe: false,
+        }
+    }
+
+    #[test]
+    fn refetches_empty_content_with_phantom_inline_text_attachments() {
+        let content = MessageContent {
+            body_text: String::new(),
+            body_html: None,
+            unsubscribe_kind: None,
+            attachments: vec![
+                attachment("attachment", "text/plain", true),
+                attachment("attachment", "text/html", true),
+            ],
+        };
+
+        assert!(looks_like_misclassified_text_body(&content));
+    }
+
+    #[test]
+    fn preserves_legitimate_empty_messages_and_named_text_attachments() {
+        let empty = MessageContent {
+            body_text: String::new(),
+            body_html: None,
+            unsubscribe_kind: None,
+            attachments: Vec::new(),
+        };
+        let named_attachment = MessageContent {
+            attachments: vec![attachment("notes.txt", "text/plain", true)],
+            ..empty
+        };
+
+        assert!(!looks_like_misclassified_text_body(&named_attachment));
+    }
 }
 
 #[tauri::command]
@@ -1583,6 +1664,55 @@ async fn fetch_remote_message(
         .fetch_message(&account, &summary.mailbox, summary.uid as u32)
         .await
         .map_err(error)
+}
+
+async fn refetch_and_persist_message(
+    state: &Arc<AppState>,
+    message_id: &str,
+) -> Result<MailSummary, String> {
+    let initial_summary = state
+        .store
+        .messages_by_ids(&[message_id.to_owned()])
+        .await
+        .map_err(error)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "Message not found".to_owned())?;
+    let account_id = Uuid::parse_str(&initial_summary.account_id).map_err(error)?;
+    let _operation = state.account_operations.acquire(account_id).await;
+    let summary = state
+        .store
+        .messages_by_ids(&[message_id.to_owned()])
+        .await
+        .map_err(error)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "Message changed while it was being repaired".to_owned())?;
+    if summary.account_id != initial_summary.account_id {
+        return Err("Message changed while it was being repaired".to_owned());
+    }
+    let account = state
+        .store
+        .account(account_id)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Account not found".to_owned())?;
+    let message = MailService::new(state.store.clone())
+        .fetch_message(&account, &summary.mailbox, summary.uid as u32)
+        .await
+        .map_err(error)?;
+    let content = CachedMessageContent {
+        body_text: message.body_text.clone(),
+        body_html: message.body_html.clone(),
+        unsubscribe_kind: message.unsubscribe_kind.clone(),
+        attachments: message
+            .attachments
+            .iter()
+            .map(|item| item.attachment.clone())
+            .collect(),
+    };
+    persist_foreground_message_content(&state.store, &message, &content).await?;
+    Ok(message)
 }
 
 struct OpenDroppedFile {

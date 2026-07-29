@@ -2755,16 +2755,29 @@ fn has_attachment(mail: &mailparse::ParsedMail<'_>) -> bool {
 
 fn is_attachment_part(mail: &mailparse::ParsedMail<'_>) -> bool {
     let disposition = mail.get_content_disposition();
-    let is_unnamed_text_body = matches!(
+    let has_filename_parameter =
+        disposition.params.contains_key("filename") || mail.ctype.params.contains_key("name");
+    let has_nonempty_filename = disposition
+        .params
+        .get("filename")
+        .is_some_and(|value| !value.trim().is_empty())
+        || mail
+            .ctype
+            .params
+            .get("name")
+            .is_some_and(|value| !value.trim().is_empty());
+    let is_text_body = matches!(
         mail.ctype.mimetype.to_ascii_lowercase().as_str(),
         "text/plain" | "text/html"
-    ) && !disposition.params.contains_key("filename")
-        && !mail.ctype.params.contains_key("name")
-        && mail.headers.get_first_value("Content-ID").is_none();
+    );
+    let is_unnamed_text_body = is_text_body && !has_nonempty_filename;
     disposition.disposition == mailparse::DispositionType::Attachment
-        || disposition.params.contains_key("filename")
-        || mail.ctype.params.contains_key("name")
-        || mail.headers.get_first_value("Content-ID").is_some()
+        || if is_text_body {
+            has_nonempty_filename
+        } else {
+            has_filename_parameter
+        }
+        || (mail.headers.get_first_value("Content-ID").is_some() && !is_unnamed_text_body)
         || (mail
             .headers
             .get_first_value("Content-Disposition")
@@ -3077,6 +3090,52 @@ mod tests {
             assert_eq!(message.bcc_addresses, "Hidden <hidden@example.test>");
             assert_eq!(message.reply_to_addresses, "Replies <replies@example.test>");
         }
+    }
+
+    #[tokio::test]
+    async fn linkedin_content_id_alternatives_are_message_bodies() {
+        let account = test_account();
+        let raw = concat!(
+            "Date: Wed, 29 Jul 2026 20:31:36 +0000\r\n",
+            "From: Example Person via LinkedIn <messaging-digest-noreply@linkedin.com>\r\n",
+            "To: Reader <reader@example.test>\r\n",
+            "Subject: Example Person just messaged you\r\n",
+            "MIME-Version: 1.0\r\n",
+            "Content-Type: multipart/alternative; boundary=linkedin-body\r\n",
+            "\r\n",
+            "--linkedin-body\r\n",
+            "Content-Type: text/plain; charset=utf-8\r\n",
+            "Content-Disposition: inline; filename=\"\"\r\n",
+            "Content-ID: <linkedin-plain-body>\r\n",
+            "\r\n",
+            "You have a new message from Example Person.\r\n",
+            "--linkedin-body\r\n",
+            "Content-Type: text/html; charset=utf-8; name=\"\"\r\n",
+            "Content-Disposition: inline\r\n",
+            "Content-ID: <linkedin-html-body>\r\n",
+            "\r\n",
+            "<p>You have a new message from <strong>Example Person</strong>.</p>\r\n",
+            "--linkedin-body--\r\n"
+        );
+
+        let message = parse_message(&account, "INBOX", 1, &[], raw.as_bytes(), None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            message.body_text.trim(),
+            "You have a new message from Example Person."
+        );
+        assert!(message
+            .body_html
+            .as_deref()
+            .is_some_and(|html| html.contains("<strong>Example Person</strong>")));
+        assert_eq!(
+            message.snippet,
+            "You have a new message from Example Person."
+        );
+        assert!(!message.has_attachments);
+        assert!(message.attachments.is_empty());
     }
 
     #[test]
@@ -3811,12 +3870,14 @@ For you, Alex =E2=80=94 related to your saved topic."
             "\r\n",
             "--body\r\n",
             "Content-Type: text/plain; charset=utf-8\r\n",
-            "Content-Disposition: inline\r\n",
+            "Content-Disposition: inline; filename=\"\"\r\n",
+            "Content-ID: <linkedin-plain-body>\r\n",
             "\r\n",
             "Plain sent body\r\n",
             "--body\r\n",
-            "Content-Type: text/html; charset=utf-8\r\n",
+            "Content-Type: text/html; charset=utf-8; name=\"\"\r\n",
             "Content-Disposition: inline\r\n",
+            "Content-ID: <linkedin-html-body>\r\n",
             "\r\n",
             "<p>HTML sent body</p>\r\n",
             "--body--\r\n"
@@ -3848,6 +3909,21 @@ For you, Alex =E2=80=94 related to your saved topic."
         let attachments = extract_attachments(&parsed, "message-1").unwrap();
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0].attachment.filename, "notes.txt");
+    }
+
+    #[test]
+    fn empty_non_text_name_parameter_remains_an_attachment() {
+        let raw = concat!(
+            "Content-Type: application/pdf; name=\"\"\r\n",
+            "\r\n",
+            "%PDF"
+        );
+        let parsed = mailparse::parse_mail(raw.as_bytes()).unwrap();
+
+        let attachments = extract_attachments(&parsed, "message-1").unwrap();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].attachment.filename, "attachment");
+        assert_eq!(attachments[0].attachment.mime_type, "application/pdf");
     }
 
     #[test]
