@@ -142,6 +142,8 @@ const desktopApi = {
     invoke<string>("save_attachment", { messageId, attachmentId }),
   saveAllAttachments: (messageId: string) =>
     invoke<string[]>("save_all_attachments", { messageId }),
+  exportMessage: (messageId: string) =>
+    invoke<string>("export_message", { messageId }),
   forwardAttachments: (messageId: string) =>
     invoke<ComposeAttachment[]>("forward_attachments", { messageId }),
   readDroppedFiles: (receipt: string) =>
@@ -529,6 +531,7 @@ const demoApi: typeof desktopApi = {
     messageId === "demo-2"
       ? ["~/Downloads/field-notes.pdf"]
       : ["~/Downloads/invoice-0726.pdf"],
+  exportMessage: async (messageId) => `~/Downloads/${messageId}.eml`,
   forwardAttachments: async () => [],
   readDroppedFiles: async () => {
     throw new Error("Native file drop support is unavailable in the web demo");
