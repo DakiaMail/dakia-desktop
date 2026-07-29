@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import appleMailReplySection from "../test/fixtures/apple-mail-reply-section.html?raw";
+import outlookWordReplySection from "../test/fixtures/outlook-word-reply-section.html?raw";
 import { buildEmailDocument, HtmlMessage } from "./HtmlMessage";
 
 function renderedEmailRoot(message: HTMLElement) {
@@ -283,6 +284,134 @@ describe("HTML email appearance", () => {
     expect(details?.textContent).not.toContain("Authored footer");
     expect(document.body.textContent).toContain("Authored footer");
     expect(document.body.firstElementChild?.textContent).toBe("Fresh");
+  });
+
+  it("collapses Word-generated Outlook history from its reply header through the quoted chain", () => {
+    const email = buildEmailDocument(outlookWordReplySection, false);
+    const document = new DOMParser().parseFromString(email.source, "text/html");
+    const disclosures = document.querySelectorAll("details.dakia-quoted-history");
+    expect(disclosures).toHaveLength(1);
+    const details = disclosures[0];
+    expect(details.hasAttribute("open")).toBe(false);
+
+    const visible =
+      document.body.textContent?.replace(details.textContent ?? "", "") ?? "";
+    expect(visible).toContain("uus vastus, mis peab nähtavaks jääma");
+    expect(visible).toContain("Juhan Tamm");
+    expect(visible).not.toContain("From:");
+    expect(visible).not.toContain("External email");
+    expect(visible).not.toContain("wrote:");
+
+    expect(details.textContent).toContain("From: Marten Mets");
+    expect(details.textContent).toContain("Sent: Friday, July 24, 2026");
+    expect(details.textContent).toContain("External email.");
+    expect(details.textContent).toContain("varasema päeva sõnum, mis kuulub ajalukku");
+    expect(details.textContent).toContain("wrote:");
+    expect(details.textContent).toContain("-----Original Message-----");
+    expect(details.textContent).toContain("Kõige vanem sõnum");
+    expect(
+      details.querySelector("[name='messageBodySection']"),
+    ).not.toBeNull();
+    expect(
+      details.querySelector("[name='messageSignatureSection']"),
+    ).not.toBeNull();
+    expect(
+      details.querySelector("[name='messageReplySection']"),
+    ).not.toBeNull();
+  });
+
+  it("expands and collapses Word-generated Outlook history repeatedly", () => {
+    render(
+      <HtmlMessage
+        html={outlookWordReplySection}
+        title="Outlook history sizing"
+        showHistoryLabel="Show history"
+        hideHistoryLabel="Hide history"
+      />,
+    );
+
+    const message = screen.getByRole("document", {
+      name: "Outlook history sizing",
+    });
+    const root = renderedEmailRoot(message);
+    expect(root?.textContent).toContain("uus vastus, mis peab nähtavaks jääma");
+    const details = root?.querySelector<HTMLDetailsElement>(
+      "details.dakia-quoted-history",
+    );
+    expect(details).not.toBeNull();
+    if (!details) return;
+    expect(details.open).toBe(false);
+
+    for (let cycle = 0; cycle < 2; cycle += 1) {
+      fireEvent.click(details.querySelector("summary")!);
+      expect(details.open).toBe(true);
+      expect(details.textContent).toContain("Kõige vanem sõnum");
+
+      fireEvent.click(details.querySelector("summary")!);
+      expect(details.open).toBe(false);
+    }
+  });
+
+  it("does not collapse a Word reply header that has no quoted content after it", () => {
+    const email = buildEmailDocument(
+      [
+        "<p>Reply</p>",
+        '<div><div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0cm 0cm 0cm">',
+        "<p><b>From:</b> Old Sender &lt;old@example.test&gt;<br>",
+        "<b>Sent:</b> Friday, July 24, 2026 10:24 PM<br>",
+        "<b>To:</b> New Sender<br>",
+        "<b>Subject:</b> RE: Empty quote</p>",
+        "</div></div>",
+        "<p>&nbsp;</p>",
+      ].join(""),
+      false,
+    );
+    const document = new DOMParser().parseFromString(email.source, "text/html");
+    expect(document.querySelector("details.dakia-quoted-history")).toBeNull();
+    expect(document.body.textContent).toContain("From: Old Sender");
+  });
+
+  it("does not treat a bare border-top divider as a reply header", () => {
+    const email = buildEmailDocument(
+      [
+        "<p>Above the divider</p>",
+        '<div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0cm 0cm 0cm">',
+        "<p>Quarterly report highlights</p>",
+        "</div>",
+        "<p>Below the divider</p>",
+      ].join(""),
+      false,
+    );
+    const document = new DOMParser().parseFromString(email.source, "text/html");
+    expect(document.querySelector("details.dakia-quoted-history")).toBeNull();
+    expect(document.body.textContent).toContain("Below the divider");
+  });
+
+  it("collapses stacked Word reply headers into a single disclosure", () => {
+    const email = buildEmailDocument(
+      [
+        "<p>Fresh</p>",
+        '<div><div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0cm 0cm 0cm">',
+        "<p><b>From:</b> One<br><b>Sent:</b> Monday<br><b>To:</b> Two<br><b>Subject:</b> RE: A</p>",
+        "</div></div>",
+        "<p>First quoted body</p>",
+        '<div><div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0cm 0cm 0cm">',
+        "<p><b>From:</b> Two<br><b>Sent:</b> Tuesday<br><b>To:</b> One<br><b>Subject:</b> RE: A</p>",
+        "</div></div>",
+        "<p>Second quoted body</p>",
+      ].join(""),
+      false,
+    );
+    const document = new DOMParser().parseFromString(email.source, "text/html");
+    const disclosures = document.querySelectorAll("details.dakia-quoted-history");
+    expect(disclosures).toHaveLength(1);
+    const details = disclosures[0];
+    const visible =
+      document.body.textContent?.replace(details.textContent ?? "", "") ?? "";
+    expect(visible).toContain("Fresh");
+    expect(visible).not.toContain("quoted body");
+    expect(details.textContent).toContain("First quoted body");
+    expect(details.textContent).toContain("Second quoted body");
   });
 
   it("keeps the trusted history disclosure visible against hostile message CSS", () => {

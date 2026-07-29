@@ -7,6 +7,20 @@ const originalMessage =
   /^-{2,}\s*(?:Original Message|Forwarded message)\s*-{2,}\s*$/i;
 const beginForwarded = /^Begin forwarded message:\s*$/i;
 const wroteLine = /^On .+\bwrote:\s*$/i;
+const outlookHeaderStart = /^From:\s*\S/i;
+const outlookHeaderLabel = /^(?:Sent|To|Cc|Subject):\s*\S/i;
+
+// Outlook desktop replies separate new content from quoted history with a
+// From/Sent/To/Subject header block instead of ">" prefixes.
+function isOutlookHeaderStart(lines: string[], index: number): boolean {
+  if (!outlookHeaderStart.test(lines[index].trim())) return false;
+  for (const line of lines.slice(index + 1, index + 6)) {
+    const trimmed = line.trim();
+    if (!trimmed) return false;
+    if (outlookHeaderLabel.test(trimmed)) return true;
+  }
+  return false;
+}
 
 export function splitQuotedText(value: string): SplitMessageText {
   const lines = value.split(/\r?\n/);
@@ -14,6 +28,7 @@ export function splitQuotedText(value: string): SplitMessageText {
     (line, index) =>
       originalMessage.test(line.trim()) ||
       beginForwarded.test(line.trim()) ||
+      isOutlookHeaderStart(lines, index) ||
       (wroteLine.test(line.trim()) &&
         lines.slice(index + 1).some((next) => /^\s*>/.test(next))),
   );
