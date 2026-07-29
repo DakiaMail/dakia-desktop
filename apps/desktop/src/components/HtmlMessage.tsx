@@ -191,12 +191,26 @@ function collapseQuotedHistory(
       "#divRplyFwdMsg",
     ].join(","),
   );
+  const outlookHeader = findOutlookReplyHeader(document);
+  let outlookBoundary: HTMLElement | null = null;
   if (
+    outlookHeader &&
+    (!candidate ||
+      (candidate.compareDocumentPosition(outlookHeader) &
+        Node.DOCUMENT_POSITION_PRECEDING) !==
+        0)
+  ) {
+    if (outlookHeader.closest("details.dakia-quoted-history")) return;
+    const boundary = outlookQuoteBoundary(outlookHeader);
+    if (!hasMeaningfulFollowingContent(boundary)) return;
+    outlookBoundary = boundary;
+  } else if (
     !candidate ||
     candidate.closest("details.dakia-quoted-history") ||
     !hasMeaningfulQuotedContent(candidate)
-  )
+  ) {
     return;
+  }
 
   const details = document.createElement("details");
   details.className = "dakia-quoted-history";
@@ -238,7 +252,15 @@ function collapseQuotedHistory(
   const content = document.createElement("div");
   content.className = "dakia-history-content";
 
-  if (candidate.id === "divRplyFwdMsg") {
+  if (outlookBoundary) {
+    outlookBoundary.before(details);
+    let node: Node | null = outlookBoundary;
+    while (node) {
+      const next: Node | null = node.nextSibling;
+      content.append(node);
+      node = next;
+    }
+  } else if (candidate?.id === "divRplyFwdMsg") {
     const nodes: Node[] = [candidate];
     let node = candidate.nextElementSibling;
     while (
@@ -251,13 +273,62 @@ function collapseQuotedHistory(
     }
     candidate.before(details);
     nodes.forEach((item) => content.append(item));
-  } else {
+  } else if (candidate) {
     const citation = precedingCitation(candidate);
     candidate.before(details);
     if (citation) content.append(citation);
     content.append(candidate);
   }
   details.append(summary, content);
+}
+
+// Word-generated Outlook desktop replies mark the start of quoted history
+// with a top-border divider above a From/Sent/To/Subject header block.
+function findOutlookReplyHeader(document: Document) {
+  for (const element of document.querySelectorAll<HTMLElement>("div[style]")) {
+    if (!/border-top\s*:/i.test(element.getAttribute("style") ?? "")) continue;
+    const text = (element.textContent ?? "").replace(/\s+/g, " ").trim();
+    if (
+      /^From:\s*\S/i.test(text) &&
+      /(?:Sent|To|Cc|Subject):\s*\S/i.test(text)
+    ) {
+      return element;
+    }
+  }
+  return null;
+}
+
+// Word often nests the divider in layout-only wrapper divs; collapse from
+// the outermost wrapper that adds no content of its own.
+function outlookQuoteBoundary(element: HTMLElement) {
+  let boundary = element;
+  while (
+    boundary.parentElement &&
+    boundary.parentElement.childElementCount === 1 &&
+    (boundary.parentElement.textContent ?? "").trim() ===
+      (boundary.textContent ?? "").trim()
+  ) {
+    boundary = boundary.parentElement;
+  }
+  return boundary;
+}
+
+// The Outlook header separates new content from the quoted message below
+// it, so the header and everything after it belongs to the history. A
+// header with nothing meaningful after it (a stripped quote) stays visible.
+function hasMeaningfulFollowingContent(boundary: HTMLElement) {
+  let node = boundary.nextSibling;
+  while (node) {
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      const element = node as HTMLElement;
+      if (element.querySelector("img, table, blockquote")) return true;
+      if ((element.textContent ?? "").replace(/\s+/g, "")) return true;
+    } else if (node.nodeType === Node.TEXT_NODE && node.textContent?.trim()) {
+      return true;
+    }
+    node = node.nextSibling;
+  }
+  return false;
 }
 
 function hasMeaningfulQuotedContent(candidate: HTMLElement) {
