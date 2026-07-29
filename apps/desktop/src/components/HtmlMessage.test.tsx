@@ -193,7 +193,7 @@ describe("HTML email appearance", () => {
     const email = buildEmailDocument(
       [
         "<p>Current reply</p>",
-        "<div>On 19 Feb 2026 at 21:00 +0200, Romario Verbran &lt;romario.verbran@gmail.com&gt;, wrote:</div>",
+        "<div>On 19 Feb 2026 at 21:00 +0200, Rowan Example &lt;rowan@example.test&gt;, wrote:</div>",
         '<blockquote type="cite"><p>Earlier message</p></blockquote>',
       ].join(""),
       false,
@@ -203,7 +203,29 @@ describe("HTML email appearance", () => {
 
     expect(document.body.firstElementChild?.textContent).toBe("Current reply");
     expect(details?.textContent).toContain(
-      "On 19 Feb 2026 at 21:00 +0200, Romario Verbran",
+      "On 19 Feb 2026 at 21:00 +0200, Rowan Example",
+    );
+    expect(details?.textContent).toContain("Earlier message");
+    expect(
+      document.body.textContent?.replace(details?.textContent ?? "", ""),
+    ).not.toContain("wrote:");
+  });
+
+  it("moves an adjacent Thunderbird citation into the collapsed history", () => {
+    const email = buildEmailDocument(
+      [
+        "<p>Current reply</p>",
+        '<div class="moz-cite-prefix">On 19 Feb 2026 at 21:00 +0200, Rowan Example &lt;rowan@example.test&gt;, wrote:</div>',
+        '<blockquote type="cite"><p>Earlier message</p></blockquote>',
+      ].join(""),
+      false,
+    );
+    const document = new DOMParser().parseFromString(email.source, "text/html");
+    const details = document.querySelector("details.dakia-quoted-history");
+
+    expect(document.body.firstElementChild?.textContent).toBe("Current reply");
+    expect(details?.textContent).toContain(
+      "On 19 Feb 2026 at 21:00 +0200, Rowan Example",
     );
     expect(details?.textContent).toContain("Earlier message");
     expect(
@@ -216,7 +238,7 @@ describe("HTML email appearance", () => {
       [
         "<p>Current reply</p>",
         '<div name="messageReplySection">',
-        "On 19 Feb 2026 at 21:00 +0200, Romario Verbran &lt;romario.verbran@gmail.com&gt;, wrote:<br>",
+        "On 19 Feb 2026 at 21:00 +0200, Rowan Example &lt;rowan@example.test&gt;, wrote:<br>",
         '<blockquote type="cite"><div>Earlier message</div></blockquote>',
         "</div>",
       ].join(""),
@@ -226,7 +248,7 @@ describe("HTML email appearance", () => {
     const details = document.querySelector("details.dakia-quoted-history");
 
     expect(details?.textContent).toContain(
-      "On 19 Feb 2026 at 21:00 +0200, Romario Verbran",
+      "On 19 Feb 2026 at 21:00 +0200, Rowan Example",
     );
     expect(details?.textContent).toContain("Earlier message");
     expect(
@@ -267,7 +289,9 @@ describe("HTML email appearance", () => {
   it("collapses Word-generated Outlook history from its reply header through the quoted chain", () => {
     const email = buildEmailDocument(outlookWordReplySection, false);
     const document = new DOMParser().parseFromString(email.source, "text/html");
-    const disclosures = document.querySelectorAll("details.dakia-quoted-history");
+    const disclosures = document.querySelectorAll(
+      "details.dakia-quoted-history",
+    );
     expect(disclosures).toHaveLength(1);
     const details = disclosures[0];
     expect(details.hasAttribute("open")).toBe(false);
@@ -283,13 +307,13 @@ describe("HTML email appearance", () => {
     expect(details.textContent).toContain("From: Marten Mets");
     expect(details.textContent).toContain("Sent: Friday, July 24, 2026");
     expect(details.textContent).toContain("External email.");
-    expect(details.textContent).toContain("varasema päeva sõnum, mis kuulub ajalukku");
+    expect(details.textContent).toContain(
+      "varasema päeva sõnum, mis kuulub ajalukku",
+    );
     expect(details.textContent).toContain("wrote:");
     expect(details.textContent).toContain("-----Original Message-----");
     expect(details.textContent).toContain("Kõige vanem sõnum");
-    expect(
-      details.querySelector("[name='messageBodySection']"),
-    ).not.toBeNull();
+    expect(details.querySelector("[name='messageBodySection']")).not.toBeNull();
     expect(
       details.querySelector("[name='messageSignatureSection']"),
     ).not.toBeNull();
@@ -381,7 +405,9 @@ describe("HTML email appearance", () => {
       false,
     );
     const document = new DOMParser().parseFromString(email.source, "text/html");
-    const disclosures = document.querySelectorAll("details.dakia-quoted-history");
+    const disclosures = document.querySelectorAll(
+      "details.dakia-quoted-history",
+    );
     expect(disclosures).toHaveLength(1);
     const details = disclosures[0];
     const visible =

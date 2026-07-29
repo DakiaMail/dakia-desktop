@@ -71,9 +71,19 @@ export function plainTextFromRichText(html: string) {
   const addBreak = () => {
     if (output && !output.endsWith("\n")) output += "\n";
   };
-  const visit = (node: Node) => {
+  const appendText = (text: string, quoteDepth: number) => {
+    const lines = text.split("\n");
+    lines.forEach((line, index) => {
+      if (line && quoteDepth && (!output || output.endsWith("\n"))) {
+        output += "> ".repeat(quoteDepth);
+      }
+      output += line;
+      if (index < lines.length - 1) output += "\n";
+    });
+  };
+  const visit = (node: Node, quoteDepth = 0) => {
     if (node.nodeType === Node.TEXT_NODE) {
-      output += node.textContent ?? "";
+      appendText(node.textContent ?? "", quoteDepth);
       return;
     }
     if (node.nodeType !== Node.ELEMENT_NODE) return;
@@ -86,17 +96,31 @@ export function plainTextFromRichText(html: string) {
     }
     if (tag === "li") {
       addBreak();
-      output += "• ";
-      element.childNodes.forEach(visit);
+      appendText("• ", quoteDepth);
+      element.childNodes.forEach((child) => {
+        visit(child, quoteDepth);
+      });
+      addBreak();
+      return;
+    }
+    if (tag === "blockquote") {
+      addBreak();
+      element.childNodes.forEach((child) => {
+        visit(child, quoteDepth + 1);
+      });
       addBreak();
       return;
     }
     if (BLOCK_TAGS.has(tag)) addBreak();
-    element.childNodes.forEach(visit);
+    element.childNodes.forEach((child) => {
+      visit(child, quoteDepth);
+    });
     if (BLOCK_TAGS.has(tag)) addBreak();
   };
 
-  document.body.childNodes.forEach(visit);
+  document.body.childNodes.forEach((child) => {
+    visit(child);
+  });
   return output.replace(/\n{3,}/g, "\n\n").trim();
 }
 
@@ -133,11 +157,17 @@ function sanitizeChildren(parent: Element) {
         element.replaceWith(...[...element.childNodes]);
       }
     } else {
+      const citePrefix =
+        tag === "div" && element.getAttribute("class") === "moz-cite-prefix";
+      const citeBlock =
+        tag === "blockquote" && element.getAttribute("type") === "cite";
       const style = safeStyle(element);
       for (const attribute of [...element.attributes]) {
         element.removeAttribute(attribute.name);
       }
       if (style) element.setAttribute("style", style);
+      if (citePrefix) element.setAttribute("class", "moz-cite-prefix");
+      if (citeBlock) element.setAttribute("type", "cite");
     }
   }
 }

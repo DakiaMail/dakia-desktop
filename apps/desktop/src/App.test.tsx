@@ -994,7 +994,23 @@ describe("App read state", () => {
     expect(mocks.api.setRead).not.toHaveBeenCalled();
   });
 
-  it("opens a reply composer when the reader reply button is clicked", async () => {
+  it("hydrates only the selected reply message before opening a quoted reply composer", async () => {
+    mocks.api.search.mockResolvedValue({
+      conversations: groupMessages([
+        mocks.message,
+        {
+          ...mocks.message,
+          id: "message-2",
+          from_address: "me@example.com",
+          received_at: "2026-07-19T11:00:00Z",
+        },
+      ]),
+      nextCursor: null,
+    });
+    mocks.api.content.mockResolvedValue({
+      body_text: "Provider body\r\n> Nested history",
+      attachments: [],
+    });
     render(
       <MantineProvider>
         <App />
@@ -1003,7 +1019,9 @@ describe("App read state", () => {
 
     const row = await screen.findByText("Unread thread");
     fireEvent.click(row.closest("button")!);
-    fireEvent.click(await screen.findByRole("button", { name: "Reply" }));
+    await screen.findByRole("button", { name: "Reply" });
+    mocks.api.content.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Reply" }));
 
     await waitFor(() =>
       expect(mocks.openComposeWindow).toHaveBeenCalledWith(
@@ -1011,9 +1029,15 @@ describe("App read state", () => {
           accountId: "account-1",
           to: "sender@example.com",
           subject: "Re: Unread thread",
+          body: expect.stringContaining("> > Nested history"),
+          bodyHtml: expect.stringContaining(
+            '<blockquote type="cite">Provider body<br>&gt; Nested history</blockquote>',
+          ),
         }),
       ),
     );
+    expect(mocks.api.content).toHaveBeenCalledTimes(1);
+    expect(mocks.api.content).toHaveBeenCalledWith("message-1");
   });
 
   it("opens Reply All with Reply-To and deduplicated non-self Cc recipients", async () => {

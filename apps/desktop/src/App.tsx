@@ -29,6 +29,7 @@ import { replyRecipients } from "./recipients";
 import { confirmNativeAction, showNativeMessage } from "./nativeFeedback";
 import { groupMessages } from "./threads";
 import { forwardBody, forwardSubject } from "./forward";
+import { formatReplyHistory } from "./replyHistory";
 import {
   onNotificationAction,
   readNotificationSettings,
@@ -1280,7 +1281,7 @@ export default function App() {
       setAiLoading(false);
     }
   };
-  const openReply = (
+  const openReply = async (
     thread: MailThread | undefined = activeThread,
     replyAll = false,
   ) => {
@@ -1298,22 +1299,39 @@ export default function App() {
         ) ?? thread.latest;
     const recipients = replyRecipients(replyMessage, account?.email, replyAll);
     if (!recipients) return;
-    const prefix = t("reader.replyPrefix");
-    openComposeWindow({
-      accountId: replyMessage.account_id,
-      to: recipients.to,
-      ...(recipients.cc ? { cc: recipients.cc } : {}),
-      subject: replyMessage.subject
-        .toLowerCase()
-        .startsWith(prefix.toLowerCase())
-        ? replyMessage.subject
-        : `${prefix} ${replyMessage.subject}`,
-      inReplyTo: replyMessage.message_id,
-      references: [replyMessage.reference_ids, replyMessage.message_id]
-        .filter(Boolean)
-        .join(" "),
-      contextMessageIds: thread.messages.map((message) => message.id),
-    });
+    try {
+      const content = await api.content(replyMessage.id);
+      const replyHistory = formatReplyHistory({
+        message: replyMessage,
+        bodyText: content.body_text,
+        formatCitation: ({ date, sender }) =>
+          t("reader.replyCitation", { date, sender }),
+      });
+      const prefix = t("reader.replyPrefix");
+      openComposeWindow({
+        accountId: replyMessage.account_id,
+        to: recipients.to,
+        ...(recipients.cc ? { cc: recipients.cc } : {}),
+        subject: replyMessage.subject
+          .toLowerCase()
+          .startsWith(prefix.toLowerCase())
+          ? replyMessage.subject
+          : `${prefix} ${replyMessage.subject}`,
+        body: replyHistory.body,
+        bodyHtml: replyHistory.bodyHtml,
+        inReplyTo: replyMessage.message_id,
+        references: [replyMessage.reference_ids, replyMessage.message_id]
+          .filter(Boolean)
+          .join(" "),
+        contextMessageIds: thread.messages.map((message) => message.id),
+      });
+    } catch (error) {
+      await showNativeMessage(
+        t("reader.replyErrorTitle"),
+        error instanceof Error ? error.message : String(error),
+        "error",
+      );
+    }
   };
   const openForward = async (thread: MailThread | undefined = activeThread) => {
     const message = thread?.latest;
