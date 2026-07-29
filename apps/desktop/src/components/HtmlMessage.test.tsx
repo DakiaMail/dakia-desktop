@@ -289,7 +289,9 @@ describe("HTML email appearance", () => {
   it("collapses Word-generated Outlook history from its reply header through the quoted chain", () => {
     const email = buildEmailDocument(outlookWordReplySection, false);
     const document = new DOMParser().parseFromString(email.source, "text/html");
-    const disclosures = document.querySelectorAll("details.dakia-quoted-history");
+    const disclosures = document.querySelectorAll(
+      "details.dakia-quoted-history",
+    );
     expect(disclosures).toHaveLength(1);
     const details = disclosures[0];
     expect(details.hasAttribute("open")).toBe(false);
@@ -305,13 +307,13 @@ describe("HTML email appearance", () => {
     expect(details.textContent).toContain("From: Marten Mets");
     expect(details.textContent).toContain("Sent: Friday, July 24, 2026");
     expect(details.textContent).toContain("External email.");
-    expect(details.textContent).toContain("varasema päeva sõnum, mis kuulub ajalukku");
+    expect(details.textContent).toContain(
+      "varasema päeva sõnum, mis kuulub ajalukku",
+    );
     expect(details.textContent).toContain("wrote:");
     expect(details.textContent).toContain("-----Original Message-----");
     expect(details.textContent).toContain("Kõige vanem sõnum");
-    expect(
-      details.querySelector("[name='messageBodySection']"),
-    ).not.toBeNull();
+    expect(details.querySelector("[name='messageBodySection']")).not.toBeNull();
     expect(
       details.querySelector("[name='messageSignatureSection']"),
     ).not.toBeNull();
@@ -403,7 +405,9 @@ describe("HTML email appearance", () => {
       false,
     );
     const document = new DOMParser().parseFromString(email.source, "text/html");
-    const disclosures = document.querySelectorAll("details.dakia-quoted-history");
+    const disclosures = document.querySelectorAll(
+      "details.dakia-quoted-history",
+    );
     expect(disclosures).toHaveLength(1);
     const details = disclosures[0];
     const visible =
