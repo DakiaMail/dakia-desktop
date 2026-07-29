@@ -924,6 +924,43 @@ impl MailService {
         Ok(message)
     }
 
+    /// Fetches the original RFC 822 bytes for an explicit export without
+    /// changing the message's `\\Seen` flag or retaining the bytes locally.
+    ///
+    /// The local mailbox catalogue remains the locator authority: its saved
+    /// UIDVALIDITY must still match the selected remote mailbox before a UID
+    /// can be used. This prevents a recycled UID from exporting a different
+    /// message after a mailbox rebuild.
+    pub async fn fetch_raw_message(
+        &self,
+        account: &Account,
+        mailbox: &str,
+        uid: u32,
+    ) -> Result<Vec<u8>> {
+        let state = self
+            .store
+            .mailbox_catalog_state(account.id, mailbox)
+            .await?
+            .context("mailbox catalogue is not initialized")?;
+        let secret = self.credentials.secret(account).await?;
+        let mut client = ImapClient::connect(account).await?;
+        client.authenticate(account, &secret).await?;
+        let selected = client
+            .command(&format!("SELECT {}", quote_imap(&state.remote_name)))
+            .await?;
+        let current_uid_validity = parse_uid_validity(&selected)
+            .context("IMAP server omitted UIDVALIDITY after SELECT")?;
+        if i64::from(current_uid_validity) != state.uid_validity {
+            bail!("mailbox identity changed; sync the account before exporting this message");
+        }
+        let response = client
+            .command_with_literal(&raw_message_fetch_command(uid))
+            .await?;
+        let raw = response.literal.context("message is no longer available")?;
+        let _ = client.command("LOGOUT").await;
+        Ok(raw)
+    }
+
     /// Searches message bodies on the authoritative server. Results are
     /// locators only; callers merge catalogue rows with the immediate local
     /// FTS results and retain those local results if the server is offline.
@@ -1741,6 +1778,10 @@ fn hydration_fetch_fields(account: &Account) -> &'static str {
 
 fn hydration_fetch_command(account: &Account, uid: u32) -> String {
     format!("UID FETCH {uid} ({})", hydration_fetch_fields(account))
+}
+
+fn raw_message_fetch_command(uid: u32) -> String {
+    format!("UID FETCH {uid} (BODY.PEEK[])")
 }
 
 fn set_read_command(uid: u32, read: bool) -> String {
@@ -3020,6 +3061,15 @@ mod tests {
             assert!(command.contains("BODY.PEEK[]"));
             assert!(!command.contains("RFC822"));
         }
+    }
+
+    #[test]
+    fn raw_export_fetch_is_read_neutral_and_requests_only_the_original_bytes() {
+        let command = raw_message_fetch_command(42);
+
+        assert_eq!(command, "UID FETCH 42 (BODY.PEEK[])");
+        assert!(!command.contains("RFC822"));
+        assert!(!command.contains("FLAGS"));
     }
 
     #[test]

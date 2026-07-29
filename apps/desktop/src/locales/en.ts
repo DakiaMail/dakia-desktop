@@ -41,6 +41,7 @@ export const en = {
       reply: "Reply",
       replyAll: "Reply all",
       forward: "Forward",
+      exportMessage: "Export message (.eml)",
       more: "More actions",
       star: "Star conversation",
       unstar: "Remove star",
@@ -135,6 +136,8 @@ export const en = {
       loadingContent: "Fetching message…",
       loadContentError:
         "This message could not be fetched from the mail server.",
+      exportSuccess: "Message exported to {{path}}",
+      exportError: "Could not export this message.",
     },
     translation: {
       translatedFrom: "Translated from {{language}} on this device",
