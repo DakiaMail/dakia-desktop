@@ -13,6 +13,19 @@ type EmailDocument = {
   dark: boolean;
 };
 
+const providerQuoteSelector = [
+  ".gmail_quote",
+  ".yahoo_quoted",
+  ".freshdesk_quote",
+  "[id^='AOLMsgPart_']",
+].join(", ");
+const recognizedQuoteSelector = [
+  providerQuoteSelector,
+  "[name='messageReplySection']",
+  "blockquote[type='cite']",
+  "[data-marker='__QUOTED_TEXT__']",
+].join(", ");
+
 const blockedElements = [
   "script",
   "iframe",
@@ -181,16 +194,16 @@ function collapseQuotedHistory(
   document: Document,
   labels: { show: string; hide: string },
 ) {
-  const candidate = document.querySelector<HTMLElement>(
+  const candidate =
     [
-      ".gmail_quote",
-      ".yahoo_quoted",
-      "[name='messageReplySection']",
-      "blockquote[type='cite']",
-      "[data-marker='__QUOTED_TEXT__']",
-      "#divRplyFwdMsg",
-    ].join(","),
-  );
+      ...document.querySelectorAll<HTMLElement>(
+        [recognizedQuoteSelector, "#divRplyFwdMsg"].join(","),
+      ),
+    ].find(
+      (element) =>
+        !element.closest("details.dakia-quoted-history") &&
+        hasMeaningfulQuotedContent(element),
+    ) ?? null;
   const outlookHeader = findOutlookReplyHeader(document);
   let outlookBoundary: HTMLElement | null = null;
   if (
@@ -204,11 +217,7 @@ function collapseQuotedHistory(
     const boundary = outlookQuoteBoundary(outlookHeader);
     if (!hasMeaningfulFollowingContent(boundary)) return;
     outlookBoundary = boundary;
-  } else if (
-    !candidate ||
-    candidate.closest("details.dakia-quoted-history") ||
-    !hasMeaningfulQuotedContent(candidate)
-  ) {
+  } else if (!candidate || candidate.closest("details.dakia-quoted-history")) {
     return;
   }
 
@@ -265,7 +274,7 @@ function collapseQuotedHistory(
     let node = candidate.nextElementSibling;
     while (
       node?.matches(
-        "blockquote, .gmail_quote, .yahoo_quoted, [data-marker='__QUOTED_TEXT__']",
+        `blockquote, ${providerQuoteSelector}, [data-marker='__QUOTED_TEXT__']`,
       )
     ) {
       nodes.push(node);
@@ -274,12 +283,45 @@ function collapseQuotedHistory(
     candidate.before(details);
     nodes.forEach((item) => content.append(item));
   } else if (candidate) {
-    const citation = precedingCitation(candidate);
-    candidate.before(details);
+    const nodes = contiguousQuotedNodes(candidate);
+    const citation = precedingCitation(nodes[0] as HTMLElement);
+    nodes[0].before(details);
     if (citation) content.append(citation);
-    content.append(candidate);
+    nodes.forEach((node) => content.append(node));
   }
   details.append(summary, content);
+}
+
+function contiguousQuotedNodes(candidate: HTMLElement) {
+  const nodes: ChildNode[] = [candidate];
+  let previous = candidate.previousSibling;
+  while (previous) {
+    if (
+      (previous.nodeType === Node.TEXT_NODE && !previous.textContent?.trim()) ||
+      (previous.nodeType === Node.ELEMENT_NODE &&
+        (previous as Element).matches(recognizedQuoteSelector))
+    ) {
+      nodes.unshift(previous);
+      previous = previous.previousSibling;
+      continue;
+    }
+    break;
+  }
+
+  let next = candidate.nextSibling;
+  while (next) {
+    if (
+      (next.nodeType === Node.TEXT_NODE && !next.textContent?.trim()) ||
+      (next.nodeType === Node.ELEMENT_NODE &&
+        (next as Element).matches(recognizedQuoteSelector))
+    ) {
+      nodes.push(next);
+      next = next.nextSibling;
+      continue;
+    }
+    break;
+  }
+  return nodes;
 }
 
 // Word-generated Outlook desktop replies mark the start of quoted history
@@ -338,13 +380,13 @@ function hasMeaningfulQuotedContent(candidate: HTMLElement) {
   if (candidate.id === "divRplyFwdMsg") {
     return Boolean(
       candidate.nextElementSibling?.matches(
-        "blockquote, .gmail_quote, .yahoo_quoted, [data-marker='__QUOTED_TEXT__']",
+        `blockquote, ${providerQuoteSelector}, [data-marker='__QUOTED_TEXT__']`,
       ),
     );
   }
-  if (candidate.matches(".gmail_quote, .yahoo_quoted")) {
+  if (candidate.matches(providerQuoteSelector)) {
     const quote = candidate.querySelector(
-      "blockquote, [type='cite'], .gmail_quote, .yahoo_quoted",
+      `blockquote, [type='cite'], ${providerQuoteSelector}`,
     );
     if (quote && quote !== candidate && quote.textContent?.trim()) return true;
     return !isCitationLine(text);
