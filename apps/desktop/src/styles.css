@@ -846,6 +846,9 @@ textarea {
   gap: 9px;
   margin-bottom: 18px;
 }
+.sender-card-collapsible {
+  cursor: pointer;
+}
 .thread-message {
   padding: 18px 0 24px;
   border-top: 1px solid var(--dakia-divider);
@@ -853,6 +856,69 @@ textarea {
 .thread-message:first-of-type {
   border-top: 0;
   padding-top: 0;
+}
+.thread-message-collapsed {
+  padding: 0;
+}
+.thread-message-summary {
+  width: 100%;
+  padding: 14px 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.thread-message-summary:hover,
+.thread-message-summary:focus-visible {
+  background: color-mix(in srgb, var(--mantine-color-gray-1) 58%, transparent);
+}
+.thread-message-summary:focus-visible {
+  outline: 2px solid var(--mantine-color-ember-5);
+  outline-offset: -2px;
+}
+.thread-message-summary-avatar {
+  flex: none;
+}
+.thread-message-summary-meta {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 2px;
+}
+.thread-message-summary-sender {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 14px;
+  font-weight: 650;
+}
+.thread-message-summary-snippet {
+  overflow: hidden;
+  color: var(--mantine-color-dimmed);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.thread-message-summary-attachment {
+  flex: none;
+  display: grid;
+  place-items: center;
+  color: var(--mantine-color-dimmed);
+}
+.reader-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 .sender-avatar {
   width: 34px !important;
