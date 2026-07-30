@@ -10,7 +10,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import "../i18n";
 import { api, MessageContentError } from "../api";
 import freshdeskReplySection from "../test/fixtures/freshdesk-reply-section.html?raw";
-import type { MailSummary } from "../types";
+import type { MailSummary, MessageContent } from "../types";
+import highRiskContract from "../../testdata/tauri-contracts/high-risk.json";
 import { Reader } from "./Reader";
 
 const translationMocks = vi.hoisted(() => ({
@@ -470,6 +471,35 @@ describe("Reader unsubscribe action", () => {
       }),
     );
     expect(screen.queryByLabelText("Has attachments")).toBeNull();
+  });
+
+  it("renders provider-signature-inline shared message content", async () => {
+    expect(highRiskContract.realisticFixtureIds.providerSignature).toBe(
+      "provider-signature-inline",
+    );
+    vi.mocked(api.content).mockResolvedValue(
+      highRiskContract.messageContent.providerSignature as MessageContent,
+    );
+    render(
+      <MantineProvider>
+        <Reader {...props} message={{ ...message, has_attachments: true }} />
+      </MantineProvider>,
+    );
+
+    expect(await screen.findByText("claim-documents.pdf")).toBeVisible();
+    expect(screen.queryByText("image001.png")).toBeNull();
+    const renderedMessage = await screen.findByRole("document", {
+      name: "Weekly notes",
+    });
+    const emailSurface = renderedMessage.shadowRoot
+      ?.firstElementChild as HTMLElement | null;
+    const emailRoot = emailSurface?.shadowRoot;
+    expect(emailRoot?.querySelector("img")?.getAttribute("src")).toBe(
+      "data:image/png;base64,iVBORw0KGgo=",
+    );
+    expect(emailRoot?.textContent).toContain(
+      "Fictional confidential-message notice.",
+    );
   });
 
   it("lists returned downloadable attachments and saves all only when there are multiple", async () => {

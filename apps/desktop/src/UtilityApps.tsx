@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   disable as disableAutostart,
@@ -118,6 +118,8 @@ export function SettingsWindowApp() {
   const [realtimeStatuses, setRealtimeStatuses] = useState<
     RealtimeSyncStatus[]
   >([]);
+  const aiPersistenceQueueRef = useRef(Promise.resolve());
+  const aiSettingsGenerationRef = useRef(0);
 
   useEffect(() => {
     document.title = t("settings.title");
@@ -182,11 +184,19 @@ export function SettingsWindowApp() {
   }, [t]);
 
   const updateAi = (value: AiSettings) => {
-    if (value.apiKey !== ai.apiKey)
-      void api.saveAiApiKey(value.apiKey).catch(showError);
+    const generation = ++aiSettingsGenerationRef.current;
+    const apiKeyChanged = value.apiKey !== ai.apiKey;
     setAi(value);
     localStorage.setItem("dakia.ai", JSON.stringify({ ...value, apiKey: "" }));
-    void notifySettingsChanged(value);
+    aiPersistenceQueueRef.current = aiPersistenceQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        if (apiKeyChanged) await api.saveAiApiKey(value.apiKey);
+        if (generation === aiSettingsGenerationRef.current) {
+          await notifySettingsChanged({ ...value, apiKey: "" });
+        }
+      });
+    void aiPersistenceQueueRef.current.catch(showError);
   };
 
   const updateNotifications = (value: NotificationSettings) => {

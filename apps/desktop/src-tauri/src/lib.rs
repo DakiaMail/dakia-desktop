@@ -1,6 +1,9 @@
 mod realtime;
 mod translation;
 
+#[cfg(test)]
+mod tauri_contracts_tests;
+
 use base64::{engine::general_purpose::STANDARD, Engine};
 use dakia_core::storage::MessageContentFetchAcquire;
 use dakia_core::{

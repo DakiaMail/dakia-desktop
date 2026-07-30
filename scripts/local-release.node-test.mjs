@@ -6,6 +6,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -31,6 +32,8 @@ function createStaticAppFixture() {
   mkdirSync(licenses, { recursive: true });
   writeFileSync(join(app, "Contents", "MacOS", "dakia-desktop"), "fixture");
   chmodSync(join(app, "Contents", "MacOS", "dakia-desktop"), 0o755);
+  writeFileSync(join(app, "Contents", "MacOS", "dakia"), "fixture");
+  chmodSync(join(app, "Contents", "MacOS", "dakia"), 0o755);
   writeFileSync(
     join(app, "Contents", "Frameworks", "libonnxruntime.1.23.2.dylib"),
     "fixture",
@@ -67,6 +70,74 @@ function createStaticAppFixture() {
     );
   }
   return { fixtureRoot, app };
+}
+
+function writeExecutable(path, source) {
+  writeFileSync(path, source);
+  chmodSync(path, 0o755);
+}
+
+function createCliContractFixture({ invalidInputSucceeds = false } = {}) {
+  const fixture = createStaticAppFixture();
+  const { app } = fixture;
+  const macOS = join(app, "Contents", "MacOS");
+  const mockBin = join(fixture.fixtureRoot, "mock-bin");
+  mkdirSync(mockBin);
+  writeFileSync(
+    join(app, "Contents", "Info.plist"),
+    `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>CFBundleShortVersionString</key><string>0.0.0</string></dict></plist>
+`,
+  );
+  writeExecutable(
+    join(macOS, "dakia-desktop"),
+    `#!/bin/sh
+set -eu
+test "\${DAKIA_RELEASE_SMOKE_TEST:-}" = 1
+test -n "\${DAKIA_RELEASE_SMOKE_DATA_DIR:-}"
+printf '%s\\n' DAKIA_RELEASE_SMOKE_TEST_OK
+`,
+  );
+  writeExecutable(
+    join(macOS, "dakia"),
+    `#!/bin/sh
+set -eu
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --data-dir) shift 2 ;;
+    --json) shift ;;
+    *) break ;;
+  esac
+done
+case "\${1:-}" in
+  --version) printf 'dakia 0.0.0\\n' ;;
+  --help)
+    printf '%s\\n' 'Search, read, and send mail from the terminal' 'Usage: dakia [OPTIONS] <COMMAND>'
+    ;;
+  not-a-command)
+    ${invalidInputSucceeds ? "exit 0" : 'printf "%s\\n" "error: unrecognized subcommand \'not-a-command\'" "" "For more information, try \'--help\'." >&2; exit 2'}
+    ;;
+  account)
+    test "\${2:-}" = list
+    printf '[]\\n'
+    ;;
+  *) exit 64 ;;
+esac
+`,
+  );
+  writeExecutable(join(mockBin, "lipo"), "#!/bin/sh\nprintf '%s\\n' arm64\n");
+  writeExecutable(
+    join(mockBin, "codesign"),
+    `#!/bin/sh
+case "$1" in
+  --verify) exit 0 ;;
+  -dv) printf '%s\\n' TeamIdentifier=fixture-team >&2 ;;
+  *) exit 64 ;;
+esac
+`,
+  );
+  return { ...fixture, mockBin };
 }
 
 test("local installer builds only an app without updater artifacts", () => {
@@ -159,6 +230,104 @@ test("static packaged-app verification rejects a missing Dakia MPL source notice
   } finally {
     rmSync(fixtureRoot, { recursive: true, force: true });
   }
+});
+
+test("static packaged-app verification rejects a missing CLI sidecar", () => {
+  const { fixtureRoot, app } = createStaticAppFixture();
+  try {
+    rmSync(join(app, "Contents", "MacOS", "dakia"));
+    const result = spawnSync(appVerifier, ["--static-only", app], {
+      encoding: "utf8",
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Contents\/MacOS\/dakia/);
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("static packaged-app verification rejects a symlinked CLI sidecar", () => {
+  const { fixtureRoot, app } = createStaticAppFixture();
+  try {
+    const sidecar = join(app, "Contents", "MacOS", "dakia");
+    rmSync(sidecar);
+    symlinkSync("dakia-desktop", sidecar);
+    const result = spawnSync(appVerifier, ["--static-only", app], {
+      encoding: "utf8",
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /unsafe packaged Dakia executable/);
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("packaged-app verification declares an isolated CLI contract smoke", () => {
+  const verifier = readFileSync(appVerifier, "utf8");
+  assert.match(verifier, /lipo -archs "\$cli"/);
+  assert.match(verifier, /codesign --verify --strict --verbose=2 "\$cli"/);
+  assert.match(verifier, /TeamIdentifier/);
+  assert.match(verifier, /"\$cli" --data-dir "\$cli_contract_data" --version/);
+  assert.match(verifier, /"\$cli" --data-dir "\$cli_contract_data" --help/);
+  assert.match(
+    verifier,
+    /"\$cli" --data-dir "\$cli_contract_data" not-a-command/,
+  );
+  assert.match(verifier, /cli_invalid_status" -ne 2/);
+  assert.match(
+    verifier,
+    /parse-only commands unexpectedly created profile state/,
+  );
+  assert.match(
+    verifier,
+    /"\$cli" --data-dir "\$smoke_root\/cli-data" --json account list/,
+  );
+  assert.match(verifier, /CFBundleShortVersionString/);
+  assert.match(verifier, /JSON\.parse/);
+});
+
+test(
+  "packaged-app verification executes and rejects bundled CLI parse-contract drift",
+  { skip: process.platform !== "darwin" },
+  () => {
+    const goodFixture = createCliContractFixture();
+    const badFixture = createCliContractFixture({ invalidInputSucceeds: true });
+    const environmentFor = (mockBin) => ({
+      PATH: `${mockBin}:${process.env.PATH}`,
+    });
+    try {
+      const goodResult = spawnSync(appVerifier, [goodFixture.app], {
+        encoding: "utf8",
+        env: environmentFor(goodFixture.mockBin),
+      });
+      assert.equal(goodResult.status, 0, goodResult.stderr);
+      assert.match(goodResult.stdout, /startup smoke test passed/);
+
+      const badResult = spawnSync(appVerifier, [badFixture.app], {
+        encoding: "utf8",
+        env: environmentFor(badFixture.mockBin),
+      });
+      assert.notEqual(badResult.status, 0);
+      assert.match(
+        badResult.stderr,
+        /invalid-input contract was not rejected as expected/,
+      );
+    } finally {
+      rmSync(goodFixture.fixtureRoot, { recursive: true, force: true });
+      rmSync(badFixture.fixtureRoot, { recursive: true, force: true });
+    }
+  },
+);
+
+test("updater packaging executes the extracted signed app and CLI verifier", () => {
+  const packager = readFileSync(
+    join(root, "scripts", "package-macos-updater.sh"),
+    "utf8",
+  );
+  assert.match(
+    packager,
+    /verify-macos-release-app\.sh" "\$verify_dir\/Dakia\.app"/,
+  );
 });
 
 test("release environment preserves an explicitly injected Google OAuth secret", () => {

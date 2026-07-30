@@ -19,8 +19,13 @@ use lettre::{
     message::{
         header::ContentType, Attachment as LettreAttachment, Mailbox, MultiPart, SinglePart,
     },
-    transport::smtp::authentication::{Credentials, Mechanism},
-    Address, AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
+    transport::smtp::{
+        authentication::{Credentials, Mechanism, DEFAULT_MECHANISMS},
+        client::{AsyncSmtpConnection, TlsParameters},
+        commands::{Data, Mail, Rcpt},
+        extension::{ClientId, Extension, MailBodyParameter, MailParameter},
+    },
+    Address, Message,
 };
 use mail_auth::{AuthenticatedMessage, DkimResult, MessageAuthenticator};
 use mail_parser::{
@@ -41,10 +46,13 @@ use std::{
     sync::Arc,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{
+        AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt,
+        BufReader,
+    },
     net::TcpStream,
     sync::watch,
-    time::{timeout, Duration},
+    time::{timeout, timeout_at, Duration, Instant},
 };
 use tokio_rustls::{
     client::TlsStream,
@@ -306,10 +314,7 @@ impl MailService {
     ) -> Result<RealtimeCycle> {
         let secret = self.credentials.secret(account).await?;
         let mut client = ImapClient::connect(account).await?;
-        client
-            .authenticate(account, &secret)
-            .await
-            .context("IMAP authentication failed")?;
+        client.authenticate(account, &secret).await?;
         let capabilities = client.command("CAPABILITY").await?;
         let supports_idle = supports_idle(&capabilities);
         let select = client.command("SELECT INBOX").await?;
@@ -661,13 +666,40 @@ impl MailService {
             completed: 0,
             total: None,
         });
-        let secret = self.credentials.secret(account).await?;
         let mut client = ImapClient::connect(account).await?;
+        self.sync_mailboxes_with_progress_on_client(
+            &mut client,
+            account,
+            max_messages,
+            plans,
+            reset_before_sync,
+            on_progress,
+        )
+        .await
+    }
+
+    /// The transport-independent sync core is shared by the TLS production
+    /// path and scripted protocol tests. Keeping connection construction in
+    /// `sync_mailboxes_with_progress` preserves the production TLS policy.
+    async fn sync_mailboxes_with_progress_on_client<S, F>(
+        &self,
+        client: &mut ImapClient<S>,
+        account: &Account,
+        max_messages: u32,
+        plans: Vec<MailboxPlan>,
+        reset_before_sync: bool,
+        mut on_progress: F,
+    ) -> Result<SyncResult>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+        F: FnMut(SyncProgress),
+    {
         on_progress(SyncProgress {
             phase: "authenticating",
             completed: 0,
             total: None,
         });
+        let secret = self.credentials.secret(account).await?;
         client.authenticate(account, &secret).await?;
         let listing = client.command("LIST \"\" \"*\"").await.unwrap_or_default();
         let plans = resolve_special_mailboxes(plans, &listing);
@@ -950,10 +982,16 @@ impl MailService {
             };
             let uid_validity = parse_uid_validity(&selected)
                 .context("IMAP server omitted UIDVALIDITY after SELECT")?;
-            let state = match self.store.mailbox_catalog_state(account.id, &plan.storage).await? {
+            let state = match self
+                .store
+                .mailbox_catalog_state(account.id, &plan.storage)
+                .await?
+            {
                 Some(state) => state,
                 None if plan.local != "INBOX" => continue,
-                None => bail!("mailbox catalogue is not initialized; sync the account before refreshing recent mail"),
+                None => bail!(
+                    "mailbox catalogue is not initialized; sync the account before refreshing recent mail"
+                ),
             };
             verify_mailbox_uid_validity(uid_validity, state.uid_validity, "refreshing recent")?;
             let search = client.command(&recent_uid_search_command(&since)).await?;
@@ -1461,35 +1499,42 @@ impl MailService {
 
     pub async fn send(&self, account: &Account, draft: &ComposeMessage) -> Result<String> {
         let secret = self.credentials.secret(account).await?;
+        let endpoint = SmtpEndpoint {
+            host: account.smtp_host.clone(),
+            port: account.smtp_port,
+            tls_parameters: TlsParameters::new(account.smtp_host.clone())?,
+        };
+        self.send_with_smtp_endpoint(account, draft, &secret, endpoint, SMTP_SEND_TIMEOUT)
+            .await
+    }
+
+    async fn send_with_smtp_endpoint(
+        &self,
+        account: &Account,
+        draft: &ComposeMessage,
+        secret: &str,
+        endpoint: SmtpEndpoint,
+        deadline: Duration,
+    ) -> Result<String> {
         let email = build_compose_message(account, draft)?;
         let raw_email = email.formatted();
-        let credentials = Credentials::new(account.auth.username().to_owned(), secret.clone());
-        let mut transport_builder = match account.smtp_security {
-            Security::Tls => AsyncSmtpTransport::<Tokio1Executor>::relay(&account.smtp_host)?,
-            Security::StartTls => {
-                AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&account.smtp_host)?
-            }
-        }
-        .port(account.smtp_port)
-        .credentials(credentials);
-        if matches!(account.auth, AccountAuth::OAuth2 { .. }) {
-            transport_builder = transport_builder.authentication(vec![Mechanism::Xoauth2]);
-        }
-        let transport = transport_builder.build();
-        let response = timeout(
-            SMTP_SEND_TIMEOUT,
-            transport.send_raw(email.envelope(), &raw_email),
+        let response = send_smtp_raw(
+            account,
+            email.envelope(),
+            &raw_email,
+            secret,
+            endpoint,
+            deadline,
         )
-        .await
-        .context("SMTP send timed out")??;
+        .await?;
         if !smtp_saves_sent_copy(account) {
-            self.append_sent_copy(account, &secret, &raw_email)
+            self.append_sent_copy(account, secret, &raw_email)
                 .await
                 .context(
                     "message was sent, but it could not be saved in the account's Sent folder",
                 )?;
         }
-        Ok(response.message().collect::<Vec<_>>().join(" "))
+        Ok(response)
     }
 
     async fn append_sent_copy(
@@ -1506,6 +1551,120 @@ impl MailService {
         let _ = client.command("LOGOUT").await;
         Ok(())
     }
+}
+
+async fn send_smtp_raw(
+    account: &Account,
+    envelope: &Envelope,
+    raw_email: &[u8],
+    secret: &str,
+    endpoint: SmtpEndpoint,
+    deadline: Duration,
+) -> Result<String> {
+    let deadline_at = Instant::now() + deadline;
+    let client_id = ClientId::default();
+    let implicit_tls =
+        matches!(account.smtp_security, Security::Tls).then(|| endpoint.tls_parameters.clone());
+    let mut connection = smtp_before_data(
+        deadline_at,
+        AsyncSmtpConnection::connect_tokio1(
+            (&*endpoint.host, endpoint.port),
+            None,
+            &client_id,
+            implicit_tls,
+            None,
+        ),
+    )
+    .await?;
+
+    if matches!(account.smtp_security, Security::StartTls) {
+        smtp_before_data(
+            deadline_at,
+            connection.starttls(endpoint.tls_parameters, &client_id),
+        )
+        .await?;
+    }
+
+    let credentials = Credentials::new(account.auth.username().to_owned(), secret.to_owned());
+    let mechanisms: &[Mechanism] = match account.auth {
+        AccountAuth::OAuth2 { .. } => &[Mechanism::Xoauth2],
+        AccountAuth::Password { .. } => DEFAULT_MECHANISMS,
+    };
+    smtp_before_data(deadline_at, connection.auth(mechanisms, &credentials)).await?;
+
+    let mut mail_options = Vec::new();
+    let has_non_ascii_address = envelope
+        .from()
+        .into_iter()
+        .chain(envelope.to())
+        .any(|address| !address.to_string().is_ascii());
+    if has_non_ascii_address {
+        if !connection
+            .server_info()
+            .supports_feature(Extension::SmtpUtfEight)
+        {
+            bail!("Envelope contains non-ascii chars but server does not support SMTPUTF8");
+        }
+        mail_options.push(MailParameter::SmtpUtfEight);
+    }
+    if !raw_email.is_ascii() {
+        if !connection
+            .server_info()
+            .supports_feature(Extension::EightBitMime)
+        {
+            bail!("Message contains non-ascii chars but server does not support 8BITMIME");
+        }
+        mail_options.push(MailParameter::Body(MailBodyParameter::EightBitMime));
+    }
+
+    smtp_before_data(
+        deadline_at,
+        connection.command(Mail::new(envelope.from().cloned(), mail_options)),
+    )
+    .await?;
+    for recipient in envelope.to() {
+        smtp_before_data(
+            deadline_at,
+            connection.command(Rcpt::new(recipient.clone(), Vec::new())),
+        )
+        .await?;
+    }
+    smtp_before_data(deadline_at, connection.command(Data)).await?;
+
+    // Once the DATA terminator has been written, a missing final response is
+    // deliberately not retried as an ordinary failure: the relay may have
+    // accepted and queued the message before the connection disappeared.
+    let response = match timeout_at(deadline_at, connection.message(raw_email)).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) if error.is_transient() || error.is_permanent() => return Err(error.into()),
+        Ok(Err(error)) => {
+            return Err(error).context(
+                "SMTP final delivery status was not received after message submission; delivery may be uncertain",
+            );
+        }
+        Err(_) => bail!(
+            "SMTP final delivery status timed out after message submission; delivery may be uncertain"
+        ),
+    };
+    Ok(response.message().collect::<Vec<_>>().join(" "))
+}
+
+/// The logical account and the connection endpoint are normally identical.
+/// Tests may point the transport at a local TLS relay while retaining the
+/// account's provider-specific Sent-copy policy.
+struct SmtpEndpoint {
+    host: String,
+    port: u16,
+    tls_parameters: TlsParameters,
+}
+
+async fn smtp_before_data<T>(
+    deadline_at: Instant,
+    operation: impl std::future::Future<Output = std::result::Result<T, lettre::transport::smtp::Error>>,
+) -> Result<T> {
+    Ok(timeout_at(deadline_at, operation)
+        .await
+        .context("SMTP send timed out before message submission")??)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1842,8 +2001,8 @@ fn decode_outbound_attachments(
         })
         .collect()
 }
-struct ImapClient {
-    reader: BufReader<TlsStream<TcpStream>>,
+struct ImapClient<S = TlsStream<TcpStream>> {
+    reader: BufReader<S>,
     tag: u32,
 }
 struct ImapResponse {
@@ -1900,6 +2059,7 @@ fn body_item_section(value: &str) -> Option<&str> {
     Some(&value[start..end])
 }
 
+#[derive(Debug)]
 enum IdleOutcome {
     Changed,
     Renewed,
@@ -2837,12 +2997,15 @@ fn collect_attachment_candidates(part: &MimePart, candidates: &mut Vec<MimePart>
     }
 }
 
-async fn fetch_section_mime_headers(
-    client: &mut ImapClient,
+async fn fetch_section_mime_headers<S>(
+    client: &mut ImapClient<S>,
     uid: u32,
     path: &[usize],
     root_headers: Option<&[u8]>,
-) -> Result<Vec<u8>> {
+) -> Result<Vec<u8>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     if path.is_empty() {
         return root_headers
             .map(ToOwned::to_owned)
@@ -2858,15 +3021,18 @@ async fn fetch_section_mime_headers(
         .context("IMAP server did not return MIME part headers")
 }
 
-async fn fetch_selective_message(
-    client: &mut ImapClient,
+async fn fetch_selective_message<S>(
+    client: &mut ImapClient<S>,
     account: &Account,
     mailbox: &str,
     uid: u32,
     response_lines: &[String],
     headers: &[u8],
     structure: &MimePart,
-) -> Result<MailSummary> {
+) -> Result<MailSummary>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let plan = selective_plan(structure)?;
     let mut total = 0usize;
     let mut decoded_text_parts = Vec::new();
@@ -3266,7 +3432,7 @@ fn gmail_all_mail_is_archive(lines: &[String]) -> bool {
         .any(|label| metadata.contains(label))
 }
 
-impl ImapClient {
+impl ImapClient<TlsStream<TcpStream>> {
     async fn connect(account: &Account) -> Result<Self> {
         let roots = RootCertStore {
             roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
@@ -3284,15 +3450,23 @@ impl ImapClient {
         .context("could not connect to IMAP server")?;
         if account.imap_security == Security::StartTls {
             let mut plain = BufReader::new(tcp);
-            let mut greeting = String::new();
-            plain.read_line(&mut greeting).await?;
+            let greeting = timeout(
+                IMAP_COMMAND_TIMEOUT,
+                read_imap_line_limited(&mut plain, MAX_IMAP_RESPONSE_TRANSCRIPT_BYTES),
+            )
+            .await
+            .context("IMAP greeting timed out")??;
             if !greeting.starts_with("* OK") {
                 bail!("IMAP server rejected connection: {}", greeting.trim());
             }
             plain.get_mut().write_all(b"D0000 STARTTLS\r\n").await?;
             plain.get_mut().flush().await?;
-            let mut response = String::new();
-            plain.read_line(&mut response).await?;
+            let response = timeout(
+                IMAP_COMMAND_TIMEOUT,
+                read_imap_line_limited(&mut plain, MAX_IMAP_RESPONSE_TRANSCRIPT_BYTES),
+            )
+            .await
+            .context("IMAP STARTTLS response timed out")??;
             if !response.starts_with("D0000 OK") {
                 bail!("IMAP server rejected STARTTLS: {}", response.trim());
             }
@@ -3306,31 +3480,54 @@ impl ImapClient {
             .context("IMAP TLS handshake failed")?;
         let mut reader = BufReader::new(stream);
         if account.imap_security == Security::Tls {
-            let mut greeting = String::new();
-            reader.read_line(&mut greeting).await?;
+            let greeting = timeout(
+                IMAP_COMMAND_TIMEOUT,
+                read_imap_line_limited(&mut reader, MAX_IMAP_RESPONSE_TRANSCRIPT_BYTES),
+            )
+            .await
+            .context("IMAP greeting timed out")??;
             if !greeting.starts_with("* OK") {
                 bail!("IMAP server rejected connection: {}", greeting.trim());
             }
         }
         Ok(Self { reader, tag: 0 })
     }
+}
 
+// Keeping command framing generic lets the protocol state machine be driven
+// by a deterministic local socket in tests. Production construction remains
+// the Rustls-only `ImapClient::connect` implementation above.
+impl<S> ImapClient<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     async fn authenticate(&mut self, account: &Account, secret: &str) -> Result<()> {
-        match &account.auth {
-            AccountAuth::Password { username } => {
-                self.command(&format!(
+        let result = match &account.auth {
+            AccountAuth::Password { username } => self
+                .command(&format!(
                     "LOGIN {} {}",
                     quote_imap(username),
                     quote_imap(secret)
                 ))
-                .await?;
-            }
+                .await
+                .map(|_| ()),
             AccountAuth::OAuth2 { username, .. } => {
                 let auth =
                     STANDARD.encode(format!("user={username}\x01auth=Bearer {secret}\x01\x01"));
                 self.command(&format!("AUTHENTICATE XOAUTH2 {auth}"))
-                    .await?;
+                    .await
+                    .map(|_| ())
             }
+        };
+        if let Err(error) = result {
+            // A tagged NO/BAD while executing the authentication command is
+            // an authentication rejection. BYE, EOF, timeout, and other
+            // transport failures must remain retryable; callers use the
+            // authentication wording to decide whether realtime should pause.
+            if error.to_string().starts_with("IMAP command failed:") {
+                return Err(error).context("IMAP authentication rejected");
+            }
+            return Err(error);
         }
         Ok(())
     }
@@ -3352,12 +3549,15 @@ impl ImapClient {
         let mut pending_change = false;
         loop {
             let mut continuation = String::new();
-            timeout(
+            let read = timeout(
                 IMAP_COMMAND_TIMEOUT,
                 self.reader.read_line(&mut continuation),
             )
             .await
             .context("IMAP IDLE continuation timed out")??;
+            if read == 0 {
+                bail!("IMAP connection closed before IDLE continuation");
+            }
             if continuation.starts_with('+') {
                 break;
             }
@@ -3403,9 +3603,15 @@ impl ImapClient {
         self.reader.get_mut().flush().await?;
         loop {
             let mut line = String::new();
-            timeout(IMAP_COMMAND_TIMEOUT, self.reader.read_line(&mut line))
+            let read = timeout(IMAP_COMMAND_TIMEOUT, self.reader.read_line(&mut line))
                 .await
                 .context("IMAP IDLE termination timed out")??;
+            if read == 0 {
+                bail!("IMAP connection closed during IDLE termination");
+            }
+            if line.to_ascii_uppercase().starts_with("* BYE") {
+                bail!("IMAP server closed the connection during IDLE termination");
+            }
             if line.starts_with(&tag) {
                 if !line[tag.len()..].trim_start().starts_with("OK") {
                     bail!("IMAP IDLE termination failed: {}", line.trim());
@@ -3523,6 +3729,17 @@ impl ImapClient {
                 .read_command_line_limited(MAX_IMAP_RESPONSE_TRANSCRIPT_BYTES)
                 .await?;
             transcript_bytes = reserve_imap_transcript_budget(transcript_bytes, line.len())?;
+            let upper = line.trim_start().to_ascii_uppercase();
+            let is_bye = upper.strip_prefix("* BYE").is_some_and(|suffix| {
+                suffix.is_empty()
+                    || suffix
+                        .as_bytes()
+                        .first()
+                        .is_some_and(u8::is_ascii_whitespace)
+            });
+            if is_bye {
+                bail!("IMAP server closed the connection: {}", line.trim());
+            }
             if is_untagged_fetch_start(&line) {
                 current_fetch_uid = None;
                 pending_fetch_literals.clear();
@@ -3559,7 +3776,6 @@ impl ImapClient {
                 if !line[tag.len()..].trim_start().starts_with("OK") {
                     bail!("IMAP command failed: {}", line.trim());
                 }
-                lines.push(line);
                 break;
             }
         }
@@ -3567,20 +3783,25 @@ impl ImapClient {
     }
 
     async fn read_command_line_limited(&mut self, max_bytes: usize) -> Result<String> {
-        let mut bytes = Vec::new();
-        loop {
-            let byte = self
-                .reader
-                .read_u8()
-                .await
-                .context("IMAP connection closed during command")?;
-            if bytes.len() >= max_bytes {
-                bail!("IMAP response line exceeds MIME safety limit");
-            }
-            bytes.push(byte);
-            if byte == b'\n' {
-                return String::from_utf8(bytes).context("IMAP response line is not valid UTF-8");
-            }
+        read_imap_line_limited(&mut self.reader, max_bytes)
+            .await
+            .context("IMAP connection closed during command")
+    }
+}
+
+async fn read_imap_line_limited<R>(reader: &mut R, max_bytes: usize) -> Result<String>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut bytes = Vec::new();
+    loop {
+        let byte = reader.read_u8().await?;
+        if bytes.len() >= max_bytes {
+            bail!("IMAP response line exceeds MIME safety limit");
+        }
+        bytes.push(byte);
+        if byte == b'\n' {
+            return String::from_utf8(bytes).context("IMAP response line is not valid UTF-8");
         }
     }
 }
@@ -3723,9 +3944,15 @@ fn literal_data_item(line: &str) -> ImapLiteralItem {
 }
 
 fn literal_length(line: &str) -> Option<usize> {
+    let line = line.trim_end_matches(['\r', '\n']);
+    if !line.ends_with('}') {
+        return None;
+    }
     let start = line.rfind('{')? + 1;
-    let end = line[start..].find('}')? + start;
-    line[start..end].trim_end_matches('+').parse().ok()
+    let length = line[start..line.len() - 1].trim_end_matches('+');
+    (!length.is_empty() && length.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| length.parse().ok())
+        .flatten()
 }
 
 fn quote_imap(value: &str) -> String {
@@ -5509,10 +5736,11 @@ pub fn safe_attachment_filename(value: &str, index: usize) -> String {
         value
     };
     let truncated = truncate_filename_bytes(value, 180);
+    let truncated = truncated.trim().trim_matches('.').trim();
     if truncated.is_empty() {
         format!("attachment-{}", index + 1)
     } else {
-        truncated
+        truncated.to_owned()
     }
 }
 
@@ -5542,6 +5770,7 @@ pub fn safe_mime_type(value: &str) -> String {
     let valid = value.split_once('/').is_some_and(|(kind, subtype)| {
         !kind.is_empty()
             && !subtype.is_empty()
+            && !subtype.contains('/')
             && value.chars().all(|character| {
                 character.is_ascii_alphanumeric()
                     || matches!(character, '/' | '.' | '+' | '-' | '_')
@@ -5586,6 +5815,620 @@ pub fn is_potentially_unsafe(filename: &str, mime_type: &str) -> bool {
 mod tests {
     use super::*;
     use crate::{provider, AccountDraft};
+    use lettre::transport::smtp::client::Certificate;
+    use tokio::{
+        io::{duplex, split, AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream},
+        net::{TcpListener, TcpStream},
+        sync::watch,
+    };
+    use tokio_rustls::{
+        rustls::{
+            pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
+            ServerConfig,
+        },
+        TlsAcceptor,
+    };
+
+    /// A deliberately small transcript harness. The client is the production
+    /// command state machine; only the transport is plain loopback TCP so the
+    /// fixture can control byte fragmentation without changing TLS policy.
+    async fn plain_imap_client_and_server() -> (ImapClient<TcpStream>, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = TcpStream::connect(address).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        (
+            ImapClient {
+                reader: BufReader::new(client),
+                tag: 0,
+            },
+            server,
+        )
+    }
+
+    async fn scripted_command<R>(reader: &mut BufReader<R>) -> (String, String)
+    where
+        R: AsyncRead + Unpin,
+    {
+        let mut command = String::new();
+        reader.read_line(&mut command).await.unwrap();
+        let (tag, command) = command.trim_end().split_once(' ').unwrap();
+        (tag.to_owned(), command.to_owned())
+    }
+
+    async fn scripted_expect_command<R>(
+        reader: &mut BufReader<R>,
+        transcript: &mut Vec<String>,
+        expected: &str,
+    ) -> String
+    where
+        R: AsyncRead + Unpin,
+    {
+        let (tag, command) = scripted_command(reader).await;
+        transcript.push(command.clone());
+        assert_eq!(command, expected);
+        tag
+    }
+
+    async fn write_transcript_fragments(
+        writer: &mut tokio::net::tcp::OwnedWriteHalf,
+        fragments: &[&[u8]],
+    ) {
+        for fragment in fragments {
+            writer.write_all(fragment).await.unwrap();
+            writer.flush().await.unwrap();
+        }
+    }
+
+    async fn scripted_inbox_sync_server(
+        server: TcpStream,
+        uid_validity: u32,
+        remote_uids: &[u32],
+        fetched_uid: u32,
+        subject: &str,
+    ) -> Vec<String> {
+        let (read, mut write) = server.into_split();
+        let mut read = BufReader::new(read);
+        let mut transcript = Vec::new();
+        let tag = scripted_expect_command(
+            &mut read,
+            &mut transcript,
+            "LOGIN \"reader@example.test\" \"sync secret\"",
+        )
+        .await;
+        let response = format!("{tag} OK authenticated\r\n");
+        write.write_all(response.as_bytes()).await.unwrap();
+
+        let tag = scripted_expect_command(&mut read, &mut transcript, "LIST \"\" \"*\"").await;
+        let response = format!("* LIST (\\\\HasNoChildren) \"/\" \"INBOX\"\r\n{tag} OK listed\r\n");
+        write.write_all(response.as_bytes()).await.unwrap();
+
+        let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+        let response = format!(
+            "* {} EXISTS\r\n* OK [UIDVALIDITY {uid_validity}] UIDs valid\r\n{tag} OK selected\r\n",
+            remote_uids.len()
+        );
+        write.write_all(response.as_bytes()).await.unwrap();
+
+        let tag = scripted_expect_command(&mut read, &mut transcript, "UID SEARCH ALL").await;
+        let response = format!(
+            "* SEARCH {}\r\n{tag} OK searched\r\n",
+            remote_uids
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        write.write_all(response.as_bytes()).await.unwrap();
+
+        // Keep this exact single exchange in the transcript: a duplicate
+        // flags request previously doubled the provider work before download.
+        let tag =
+            scripted_expect_command(&mut read, &mut transcript, "UID FETCH 1:* (UID FLAGS)").await;
+        let flags = remote_uids
+            .iter()
+            .map(|uid| format!("* 1 FETCH (UID {uid} FLAGS ())\r\n"))
+            .collect::<String>();
+        let response = format!("{flags}{tag} OK flags\r\n");
+        write.write_all(response.as_bytes()).await.unwrap();
+
+        let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+        let response = format!(
+            "* {} EXISTS\r\n* OK [UIDVALIDITY {uid_validity}] UIDs valid\r\n{tag} OK selected\r\n",
+            remote_uids.len()
+        );
+        write.write_all(response.as_bytes()).await.unwrap();
+
+        let metadata_fields = "FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)]";
+        let tag = scripted_expect_command(
+            &mut read,
+            &mut transcript,
+            &format!("UID FETCH {fetched_uid} ({metadata_fields})"),
+        )
+        .await;
+        let headers = format!(
+            "Date: Wed, 30 Jul 2026 10:00:00 +0000\r\nFrom: Sender <sender@example.test>\r\nTo: Reader <reader@example.test>\r\nSubject: {subject}\r\nMessage-ID: <{fetched_uid}@example.test>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"
+        );
+        let response = format!(
+            "* 1 FETCH (UID {fetched_uid} FLAGS () INTERNALDATE \"30-Jul-2026 10:00:00 +0000\" RFC822.SIZE 5 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"UTF-8\") NIL NIL \"7BIT\" 5 1) BODY[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)] {{{}}}\r\n",
+            headers.len()
+        );
+        write.write_all(response.as_bytes()).await.unwrap();
+        write.write_all(headers.as_bytes()).await.unwrap();
+        let response = format!(")\r\n{tag} OK metadata\r\n");
+        write.write_all(response.as_bytes()).await.unwrap();
+
+        let tag = scripted_expect_command(
+            &mut read,
+            &mut transcript,
+            &format!("UID FETCH {fetched_uid} (BODY.PEEK[]<0.8192>)"),
+        )
+        .await;
+        let response = format!(
+            "* 1 FETCH (UID {fetched_uid} BODY[]<0> {{5}}\r\nhello)\r\n{tag} OK preview\r\n"
+        );
+        write.write_all(response.as_bytes()).await.unwrap();
+
+        let _ = scripted_expect_command(&mut read, &mut transcript, "LOGOUT").await;
+        transcript
+    }
+
+    #[tokio::test]
+    async fn scripted_mail_service_inbox_sync_persists_incremental_uid_and_isolates_accounts() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("scripted-mail-service.sqlite");
+        let store = Store::open(&database).await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        let mut other_account = test_account();
+        other_account.email = "other@example.test".into();
+        other_account.account_name = other_account.email.clone();
+        store.save_account(&account).await.unwrap();
+        store.save_account(&other_account).await.unwrap();
+        service
+            .credentials()
+            .set_password(&account, "sync secret")
+            .await
+            .unwrap();
+
+        let (mut first_client, first_server) = plain_imap_client_and_server().await;
+        let first_server = tokio::spawn(scripted_inbox_sync_server(
+            first_server,
+            77,
+            &[42],
+            42,
+            "Initial transcript message",
+        ));
+        let first = service
+            .sync_mailboxes_with_progress_on_client(
+                &mut first_client,
+                &account,
+                50,
+                vec![MailboxPlan::new("INBOX", "INBOX")],
+                false,
+                |_| {},
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.synced_count, 1);
+        assert!(
+            first.new_messages.is_empty(),
+            "initial catalogue is not new mail"
+        );
+        assert_eq!(
+            first_server.await.unwrap(),
+            vec![
+                "LOGIN \"reader@example.test\" \"sync secret\"",
+                "LIST \"\" \"*\"",
+                "SELECT \"INBOX\"",
+                "UID SEARCH ALL",
+                "UID FETCH 1:* (UID FLAGS)",
+                "SELECT \"INBOX\"",
+                "UID FETCH 42 (FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)])",
+                "UID FETCH 42 (BODY.PEEK[]<0.8192>)",
+                "LOGOUT",
+            ]
+        );
+
+        let (mut second_client, second_server) = plain_imap_client_and_server().await;
+        let second_server = tokio::spawn(scripted_inbox_sync_server(
+            second_server,
+            77,
+            &[42, 43],
+            43,
+            "Incremental transcript message",
+        ));
+        let second = service
+            .sync_mailboxes_with_progress_on_client(
+                &mut second_client,
+                &account,
+                50,
+                vec![MailboxPlan::new("INBOX", "INBOX")],
+                false,
+                |_| {},
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.synced_count, 1);
+        assert_eq!(
+            second
+                .new_messages
+                .iter()
+                .map(|message| message.uid)
+                .collect::<Vec<_>>(),
+            vec![43]
+        );
+
+        assert_eq!(
+            store.mailbox_uids(account.id, "INBOX").await.unwrap(),
+            [42, 43].into()
+        );
+        assert!(store
+            .mailbox_uids(other_account.id, "INBOX")
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .message_by_locator(account.id, "INBOX", 43)
+                .await
+                .unwrap()
+                .unwrap()
+                .subject,
+            "Incremental transcript message"
+        );
+        let state = store
+            .mailbox_catalog_state(account.id, "INBOX")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.uid_validity, 77);
+        assert_eq!(state.remote_total, 2);
+        assert!(state.historical_complete);
+        assert_eq!(
+            store
+                .highest_mailbox_uid(account.id, "INBOX")
+                .await
+                .unwrap(),
+            Some(43)
+        );
+        assert_eq!(
+            second_server.await.unwrap(),
+            vec![
+                "LOGIN \"reader@example.test\" \"sync secret\"",
+                "LIST \"\" \"*\"",
+                "SELECT \"INBOX\"",
+                "UID SEARCH ALL",
+                "UID FETCH 1:* (UID FLAGS)",
+                "SELECT \"INBOX\"",
+                "UID FETCH 43 (FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)])",
+                "UID FETCH 43 (BODY.PEEK[]<0.8192>)",
+                "LOGOUT",
+            ]
+        );
+
+        drop(service);
+        drop(store);
+        let reopened = Store::open(&database).await.unwrap();
+        assert_eq!(
+            reopened.mailbox_uids(account.id, "INBOX").await.unwrap(),
+            [42, 43].into()
+        );
+        assert!(reopened
+            .mailbox_uids(other_account.id, "INBOX")
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            reopened
+                .message_by_locator(account.id, "INBOX", 43)
+                .await
+                .unwrap()
+                .unwrap()
+                .subject,
+            "Incremental transcript message"
+        );
+    }
+
+    // Test-only CA plus leaf certificate for 127.0.0.1/localhost. The
+    // private key is intentionally public: it exists solely to make the
+    // loopback TLS transcripts deterministic while still verifying a test CA.
+    const SMTP_TEST_CA_DER_BASE64: &str = "MIIBoDCCAUWgAwIBAgIUQltW8tjmRLr4QjHNjnIXOGd4oqcwCgYIKoZIzj0EAwIwHTEbMBkGA1UEAwwSRGFraWEgU01UUCB0ZXN0IENBMB4XDTI2MDczMDE2MDE1NFoXDTM2MDcyNzE2MDE1NFowHTEbMBkGA1UEAwwSRGFraWEgU01UUCB0ZXN0IENBMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEowlFdKeMeRMDaJroLiqhOMAQ1dKYMuoX/SXdgSSY0fIcL7K4mv7z8Xqg5iLrw84NQxGZt36GLxNaGfSLmCR6nqNjMGEwHQYDVR0OBBYEFKzJ36GY9x0+2bor86BZVX+U3mOLMB8GA1UdIwQYMBaAFKzJ36GY9x0+2bor86BZVX+U3mOLMA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgKEMAoGCCqGSM49BAMCA0kAMEYCIQD5sjoNPPW9m+gCspyKyj9AOdgwZiavQhgDeIvu5hzVgQIhALJpuju+3/idyBTJ1qGomBG4aRuIO9cHhLwuMtAVtMvt";
+    const SMTP_TEST_CERT_DER_BASE64: &str = "MIIBxjCCAWygAwIBAgIUM95kwE13FWtKVQEkqO3f8DeMFAgwCgYIKoZIzj0EAwIwHTEbMBkGA1UEAwwSRGFraWEgU01UUCB0ZXN0IENBMB4XDTI2MDczMDE2MDE1NFoXDTM2MDcyNzE2MDE1NFowFDESMBAGA1UEAwwJbG9jYWxob3N0MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAElFRQ2c4qt7037iUsrzdKiDrS/euRkQ3z5uCpfrYsFVhe3g4ffc5IBLZDWSEUP0EJvyEOOg5KL1by1ZGYC/d+S6OBkjCBjzAMBgNVHRMBAf8EAjAAMA4GA1UdDwEB/wQEAwIHgDATBgNVHSUEDDAKBggrBgEFBQcDATAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEwHQYDVR0OBBYEFM3UTgErLg6p5+pv13yFNths9Lb9MB8GA1UdIwQYMBaAFKzJ36GY9x0+2bor86BZVX+U3mOLMAoGCCqGSM49BAMCA0gAMEUCIEmgwMiWttP7OvYXRkvPm/5c64vpxLLtT+Jg6E4g+OnYAiEAp742aGep2AEwIRP9YXI8RLjhaseLGUQT7R4AWFwnYZE=";
+    const SMTP_TEST_KEY_DER_BASE64: &str = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg8ZClgJ8kAl4AVnA0D9d0PXx2siCJiOmjud/vD1NKSqehRANCAASUVFDZziq3vTfuJSyvN0qIOtL965GRDfPm4Kl+tiwVWF7eDh99zkgEtkNZIRQ/QQm/IQ46DkovVvLVkZgL935L";
+
+    fn smtp_test_acceptor() -> TlsAcceptor {
+        let certificate = CertificateDer::from(STANDARD.decode(SMTP_TEST_CERT_DER_BASE64).unwrap());
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            STANDARD.decode(SMTP_TEST_KEY_DER_BASE64).unwrap(),
+        ));
+        let config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate], key)
+            .unwrap();
+        TlsAcceptor::from(Arc::new(config))
+    }
+
+    fn smtp_test_account(security: Security, port: u16) -> Account {
+        let mut account = test_account();
+        account.email = "sender@example.test".into();
+        account.auth = AccountAuth::Password {
+            username: "sender@example.test".into(),
+        };
+        account.smtp_host = "127.0.0.1".into();
+        account.smtp_port = port;
+        account.smtp_security = security;
+        account
+    }
+
+    fn smtp_test_tls_parameters(account: &Account) -> TlsParameters {
+        let certificate =
+            Certificate::from_der(STANDARD.decode(SMTP_TEST_CA_DER_BASE64).unwrap()).unwrap();
+        TlsParameters::builder(account.smtp_host.clone())
+            .add_root_certificate(certificate)
+            .build()
+            .unwrap()
+    }
+
+    fn smtp_test_endpoint(account: &Account) -> SmtpEndpoint {
+        SmtpEndpoint {
+            host: account.smtp_host.clone(),
+            port: account.smtp_port,
+            tls_parameters: smtp_test_tls_parameters(account),
+        }
+    }
+
+    fn smtp_test_envelope() -> Envelope {
+        Envelope::new(
+            Some("sender@example.test".parse().unwrap()),
+            vec!["recipient@example.test".parse().unwrap()],
+        )
+        .unwrap()
+    }
+
+    async fn smtp_command<S>(connection: &mut BufReader<S>) -> String
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let mut command = String::new();
+        assert_ne!(connection.read_line(&mut command).await.unwrap(), 0);
+        command
+    }
+
+    async fn smtp_reply<S>(connection: &mut BufReader<S>, response: &str)
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        connection
+            .get_mut()
+            .write_all(response.as_bytes())
+            .await
+            .unwrap();
+        connection.get_mut().flush().await.unwrap();
+    }
+
+    async fn smtp_expect_ehlo_and_auth<S>(connection: &mut BufReader<S>, reject: bool)
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        assert!(smtp_command(connection).await.starts_with("EHLO "));
+        smtp_reply(
+            connection,
+            "250-localhost\r\n250-AUTH PLAIN\r\n250 8BITMIME\r\n",
+        )
+        .await;
+        let auth = smtp_command(connection).await;
+        assert_eq!(auth, "AUTH PLAIN AHNlbmRlckBleGFtcGxlLnRlc3QAc2VjcmV0\r\n");
+        smtp_reply(
+            connection,
+            if reject {
+                "535 5.7.8 invalid credentials\r\n"
+            } else {
+                "235 2.7.0 authenticated\r\n"
+            },
+        )
+        .await;
+    }
+
+    async fn smtp_expect_envelope_until_data<S>(connection: &mut BufReader<S>)
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        assert_eq!(
+            smtp_command(connection).await,
+            "MAIL FROM:<sender@example.test>\r\n"
+        );
+        smtp_reply(connection, "250 2.1.0 sender accepted\r\n").await;
+        assert_eq!(
+            smtp_command(connection).await,
+            "RCPT TO:<recipient@example.test>\r\n"
+        );
+        smtp_reply(connection, "250 2.1.5 recipient accepted\r\n").await;
+        assert_eq!(smtp_command(connection).await, "DATA\r\n");
+        smtp_reply(connection, "354 send message\r\n").await;
+    }
+
+    async fn smtp_read_message<S>(connection: &mut BufReader<S>) -> String
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let mut message = String::new();
+        loop {
+            let line = smtp_command(connection).await;
+            if line == ".\r\n" {
+                return message;
+            }
+            message.push_str(&line);
+        }
+    }
+
+    #[tokio::test]
+    async fn scripted_smtp_implicit_tls_rejects_a_recipient_after_authentication() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let account = smtp_test_account(Security::Tls, listener.local_addr().unwrap().port());
+        let acceptor = smtp_test_acceptor();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let stream = acceptor.accept(stream).await.unwrap();
+            let mut connection = BufReader::new(stream);
+            smtp_reply(&mut connection, "220 localhost ready\r\n").await;
+            smtp_expect_ehlo_and_auth(&mut connection, false).await;
+            assert_eq!(
+                smtp_command(&mut connection).await,
+                "MAIL FROM:<sender@example.test>\r\n"
+            );
+            smtp_reply(&mut connection, "250 2.1.0 sender accepted\r\n").await;
+            assert_eq!(
+                smtp_command(&mut connection).await,
+                "RCPT TO:<recipient@example.test>\r\n"
+            );
+            smtp_reply(&mut connection, "550 5.1.1 no such recipient\r\n").await;
+        });
+
+        let error = send_smtp_raw(
+            &account,
+            &smtp_test_envelope(),
+            b"From: sender@example.test\r\nTo: recipient@example.test\r\nSubject: RCPT\r\n\r\nhello\r\n",
+            "secret",
+            smtp_test_endpoint(&account),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+        server.await.unwrap();
+        assert!(error.to_string().contains("550"), "{error:#}");
+        assert!(!error.to_string().contains("may be uncertain"), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn scripted_smtp_starttls_rejects_bad_credentials_before_envelope_submission() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let account = smtp_test_account(Security::StartTls, listener.local_addr().unwrap().port());
+        let acceptor = smtp_test_acceptor();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut plaintext = BufReader::new(stream);
+            smtp_reply(&mut plaintext, "220 localhost ready\r\n").await;
+            assert!(smtp_command(&mut plaintext).await.starts_with("EHLO "));
+            smtp_reply(
+                &mut plaintext,
+                "250-localhost\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n",
+            )
+            .await;
+            assert_eq!(smtp_command(&mut plaintext).await, "STARTTLS\r\n");
+            smtp_reply(&mut plaintext, "220 2.0.0 start TLS\r\n").await;
+
+            let stream = acceptor.accept(plaintext.into_inner()).await.unwrap();
+            let mut encrypted = BufReader::new(stream);
+            smtp_expect_ehlo_and_auth(&mut encrypted, true).await;
+        });
+
+        let error = send_smtp_raw(
+            &account,
+            &smtp_test_envelope(),
+            b"From: sender@example.test\r\nTo: recipient@example.test\r\nSubject: auth\r\n\r\nhello\r\n",
+            "secret",
+            smtp_test_endpoint(&account),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+        server.await.unwrap();
+        assert!(error.to_string().contains("535"), "{error:#}");
+        assert!(!error.to_string().contains("may be uncertain"), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn scripted_smtp_starttls_eof_after_data_reports_uncertain_delivery() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let account = smtp_test_account(Security::StartTls, listener.local_addr().unwrap().port());
+        let acceptor = smtp_test_acceptor();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut plaintext = BufReader::new(stream);
+            smtp_reply(&mut plaintext, "220 localhost ready\r\n").await;
+            assert!(smtp_command(&mut plaintext).await.starts_with("EHLO "));
+            smtp_reply(
+                &mut plaintext,
+                "250-localhost\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n",
+            )
+            .await;
+            assert_eq!(smtp_command(&mut plaintext).await, "STARTTLS\r\n");
+            smtp_reply(&mut plaintext, "220 2.0.0 start TLS\r\n").await;
+
+            let stream = acceptor.accept(plaintext.into_inner()).await.unwrap();
+            let mut encrypted = BufReader::new(stream);
+            smtp_expect_ehlo_and_auth(&mut encrypted, false).await;
+            smtp_expect_envelope_until_data(&mut encrypted).await;
+            let message = smtp_read_message(&mut encrypted).await;
+            assert!(message.contains("Subject: uncertain delivery"));
+            // The terminating dot has been consumed, but the server closes
+            // before its final 250. The client cannot know whether the relay
+            // accepted, queued, or lost the submission.
+        });
+
+        let error = send_smtp_raw(
+            &account,
+            &smtp_test_envelope(),
+            b"From: sender@example.test\r\nTo: recipient@example.test\r\nSubject: uncertain delivery\r\n\r\nhello\r\n",
+            "secret",
+            smtp_test_endpoint(&account),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+        server.await.unwrap();
+        assert!(
+            error.to_string().contains("delivery may be uncertain"),
+            "{error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_mail_service_send_builds_message_and_skips_duplicate_gmail_append() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let transport_account =
+            smtp_test_account(Security::Tls, listener.local_addr().unwrap().port());
+        let acceptor = smtp_test_acceptor();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let stream = acceptor.accept(stream).await.unwrap();
+            let mut connection = BufReader::new(stream);
+            smtp_reply(&mut connection, "220 localhost ready\r\n").await;
+            smtp_expect_ehlo_and_auth(&mut connection, false).await;
+            smtp_expect_envelope_until_data(&mut connection).await;
+            let message = smtp_read_message(&mut connection).await;
+            assert!(message.contains("Subject: MailService transcript"));
+            assert!(message.contains("plain body"));
+            assert!(message.contains("HTML body"));
+            smtp_reply(&mut connection, "250 2.0.0 queued as fixture-42\r\n").await;
+        });
+
+        let service = MailService::new(Store::in_memory().await.unwrap());
+        let endpoint = smtp_test_endpoint(&transport_account);
+        let mut gmail = transport_account;
+        // The exact production Gmail submission host is the provider contract
+        // that prevents a second IMAP APPEND after SMTP accepts the message.
+        gmail.smtp_host = "smtp.gmail.com".into();
+        let draft = ComposeMessage {
+            account_id: gmail.id,
+            to: vec!["recipient@example.test".into()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "MailService transcript".into(),
+            body_text: "plain body".into(),
+            body_html: Some("<p>HTML body</p>".into()),
+            in_reply_to: None,
+            references: None,
+            attachments: Vec::new(),
+        };
+        let response = service
+            .send_with_smtp_endpoint(&gmail, &draft, "secret", endpoint, Duration::from_secs(1))
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert!(response.contains("queued as fixture-42"));
+    }
 
     fn test_account() -> Account {
         AccountDraft {
@@ -5638,6 +6481,221 @@ mod tests {
                 include_bytes!("../testdata/mime/truncated-multipart-lf.eml")
             }
             _ => panic!("unknown MIME corpus fixture: {name}"),
+        }
+    }
+
+    #[derive(Clone)]
+    struct FixtureImapSection {
+        headers: Vec<u8>,
+        body: Vec<u8>,
+    }
+
+    /// The conformance server derives its IMAP view from the exact checked-in
+    /// RFC822 bytes.  It deliberately does not use decoded parser contents:
+    /// selective fetches must receive the same transfer-encoded leaf bytes a
+    /// real server would return for BODY[section].
+    struct FixtureImapMessage {
+        bodystructure: String,
+        root_headers: Vec<u8>,
+        sections: BTreeMap<String, FixtureImapSection>,
+    }
+
+    fn fixture_imap_message(raw: &[u8]) -> Result<FixtureImapMessage> {
+        let parsed = parse_complete_message(raw)?;
+        let root = parsed.part(0).context("fixture parser omitted root part")?;
+        let mut sections = BTreeMap::new();
+        let bodystructure = fixture_bodystructure_part(&parsed, 0, raw, &[], &mut sections)?;
+        let root_headers = raw
+            .get(root.raw_header_offset() as usize..root.raw_body_offset() as usize)
+            .context("fixture root header offsets are invalid")?
+            .to_vec();
+        Ok(FixtureImapMessage {
+            bodystructure,
+            root_headers,
+            sections,
+        })
+    }
+
+    fn fixture_bodystructure_part(
+        message: &ParsedMessage<'_>,
+        part_id: u32,
+        raw: &[u8],
+        path: &[usize],
+        sections: &mut BTreeMap<String, FixtureImapSection>,
+    ) -> Result<String> {
+        let part = message
+            .part(part_id)
+            .context("fixture parser omitted MIME part")?;
+        let section = FixtureImapSection {
+            headers: raw
+                .get(part.raw_header_offset() as usize..part.raw_body_offset() as usize)
+                .context("fixture MIME header offsets are invalid")?
+                .to_vec(),
+            body: raw
+                .get(part.raw_body_offset() as usize..part.raw_end_offset() as usize)
+                .context("fixture MIME body offsets are invalid")?
+                .to_vec(),
+        };
+        sections.insert(section_name(path), section);
+
+        let content_type = part
+            .content_type()
+            .context("fixture MIME part omitted Content-Type")?;
+        if let Some(children) = part.sub_parts() {
+            let mut values = Vec::with_capacity(children.len() + 5);
+            for (index, child) in children.iter().enumerate() {
+                let mut child_path = path.to_vec();
+                child_path.push(index + 1);
+                values.push(fixture_bodystructure_part(
+                    message,
+                    *child,
+                    raw,
+                    &child_path,
+                    sections,
+                )?);
+            }
+            values.push(imap_fixture_string(
+                content_type.subtype().unwrap_or("mixed"),
+            ));
+            values.push(imap_fixture_params(content_type.attributes()));
+            values.push(imap_fixture_disposition(part));
+            values.push("NIL".into());
+            values.push("NIL".into());
+            return Ok(format!("({})", values.join(" ")));
+        }
+
+        let raw_size = part.raw_end_offset().saturating_sub(part.raw_body_offset()) as usize;
+        Ok(format!(
+            "({} {} {} {} NIL {} {} 0 {} NIL NIL)",
+            imap_fixture_string(content_type.ctype()),
+            imap_fixture_string(content_type.subtype().unwrap_or("plain")),
+            imap_fixture_params(content_type.attributes()),
+            part.content_id()
+                .map(imap_fixture_string)
+                .unwrap_or_else(|| "NIL".into()),
+            imap_fixture_string(part.content_transfer_encoding().unwrap_or("7BIT")),
+            raw_size,
+            imap_fixture_disposition(part),
+        ))
+    }
+
+    fn imap_fixture_params(attributes: Option<&[mail_parser::Attribute<'_>]>) -> String {
+        let Some(attributes) = attributes.filter(|attributes| !attributes.is_empty()) else {
+            return "NIL".into();
+        };
+        let mut values = Vec::with_capacity(attributes.len() * 2);
+        for attribute in attributes {
+            values.push(imap_fixture_string(&attribute.name));
+            values.push(imap_fixture_string(&attribute.value));
+        }
+        format!("({})", values.join(" "))
+    }
+
+    fn imap_fixture_disposition(part: &MessagePart<'_>) -> String {
+        let Some(disposition) = part.content_disposition() else {
+            return "NIL".into();
+        };
+        format!(
+            "({} {})",
+            imap_fixture_string(disposition.ctype()),
+            imap_fixture_params(disposition.attributes())
+        )
+    }
+
+    fn imap_fixture_string(value: &str) -> String {
+        format!(
+            "\"{}\"",
+            value
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace(['\r', '\n'], " ")
+        )
+    }
+
+    async fn serve_fixture_selective_sections(
+        stream: DuplexStream,
+        uid: u32,
+        sections: BTreeMap<String, FixtureImapSection>,
+    ) -> Result<BTreeSet<String>> {
+        let (read, mut write) = split(stream);
+        let mut reader = BufReader::new(read);
+        let mut served = BTreeSet::new();
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).await? == 0 {
+                return Ok(served);
+            }
+            let (tag, command) = line
+                .trim_end()
+                .split_once(' ')
+                .context("fixture server received an untagged command")?;
+            let section = command
+                .split_once("BODY.PEEK[")
+                .and_then(|(_, rest)| rest.split_once(']'))
+                .map(|(section, _)| section)
+                .context("fixture server received a non-sectioned fetch")?;
+            let (path, mime_headers) = section
+                .strip_suffix(".MIME")
+                .map(|path| (path, true))
+                .unwrap_or((section, false));
+            let key = if path.eq_ignore_ascii_case("TEXT") {
+                ""
+            } else {
+                path
+            };
+            let item = sections
+                .get(key)
+                .with_context(|| format!("fixture server lacks BODY[{section}]"))?;
+            let bytes = if mime_headers {
+                &item.headers
+            } else {
+                &item.body
+            };
+            served.insert(section.to_owned());
+            write
+                .write_all(
+                    format!(
+                        "* 1 FETCH (UID {uid} BODY[{section}] {{{}}}\r\n",
+                        bytes.len()
+                    )
+                    .as_bytes(),
+                )
+                .await?;
+            write.write_all(bytes).await?;
+            write
+                .write_all(format!("\r\n)\r\n{tag} OK FETCH completed\r\n").as_bytes())
+                .await?;
+            write.flush().await?;
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct SelectiveUserVisibleSemantics {
+        body_text: String,
+        body_html: Option<String>,
+        snippet: String,
+        attachments: Vec<(String, String, bool, String)>,
+    }
+
+    fn selective_user_visible_semantics(message: &MailSummary) -> SelectiveUserVisibleSemantics {
+        let mut attachments = message
+            .attachments
+            .iter()
+            .map(|attachment| {
+                (
+                    attachment.attachment.filename.clone(),
+                    attachment.attachment.mime_type.clone(),
+                    attachment.attachment.is_inline,
+                    format!("{:?}", attachment.attachment.presentation),
+                )
+            })
+            .collect::<Vec<_>>();
+        attachments.sort();
+        SelectiveUserVisibleSemantics {
+            body_text: message.body_text.clone(),
+            body_html: message.body_html.clone(),
+            snippet: message.snippet.clone(),
+            attachments,
         }
     }
 
@@ -5941,6 +6999,148 @@ mod tests {
             assert!(headers.snippet.is_empty(), "{name}");
             assert!(headers.body_text.is_empty(), "{name}");
             assert!(headers.attachments.is_empty(), "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn realistic_selective_bodystructure_fixtures_match_complete_parser_and_starred_storage()
+    {
+        // Keep this list in lockstep with `selective-bodystructure` in the
+        // governed manifest. Each fixture is served as transfer-encoded IMAP
+        // sections generated from its actual raw RFC822 representation.
+        let cases = [
+            "attached-message-rfc822",
+            "format-flowed-delsp",
+            "linkedin-inline-content-id",
+            "multipart-attachment-container",
+            "provider-signature-inline",
+        ];
+        let manifest: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../testdata/realistic-fixtures.manifest.json"
+        ))
+        .unwrap();
+        let mut declared = manifest["fixtures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|fixture| {
+                fixture["path"]
+                    .as_str()
+                    .is_some_and(|path| path.ends_with(".eml"))
+                    && fixture["applicablePaths"].as_array().is_some_and(|paths| {
+                        paths
+                            .iter()
+                            .any(|path| path.as_str() == Some("selective-bodystructure"))
+                    })
+            })
+            .map(|fixture| {
+                fixture["id"]
+                    .as_str()
+                    .unwrap()
+                    .trim_start_matches("mime.")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        declared.sort();
+        assert_eq!(
+            declared, cases,
+            "manifest selective fixtures must all be covered"
+        );
+        let account = test_account();
+        let response_lines = vec![
+            "* 1 FETCH (UID 1 FLAGS (\\Seen \\Flagged) INTERNALDATE \"21-Jul-2026 10:00:00 +0000\")"
+                .to_owned(),
+        ];
+        let mut complete_messages = Vec::new();
+
+        for (index, name) in cases.iter().enumerate() {
+            let raw = if *name == "provider-signature-inline" {
+                include_bytes!("../tests/fixtures/provider-signature-inline.eml").as_slice()
+            } else {
+                mime_corpus(name)
+            };
+            let uid = index as u32 + 1;
+            let complete = parse_message(&account, "INBOX", uid, &response_lines, raw, None)
+                .await
+                .unwrap_or_else(|error| panic!("{name} complete parse failed: {error}"));
+            let fixture = fixture_imap_message(raw)
+                .unwrap_or_else(|error| panic!("{name} fixture IMAP derivation failed: {error}"));
+            let structure = parse_bodystructure(&[format!(
+                "* 1 FETCH (UID {uid} BODYSTRUCTURE {})",
+                fixture.bodystructure
+            )])
+            .unwrap_or_else(|error| {
+                panic!("{name} generated BODYSTRUCTURE failed to parse: {error}")
+            });
+            let (client_transport, server_transport) =
+                duplex(MAX_RAW_MESSAGE_BYTES.min(1024 * 1024));
+            let server = tokio::spawn(serve_fixture_selective_sections(
+                server_transport,
+                uid,
+                fixture.sections,
+            ));
+            let mut client = ImapClient {
+                reader: BufReader::new(client_transport),
+                tag: 0,
+            };
+            let selective = fetch_selective_message(
+                &mut client,
+                &account,
+                "INBOX",
+                uid,
+                &response_lines,
+                &fixture.root_headers,
+                &structure,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{name} selective fetch failed: {error}"));
+            drop(client);
+            let served = server
+                .await
+                .unwrap_or_else(|error| panic!("{name} fixture server panicked: {error}"))
+                .unwrap_or_else(|error| panic!("{name} fixture server failed: {error}"));
+
+            assert!(
+                served
+                    .iter()
+                    .all(|section| { section.as_bytes().first().is_some_and(u8::is_ascii_digit) }),
+                "{name} selective fetch must use only nested BODY sections: {served:?}"
+            );
+            assert_eq!(
+                selective_user_visible_semantics(&selective),
+                selective_user_visible_semantics(&complete),
+                "{name} complete and selective user-visible content diverged"
+            );
+            complete_messages.push(complete);
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("selective-fixtures.sqlite");
+        let store = Store::open(&database).await.unwrap();
+        store.save_account(&account).await.unwrap();
+        store.upsert_messages(&complete_messages).await.unwrap();
+        drop(store);
+
+        let reopened = Store::open(&database).await.unwrap();
+        for complete in &complete_messages {
+            let stored = reopened.message(&complete.id).await.unwrap().unwrap();
+            assert_eq!(stored.body_text, complete.body_text, "{}", complete.id);
+            assert_eq!(stored.body_html, complete.body_html, "{}", complete.id);
+            assert_eq!(stored.snippet, complete.snippet, "{}", complete.id);
+            let metadata = reopened
+                .starred_attachment_metadata(&complete.id)
+                .await
+                .unwrap();
+            assert_eq!(
+                metadata.len(),
+                complete
+                    .attachments
+                    .iter()
+                    .filter(|attachment| attachment.attachment.presentation.is_downloadable())
+                    .count(),
+                "{}",
+                complete.id
+            );
         }
     }
 
@@ -6440,7 +7640,10 @@ mod tests {
         let headers = parse_header_message(&account, "INBOX", 3, &[], raw.as_bytes()).unwrap();
 
         for message in [complete, catalogue, headers] {
-            assert_eq!(message.to_addresses, "Primary <primary@example.test>, Team: second@example.test, Third <third@example.test>;");
+            assert_eq!(
+                message.to_addresses,
+                "Primary <primary@example.test>, Team: second@example.test, Third <third@example.test>;"
+            );
             assert_eq!(
                 message.cc_addresses,
                 "Mära <mara@example.test>, Other <other@example.test>"
@@ -7396,6 +8599,243 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn scripted_imap_transcript_handles_fragmented_literals_and_unsolicited_fetches() {
+        let (mut client, server) = plain_imap_client_and_server().await;
+        let server = tokio::spawn(async move {
+            let (read, mut write) = server.into_split();
+            let mut read = BufReader::new(read);
+            let (tag, command) = scripted_command(&mut read).await;
+            assert_eq!(command, "UID FETCH 42 (BODY.PEEK[1])");
+
+            // Each protocol unit is intentionally split differently. The
+            // final requested literal appears before its UID, while the two
+            // preceding literals belong to unsolicited/wrong FETCH replies.
+            write_transcript_fragments(
+                &mut write,
+                &[
+                    b"* 1 FETCH (UID 7 BODY[1] {5}\r\nwr",
+                    b"ong)\r\n* 2 FETCH (UID 42 BODY[2] {5}\r\nother)\r\n",
+                    b"* 3 FETCH (BODY[1] {5}\r\nright UID 42)\r\n",
+                    format!("{tag} OK FETCH complete\r\n").as_bytes(),
+                ],
+            )
+            .await;
+        });
+
+        let mut response = client
+            .command_with_literal("UID FETCH 42 (BODY.PEEK[1])")
+            .await
+            .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(
+            response.take_body_literal_for(42, "1").as_deref(),
+            Some(b"right".as_slice())
+        );
+        assert_eq!(response.literals.len(), 2);
+        assert!(response
+            .literals
+            .iter()
+            .any(|literal| literal.uid == Some(7)));
+        assert!(response.literals.iter().any(|literal| {
+            literal.uid == Some(42) && literal.data_item == ImapLiteralItem::Body("BODY[2]".into())
+        }));
+        assert_eq!(
+            response
+                .lines
+                .iter()
+                .filter(|line| line.starts_with("D0001 "))
+                .count(),
+            1,
+            "one tagged wire response must produce one transcript line"
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_imap_rejects_bye_eof_and_oversize_literal_before_reading_it() {
+        let (mut bye_client, bye_server) = plain_imap_client_and_server().await;
+        let bye_server = tokio::spawn(async move {
+            let (read, mut write) = bye_server.into_split();
+            let mut read = BufReader::new(read);
+            let (_, command) = scripted_command(&mut read).await;
+            assert_eq!(command, "NOOP");
+            write_transcript_fragments(&mut write, &[b"* B", b"YE maintenance\r\n"]).await;
+        });
+        let bye = bye_client.command("NOOP").await.unwrap_err();
+        bye_server.await.unwrap();
+        assert!(bye
+            .to_string()
+            .contains("IMAP server closed the connection: * BYE maintenance"));
+
+        let (mut eof_client, eof_server) = plain_imap_client_and_server().await;
+        let eof_server = tokio::spawn(async move {
+            let (read, _) = eof_server.into_split();
+            let mut read = BufReader::new(read);
+            let (_, command) = scripted_command(&mut read).await;
+            assert_eq!(command, "NOOP");
+        });
+        let eof = eof_client.command("NOOP").await.unwrap_err();
+        eof_server.await.unwrap();
+        assert!(eof
+            .to_string()
+            .contains("IMAP connection closed during command"));
+
+        let (mut limited_client, limited_server) = plain_imap_client_and_server().await;
+        let limited_server = tokio::spawn(async move {
+            let (read, mut write) = limited_server.into_split();
+            let mut read = BufReader::new(read);
+            let (tag, command) = scripted_command(&mut read).await;
+            assert_eq!(command, "UID FETCH 1 (BODY.PEEK[])");
+            write_transcript_fragments(
+                &mut write,
+                &[format!("* 1 FETCH (UID 1 BODY[] {{4}}\r\n{tag} OK ignored\r\n").as_bytes()],
+            )
+            .await;
+        });
+        let limited = match limited_client
+            .command_with_literal_limited("UID FETCH 1 (BODY.PEEK[])", 3)
+            .await
+        {
+            Ok(_) => panic!("oversize literal unexpectedly completed"),
+            Err(error) => error,
+        };
+        limited_server.await.unwrap();
+        assert!(limited
+            .to_string()
+            .contains("IMAP response literals exceed the 0 MiB safety limit"));
+    }
+
+    #[tokio::test]
+    async fn scripted_imap_idle_honours_cancellation_and_completes_the_done_exchange() {
+        let (mut client, server) = plain_imap_client_and_server().await;
+        let server = tokio::spawn(async move {
+            let (read, mut write) = server.into_split();
+            let mut read = BufReader::new(read);
+            let (tag, command) = scripted_command(&mut read).await;
+            assert_eq!(command, "IDLE");
+            write_transcript_fragments(&mut write, &[b"+ id", b"ling\r\n"]).await;
+            let mut done = String::new();
+            read.read_line(&mut done).await.unwrap();
+            assert_eq!(done, "DONE\r\n");
+            write_transcript_fragments(
+                &mut write,
+                &[format!("{tag} OK IDLE completed\r\n").as_bytes()],
+            )
+            .await;
+        });
+
+        let (cancel, mut cancelled) = watch::channel(false);
+        let idle = tokio::spawn(async move { client.idle_until_change(&mut cancelled).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        cancel.send(true).unwrap();
+
+        assert!(matches!(
+            idle.await.unwrap().unwrap(),
+            IdleOutcome::Cancelled
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn scripted_imap_idle_eof_and_bye_termination_fail_without_spinning() {
+        let (mut eof_client, eof_server) = plain_imap_client_and_server().await;
+        let eof_server = tokio::spawn(async move {
+            let (read, _) = eof_server.into_split();
+            let mut read = BufReader::new(read);
+            let (_, command) = scripted_command(&mut read).await;
+            assert_eq!(command, "IDLE");
+        });
+        let (_cancel, mut not_cancelled) = watch::channel(false);
+        let eof = timeout(
+            Duration::from_secs(1),
+            eof_client.idle_until_change(&mut not_cancelled),
+        )
+        .await
+        .expect("IDLE EOF must not spin")
+        .unwrap_err();
+        eof_server.await.unwrap();
+        assert!(eof
+            .to_string()
+            .contains("IMAP connection closed before IDLE continuation"));
+
+        let (mut bye_client, bye_server) = plain_imap_client_and_server().await;
+        let bye_server = tokio::spawn(async move {
+            let (read, mut write) = bye_server.into_split();
+            let mut read = BufReader::new(read);
+            let (_, command) = scripted_command(&mut read).await;
+            assert_eq!(command, "IDLE");
+            write.write_all(b"+ idling\r\n").await.unwrap();
+            write.flush().await.unwrap();
+            let mut done = String::new();
+            read.read_line(&mut done).await.unwrap();
+            assert_eq!(done, "DONE\r\n");
+            write.write_all(b"* BYE maintenance\r\n").await.unwrap();
+            write.flush().await.unwrap();
+        });
+        let (cancel, mut cancelled) = watch::channel(false);
+        let idle = tokio::spawn(async move { bye_client.idle_until_change(&mut cancelled).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        cancel.send(true).unwrap();
+        let bye = timeout(Duration::from_secs(1), idle)
+            .await
+            .expect("IDLE BYE termination must not spin")
+            .unwrap()
+            .unwrap_err();
+        bye_server.await.unwrap();
+        assert!(bye
+            .to_string()
+            .contains("IMAP server closed the connection during IDLE termination"));
+    }
+
+    #[tokio::test]
+    async fn authentication_distinguishes_rejection_from_retryable_bye() {
+        let account = test_account();
+
+        let (mut bye_client, bye_server) = plain_imap_client_and_server().await;
+        let bye_server = tokio::spawn(async move {
+            let (read, mut write) = bye_server.into_split();
+            let mut read = BufReader::new(read);
+            let (_, command) = scripted_command(&mut read).await;
+            assert!(command.starts_with("LOGIN ") || command.starts_with("AUTHENTICATE XOAUTH2 "));
+            write
+                .write_all(b"* BYE [UNAVAILABLE] maintenance\r\n")
+                .await
+                .unwrap();
+            write.flush().await.unwrap();
+        });
+        let bye = bye_client
+            .authenticate(&account, "secret")
+            .await
+            .unwrap_err();
+        bye_server.await.unwrap();
+        assert!(!bye
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("authentication"));
+
+        let (mut rejected_client, rejected_server) = plain_imap_client_and_server().await;
+        let rejected_server = tokio::spawn(async move {
+            let (read, mut write) = rejected_server.into_split();
+            let mut read = BufReader::new(read);
+            let (tag, command) = scripted_command(&mut read).await;
+            assert!(command.starts_with("LOGIN ") || command.starts_with("AUTHENTICATE XOAUTH2 "));
+            write
+                .write_all(format!("{tag} NO invalid credentials\r\n").as_bytes())
+                .await
+                .unwrap();
+            write.flush().await.unwrap();
+        });
+        let rejected = rejected_client
+            .authenticate(&account, "secret")
+            .await
+            .unwrap_err();
+        rejected_server.await.unwrap();
+        assert!(rejected
+            .to_string()
+            .contains("IMAP authentication rejected"));
+    }
+
     #[test]
     fn uid_after_a_body_literal_backfills_only_that_fetch_response() {
         let mut literals = vec![ImapLiteral {
@@ -7482,6 +8922,13 @@ mod tests {
         .into_account(provider::by_id("gmail").unwrap());
 
         assert!(smtp_saves_sent_copy(&gmail));
+        // SMTP acceptance is not a durable Sent-copy guarantee for generic
+        // providers. Only this exact Gmail submission host opts out of the
+        // subsequent IMAP APPEND path.
+        gmail.smtp_host = "SMTP.GMAIL.COM.".into();
+        assert!(smtp_saves_sent_copy(&gmail));
+        gmail.smtp_host = "smtp.gmail.com.example.test".into();
+        assert!(!smtp_saves_sent_copy(&gmail));
         gmail.smtp_host = "smtp.example.com".into();
         assert!(!smtp_saves_sent_copy(&gmail));
     }
@@ -7489,6 +8936,9 @@ mod tests {
     #[test]
     fn extracts_literal_lengths() {
         assert_eq!(literal_length("* 1 FETCH (RFC822 {42}\r\n"), Some(42));
+        assert_eq!(literal_length("* LIST (\\Sent) \"/\" \"{5}\"\r\n"), None);
+        assert_eq!(literal_length("* OK server says {5} later\r\n"), None);
+        assert_eq!(literal_length("* 1 FETCH (BODY[] {5+}\r\n"), Some(5));
     }
     #[test]
     fn parses_search() {
@@ -7797,6 +9247,29 @@ For you, Alex =E2=80=94 related to your saved topic."
         let message = parse_message(&test_account(), "INBOX", 2965, &[], raw.as_bytes(), None)
             .await
             .unwrap();
+        let contract: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../apps/desktop/testdata/tauri-contracts/high-risk.json"
+        )))
+        .unwrap();
+        let provider_content = &contract["messageContent"]["providerSignature"];
+        assert_eq!(provider_content["body_text"], message.body_text);
+        assert_eq!(
+            provider_content["body_html"],
+            serde_json::to_value(&message.body_html).unwrap()
+        );
+        assert_eq!(
+            provider_content["attachments"][0]["filename"],
+            message.attachments[0].attachment.filename
+        );
+        assert_eq!(
+            provider_content["attachments"][0]["mime_type"],
+            message.attachments[0].attachment.mime_type
+        );
+        assert_eq!(
+            provider_content["attachments"][0]["presentation"],
+            serde_json::to_value(message.attachments[0].attachment.presentation).unwrap()
+        );
 
         assert!(message
             .body_html

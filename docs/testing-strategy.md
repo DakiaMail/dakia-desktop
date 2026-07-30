@@ -1,12 +1,29 @@
 # Testing and Fixture Strategy
 
-Status: implementation plan
+Status: activated deterministic source lanes implemented; connector/event-path
+gaps, external activation, and measured evidence pending
 
 Baseline reviewed: `origin/main` at `0a3182e` on 2026-07-30
 
-This document defines how Dakia should prevent repeats of production issues
-without returning to slow, expensive GitHub Actions. It is a plan, not a claim
-that the described harnesses, workflows, or gates already exist.
+This document defines how Dakia prevents repeats of production issues without
+returning to slow, expensive GitHub Actions. The activated source-controlled
+harnesses, workflows, fixture governance, and gates in the delivery state are
+implemented; the explicitly named integration gaps remain work rather than
+completed coverage.
+
+The following acceptance evidence deliberately remains external to this source
+change:
+
+- making the pull-request validation status required and measuring three
+  representative hosted runs;
+- reviewing and committing a coverage baseline after three repeat green runs;
+- enabling credentials for a live-provider smoke test;
+- Apple-Silicon WebKit acceptance when a change affects native layout or
+  interaction; and
+- building, signing, notarizing, or publishing a release.
+
+None of those unperformed activities is reported as a pass. Automated Intel Mac
+testing remains an owner-authorized waiver, not acceptance evidence.
 
 ## Goals
 
@@ -118,8 +135,10 @@ only "does not panic."
 
 Build reusable local TLS and STARTTLS servers with ordered expectations,
 dynamic IMAP tags, exact transcripts, fault injection, and short test-specific
-deadlines. Drive public `MailService` sync, send, and realtime operations
-through temporary SQLite and a test event sink.
+deadlines. Drive the public `MailService` entry points where construction can
+be controlled; otherwise exercise their internal, injectable transport seams
+through temporary SQLite. Treat Tauri realtime publication as a separate
+event-sink integration boundary, not as evidence from a core protocol test.
 
 The blocking scenario set should include:
 
@@ -135,7 +154,17 @@ The blocking scenario set should include:
 - Inbox versus Sent event semantics, remote flag/deletion reconciliation,
   restart recovery, and account isolation.
 
-Protocol tests assert both the exact conversation and final SQLite/event state.
+Core protocol tests assert exact conversations and final SQLite outcomes;
+Tauri-targeted tests assert the event-state contracts they own.
+
+Current deterministic coverage uses the internal injected-client sync seam and
+the injected SMTP transport seam. It covers a file-backed two-pass sync and
+the Gmail-specific rule that skips a duplicate IMAP `APPEND` after successful
+SMTP submission. It does not construct the public IMAP connector, run the
+Tauri realtime loop through its event sink, or exercise a generic (non-Gmail)
+SMTP success followed by an IMAP `APPEND` failure. Those remain future
+connector/event-path scenarios; the latter must prove that the returned error
+preserves the distinction between successful delivery and an unsaved Sent copy.
 
 ### State, persistence, and process boundaries
 
@@ -254,6 +283,31 @@ They are disabled by default, have explicit job timeouts, and require a manual
 reason/input. No scheduled workflow is enabled without separate approval and a
 measured cost estimate.
 
+The initial manual workflow is deliberately useful without overstating its
+scope:
+
+- the coverage dispatch installs pinned `cargo-llvm-cov` and Vitest V8 coverage
+  tooling, writes Rust and frontend LCOV reports, and emits a candidate JSON;
+  if `testdata/coverage/baseline.json` has been intentionally reviewed, it
+  fails on any line, branch, or function ratio regression. The workflow never
+  writes the baseline itself.
+- the fuzz dispatch currently runs the checked-in, bounded fixed-seed thread
+  property and MIME corpus regressions three times. This is not an unbounded
+  generative fuzz pass; a future target must check in its seed corpus and
+  resource budget before it is described as one.
+- the provider dispatch is protected by both the explicit boolean input and
+  environment secret. It validates the secret JSON contract without printing
+  it or opening a network connection. A successful dispatch means only that
+  the provider harness configuration is well-formed, not that a live provider
+  succeeded. Connecting a `MailService` harness to a provider remains a
+  separately approved operation. `DAKIA_PROVIDER_SMOKE_CONFIG` uses version
+  `1` and contains
+  a provider label, account email, IMAP and SMTP endpoints (`host`, integer
+  `port`, and `tls` or `starttls` security), plus exactly one credential field
+  (`password`, `accessToken`, `refreshToken`, or `clientSecret`). Keep the JSON
+  solely in the protected environment secret; do not commit an example with a
+  real address or value.
+
 Apple-Silicon native verification and the entire release flow stay local. CI
 never receives signing, notarization, OAuth, R2, or production mailbox secrets.
 
@@ -279,21 +333,30 @@ Semantic fixture inventory and contract completeness remain blocking on every
 relevant pull request; coverage is a periodic non-regression guard, not a
 substitute for those gates.
 
-## Delivery sequence
+## Delivery state
 
-1. Add the tested change classifier and minimal Linux workflow. Measure three
-   representative runs before making it required.
-2. Add the fixture manifest, redaction validator, ownership, and automatic
-   corpus enumeration.
-3. Make existing raw fixtures equivalent across complete, selective, storage,
-   Tauri, and Reader paths.
-4. Add the scripted IMAP/SMTP harness and provider capability profiles.
-5. Enforce bidirectional Tauri command/event contracts.
-6. Add deterministic concurrency, locking, restart, and CLI subprocess tests.
-7. Add fixed-seed properties, then manual fuzzing and the periodic coverage
-   ratchet.
-8. Add disabled manual provider-smoke infrastructure. Enabling credentials or
-   scheduling it is a separately approved change.
+1. The tested change classifier and one-job Linux workflow are checked in.
+   Measure three representative hosted runs before making the status required.
+2. The fixture manifest, redaction validator, path-specific exercise mapping,
+   and automatic corpus enumeration are blocking checks.
+3. Suitable raw fixtures cross complete, selective, storage, Tauri, TypeScript,
+   and Reader boundaries, with intentional path differences declared.
+4. Scripted IMAP and SMTP harnesses cover framing, cancellation, TLS/STARTTLS,
+   failures, uncertainty, and a two-pass `MailService` persistence path via
+   internal injectable transport seams. Gmail duplicate-Sent `APPEND` skipping
+   is covered; public connector construction, the Tauri realtime event sink,
+   and generic-provider `APPEND` failure after SMTP acceptance remain future
+   integration scenarios.
+5. Mechanical Tauri command/event inventory and shared Rust/TypeScript payload
+   contracts are blocking checks.
+6. Deterministic locking, restart, late-completion, account-isolation, CLI
+   subprocess, cancellation, and bundled-sidecar checks are present.
+7. Fixed-seed properties are blocking source tests; bounded repetition and
+   coverage-candidate generation are manual dispatches. A ratchet activates
+   only after a reviewed baseline exists.
+8. Disabled manual provider-smoke configuration infrastructure is present.
+   Enabling credentials, connecting to a provider, or scheduling it remains a
+   separately approved change.
 9. Keep native WebKit and installed-upgrade verification in the supervised
    Apple-Silicon acceptance and release process.
 

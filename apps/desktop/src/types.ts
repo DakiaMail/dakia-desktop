@@ -41,12 +41,12 @@ export type MailSummary = {
   account_id: string;
   mailbox: string;
   uid: number;
-  message_id?: string;
-  in_reply_to?: string;
-  reference_ids?: string;
+  message_id?: string | null;
+  in_reply_to?: string | null;
+  reference_ids?: string | null;
   thread_id: string;
   subject: string;
-  from_name?: string;
+  from_name?: string | null;
   from_address: string;
   to_addresses: string;
   cc_addresses?: string;
@@ -55,9 +55,9 @@ export type MailSummary = {
   received_at: string;
   snippet: string;
   body_text: string;
-  body_html?: string;
+  body_html?: string | null;
   content_state?: "headers_only" | "hydrating" | "complete" | "failed";
-  unsubscribe_kind?: "one_click" | "web" | "mailto";
+  unsubscribe_kind?: "one_click" | "web" | "mailto" | null;
   is_read: boolean;
   is_flagged: boolean;
   has_attachments: boolean;
@@ -71,6 +71,8 @@ export type MailThread = {
   accountId?: string;
   threadId?: string;
   messages: MailSummary[];
+  /** All concrete mailbox/UID rows, including logical duplicate copies. */
+  sourceMessages?: MailSummary[];
   latest: MailSummary;
   messageCount?: number;
   unread: boolean;
@@ -109,8 +111,8 @@ export type Attachment = {
 };
 export type MessageContent = {
   body_text: string;
-  body_html?: string;
-  unsubscribe_kind?: "one_click" | "web" | "mailto";
+  body_html?: string | null;
+  unsubscribe_kind?: "one_click" | "web" | "mailto" | null;
   attachments: Attachment[];
 };
 export type MessageContentErrorKind =
@@ -167,8 +169,8 @@ export type MailHydrated = {
 export type RealtimeSyncStatus = {
   accountId: string;
   state: "connecting" | "idle" | "polling" | "retrying" | "paused";
-  retryAt?: string;
-  errorKind?: "connection" | "authentication";
+  retryAt?: string | null;
+  errorKind?: "connection" | "authentication" | null;
 };
 export type AiSettings = {
   provider: "ollama" | "openai" | "local";
