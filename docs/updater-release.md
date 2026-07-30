@@ -3,8 +3,9 @@
 Dakia publishes signed Apple Silicon updates through Tauri's native updater.
 The installed app downloads over the native transport, verifies the archive
 with its embedded public key, and installs only after the user chooses
-**Install and Restart**. GitHub Actions, GitHub Releases, staging channels,
-and Intel builds are not part of this release path.
+**Install and Restart**. GitHub Releases mirror the locally built assets for
+public downloads, but they do not replace the R2 updater feed. GitHub Actions,
+staging channels, and Intel builds are not part of this release path.
 
 ## Local trust material
 
@@ -87,6 +88,7 @@ Silicon download.
 
 ## Source-control marker
 
-After publication is proven, a signed `vX.Y.Z` Git tag may be pushed as a source
-marker. It does not trigger a build and is not an artifact host. Do not create a
-GitHub Release.
+After R2 publication is proven, push a signed `vX.Y.Z` Git tag as a source
+marker. It does not trigger a build. Create the GitHub Release from that
+verified tag and copy the already-built local release assets to it; do not
+rebuild assets on GitHub.

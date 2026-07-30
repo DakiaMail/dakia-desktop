@@ -8,10 +8,12 @@ npm run verify:local
 
 For macOS, the primary Apple Silicon Mac builds the Apple Silicon release. R2
 hosts the versioned DMG, signed updater archive, stable download alias, and
-updater manifest.
+updater manifest. A GitHub Release mirrors those same locally built assets for
+public downloads.
 
-GitHub Actions and GitHub Releases are not part of this process. A Git tag is an
-optional source-control marker only.
+GitHub Actions are not part of this process. Create the GitHub Release only
+after R2 publication is verified, using the signed source tag and the exact
+local artifacts produced by the release builder.
 
 Follow:
 
