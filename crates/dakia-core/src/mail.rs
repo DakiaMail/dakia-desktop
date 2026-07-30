@@ -3,7 +3,7 @@ use crate::storage::ThreadingHeaders;
 use crate::{
     oauth::OAuthTokens,
     provider::Security,
-    storage::{stable_message_id, Attachment, AttachmentData, MailSummary},
+    storage::{stable_message_id, Attachment, AttachmentData, AttachmentPresentation, MailSummary},
     Account, AccountAuth, Store,
 };
 use anyhow::{bail, Context, Result};
@@ -42,6 +42,7 @@ const SMTP_SEND_TIMEOUT: Duration = Duration::from_secs(60);
 const DKIM_VERIFY_TIMEOUT: Duration = Duration::from_secs(5);
 const UNSUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
+const MAX_ATTACHMENT_TOTAL_BYTES: usize = 50 * 1024 * 1024;
 const MAX_ATTACHMENT_COUNT: usize = 50;
 const MAX_OUTBOUND_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 const MAX_OUTBOUND_ATTACHMENT_TOTAL_BYTES: usize = 50 * 1024 * 1024;
@@ -2188,7 +2189,12 @@ async fn parse_message(
     let from_header = header("From");
     let (from_name, from_address) = parse_first_address(&from_header);
     let id = stable_message_id(account.id, mailbox, uid);
-    let body_html = extract_html(&parsed)?
+    // Classification must see the selected HTML before CID/Content-Location
+    // URLs are rewritten to data URLs. MIME transport-inline is not the same
+    // as a user-facing attachment.
+    let selected_html = extract_html(&parsed)?;
+    let attachments = extract_attachments(&parsed, &id)?;
+    let body_html = selected_html
         .map(|html| resolve_inline_images(html, &parsed))
         .transpose()?;
     let mut body_text = extract_text(&parsed)?;
@@ -2228,8 +2234,8 @@ async fn parse_message(
         unsubscribe_url,
         is_read: flags.contains("\\Seen"),
         is_flagged: flags.contains("\\Flagged"),
-        has_attachments: has_attachment(&parsed),
-        attachments: extract_attachments(&parsed, &id)?,
+        has_attachments: !attachments.is_empty(),
+        attachments,
         category: None,
         classification_confidence: None,
         classification_source: None,
@@ -2252,9 +2258,11 @@ fn parse_catalog_message(
     let id = stable_message_id(account.id, mailbox, uid);
     let flags = response_lines.join(" ");
     let structure = flags.to_ascii_lowercase();
-    let has_attachments = structure.contains("attachment")
-        || structure.contains(" filename ")
-        || structure.contains(" name ");
+    // A header-only BODYSTRUCTURE cannot tell whether a named inline part is
+    // a referenced signature asset. Only an explicit attachment disposition
+    // is safe to surface provisionally; complete MIME parsing supplies the
+    // authoritative user-facing attachment state.
+    let has_attachments = structure.contains("attachment");
     let unsubscribe_url = parsed
         .headers
         .get_all_values("List-Unsubscribe")
@@ -2295,7 +2303,10 @@ fn parse_catalog_message(
         snippet,
         body_text: String::new(),
         body_html: None,
-        content_state: "complete".into(),
+        // Header and preview fetches never contain authoritative MIME part
+        // classification or full bodies. Keeping this distinct prevents a
+        // later catalogue refresh from replacing durable starred content.
+        content_state: "headers_only".into(),
         unsubscribe_kind,
         unsubscribe_url: unsubscribe_url.map(|url| url.to_string()),
         is_read: flags.contains("\\Seen"),
@@ -2633,6 +2644,9 @@ fn parse_first_address(value: &str) -> (Option<String>, String) {
 }
 
 fn extract_text(mail: &mailparse::ParsedMail<'_>) -> Result<String> {
+    if !mail.subparts.is_empty() && is_attachment_part(mail) {
+        return Ok(String::new());
+    }
     if mail.subparts.is_empty() {
         return if mail.ctype.mimetype.eq_ignore_ascii_case("text/plain")
             && !is_attachment_part(mail)
@@ -2655,6 +2669,9 @@ fn extract_text(mail: &mailparse::ParsedMail<'_>) -> Result<String> {
 }
 
 fn extract_html(mail: &mailparse::ParsedMail<'_>) -> Result<Option<String>> {
+    if !mail.subparts.is_empty() && is_attachment_part(mail) {
+        return Ok(None);
+    }
     if mail.subparts.is_empty() {
         return if mail.ctype.mimetype.eq_ignore_ascii_case("text/html") && !is_attachment_part(mail)
         {
@@ -2684,6 +2701,11 @@ fn collect_inline_images(
     mail: &mailparse::ParsedMail<'_>,
     images: &mut Vec<(String, String)>,
 ) -> Result<()> {
+    // Do not resolve a resource from an attached forwarded message into the
+    // selected outer HTML document, even if the two happen to reuse a CID.
+    if !mail.subparts.is_empty() && is_attachment_part(mail) {
+        return Ok(());
+    }
     if mail.subparts.is_empty()
         && mail
             .ctype
@@ -2726,6 +2748,7 @@ fn replace_ascii_case_insensitive(input: &str, needle: &str, replacement: &str) 
     output
 }
 
+#[cfg(test)]
 fn has_attachment(mail: &mailparse::ParsedMail<'_>) -> bool {
     is_attachment_part(mail) || mail.subparts.iter().any(has_attachment)
 }
@@ -2754,57 +2777,173 @@ fn extract_attachments(
     mail: &mailparse::ParsedMail<'_>,
     message_id: &str,
 ) -> Result<Vec<AttachmentData>> {
-    let mut parts = Vec::new();
-    collect_attachment_parts(mail, message_id, &mut parts)?;
-    Ok(parts)
+    let selected_html = extract_html(mail)?;
+    extract_attachments_for_html(mail, message_id, selected_html.as_deref())
+}
+
+fn extract_attachments_for_html(
+    mail: &mailparse::ParsedMail<'_>,
+    message_id: &str,
+    selected_html: Option<&str>,
+) -> Result<Vec<AttachmentData>> {
+    let mut collection = AttachmentCollection::default();
+    collect_attachment_parts(mail, mail, message_id, selected_html, &mut collection)?;
+    Ok(collection.parts)
+}
+
+#[derive(Default)]
+struct AttachmentCollection {
+    parts: Vec<AttachmentData>,
+    candidate_count: usize,
+    decoded_bytes: usize,
 }
 
 fn collect_attachment_parts(
     mail: &mailparse::ParsedMail<'_>,
+    root: &mailparse::ParsedMail<'_>,
     message_id: &str,
-    parts: &mut Vec<AttachmentData>,
+    selected_html: Option<&str>,
+    collection: &mut AttachmentCollection,
 ) -> Result<()> {
+    if !mail.subparts.is_empty()
+        && mail.ctype.mimetype.eq_ignore_ascii_case("message/rfc822")
+        && is_attachment_part(mail)
+    {
+        // A forwarded .eml is one downloadable unit. Its nested HTML and CID
+        // resources belong to the forwarded message, not to this reader.
+        return collect_attachment_candidate(mail, root, message_id, selected_html, collection);
+    }
     if mail.subparts.is_empty() {
         if !is_attachment_part(mail) {
             return Ok(());
         }
-        if parts.len() >= MAX_ATTACHMENT_COUNT {
-            bail!("message has more than {MAX_ATTACHMENT_COUNT} attachments");
-        }
-        let bytes = mail.get_body_raw()?;
-        if bytes.len() > MAX_ATTACHMENT_BYTES {
-            bail!(
-                "attachment exceeds the {} MiB safety limit",
-                MAX_ATTACHMENT_BYTES / 1024 / 1024
-            );
-        }
-        let disposition = mail.get_content_disposition();
-        let supplied_name = disposition
-            .params
-            .get("filename")
-            .or_else(|| mail.ctype.params.get("name"))
-            .map(String::as_str)
-            .unwrap_or("attachment");
-        let filename = safe_attachment_filename(supplied_name, parts.len());
-        let mime_type = safe_mime_type(&mail.ctype.mimetype);
-        let is_inline = matches!(disposition.disposition, mailparse::DispositionType::Inline)
-            || mail.headers.get_first_value("Content-ID").is_some();
-        let attachment = Attachment {
-            id: format!("{message_id}:{}", parts.len()),
-            message_id: message_id.to_owned(),
-            is_potentially_unsafe: is_potentially_unsafe(&filename, &mime_type),
-            filename,
-            mime_type,
-            size_bytes: bytes.len() as i64,
-            is_inline,
-        };
-        parts.push(AttachmentData { attachment, bytes });
-        return Ok(());
+        return collect_attachment_candidate(mail, root, message_id, selected_html, collection);
     }
     for part in &mail.subparts {
-        collect_attachment_parts(part, message_id, parts)?;
+        collect_attachment_parts(part, root, message_id, selected_html, collection)?;
     }
     Ok(())
+}
+
+fn collect_attachment_candidate(
+    mail: &mailparse::ParsedMail<'_>,
+    root: &mailparse::ParsedMail<'_>,
+    message_id: &str,
+    selected_html: Option<&str>,
+    collection: &mut AttachmentCollection,
+) -> Result<()> {
+    collection.candidate_count += 1;
+    if collection.candidate_count > MAX_ATTACHMENT_COUNT {
+        bail!("message has more than {MAX_ATTACHMENT_COUNT} attachments");
+    }
+    let bytes = mail.get_body_raw()?;
+    if bytes.len() > MAX_ATTACHMENT_BYTES {
+        bail!(
+            "attachment exceeds the {} MiB safety limit",
+            MAX_ATTACHMENT_BYTES / 1024 / 1024
+        );
+    }
+    collection.decoded_bytes = collection
+        .decoded_bytes
+        .checked_add(bytes.len())
+        .context("attachment bytes overflowed the safety limit")?;
+    if collection.decoded_bytes > MAX_ATTACHMENT_TOTAL_BYTES {
+        bail!(
+            "message attachments exceed the {} MiB safety limit",
+            MAX_ATTACHMENT_TOTAL_BYTES / 1024 / 1024
+        );
+    }
+    let disposition = mail.get_content_disposition();
+    let presentation = attachment_presentation(mail, root, selected_html);
+    if !presentation.is_downloadable() {
+        return Ok(());
+    }
+    let supplied_name = disposition
+        .params
+        .get("filename")
+        .or_else(|| mail.ctype.params.get("name"))
+        .map(String::as_str)
+        .unwrap_or("attachment");
+    let filename = safe_attachment_filename(supplied_name, collection.parts.len());
+    let mime_type = safe_mime_type(&mail.ctype.mimetype);
+    let is_inline = matches!(disposition.disposition, mailparse::DispositionType::Inline)
+        || mail.headers.get_first_value("Content-ID").is_some();
+    let attachment = Attachment {
+        id: format!("{message_id}:{}", collection.parts.len()),
+        message_id: message_id.to_owned(),
+        is_potentially_unsafe: is_potentially_unsafe(&filename, &mime_type),
+        filename,
+        mime_type,
+        size_bytes: bytes.len() as i64,
+        is_inline,
+        presentation,
+    };
+    collection.parts.push(AttachmentData { attachment, bytes });
+    Ok(())
+}
+
+fn attachment_presentation(
+    mail: &mailparse::ParsedMail<'_>,
+    root: &mailparse::ParsedMail<'_>,
+    selected_html: Option<&str>,
+) -> AttachmentPresentation {
+    let disposition = mail.get_content_disposition();
+    let explicitly_attached = disposition.disposition == mailparse::DispositionType::Attachment;
+    let referenced = selected_html.is_some_and(|html| {
+        attachment_references(mail).iter().any(|reference| {
+            html_contains_reference(html, reference)
+                && attachment_reference_count(root, reference) == 1
+        })
+    });
+    match (explicitly_attached, referenced) {
+        (true, true) => AttachmentPresentation::Both,
+        (true, false) => AttachmentPresentation::Downloadable,
+        (false, true) => AttachmentPresentation::Embedded,
+        (false, false) => AttachmentPresentation::Downloadable,
+    }
+}
+
+fn attachment_reference_count(mail: &mailparse::ParsedMail<'_>, reference: &str) -> usize {
+    if !mail.subparts.is_empty()
+        && mail.ctype.mimetype.eq_ignore_ascii_case("message/rfc822")
+        && is_attachment_part(mail)
+    {
+        return 0;
+    }
+    if mail.subparts.is_empty() {
+        return usize::from(
+            is_attachment_part(mail)
+                && attachment_references(mail)
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(reference)),
+        );
+    }
+    mail.subparts
+        .iter()
+        .map(|part| attachment_reference_count(part, reference))
+        .sum()
+}
+
+fn attachment_references(mail: &mailparse::ParsedMail<'_>) -> Vec<String> {
+    let mut references = Vec::new();
+    if let Some(content_id) = mail.headers.get_first_value("Content-ID") {
+        let content_id = content_id.trim().trim_matches(['<', '>']);
+        if !content_id.is_empty() {
+            references.push(format!("cid:{content_id}"));
+        }
+    }
+    if let Some(location) = mail.headers.get_first_value("Content-Location") {
+        let location = location.trim();
+        if !location.is_empty() {
+            references.push(location.to_owned());
+        }
+    }
+    references
+}
+
+fn html_contains_reference(html: &str, reference: &str) -> bool {
+    html.to_ascii_lowercase()
+        .contains(&reference.to_ascii_lowercase())
 }
 
 pub fn safe_attachment_filename(value: &str, index: usize) -> String {
@@ -2938,6 +3077,32 @@ mod tests {
             assert_eq!(message.bcc_addresses, "Hidden <hidden@example.test>");
             assert_eq!(message.reply_to_addresses, "Replies <replies@example.test>");
         }
+    }
+
+    #[test]
+    fn catalogue_does_not_turn_a_named_inline_signature_image_into_a_paperclip() {
+        let raw = b"Date: Tue, 21 Jul 2026 10:00:00 +0000\r\nSubject: Signature\r\n\r\n";
+        let inline = parse_catalog_message(
+            &test_account(),
+            "INBOX",
+            1,
+            &["* 1 FETCH (BODYSTRUCTURE (\"IMAGE\" \"PNG\" NIL \"image001.png\" \"INLINE\" (\"FILENAME\" \"image001.png\")))".into()],
+            raw,
+            String::new(),
+        )
+        .unwrap();
+        let attachment = parse_catalog_message(
+            &test_account(),
+            "INBOX",
+            2,
+            &["* 2 FETCH (BODYSTRUCTURE (\"APPLICATION\" \"PDF\" NIL \"claim.pdf\" \"ATTACHMENT\" (\"FILENAME\" \"claim.pdf\")))".into()],
+            raw,
+            String::new(),
+        )
+        .unwrap();
+
+        assert!(!inline.has_attachments);
+        assert!(attachment.has_attachments);
     }
 
     #[test]
@@ -3406,6 +3571,226 @@ For you, Alex =E2=80=94 related to your saved topic."
         let resolved = resolve_inline_images(html, &parsed).unwrap();
         assert!(resolved.contains("<strong>Hello</strong>"));
         assert!(resolved.contains("src=\"data:image/png;base64,iVBORw0KGgo=\""));
+    }
+
+    #[tokio::test]
+    async fn redacted_provider_signature_logo_stays_embedded_while_pdf_is_downloadable() {
+        // This fictional fixture preserves the multipart/mixed ->
+        // multipart/related shape, signature table, whitespace spacers, CID,
+        // and Content-Location headers. The local cache did not contain raw
+        // RFC822 source, so no production names, addresses, or content remain.
+        let raw = include_str!("../tests/fixtures/provider-signature-inline.eml");
+        let message = parse_message(&test_account(), "INBOX", 2965, &[], raw.as_bytes(), None)
+            .await
+            .unwrap();
+
+        assert!(message
+            .body_html
+            .as_deref()
+            .is_some_and(|html| html.contains("data:image/png;base64,iVBORw0KGgo=")));
+        assert!(message.has_attachments);
+        assert_eq!(message.attachments.len(), 1);
+        assert_eq!(
+            message.attachments[0].attachment.filename,
+            "claim-documents.pdf"
+        );
+        assert_eq!(
+            message.attachments[0].attachment.presentation,
+            AttachmentPresentation::Downloadable
+        );
+    }
+
+    #[tokio::test]
+    async fn referenced_signature_logo_does_not_set_the_user_facing_attachment_flag() {
+        let raw = concat!(
+            "Date: Wed, 29 Jul 2026 14:34:00 +0000\r\n",
+            "Content-Type: multipart/related; boundary=related\r\n\r\n",
+            "--related\r\nContent-Type: text/html; charset=utf-8\r\n\r\n",
+            "<table><tr><td>Signature<img src=\"cid:image001.png@redacted\"></td></tr></table>\r\n",
+            "--related\r\nContent-Type: image/png; name=image001.png\r\n",
+            "Content-ID: <image001.png@redacted>\r\n",
+            "Content-Location: image001.png\r\n",
+            "Content-Disposition: inline; filename=image001.png\r\n",
+            "Content-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n",
+            "--related--\r\n"
+        );
+        let message = parse_message(&test_account(), "INBOX", 1, &[], raw.as_bytes(), None)
+            .await
+            .unwrap();
+
+        assert!(message
+            .body_html
+            .as_deref()
+            .is_some_and(|html| html.contains("data:image/png;base64,iVBORw0KGgo=")));
+        assert!(!message.has_attachments);
+        assert!(message.attachments.is_empty());
+    }
+
+    #[test]
+    fn classifies_explicit_cid_attachments_as_both_and_unreferenced_inline_files_as_downloadable() {
+        let raw = concat!(
+            "Content-Type: multipart/related; boundary=related\r\n\r\n",
+            "--related\r\nContent-Type: text/html; charset=utf-8\r\n\r\n",
+            "<img src=\"CiD:invoice@example\">\r\n",
+            "--related\r\nContent-Type: application/pdf; name=invoice.pdf\r\n",
+            "Content-ID: <invoice@example>\r\n",
+            "Content-Disposition: attachment; filename=invoice.pdf\r\n",
+            "Content-Transfer-Encoding: base64\r\n\r\ncGRm\r\n",
+            "--related\r\nContent-Type: image/png; name=unused.png\r\n",
+            "Content-ID: <unused@example>\r\n",
+            "Content-Disposition: inline; filename=unused.png\r\n",
+            "Content-Transfer-Encoding: base64\r\n\r\naW1n\r\n",
+            "--related--\r\n"
+        );
+        let parsed = mailparse::parse_mail(raw.as_bytes()).unwrap();
+        let attachments = extract_attachments(&parsed, "message-1").unwrap();
+
+        assert_eq!(attachments.len(), 2);
+        assert_eq!(
+            attachments[0].attachment.presentation,
+            AttachmentPresentation::Both
+        );
+        assert!(attachments[0].attachment.is_inline);
+        assert_eq!(
+            attachments[1].attachment.presentation,
+            AttachmentPresentation::Downloadable
+        );
+        assert!(attachments[1].attachment.is_inline);
+    }
+
+    #[test]
+    fn only_references_in_the_selected_html_branch_embed_inline_resources() {
+        let raw = concat!(
+            "Content-Type: multipart/mixed; boundary=mixed\r\n\r\n",
+            "--mixed\r\nContent-Type: text/html; charset=utf-8\r\n\r\n",
+            "<img src=\"cid:selected@example\">\r\n",
+            "--mixed\r\nContent-Type: text/html; charset=utf-8\r\n\r\n",
+            "<img src=\"cid:unselected@example\">\r\n",
+            "--mixed\r\nContent-Type: image/png; name=selected.png\r\n",
+            "Content-ID: <selected@example>\r\n",
+            "Content-Disposition: inline; filename=selected.png\r\n",
+            "Content-Transfer-Encoding: base64\r\n\r\naW1n\r\n",
+            "--mixed\r\nContent-Type: image/png; name=unselected.png\r\n",
+            "Content-ID: <unselected@example>\r\n",
+            "Content-Disposition: inline; filename=unselected.png\r\n",
+            "Content-Transfer-Encoding: base64\r\n\r\naW1n\r\n",
+            "--mixed--\r\n"
+        );
+        let parsed = mailparse::parse_mail(raw.as_bytes()).unwrap();
+        let attachments = extract_attachments(&parsed, "message-1").unwrap();
+
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].attachment.filename, "unselected.png");
+        assert_eq!(
+            attachments[0].attachment.presentation,
+            AttachmentPresentation::Downloadable
+        );
+    }
+
+    fn related_inline_images(count: usize, referenced: bool) -> String {
+        let mut html = String::from("<html><body>");
+        if referenced {
+            for index in 0..count {
+                html.push_str(&format!("<img src=\"cid:image-{index}@example.test\">"));
+            }
+        }
+        html.push_str("</body></html>");
+        let mut raw = format!(
+            "Content-Type: multipart/related; boundary=related\r\n\r\n--related\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{html}\r\n"
+        );
+        for index in 0..count {
+            raw.push_str(&format!(
+                "--related\r\nContent-Type: image/png; name=image-{index}.png\r\nContent-ID: <image-{index}@example.test>\r\nContent-Disposition: inline; filename=image-{index}.png\r\nContent-Transfer-Encoding: base64\r\n\r\naW1n\r\n"
+            ));
+        }
+        raw.push_str("--related--\r\n");
+        raw
+    }
+
+    #[test]
+    fn bounds_embedded_and_mixed_attachment_candidates_before_filtering_them() {
+        let fifty = related_inline_images(MAX_ATTACHMENT_COUNT, true);
+        let parsed = mailparse::parse_mail(fifty.as_bytes()).unwrap();
+        assert!(extract_attachments(&parsed, "message-1")
+            .unwrap()
+            .is_empty());
+
+        let fifty_one = related_inline_images(MAX_ATTACHMENT_COUNT + 1, true);
+        let parsed = mailparse::parse_mail(fifty_one.as_bytes()).unwrap();
+        assert!(extract_attachments(&parsed, "message-1")
+            .unwrap_err()
+            .to_string()
+            .contains("more than 50 attachments"));
+
+        let mut mixed = related_inline_images(MAX_ATTACHMENT_COUNT - 1, true);
+        mixed = mixed.replacen(
+            "--related--\r\n",
+            "--related\r\nContent-Type: application/pdf; name=first.pdf\r\nContent-Disposition: attachment; filename=first.pdf\r\nContent-Transfer-Encoding: base64\r\n\r\ncGRm\r\n--related\r\nContent-Type: application/pdf; name=second.pdf\r\nContent-Disposition: attachment; filename=second.pdf\r\nContent-Transfer-Encoding: base64\r\n\r\ncGRm\r\n--related--\r\n",
+            1,
+        );
+        let parsed = mailparse::parse_mail(mixed.as_bytes()).unwrap();
+        assert!(extract_attachments(&parsed, "message-1").is_err());
+    }
+
+    #[test]
+    fn bounds_total_decoded_bytes_even_for_embedded_only_resources() {
+        let raw = related_inline_images(1, true);
+        let parsed = mailparse::parse_mail(raw.as_bytes()).unwrap();
+        let mut collection = AttachmentCollection {
+            decoded_bytes: MAX_ATTACHMENT_TOTAL_BYTES,
+            ..Default::default()
+        };
+
+        assert!(collect_attachment_parts(
+            &parsed,
+            &parsed,
+            "message-1",
+            extract_html(&parsed).unwrap().as_deref(),
+            &mut collection,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("attachments exceed"));
+    }
+
+    #[test]
+    fn duplicate_or_missing_cid_targets_remain_downloadable_instead_of_being_guessed_embedded() {
+        let duplicate = concat!(
+            "Content-Type: multipart/related; boundary=related\r\n\r\n",
+            "--related\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<img src=\"cid:logo@example\">\r\n",
+            "--related\r\nContent-Type: image/png; name=one.png\r\nContent-ID: <logo@example>\r\nContent-Disposition: inline; filename=one.png\r\nContent-Transfer-Encoding: base64\r\n\r\naW1n\r\n",
+            "--related\r\nContent-Type: image/png; name=two.png\r\nContent-ID: <logo@example>\r\nContent-Disposition: inline; filename=two.png\r\nContent-Transfer-Encoding: base64\r\n\r\naW1n\r\n--related--\r\n"
+        );
+        let parsed = mailparse::parse_mail(duplicate.as_bytes()).unwrap();
+        assert_eq!(extract_attachments(&parsed, "message-1").unwrap().len(), 2);
+
+        let missing = related_inline_images(1, false)
+            .replace("</body>", "<img src=\"cid:missing@example.test\"></body>");
+        let parsed = mailparse::parse_mail(missing.as_bytes()).unwrap();
+        assert_eq!(extract_attachments(&parsed, "message-1").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn attached_message_branches_cannot_supply_html_or_inline_resources_to_the_outer_message() {
+        let raw = concat!(
+            "Content-Type: multipart/mixed; boundary=outer\r\n\r\n",
+            "--outer\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<img src=\"cid:outer@example\">\r\n",
+            "--outer\r\nContent-Type: image/png\r\nContent-ID: <outer@example>\r\nContent-Disposition: inline; filename=outer.png\r\nContent-Transfer-Encoding: base64\r\n\r\nb3V0ZXI=\r\n",
+            "--outer\r\nContent-Type: message/rfc822; name=forwarded.eml\r\nContent-Disposition: attachment; filename=forwarded.eml\r\n\r\n",
+            "Content-Type: multipart/related; boundary=inner\r\n\r\n",
+            "--inner\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<img src=\"cid:outer@example\">\r\n",
+            "--inner\r\nContent-Type: image/png\r\nContent-ID: <outer@example>\r\nContent-Disposition: inline; filename=inner.png\r\nContent-Transfer-Encoding: base64\r\n\r\naW5uZXI=\r\n",
+            "--inner--\r\n--outer--\r\n"
+        );
+        let parsed = mailparse::parse_mail(raw.as_bytes()).unwrap();
+        let html = extract_html(&parsed).unwrap().unwrap();
+        let resolved = resolve_inline_images(html, &parsed).unwrap();
+        let attachments = extract_attachments(&parsed, "message-1").unwrap();
+
+        assert!(resolved.contains("b3V0ZXI="));
+        assert!(!resolved.contains("aW5uZXI="));
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].attachment.filename, "forwarded.eml");
     }
 
     #[test]

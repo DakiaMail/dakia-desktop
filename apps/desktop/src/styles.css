@@ -813,13 +813,18 @@ textarea {
   flex: 1;
 }
 .reader-content {
-  padding: 22px clamp(24px, 2.4vw, 36px) 30px;
+  padding: 10px clamp(24px, 2.4vw, 36px) 30px;
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
   flex: 1;
   overscroll-behavior: contain;
   animation: reader-message-enter 180ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.reader-subject-sentinel {
+  height: 1px;
+  margin-top: -1px;
+  pointer-events: none;
 }
 @keyframes reader-message-enter {
   from {
@@ -831,26 +836,60 @@ textarea {
     transform: translateY(0);
   }
 }
+.reader-subject-surface {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  width: 100%;
+  margin: 0 0 8px;
+  background: var(--dakia-paper);
+  /* Cover the scroll container's top inset so message content can never show
+     through above the pinned heading. */
+  box-shadow: 0 -12px 0 var(--dakia-paper);
+}
 .reader-subject {
   max-width: 820px;
-  margin: 0 0 14px;
+  margin: 0;
+  padding: 2px 20px 8px 0;
+  overflow: hidden;
   font-size: clamp(18px, 1.45vw, 22px);
   line-height: 1.2;
   font-weight: 650;
   letter-spacing: -0.025em;
   text-wrap: balance;
+  transition:
+    font-size 140ms ease,
+    padding 140ms ease;
+}
+.reader-subject[data-compact] {
+  max-width: 100%;
+  padding-bottom: 6px;
+  font-size: 16px;
+  text-overflow: ellipsis;
+  text-wrap: nowrap;
+  white-space: nowrap;
 }
 .sender-card {
   display: flex;
   align-items: center;
   gap: 9px;
-  margin-bottom: 18px;
+  margin-bottom: 16px;
+  padding: 4px 0;
+  border-radius: 10px;
 }
 .sender-card-collapsible {
   cursor: pointer;
 }
+.sender-card-collapsible:hover {
+  background: color-mix(in srgb, var(--mantine-color-gray-1) 45%, transparent);
+}
+.sender-card-collapsible:focus-within {
+  outline: 2px solid
+    color-mix(in srgb, var(--mantine-color-ember-5) 55%, transparent);
+  outline-offset: 2px;
+}
 .thread-message {
-  padding: 18px 0 24px;
+  padding: 20px 0 28px;
   border-top: 1px solid var(--dakia-divider);
 }
 .thread-message:first-of-type {
@@ -1037,8 +1076,9 @@ textarea {
   white-space: pre-wrap;
 }
 .reader-reply-actions {
-  margin-top: 22px;
+  margin-top: 20px;
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
@@ -1084,6 +1124,17 @@ textarea {
 .html-message--dark {
   background: var(--dakia-paper);
   color-scheme: dark;
+}
+.html-message-history-toggle:hover {
+  background: color-mix(
+    in srgb,
+    var(--mantine-color-gray-1) 58%,
+    transparent
+  ) !important;
+}
+.html-message-history-toggle:focus-visible {
+  outline: 2px solid var(--mantine-color-ember-5);
+  outline-offset: 2px;
 }
 .attachment-panel {
   max-width: 760px;

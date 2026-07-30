@@ -1278,23 +1278,33 @@ export default function App() {
       setAiLoading(false);
     }
   };
-  const openReply = async (
-    thread: MailThread | undefined = activeThread,
+  const openReplyForMessage = async (
+    replyMessage: MailSummary | undefined,
     replyAll = false,
+    contextMessages: MailSummary[] = activeThread?.messages ?? [],
   ) => {
-    if (!thread) return;
+    if (!replyMessage) return;
     const account = accounts.find(
-      (item) => item.id === thread.latest.account_id,
+      (item) => item.id === replyMessage.account_id,
     );
-    const replyMessage =
-      [...thread.messages]
-        .reverse()
-        .find(
-          (message) =>
-            !account ||
-            message.from_address.toLowerCase() !== account.email.toLowerCase(),
-        ) ?? thread.latest;
-    const recipients = replyRecipients(replyMessage, account?.email, replyAll);
+    // A Reply button on a sent message may need a conversation counterpart for
+    // recipient calculation, but the clicked message remains the provenance of
+    // the subject, quoted body, and threading headers.
+    const recipientMessage =
+      account &&
+      replyMessage.from_address.toLowerCase() === account.email.toLowerCase()
+        ? ([...contextMessages]
+            .reverse()
+            .find(
+              (item) =>
+                item.from_address.toLowerCase() !== account.email.toLowerCase(),
+            ) ?? replyMessage)
+        : replyMessage;
+    const recipients = replyRecipients(
+      recipientMessage,
+      account?.email,
+      replyAll,
+    );
     if (!recipients) return;
     try {
       const content = await api.content(replyMessage.id);
@@ -1320,7 +1330,10 @@ export default function App() {
         references: [replyMessage.reference_ids, replyMessage.message_id]
           .filter(Boolean)
           .join(" "),
-        contextMessageIds: thread.messages.map((message) => message.id),
+        contextMessageIds: (contextMessages.length
+          ? contextMessages
+          : [replyMessage]
+        ).map((message) => message.id),
       });
     } catch (error) {
       await showNativeMessage(
@@ -1330,8 +1343,25 @@ export default function App() {
       );
     }
   };
-  const openForward = async (thread: MailThread | undefined = activeThread) => {
-    const message = thread?.latest;
+  const openThreadReply = async (
+    thread: MailThread | undefined = activeThread,
+    replyAll = false,
+  ) => {
+    if (!thread) return;
+    const account = accounts.find(
+      (item) => item.id === thread.latest.account_id,
+    );
+    const replyMessage =
+      [...thread.messages]
+        .reverse()
+        .find(
+          (item) =>
+            !account ||
+            item.from_address.toLowerCase() !== account.email.toLowerCase(),
+        ) ?? thread.latest;
+    await openReplyForMessage(replyMessage, replyAll, thread.messages);
+  };
+  const openForwardForMessage = async (message: MailSummary | undefined) => {
     if (!message) return;
     try {
       const content = await api.content(message.id);
@@ -1345,7 +1375,11 @@ export default function App() {
           subject: t("composer.subject"),
           to: t("composer.to"),
         }),
-        forwardMessageId: message.has_attachments ? message.id : undefined,
+        forwardMessageId: content.attachments.some(
+          (attachment) => attachment.presentation !== "embedded",
+        )
+          ? message.id
+          : undefined,
         contextMessageIds: [message.id],
       });
     } catch (error) {
@@ -1356,6 +1390,9 @@ export default function App() {
       );
     }
   };
+  const openThreadForward = async (
+    thread: MailThread | undefined = activeThread,
+  ) => openForwardForMessage(thread?.latest);
   const toggleThreadStar = async (thread: MailThread, flagged: boolean) => {
     if (actionBusyRef.current) return;
     actionBusyRef.current = true;
@@ -1634,8 +1671,8 @@ export default function App() {
     ["mod+K", () => searchRef.current?.focus()],
     ["mod+N", openCompose],
     ["mod+,", () => void openSettingsWindow()],
-    ["mod+R", () => openReply()],
-    ["mod+shift+F", () => void openForward()],
+    ["mod+R", () => void openThreadReply()],
+    ["mod+shift+F", () => void openThreadForward()],
     ["/", () => searchRef.current?.focus()],
     ["c", openCompose],
     ["e", () => void applyAction("archive")],
@@ -1665,10 +1702,10 @@ export default function App() {
           void sync();
           break;
         case "reply":
-          openReply();
+          void openThreadReply();
           break;
         case "forward":
-          void openForward();
+          void openThreadForward();
           break;
         case "archive":
           void applyAction("archive");
@@ -1717,7 +1754,8 @@ export default function App() {
     applyAction,
     configureTerminalCommand,
     openCompose,
-    openReply,
+    openThreadReply,
+    openThreadForward,
     runManualUpdateCheck,
     sync,
     t,
@@ -1976,8 +2014,8 @@ export default function App() {
         onCompose={openCompose}
         onArchive={() => void applyAction("archive")}
         onSpam={() => void applyAction("spam")}
-        onReplyThread={(thread) => openReply(thread)}
-        onForwardThread={(thread) => void openForward(thread)}
+        onReplyThread={(thread) => void openThreadReply(thread)}
+        onForwardThread={(thread) => void openThreadForward(thread)}
         onActionThread={(thread, action) => void applyAction(action, [thread])}
         onToggleReadThread={(thread, read) =>
           void setThreadReadState(thread, read)
@@ -2009,9 +2047,9 @@ export default function App() {
           )
         }
         onTrash={() => void applyAction("trash")}
-        onReply={openReply}
-        onReplyAll={() => openReply(activeThread, true)}
-        onForward={() => void openForward()}
+        onReply={(message) => void openReplyForMessage(message)}
+        onReplyAll={(message) => void openReplyForMessage(message, true)}
+        onForward={(message) => void openForwardForMessage(message)}
         onToggleRead={(read) =>
           activeThread ? void setThreadReadState(activeThread, read) : undefined
         }

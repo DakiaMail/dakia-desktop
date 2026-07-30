@@ -99,6 +99,12 @@ export type Attachment = {
   mime_type: string;
   size_bytes: number;
   is_inline: boolean;
+  /**
+   * Whether this MIME part is embedded in the rendered message, available for
+   * download, or intentionally both. Older cached payloads omit this field;
+   * those remain displayable until refreshed by the backend.
+   */
+  presentation?: "embedded" | "downloadable" | "both";
   is_potentially_unsafe: boolean;
 };
 export type MessageContent = {
