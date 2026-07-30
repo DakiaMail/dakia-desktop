@@ -296,20 +296,33 @@ scope:
   generative fuzz pass; a future target must check in its seed corpus and
   resource budget before it is described as one.
 - the provider dispatch is protected by both the explicit boolean input and
-  environment secret. It validates the secret JSON contract without printing
-  it or opening a network connection. A successful dispatch means only that
-  the provider harness configuration is well-formed, not that a live provider
-  succeeded. Connecting a `MailService` harness to a provider remains a
-  separately approved operation. `DAKIA_PROVIDER_SMOKE_CONFIG` uses version
-  `1` and contains
+  the `provider-smoke` environment secret. It validates the secret JSON
+  contract without printing it, then runs the checked-in
+  `dakia-provider-smoke` binary. That binary creates a fresh temporary SQLite
+  store, persists a temporary account, persists the password only to that
+  temporary store,
+  calls the public production `MailService::imap_auth_probe` path, and removes
+  the temporary state on every exit. That probe is limited to authenticated
+  `CAPABILITY`, `LIST`, read-only `EXAMINE INBOX`, and constant-size
+  `STATUS INBOX (UIDVALIDITY UIDNEXT)`; it fetches no message content, headers,
+  flags, or UID list, and does not request remote mailbox mutation.
+  It then runs the public production SMTP probe through the configured
+  implicit-TLS or STARTTLS/auth path and requires `QUIT` before `MAIL`, `RCPT`,
+  or `DATA`. The complete binary has a 45-second timeout; the SMTP probe has a
+  20-second deadline. A successful dispatch is live, bounded evidence of
+  authenticated read-neutral IMAP access plus SMTP auth/QUIT, not a send,
+  mailbox-write, OAuth, or broad provider-compatibility pass. The protected
+  environment still must be deliberately configured before it can run.
+  `DAKIA_PROVIDER_SMOKE_CONFIG` uses version `1` and contains
   a provider label, account email, IMAP and SMTP endpoints (`host`, integer
   `port`, and `tls` or `starttls` security), plus exactly one credential field
-  (`password`, `accessToken`, `refreshToken`, or `clientSecret`). Keep the JSON
-  solely in the protected environment secret; do not commit an example with a
-  real address or value.
+  (`password` or `appPassword`). OAuth/token fields are rejected rather than
+  guessing a token refresh flow. Keep the JSON solely in the protected
+  environment secret; do not commit an example with a real address or value.
 
-Apple-Silicon native verification and the entire release flow stay local. CI
-never receives signing, notarization, OAuth, R2, or production mailbox secrets.
+Apple-Silicon native verification and the entire release flow stay local.
+Outside the explicitly protected provider-smoke environment, CI never receives
+signing, notarization, OAuth, R2, or production mailbox secrets.
 
 ### Coverage ratchet without per-PR duplication
 
@@ -354,9 +367,12 @@ substitute for those gates.
 7. Fixed-seed properties are blocking source tests; bounded repetition and
    coverage-candidate generation are manual dispatches. A ratchet activates
    only after a reviewed baseline exists.
-8. Disabled manual provider-smoke configuration infrastructure is present.
-   Enabling credentials, connecting to a provider, or scheduling it remains a
-   separately approved change.
+8. The dispatch-only provider smoke harness is checked in. It is bounded to a
+   fresh temporary SQLite store, a read-neutral public `MailService` IMAP
+   authentication/discovery probe with no message fetch, and SMTP
+   TLS/STARTTLS authentication followed by `QUIT`; it cannot send a message.
+   Its protected credentials must still be enabled and its hosted result
+   recorded separately; scheduling it remains unapproved.
 9. Keep native WebKit and installed-upgrade verification in the supervised
    Apple-Silicon acceptance and release process.
 

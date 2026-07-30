@@ -2,9 +2,7 @@
 
 const SECRET_KEYS = new Set([
   "password",
-  "accessToken",
-  "refreshToken",
-  "clientSecret",
+  "appPassword",
 ]);
 
 function fail(message) {
@@ -32,9 +30,10 @@ function endpoint(value, name) {
 }
 
 /**
- * Validate, but never connect with, the secret-backed provider smoke contract.
- * The validated schema gives a future explicit harness a stable handoff without
- * treating a credential/configuration check as a live-provider pass.
+ * Validate the secret-backed provider smoke contract before the Rust harness
+ * opens its single read-neutral IMAP session and SMTP auth/QUIT probe. OAuth
+ * values are deliberately rejected: this lane must not guess a refresh or
+ * token acquisition flow.
  */
 export function validateProviderSmokeContract(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -55,7 +54,7 @@ export function validateProviderSmokeContract(value) {
   }
   const credentialKeys = Object.keys(value.credentials);
   if (credentialKeys.length !== 1 || !SECRET_KEYS.has(credentialKeys[0])) {
-    fail("credentials must contain exactly one supported secret field");
+    fail("credentials must contain exactly one password or appPassword field");
   }
   nonEmptyString(
     value.credentials[credentialKeys[0]],
@@ -89,9 +88,11 @@ function main() {
     fail("PROVIDER_SMOKE_CONFIG must be valid JSON");
   }
   const contract = validateProviderSmokeContract(value);
-  console.log(
-    `Provider smoke contract validated for ${contract.provider}; no network connection was attempted.`,
-  );
+  // Do not log account, endpoint, provider, or the secret-backed JSON. The
+  // workflow runs the separately compiled Rust harness immediately after this
+  // validation, so this is not presented as a live-provider pass by itself.
+  void contract;
+  console.log("Provider smoke configuration validated for the live harness.");
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

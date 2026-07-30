@@ -25,7 +25,7 @@ const providerConfig = {
   accountEmail: "smoke@example.invalid",
   imap: { host: "imap.example.invalid", port: 993, security: "tls" },
   smtp: { host: "smtp.example.invalid", port: 587, security: "starttls" },
-  credentials: { accessToken: "not-a-real-token" },
+  credentials: { appPassword: "not-a-real-app-password" },
 };
 
 test("LCOV summaries deduplicate records and ratchet exact ratios", () => {
@@ -120,15 +120,24 @@ test("provider smoke contract validates secrets without exposing them or connect
     accountEmail: "smoke@example.invalid",
     imap: providerConfig.imap,
     smtp: providerConfig.smtp,
-    credentialKind: "accessToken",
+    credentialKind: "appPassword",
   });
   assert.throws(
     () =>
       validateProviderSmokeContract({
         ...providerConfig,
-        credentials: { accessToken: "x", password: "y" },
+        credentials: { appPassword: "x", password: "y" },
       }),
     /exactly one/,
+  );
+  assert.throws(
+    () =>
+      validateProviderSmokeContract({
+        ...providerConfig,
+        credentials: { accessToken: "not-a-real-token" },
+      }),
+    /password or appPassword/,
+    "the live harness must reject OAuth-like credential fields instead of guessing a flow",
   );
   const secret = "must-not-appear-in-output";
   const result = spawnSync(
@@ -141,7 +150,7 @@ test("provider smoke contract validates secrets without exposing them or connect
         ...process.env,
         PROVIDER_SMOKE_CONFIG: JSON.stringify({
           ...providerConfig,
-          credentials: { accessToken: secret },
+          credentials: { appPassword: secret },
         }),
       },
     },
@@ -149,6 +158,21 @@ test("provider smoke contract validates secrets without exposing them or connect
   assert.equal(result.status, 0, result.stderr);
   assert.doesNotMatch(`${result.stdout}${result.stderr}`, new RegExp(secret));
   assert.doesNotMatch(result.stdout, /smoke@example\.invalid/);
+  assert.doesNotMatch(result.stdout, /example-provider|imap\.example\.invalid|smtp\.example\.invalid/);
+
+  const rejected = spawnSync(process.execPath, ["scripts/provider-smoke-contract.mjs"], {
+    cwd: root,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PROVIDER_SMOKE_CONFIG: JSON.stringify({
+        ...providerConfig,
+        credentials: { accessToken: secret },
+      }),
+    },
+  });
+  assert.notEqual(rejected.status, 0);
+  assert.doesNotMatch(`${rejected.stdout}${rejected.stderr}`, new RegExp(secret));
 });
 
 test("manual workflow remains dispatch-only and runs bounded infrastructure", () => {
@@ -168,6 +192,30 @@ test("manual workflow remains dispatch-only and runs bounded infrastructure", ()
   );
   assert.match(workflow, /run-fixed-seed-property-regressions\.sh 3/);
   assert.match(workflow, /provider-smoke-contract\.mjs/);
+  assert.match(workflow, /dakia-provider-smoke/);
+  assert.match(workflow, /RUSTUP_TOOLCHAIN=1\.82\.0/);
+  const providerJob = workflow.slice(workflow.indexOf("\n  provider-smoke:"));
+  assert.match(
+    providerJob,
+    /cargo build --locked -p dakia-cli --bin dakia-provider-smoke/,
+  );
+  assert.doesNotMatch(
+    providerJob,
+    /cargo run .*dakia-provider-smoke/,
+    "the protected execution step must run the prebuilt artifact, never compile with a secret in scope",
+  );
+  const buildIndex = providerJob.indexOf("cargo build --locked -p dakia-cli --bin dakia-provider-smoke");
+  const secretIndex = providerJob.indexOf("PROVIDER_SMOKE_CONFIG:");
+  assert.ok(buildIndex >= 0 && secretIndex > buildIndex);
+  assert.equal(
+    [...providerJob.matchAll(/PROVIDER_SMOKE_CONFIG:/g)].length,
+    1,
+    "the provider secret may be scoped only to the artifact execution step",
+  );
+  assert.match(
+    providerJob,
+    /run: \|\n\s+node scripts\/provider-smoke-contract\.mjs\n\s+target\/debug\/dakia-provider-smoke/,
+  );
   assert.equal(
     [...workflow.matchAll(/npm run bundle:cli:dev/g)].length,
     2,

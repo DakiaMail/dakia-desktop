@@ -39,14 +39,11 @@ jobs:
         env:
           REASON: ${{ inputs.reason }}
         run: test -n "$(printf '%s' "$REASON" | tr -d '[:space:]')"
-      - name: Guard provider smoke credentials and opt-in
+      - name: Guard provider smoke explicit opt-in
         if: inputs.lane == 'provider-smoke'
         env:
           ENABLE_PROVIDER_SMOKE: ${{ inputs.enable_provider_smoke }}
-          PROVIDER_SMOKE_CONFIG: ${{ secrets.DAKIA_PROVIDER_SMOKE_CONFIG }}
-        run: |
-          test "$ENABLE_PROVIDER_SMOKE" = true
-          test -n "$PROVIDER_SMOKE_CONFIG"
+        run: test "$ENABLE_PROVIDER_SMOKE" = true
 
   full-source:
     name: Full Linux source suite
@@ -171,7 +168,7 @@ jobs:
           ./scripts/run-fixed-seed-property-regressions.sh 3
 
   provider-smoke:
-    name: Credentialed provider smoke contract
+    name: Credentialed provider smoke
     needs: validate-request
     if: inputs.lane == 'provider-smoke' && inputs.enable_provider_smoke
     runs-on: ubuntu-24.04
@@ -184,11 +181,15 @@ jobs:
       - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4
         with:
           node-version: 20.19.0
-      - name: Validate the non-network provider smoke contract
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.82.0 --profile minimal
+          echo 'RUSTUP_TOOLCHAIN=1.82.0' >> "$GITHUB_ENV"
+      - name: Compile the exact locked provider smoke binary
+        run: cargo build --locked -p dakia-cli --bin dakia-provider-smoke
+      - name: Run the read-neutral IMAP and SMTP auth/QUIT smoke
         env:
           PROVIDER_SMOKE_CONFIG: ${{ secrets.DAKIA_PROVIDER_SMOKE_CONFIG }}
-        run: node scripts/provider-smoke-contract.mjs
-      - name: Record scope accurately
         run: |
-          echo 'A secret-backed configuration contract was validated.'
-          echo 'No provider connection was attempted: a live MailService provider harness is not checked in yet.'
+          node scripts/provider-smoke-contract.mjs
+          target/debug/dakia-provider-smoke

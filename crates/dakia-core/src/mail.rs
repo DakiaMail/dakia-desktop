@@ -64,6 +64,11 @@ use url::{Host, Url};
 const IMAP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const IMAP_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 const SMTP_SEND_TIMEOUT: Duration = Duration::from_secs(60);
+/// A provider smoke must authenticate the configured SMTP transport without
+/// ever starting a message transaction. Keep this distinct from the normal
+/// send deadline so an opt-in diagnostic cannot hold a manual CI runner for a
+/// full delivery timeout.
+const SMTP_AUTH_PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 const DKIM_VERIFY_TIMEOUT: Duration = Duration::from_secs(5);
 const UNSUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
@@ -286,6 +291,36 @@ impl MailService {
     }
     pub fn credentials(&self) -> &CredentialStore {
         &self.credentials
+    }
+
+    /// Verify authenticated production IMAP connectivity without fetching
+    /// message data or changing remote mailbox state. This intentionally stops
+    /// after capability, mailbox discovery, read-only INBOX examination, and
+    /// constant-size mailbox status so a provider smoke remains bounded even
+    /// when an account has a large mailbox.
+    pub async fn imap_auth_probe(&self, account: &Account) -> Result<()> {
+        let mut client = ImapClient::connect(account).await?;
+        self.imap_auth_probe_with_client(&mut client, account).await
+    }
+
+    async fn imap_auth_probe_with_client<S>(
+        &self,
+        client: &mut ImapClient<S>,
+        account: &Account,
+    ) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let secret = self.credentials.secret(account).await?;
+        client.authenticate(account, &secret).await?;
+        client.command("CAPABILITY").await?;
+        client.command("LIST \"\" \"INBOX\"").await?;
+        client.command("EXAMINE \"INBOX\"").await?;
+        client
+            .command("STATUS \"INBOX\" (UIDVALIDITY UIDNEXT)")
+            .await?;
+        let _ = client.command("LOGOUT").await;
+        Ok(())
     }
 
     pub async fn sync_inbox(&self, account: &Account, max_messages: u32) -> Result<usize> {
@@ -1508,6 +1543,21 @@ impl MailService {
             .await
     }
 
+    /// Verify the production SMTP connection, TLS/STARTTLS upgrade, and
+    /// credentials without submitting any mail. The probe always sends QUIT
+    /// immediately after successful authentication; it never sends MAIL,
+    /// RCPT, DATA, or a message body.
+    pub async fn smtp_auth_probe(&self, account: &Account) -> Result<()> {
+        let secret = self.credentials.secret(account).await?;
+        let endpoint = SmtpEndpoint {
+            host: account.smtp_host.clone(),
+            port: account.smtp_port,
+            tls_parameters: TlsParameters::new(account.smtp_host.clone())?,
+        };
+        smtp_auth_probe_with_smtp_endpoint(account, &secret, endpoint, SMTP_AUTH_PROBE_TIMEOUT)
+            .await
+    }
+
     async fn send_with_smtp_endpoint(
         &self,
         account: &Account,
@@ -1551,6 +1601,46 @@ impl MailService {
         let _ = client.command("LOGOUT").await;
         Ok(())
     }
+}
+
+async fn smtp_auth_probe_with_smtp_endpoint(
+    account: &Account,
+    secret: &str,
+    endpoint: SmtpEndpoint,
+    deadline: Duration,
+) -> Result<()> {
+    let deadline_at = Instant::now() + deadline;
+    let client_id = ClientId::default();
+    let implicit_tls =
+        matches!(account.smtp_security, Security::Tls).then(|| endpoint.tls_parameters.clone());
+    let mut connection = smtp_probe_before_quit(
+        deadline_at,
+        AsyncSmtpConnection::connect_tokio1(
+            (&*endpoint.host, endpoint.port),
+            None,
+            &client_id,
+            implicit_tls,
+            None,
+        ),
+    )
+    .await?;
+
+    if matches!(account.smtp_security, Security::StartTls) {
+        smtp_probe_before_quit(
+            deadline_at,
+            connection.starttls(endpoint.tls_parameters, &client_id),
+        )
+        .await?;
+    }
+
+    let credentials = Credentials::new(account.auth.username().to_owned(), secret.to_owned());
+    let mechanisms: &[Mechanism] = match account.auth {
+        AccountAuth::OAuth2 { .. } => &[Mechanism::Xoauth2],
+        AccountAuth::Password { .. } => DEFAULT_MECHANISMS,
+    };
+    smtp_probe_before_quit(deadline_at, connection.auth(mechanisms, &credentials)).await?;
+    smtp_probe_before_quit(deadline_at, connection.quit()).await?;
+    Ok(())
 }
 
 async fn send_smtp_raw(
@@ -1665,6 +1755,15 @@ async fn smtp_before_data<T>(
     Ok(timeout_at(deadline_at, operation)
         .await
         .context("SMTP send timed out before message submission")??)
+}
+
+async fn smtp_probe_before_quit<T>(
+    deadline_at: Instant,
+    operation: impl std::future::Future<Output = std::result::Result<T, lettre::transport::smtp::Error>>,
+) -> Result<T> {
+    Ok(timeout_at(deadline_at, operation)
+        .await
+        .context("SMTP authentication probe timed out")??)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -5973,6 +6072,72 @@ mod tests {
         transcript
     }
 
+    async fn scripted_imap_probe_server(server: TcpStream) -> Vec<String> {
+        let (read, mut write) = server.into_split();
+        let mut read = BufReader::new(read);
+        let mut transcript = Vec::new();
+
+        let tag = scripted_expect_command(
+            &mut read,
+            &mut transcript,
+            "LOGIN \"reader@example.test\" \"probe secret\"",
+        )
+        .await;
+        write
+            .write_all(format!("{tag} OK authenticated\r\n").as_bytes())
+            .await
+            .unwrap();
+
+        let tag = scripted_expect_command(&mut read, &mut transcript, "CAPABILITY").await;
+        write
+            .write_all(
+                format!("* CAPABILITY IMAP4rev1 UIDPLUS\r\n{tag} OK capability\r\n").as_bytes(),
+            )
+            .await
+            .unwrap();
+
+        let tag = scripted_expect_command(&mut read, &mut transcript, "LIST \"\" \"INBOX\"").await;
+        write
+            .write_all(
+                format!("* LIST (\\\\HasNoChildren) \"/\" \"INBOX\"\r\n{tag} OK listed\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+
+        let tag = scripted_expect_command(&mut read, &mut transcript, "EXAMINE \"INBOX\"").await;
+        write
+            .write_all(
+                format!("* 3 EXISTS\r\n* OK [UIDVALIDITY 19] UIDs valid\r\n{tag} OK examined\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+
+        let tag = scripted_expect_command(
+            &mut read,
+            &mut transcript,
+            "STATUS \"INBOX\" (UIDVALIDITY UIDNEXT)",
+        )
+        .await;
+        // A constant-size status response proves the probe does not request a
+        // UID list, FETCH, flag change, or any per-message follow-up work.
+        write
+            .write_all(
+                format!("* STATUS \"INBOX\" (UIDVALIDITY 19 UIDNEXT 44)\r\n{tag} OK status\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+
+        let tag = scripted_expect_command(&mut read, &mut transcript, "LOGOUT").await;
+        write
+            .write_all(format!("* BYE done\r\n{tag} OK logout\r\n").as_bytes())
+            .await
+            .unwrap();
+        transcript
+    }
+
     #[tokio::test]
     async fn scripted_mail_service_inbox_sync_persists_incremental_uid_and_isolates_accounts() {
         let directory = tempfile::tempdir().unwrap();
@@ -6127,6 +6292,37 @@ mod tests {
                 .unwrap()
                 .subject,
             "Incremental transcript message"
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_mail_service_imap_auth_probe_uses_read_only_constant_size_commands() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store);
+        let account = test_account();
+        service
+            .credentials()
+            .set_password(&account, "probe secret")
+            .await
+            .unwrap();
+        let (mut client, server) = plain_imap_client_and_server().await;
+        let server = tokio::spawn(scripted_imap_probe_server(server));
+
+        service
+            .imap_auth_probe_with_client(&mut client, &account)
+            .await
+            .unwrap();
+        assert_eq!(
+            server.await.unwrap(),
+            vec![
+                "LOGIN \"reader@example.test\" \"probe secret\"",
+                "CAPABILITY",
+                "LIST \"\" \"INBOX\"",
+                "EXAMINE \"INBOX\"",
+                "STATUS \"INBOX\" (UIDVALIDITY UIDNEXT)",
+                "LOGOUT",
+            ],
+            "the probe must not request UID lists, FETCH, flag changes, or any per-message work"
         );
     }
 
@@ -6336,6 +6532,70 @@ mod tests {
         server.await.unwrap();
         assert!(error.to_string().contains("535"), "{error:#}");
         assert!(!error.to_string().contains("may be uncertain"), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn scripted_smtp_implicit_tls_auth_probe_quits_without_an_envelope() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let account = smtp_test_account(Security::Tls, listener.local_addr().unwrap().port());
+        let acceptor = smtp_test_acceptor();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let stream = acceptor.accept(stream).await.unwrap();
+            let mut connection = BufReader::new(stream);
+            smtp_reply(&mut connection, "220 localhost ready\r\n").await;
+            smtp_expect_ehlo_and_auth(&mut connection, false).await;
+            // MAIL, RCPT, and DATA would all fail this exact next-command
+            // assertion. A successful probe has no envelope side effects.
+            assert_eq!(smtp_command(&mut connection).await, "QUIT\r\n");
+            smtp_reply(&mut connection, "221 2.0.0 bye\r\n").await;
+        });
+
+        smtp_auth_probe_with_smtp_endpoint(
+            &account,
+            "secret",
+            smtp_test_endpoint(&account),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn scripted_smtp_starttls_auth_probe_quits_without_an_envelope() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let account = smtp_test_account(Security::StartTls, listener.local_addr().unwrap().port());
+        let acceptor = smtp_test_acceptor();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut plaintext = BufReader::new(stream);
+            smtp_reply(&mut plaintext, "220 localhost ready\r\n").await;
+            assert!(smtp_command(&mut plaintext).await.starts_with("EHLO "));
+            smtp_reply(
+                &mut plaintext,
+                "250-localhost\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n",
+            )
+            .await;
+            assert_eq!(smtp_command(&mut plaintext).await, "STARTTLS\r\n");
+            smtp_reply(&mut plaintext, "220 2.0.0 start TLS\r\n").await;
+
+            let stream = acceptor.accept(plaintext.into_inner()).await.unwrap();
+            let mut encrypted = BufReader::new(stream);
+            smtp_expect_ehlo_and_auth(&mut encrypted, false).await;
+            assert_eq!(smtp_command(&mut encrypted).await, "QUIT\r\n");
+            smtp_reply(&mut encrypted, "221 2.0.0 bye\r\n").await;
+        });
+
+        smtp_auth_probe_with_smtp_endpoint(
+            &account,
+            "secret",
+            smtp_test_endpoint(&account),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
     }
 
     #[tokio::test]
