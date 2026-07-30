@@ -81,6 +81,7 @@ describe("Reader unsubscribe action", () => {
       body_text: "Tere maailm",
       attachments: [],
     });
+    vi.spyOn(api, "hydrateMessage").mockResolvedValue(message);
     vi.spyOn(api, "translationModels").mockResolvedValue([
       {
         source: "et",
@@ -170,7 +171,20 @@ describe("Reader unsubscribe action", () => {
     expect(screen.getByText("Sent by you")).toBeVisible();
   });
 
-  it("shows a localized loading state for header-first arrivals", () => {
+  it("loads an expanded complete message through content without foreground hydration", async () => {
+    render(
+      <MantineProvider>
+        <Reader {...props} message={message} />
+      </MantineProvider>,
+    );
+
+    expect(await screen.findByText("Tere maailm")).toBeVisible();
+    expect(api.content).toHaveBeenCalledTimes(1);
+    expect(api.content).toHaveBeenCalledWith(message.id);
+    expect(api.hydrateMessage).not.toHaveBeenCalled();
+  });
+
+  it("loads header-first arrivals through content without foreground hydration", async () => {
     render(
       <MantineProvider>
         <Reader
@@ -182,6 +196,38 @@ describe("Reader unsubscribe action", () => {
     expect(screen.getByRole("status")).toHaveTextContent(
       "Loading the full message",
     );
+    expect(await screen.findByText("Tere maailm")).toBeVisible();
+    expect(api.content).toHaveBeenCalledTimes(1);
+    expect(api.content).toHaveBeenCalledWith(message.id);
+    expect(api.hydrateMessage).not.toHaveBeenCalled();
+  });
+
+  it("retries content without foreground hydration after a load failure", async () => {
+    vi.mocked(api.content)
+      .mockRejectedValueOnce(new Error("content unavailable"))
+      .mockResolvedValueOnce({ body_text: "Recovered body", attachments: [] });
+    render(
+      <MantineProvider>
+        <Reader
+          {...props}
+          message={{ ...message, body_text: "", content_state: "headers_only" }}
+        />
+      </MantineProvider>,
+    );
+
+    expect(
+      await screen.findByText(
+        "This message could not be fetched from the mail server.",
+      ),
+    ).toBeVisible();
+    expect(api.content).toHaveBeenCalledTimes(1);
+    expect(api.hydrateMessage).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Recovered body")).toBeVisible();
+    expect(api.content).toHaveBeenCalledTimes(2);
+    expect(api.content).toHaveBeenLastCalledWith(message.id);
+    expect(api.hydrateMessage).not.toHaveBeenCalled();
   });
 
   it("offers forwarding from the message actions menu", async () => {

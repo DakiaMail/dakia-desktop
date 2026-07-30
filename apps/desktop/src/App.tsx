@@ -41,6 +41,7 @@ import {
   onAccountRemoved,
   onAccountUpdated,
   onMailArrived,
+  onMailChanged,
   onMailHydrated,
   onMailIndexRebuilt,
   onMailRebuildProgress,
@@ -935,6 +936,9 @@ export default function App() {
       }),
       onMailHydrated(() => {
         void classifyPending();
+      }),
+      onMailChanged(() => {
+        void loadMessages().catch(showError);
       }),
       onMailSyncState(() => undefined),
     ])

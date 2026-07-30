@@ -2,6 +2,7 @@ mod realtime;
 mod translation;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
+use dakia_core::storage::MessageContentFetchAcquire;
 use dakia_core::{
     ai::{AiConfig, AiProvider, AiService},
     mailbox_action_destination, provider, remote_mailbox, Account, AccountAuth, AccountDraft,
@@ -1070,17 +1071,9 @@ async fn message_attachments(
     state: State<'_, Arc<AppState>>,
     message_id: String,
 ) -> Result<Vec<Attachment>, String> {
-    Ok(fetch_remote_message(state.inner(), &message_id)
+    Ok(load_message_content(state.inner(), &message_id)
         .await?
-        .attachments
-        .into_iter()
-        // `is_inline` describes MIME transport, not whether a part belongs in
-        // a user-facing attachment list. Never let an embedded CID resource
-        // escape through a command even if an older cache or parser supplied
-        // it here.
-        .filter(|item| is_downloadable_attachment(&item.attachment))
-        .map(|item| item.attachment)
-        .collect())
+        .attachments)
 }
 
 #[tauri::command]
@@ -1088,50 +1081,37 @@ async fn message_content(
     state: State<'_, Arc<AppState>>,
     message_id: String,
 ) -> Result<MessageContent, String> {
-    if let Some((body_text, body_html)) =
-        state.store.starred_body(&message_id).await.map_err(error)?
-    {
-        let content = MessageContent {
+    load_message_content(state.inner(), &message_id).await
+}
+
+async fn cached_message_content(
+    store: &Store,
+    message_id: &str,
+) -> Result<Option<MessageContent>, String> {
+    if let Some((body_text, body_html)) = store.starred_body(message_id).await.map_err(error)? {
+        return Ok(Some(MessageContent {
             body_text,
             body_html,
-            unsubscribe_kind: state
-                .store
-                .message(&message_id)
+            unsubscribe_kind: store
+                .message(message_id)
                 .await
                 .map_err(error)?
                 .and_then(|message| message.unsubscribe_kind),
-            attachments: state
-                .store
-                .starred_attachment_metadata(&message_id)
+            attachments: store
+                .starred_attachment_metadata(message_id)
                 .await
                 .map_err(error)?
                 .into_iter()
                 .filter(is_downloadable_attachment)
                 .collect(),
-        };
-        if !looks_like_misclassified_text_body(&content) {
-            return Ok(content);
-        }
-        let message = refetch_and_persist_message(state.inner(), &message_id).await?;
-        return Ok(MessageContent {
-            body_text: message.body_text,
-            body_html: message.body_html,
-            unsubscribe_kind: message.unsubscribe_kind,
-            attachments: message
-                .attachments
-                .into_iter()
-                .map(|item| item.attachment)
-                .filter(is_downloadable_attachment)
-                .collect(),
-        });
+        }));
     }
-    if let Some(cached) = state
-        .store
-        .cached_message_content(&message_id)
+    if let Some(cached) = store
+        .cached_message_content(message_id)
         .await
         .map_err(error)?
     {
-        let content = MessageContent {
+        return Ok(Some(MessageContent {
             body_text: cached.body_text,
             body_html: cached.body_html,
             unsubscribe_kind: cached.unsubscribe_kind,
@@ -1140,39 +1120,112 @@ async fn message_content(
                 .into_iter()
                 .filter(is_downloadable_attachment)
                 .collect(),
-        };
-        if !looks_like_misclassified_text_body(&content) {
-            return Ok(content);
+        }));
+    }
+    Ok(None)
+}
+
+async fn load_message_content(
+    state: &Arc<AppState>,
+    message_id: &str,
+) -> Result<MessageContent, String> {
+    if let Some(cached) = cached_message_content(&state.store, message_id).await? {
+        if !looks_like_misclassified_text_body(&cached) {
+            return Ok(cached);
         }
     }
-    let message = fetch_remote_message(state.inner(), &message_id).await?;
-    let cached = CachedMessageContent {
-        body_text: message.body_text.clone(),
-        body_html: message.body_html.clone(),
-        unsubscribe_kind: message.unsubscribe_kind.clone(),
-        attachments: message
-            .attachments
-            .iter()
-            .filter(|item| is_downloadable_attachment(&item.attachment))
-            .map(|item| item.attachment.clone())
-            .collect(),
-    };
-    let still_starred = persist_foreground_message_content(&state.store, &message, &cached).await?;
-    if !still_starred {
-        if let Err(cache_error) = state
+
+    // Background warming and a foreground open share this durable claim. A
+    // foreground request waits for the warmer's cache commit, but takes over
+    // immediately if the warmer failed and released the claim.
+    let mut waited = Duration::ZERO;
+    let claim = loop {
+        match state
             .store
-            .cache_message_content(&message_id, false, cached.clone())
+            .acquire_message_content_fetch_outcome(message_id)
             .await
+            .map_err(error)?
         {
-            tracing::warn!(%cache_error, %message_id, "could not persist foreground message cache");
+            MessageContentFetchAcquire::Claimed(claim) => break claim,
+            MessageContentFetchAcquire::Missing => return Err("Message not found".to_owned()),
+            MessageContentFetchAcquire::Busy => {}
         }
+        if let Some(cached) = cached_message_content(&state.store, message_id).await? {
+            if !looks_like_misclassified_text_body(&cached) {
+                return Ok(cached);
+            }
+        }
+        if waited >= Duration::from_secs(60) {
+            return Err("Timed out waiting for message content".to_owned());
+        }
+        let delay = Duration::from_millis(50);
+        tokio::time::sleep(delay).await;
+        waited += delay;
+    };
+
+    let result = async {
+        // The winner must re-check after claiming: another fetch can commit
+        // content immediately before releasing its claim.
+        let cached_before_fetch = cached_message_content(&state.store, message_id).await?;
+        if let Some(cached) = &cached_before_fetch {
+            if !looks_like_misclassified_text_body(cached) {
+                return Ok(MessageContent {
+                    body_text: cached.body_text.clone(),
+                    body_html: cached.body_html.clone(),
+                    unsubscribe_kind: cached.unsubscribe_kind.clone(),
+                    attachments: cached.attachments.clone(),
+                });
+            }
+        }
+        let message = if cached_before_fetch
+            .as_ref()
+            .is_some_and(looks_like_misclassified_text_body)
+        {
+            // PR #42 repairs legacy rows under the account-operation lock so
+            // a concurrent move or action cannot redirect the refetch.
+            refetch_and_persist_message(state, message_id).await?
+        } else {
+            fetch_remote_message(state, message_id).await?
+        };
+        let cached = CachedMessageContent {
+            body_text: message.body_text.clone(),
+            body_html: message.body_html.clone(),
+            unsubscribe_kind: message.unsubscribe_kind.clone(),
+            attachments: message
+                .attachments
+                .iter()
+                .filter(|item| is_downloadable_attachment(&item.attachment))
+                .map(|item| item.attachment.clone())
+                .collect(),
+        };
+        let still_starred =
+            persist_foreground_message_content(&state.store, &message, &cached).await?;
+        if !still_starred {
+            if let Err(cache_error) = state
+                .store
+                .cache_message_content(message_id, false, cached.clone())
+                .await
+            {
+                tracing::warn!(%cache_error, %message_id, "could not persist foreground message cache");
+            }
+        }
+        state
+            .store
+            .set_message_content_state(message_id, "complete")
+            .await
+            .map_err(error)?;
+        Ok(MessageContent {
+            body_text: cached.body_text,
+            body_html: cached.body_html,
+            unsubscribe_kind: cached.unsubscribe_kind,
+            attachments: cached.attachments,
+        })
     }
-    Ok(MessageContent {
-        body_text: cached.body_text,
-        body_html: cached.body_html,
-        unsubscribe_kind: cached.unsubscribe_kind,
-        attachments: cached.attachments,
-    })
+    .await;
+    if let Err(release_error) = claim.release().await {
+        tracing::warn!(%release_error, %message_id, "could not release message-content fetch claim");
+    }
+    result
 }
 
 fn looks_like_misclassified_text_body(content: &MessageContent) -> bool {
@@ -1192,6 +1245,24 @@ fn looks_like_misclassified_text_body(content: &MessageContent) -> bool {
 mod message_content_repair_tests {
     use super::*;
     use dakia_core::AttachmentPresentation;
+
+    fn message_content_test_state(store: Store) -> Arc<AppState> {
+        let resources =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/email-classifier-v2");
+        Arc::new(AppState {
+            realtime: RealtimeSyncManager::new(store.clone()),
+            store,
+            data_dir: PathBuf::new(),
+            classifier: Mutex::new(
+                LocalEmailClassifier::from_dir(resources).expect("bundled test classifier"),
+            ),
+            classification: Arc::new(ClassificationScheduler::default()),
+            mail_rebuilds: Mutex::new(HashMap::new()),
+            account_operations: AccountOperationLocks::default(),
+            remote_operation_slots: Arc::new(Semaphore::new(MESSAGE_HYDRATION_CONCURRENCY)),
+            translation_downloads: Mutex::new(HashMap::new()),
+        })
+    }
 
     fn attachment(filename: &str, mime_type: &str, is_inline: bool) -> Attachment {
         Attachment {
@@ -1236,6 +1307,20 @@ mod message_content_repair_tests {
 
         assert!(!looks_like_misclassified_text_body(&named_attachment));
     }
+
+    #[tokio::test]
+    async fn deleted_message_content_fails_without_waiting_for_a_fetch_claim() {
+        let state = message_content_test_state(Store::in_memory().await.expect("test store"));
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(250),
+            load_message_content(&state, "deleted-message"),
+        )
+        .await
+        .expect("a deleted message must not wait for the claim timeout");
+
+        assert!(matches!(result, Err(error) if error == "Message not found"));
+    }
 }
 
 #[tauri::command]
@@ -1245,13 +1330,16 @@ async fn save_attachment(
     message_id: String,
     attachment_id: String,
 ) -> Result<String, String> {
-    let attachment = fetch_remote_message(state.inner(), &message_id)
-        .await?
-        .attachments
-        .into_iter()
-        .filter(|item| is_downloadable_attachment(&item.attachment))
-        .find(|item| item.attachment.id == attachment_id)
-        .ok_or_else(|| "Attachment not found".to_owned())?;
+    let (summary, account) = remote_message_locator(state.inner(), &message_id).await?;
+    let attachment = MailService::new(state.store.clone())
+        .fetch_attachment(
+            &account,
+            &summary.mailbox,
+            summary.uid as u32,
+            &attachment_id,
+        )
+        .await
+        .map_err(error)?;
     save_to_downloads(&app, &attachment.attachment, &attachment.bytes).map_err(error)
 }
 
@@ -1306,7 +1394,7 @@ async fn save_all_attachments(
     state: State<'_, Arc<AppState>>,
     message_id: String,
 ) -> Result<Vec<String>, String> {
-    let attachments = fetch_remote_message(state.inner(), &message_id)
+    let attachments = fetch_full_remote_message(state.inner(), &message_id)
         .await?
         .attachments
         .into_iter()
@@ -1326,7 +1414,7 @@ async fn forward_attachments(
     state: State<'_, Arc<AppState>>,
     message_id: String,
 ) -> Result<Vec<DroppedAttachment>, String> {
-    let attachments = fetch_remote_message(state.inner(), &message_id)
+    let attachments = fetch_full_remote_message(state.inner(), &message_id)
         .await?
         .attachments
         .into_iter()
@@ -1645,6 +1733,28 @@ async fn fetch_remote_message(
     state: &Arc<AppState>,
     message_id: &str,
 ) -> Result<MailSummary, String> {
+    let (summary, account) = remote_message_locator(state, message_id).await?;
+    MailService::new(state.store.clone())
+        .fetch_message(&account, &summary.mailbox, summary.uid as u32)
+        .await
+        .map_err(error)
+}
+
+async fn fetch_full_remote_message(
+    state: &Arc<AppState>,
+    message_id: &str,
+) -> Result<MailSummary, String> {
+    let (summary, account) = remote_message_locator(state, message_id).await?;
+    MailService::new(state.store.clone())
+        .fetch_full_message(&account, &summary.mailbox, summary.uid as u32)
+        .await
+        .map_err(error)
+}
+
+async fn remote_message_locator(
+    state: &Arc<AppState>,
+    message_id: &str,
+) -> Result<(MailSummary, Account), String> {
     let summary = state
         .store
         .messages_by_ids(&[message_id.to_owned()])
@@ -1660,10 +1770,7 @@ async fn fetch_remote_message(
         .await
         .map_err(error)?
         .ok_or_else(|| "Account not found".to_owned())?;
-    MailService::new(state.store.clone())
-        .fetch_message(&account, &summary.mailbox, summary.uid as u32)
-        .await
-        .map_err(error)
+    Ok((summary, account))
 }
 
 async fn refetch_and_persist_message(
@@ -3186,58 +3293,41 @@ async fn hydrate_message(
     state: State<'_, Arc<AppState>>,
     message_id: String,
 ) -> Result<dakia_core::MailSummary, String> {
-    let message = state
+    let message = hydrated_message(state.inner(), &message_id).await?;
+    let account_id = Uuid::parse_str(&message.account_id).map_err(error)?;
+    kick_classification(state.inner().clone());
+    let _ = app.emit(
+        "mail-hydrated",
+        serde_json::json!({
+            "accountId": account_id,
+            "messageId": message.id,
+        }),
+    );
+    Ok(message)
+}
+
+async fn hydrated_message(state: &Arc<AppState>, message_id: &str) -> Result<MailSummary, String> {
+    let content = load_message_content(state, message_id).await?;
+    let mut message = state
         .store
-        .message(&message_id)
+        .message(message_id)
         .await
         .map_err(error)?
         .ok_or_else(|| "Message not found".to_owned())?;
-    if matches!(message.content_state.as_str(), "complete" | "hydrating") {
-        return Ok(message);
-    }
-    let account_id = Uuid::parse_str(&message.account_id).map_err(error)?;
-    let account = state
-        .store
-        .account(account_id)
-        .await
-        .map_err(error)?
-        .ok_or_else(|| "Account not found".to_owned())?;
-    if !state
-        .store
-        .claim_message_hydration(&message_id)
-        .await
-        .map_err(error)?
-    {
-        return state
-            .store
-            .message(&message_id)
-            .await
-            .map_err(error)?
-            .ok_or_else(|| "Message not found".to_owned());
-    }
-    match MailService::new(state.store.clone())
-        .hydrate_message(&account, &message.mailbox, message.uid as u32)
-        .await
-    {
-        Ok(hydrated) => {
-            kick_classification(state.inner().clone());
-            let _ = app.emit(
-                "mail-hydrated",
-                serde_json::json!({
-                    "accountId": account_id,
-                    "messageId": hydrated.id,
-                }),
-            );
-            Ok(hydrated)
-        }
-        Err(failure) => {
-            let _ = state
-                .store
-                .set_message_content_state(&message_id, "failed")
-                .await;
-            Err(error(failure))
-        }
-    }
+    message.body_text = content.body_text;
+    message.body_html = content.body_html;
+    message.unsubscribe_kind = content.unsubscribe_kind;
+    message.content_state = "complete".into();
+    message.attachments = content
+        .attachments
+        .into_iter()
+        .map(|attachment| dakia_core::storage::AttachmentData {
+            attachment,
+            bytes: Vec::new(),
+        })
+        .collect();
+    message.has_attachments = !message.attachments.is_empty();
+    Ok(message)
 }
 
 fn publish_mail_rebuild_progress(
@@ -3540,7 +3630,7 @@ async fn hydrate_messages(
         state.remote_operation_slots.clone(),
         move |message_id| {
             let state = hydration_state.clone();
-            async move { fetch_remote_message(&state, &message_id).await }
+            async move { hydrated_message(&state, &message_id).await }
         },
     )
     .await

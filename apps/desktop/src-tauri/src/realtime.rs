@@ -1,10 +1,10 @@
-use dakia_core::{Account, MailService, MailSummary, RealtimeMode, Store};
+use dakia_core::{Account, CachedMessageContent, MailService, MailSummary, RealtimeMode, Store};
 use serde::Serialize;
 use std::{
     collections::HashMap,
     future::Future,
     sync::{Arc, RwLock as StdRwLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, watch, Mutex, OwnedMutexGuard, RwLock, Semaphore};
@@ -13,7 +13,12 @@ use uuid::Uuid;
 const REALTIME_BATCH_LIMIT: u32 = 300;
 const FALLBACK_POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const HYDRATION_CONCURRENCY: usize = 3;
-const HYDRATION_QUEUE_CAPACITY: usize = 2;
+const HYDRATION_MAINTENANCE_QUEUE_CAPACITY: usize = 1;
+const BODY_CACHE_WARM_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const BODY_CACHE_WARM_BATCH_LIMIT: u32 = 100;
+const BODY_CACHE_WARM_CANDIDATE_PAGES_PER_CYCLE: u32 = 3;
+const BODY_CACHE_WARM_LOOKBACK_DAYS: i64 = 30;
+const BODY_CACHE_FAILURE_COOLDOWN: Duration = Duration::from_secs(60 * 60);
 
 type HydrationCompleteHook = Arc<dyn Fn() + Send + Sync>;
 type HydrationCompleteHookStore = Arc<StdRwLock<Option<HydrationCompleteHook>>>;
@@ -223,21 +228,26 @@ async fn run_watcher(
     hydration_complete: HydrationCompleteHookStore,
 ) {
     let mut failures = 0_usize;
-    // A single owned worker serializes cycle batches for this account. The
-    // bounded channel provides backpressure instead of dropping later arrivals
-    // or accumulating detached tasks while an earlier batch is still active.
-    let (hydration_sender, hydration_receiver) =
-        mpsc::channel::<Vec<MailSummary>>(HYDRATION_QUEUE_CAPACITY);
+    // Arrivals must never wait behind a long cache-warm pass. Keep their queue
+    // separate and prioritize it in the worker; maintenance is coalesced to a
+    // single pending pass because an extra empty IDLE renewal has no payload.
+    let (arrival_sender, arrival_receiver) = mpsc::unbounded_channel::<HydrationBatch>();
+    let (maintenance_sender, maintenance_receiver) =
+        mpsc::channel::<HydrationBatch>(HYDRATION_MAINTENANCE_QUEUE_CAPACITY);
     let (hydration_cancel, hydration_cancel_receiver) = watch::channel(false);
     let hydration_handle = tauri::async_runtime::spawn(run_hydration_worker(
         app.clone(),
         store.clone(),
         account.clone(),
-        hydration_receiver,
+        HydrationWorkerQueues {
+            arrivals: arrival_receiver,
+            maintenance: maintenance_receiver,
+        },
         hydration_cancel_receiver,
         hydration_slots,
         hydration_complete,
     ));
+    let mut last_body_cache_warm = None;
     loop {
         if *cancel.borrow() {
             break;
@@ -275,22 +285,36 @@ async fn run_watcher(
                         },
                     );
                 }
-                // Queue every cycle, including an empty pending list, because
-                // the worker also revisits uncached starred messages. If the
-                // small queue is full, wait with cancellation rather than lose
-                // a cycle's only copy of its new-message hydration candidates.
-                let pending_hydration = cycle.pending_hydration;
-                tokio::select! {
-                    sent = hydration_sender.send(pending_hydration) => {
-                        if sent.is_err() {
-                            tracing::warn!(
-                                account_id = %account.id,
-                                "background hydration worker stopped unexpectedly"
-                            );
-                            break;
-                        }
-                    }
-                    _ = wait_for_cancellation(&mut cancel) => break,
+                // Only a real arrival enters the unbounded priority queue. A
+                // non-warm empty renewal is intentionally dropped, and a warm
+                // request supersedes an already queued maintenance request.
+                let now = Instant::now();
+                let warm_recent = body_cache_warm_due(last_body_cache_warm, now);
+                if warm_recent {
+                    last_body_cache_warm = Some(now);
+                }
+                if !cycle.pending_hydration.is_empty()
+                    && arrival_sender
+                        .send(HydrationBatch {
+                            pending: cycle.pending_hydration,
+                            warm_recent: false,
+                        })
+                        .is_err()
+                {
+                    tracing::warn!(
+                        account_id = %account.id,
+                        "background hydration worker stopped unexpectedly"
+                    );
+                    break;
+                }
+                if warm_recent {
+                    // Full means a maintenance pass is already queued. It is
+                    // equivalent to this one, so coalescing preserves the
+                    // cadence without letting the IDLE watcher block.
+                    let _ = maintenance_sender.try_send(HydrationBatch {
+                        pending: Vec::new(),
+                        warm_recent: true,
+                    });
                 }
                 if cycle.mode == RealtimeMode::Poll
                     && wait_or_cancel(poll_delay(account.id), &mut cancel).await
@@ -341,13 +365,15 @@ async fn run_watcher(
         }
     }
     let _ = hydration_cancel.send(true);
-    drop(hydration_sender);
+    drop(arrival_sender);
+    drop(maintenance_sender);
     let _ = hydration_handle.await;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HydrationKind {
     Pending,
+    Recent,
     Starred,
 }
 
@@ -355,6 +381,22 @@ enum HydrationKind {
 struct HydrationTarget {
     kind: HydrationKind,
     message: MailSummary,
+}
+
+struct HydrationBatch {
+    pending: Vec<MailSummary>,
+    warm_recent: bool,
+}
+
+struct HydrationWorkerQueues {
+    arrivals: mpsc::UnboundedReceiver<HydrationBatch>,
+    maintenance: mpsc::Receiver<HydrationBatch>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ContentCacheDestination {
+    Regular,
+    Starred,
 }
 
 struct HydrationResult {
@@ -372,9 +414,18 @@ struct HydrationContext {
     account: Account,
     slots: Arc<Semaphore>,
     complete: HydrationCompleteHookStore,
+    recent_failures: Arc<Mutex<HashMap<String, Instant>>>,
+    // Each worker walks a bounded window of the ordered candidate set. A
+    // cooling newest prefix must not keep later messages beyond the first few
+    // pages unreachable forever.
+    recent_candidate_offset: Arc<Mutex<u32>>,
 }
 
-fn hydration_plan(pending: Vec<MailSummary>, starred: Vec<MailSummary>) -> Vec<HydrationTarget> {
+fn hydration_plan(
+    pending: Vec<MailSummary>,
+    recent: Vec<MailSummary>,
+    starred: Vec<MailSummary>,
+) -> Vec<HydrationTarget> {
     let mut seen = std::collections::HashSet::new();
     pending
         .into_iter()
@@ -382,19 +433,101 @@ fn hydration_plan(pending: Vec<MailSummary>, starred: Vec<MailSummary>) -> Vec<H
             kind: HydrationKind::Pending,
             message,
         })
+        .chain(recent.into_iter().map(|message| HydrationTarget {
+            kind: HydrationKind::Recent,
+            message,
+        }))
         .chain(starred.into_iter().map(|message| HydrationTarget {
             kind: HydrationKind::Starred,
             message,
         }))
-        .filter(|target| seen.insert(target.message.id.clone()))
+        .filter(|target| seen.insert(hydration_dedupe_key(&target.message)))
         .collect()
+}
+
+fn hydration_dedupe_key(message: &MailSummary) -> String {
+    // MailService parses Message-ID values into their canonical form before
+    // persistence. Lower-casing follows the storage/threading identity rules
+    // and also handles rows that predate canonical storage. A blank or
+    // malformed value is not an identity, so use the durable local id instead.
+    match message
+        .message_id
+        .as_deref()
+        .and_then(canonical_hydration_message_id)
+    {
+        Some(message_id) => format!("message-id:{message_id}"),
+        _ => format!("id:{}", message.id),
+    }
+}
+
+fn canonical_hydration_message_id(value: &str) -> Option<String> {
+    let value = value.trim();
+    let start = value.find('<')?;
+    let end = value[start..].find('>')? + start;
+    (end > start + 1).then(|| value[start..=end].to_ascii_lowercase())
+}
+
+fn body_cache_warm_due(last_warm: Option<Instant>, now: Instant) -> bool {
+    last_warm
+        .map(|last_warm| now.saturating_duration_since(last_warm) >= BODY_CACHE_WARM_INTERVAL)
+        .unwrap_or(true)
+}
+
+fn select_recent_candidate_page(
+    candidates: Vec<MailSummary>,
+    failures: &mut HashMap<String, Instant>,
+    selected: &mut Vec<MailSummary>,
+) {
+    let remaining = BODY_CACHE_WARM_BATCH_LIMIT.saturating_sub(selected.len() as u32) as usize;
+    if remaining == 0 {
+        return;
+    }
+    candidates
+        .into_iter()
+        .filter(|message| !failures.contains_key(&message.id))
+        .take(remaining)
+        .for_each(|message| selected.push(message));
+}
+
+fn next_recent_candidate_offset(
+    start_offset: u32,
+    pages_examined: u32,
+    saw_empty_page: bool,
+    batch_is_full: bool,
+) -> u32 {
+    if saw_empty_page || batch_is_full {
+        0
+    } else {
+        start_offset.saturating_add(pages_examined.saturating_mul(BODY_CACHE_WARM_BATCH_LIMIT))
+    }
+}
+
+fn content_cache_destination(message: &MailSummary) -> ContentCacheDestination {
+    if message.is_flagged {
+        ContentCacheDestination::Starred
+    } else {
+        ContentCacheDestination::Regular
+    }
+}
+
+fn display_cache_content(message: &MailSummary) -> CachedMessageContent {
+    CachedMessageContent {
+        body_text: message.body_text.clone(),
+        body_html: message.body_html.clone(),
+        unsubscribe_kind: message.unsubscribe_kind.clone(),
+        attachments: message
+            .attachments
+            .iter()
+            .map(|attachment| attachment.attachment.clone())
+            .collect(),
+    }
 }
 
 async fn run_hydration_worker(
     app: AppHandle,
     store: Store,
     account: Account,
-    receiver: mpsc::Receiver<Vec<MailSummary>>,
+    queues: HydrationWorkerQueues,
     cancel: watch::Receiver<bool>,
     hydration_slots: Arc<Semaphore>,
     hydration_complete: HydrationCompleteHookStore,
@@ -407,18 +540,26 @@ async fn run_hydration_worker(
         account,
         slots: hydration_slots,
         complete: hydration_complete,
+        recent_failures: Arc::new(Mutex::new(HashMap::new())),
+        recent_candidate_offset: Arc::new(Mutex::new(0)),
     };
-    run_queued_hydration_batches(receiver, cancel, move |pending, cancel| {
-        let context = context.clone();
-        async move {
-            hydrate_after_sync(context, pending, cancel).await;
-        }
-    })
+    run_prioritized_hydration_batches(
+        queues.arrivals,
+        queues.maintenance,
+        cancel,
+        move |batch, cancel| {
+            let context = context.clone();
+            async move {
+                hydrate_after_sync(context, batch, cancel).await;
+            }
+        },
+    )
     .await;
 }
 
-async fn run_queued_hydration_batches<T, F, Fut>(
-    mut receiver: mpsc::Receiver<T>,
+async fn run_prioritized_hydration_batches<T, F, Fut>(
+    mut arrival_receiver: mpsc::UnboundedReceiver<T>,
+    mut maintenance_receiver: mpsc::Receiver<T>,
     mut cancel: watch::Receiver<bool>,
     mut operation: F,
 ) where
@@ -426,14 +567,36 @@ async fn run_queued_hydration_batches<T, F, Fut>(
     F: FnMut(T, watch::Receiver<bool>) -> Fut,
     Fut: Future<Output = ()>,
 {
+    let mut arrivals_closed = false;
+    let mut maintenance_closed = false;
     loop {
+        if arrivals_closed && maintenance_closed {
+            break;
+        }
         let item = tokio::select! {
             biased;
             _ = wait_for_cancellation(&mut cancel) => break,
-            item = receiver.recv() => item,
+            item = arrival_receiver.recv(), if !arrivals_closed => {
+                match item {
+                    Some(item) => Some(item),
+                    None => {
+                        arrivals_closed = true;
+                        None
+                    }
+                }
+            },
+            item = maintenance_receiver.recv(), if !maintenance_closed => {
+                match item {
+                    Some(item) => Some(item),
+                    None => {
+                        maintenance_closed = true;
+                        None
+                    }
+                }
+            },
         };
         let Some(item) = item else {
-            break;
+            continue;
         };
         operation(item, cancel.clone()).await;
     }
@@ -441,9 +604,46 @@ async fn run_queued_hydration_batches<T, F, Fut>(
 
 async fn hydrate_after_sync(
     context: HydrationContext,
-    pending: Vec<MailSummary>,
+    batch: HydrationBatch,
     cancel: watch::Receiver<bool>,
 ) {
+    if *cancel.borrow() {
+        return;
+    }
+    let recent_cutoff = chrono::Utc::now() - chrono::Duration::days(BODY_CACHE_WARM_LOOKBACK_DAYS);
+    let recent = if batch.warm_recent {
+        let refresh_cancel = cancel.clone();
+        let refresh = context.service.refresh_recent_main_mailboxes(
+            &context.account,
+            recent_cutoff,
+            BODY_CACHE_WARM_BATCH_LIMIT * 3,
+        );
+        let Some(refresh_result) = run_cancellable(refresh, refresh_cancel).await else {
+            return;
+        };
+        match refresh_result {
+            Ok(messages) if !messages.is_empty() => {
+                let _ = context.app.emit(
+                    "mail-changed",
+                    serde_json::json!({ "accountId": context.account.id }),
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                // Existing catalogue rows remain valid warm candidates. A
+                // provider or UIDVALIDITY failure must not turn a cache
+                // refresh into destructive catalogue recovery.
+                tracing::warn!(
+                    account_id = %context.account.id,
+                    error = %error,
+                    "could not refresh recent primary-folder headers before body-cache warming"
+                );
+            }
+        }
+        load_recent_warm_candidates(&context, recent_cutoff, &cancel).await
+    } else {
+        Vec::new()
+    };
     let starred = match context
         .store
         .uncached_starred_messages(context.account.id, 25)
@@ -459,7 +659,10 @@ async fn hydrate_after_sync(
             Vec::new()
         }
     };
-    let plan = hydration_plan(pending, starred);
+    // New arrivals take precedence, followed by recent primary-folder bodies,
+    // then the durable starred backlog. `hydration_plan` deduplicates their
+    // provider identity so a Gmail label duplicate is fetched once.
+    let plan = hydration_plan(batch.pending, recent, starred);
     let hydration_account = context.account.clone();
     let hydration_context = context.clone();
     let results = run_bounded_cancellable_ordered(
@@ -499,8 +702,20 @@ async fn hydrate_after_sync(
                 );
                 notify_hydration_complete(&context.complete);
             }
-            Ok(_) => {}
+            Ok(_) => {
+                context
+                    .recent_failures
+                    .lock()
+                    .await
+                    .remove(&outcome.target.message.id);
+            }
             Err(error) => {
+                if outcome.target.kind == HydrationKind::Recent {
+                    context.recent_failures.lock().await.insert(
+                        outcome.target.message.id.clone(),
+                        Instant::now() + BODY_CACHE_FAILURE_COOLDOWN,
+                    );
+                }
                 tracing::warn!(
                     account_id = %context.account.id,
                     message_id = %outcome.target.message.id,
@@ -510,6 +725,71 @@ async fn hydrate_after_sync(
             }
         }
     }
+}
+
+async fn load_recent_warm_candidates(
+    context: &HydrationContext,
+    cutoff: chrono::DateTime<chrono::Utc>,
+    cancel: &watch::Receiver<bool>,
+) -> Vec<MailSummary> {
+    let start_offset = *context.recent_candidate_offset.lock().await;
+    let now = Instant::now();
+    let mut failures = {
+        let mut failures = context.recent_failures.lock().await;
+        failures.retain(|_, retry_at| *retry_at > now);
+        failures.clone()
+    };
+    let mut selected = Vec::new();
+    let mut pages_examined = 0;
+    let mut saw_empty_page = false;
+    let mut page_query_failed = false;
+
+    while pages_examined < BODY_CACHE_WARM_CANDIDATE_PAGES_PER_CYCLE
+        && selected.len() < BODY_CACHE_WARM_BATCH_LIMIT as usize
+    {
+        if *cancel.borrow() {
+            return Vec::new();
+        }
+        let offset =
+            start_offset.saturating_add(pages_examined.saturating_mul(BODY_CACHE_WARM_BATCH_LIMIT));
+        let candidates = match context
+            .store
+            .recent_body_cache_candidates_page(
+                context.account.id,
+                cutoff,
+                BODY_CACHE_WARM_BATCH_LIMIT,
+                offset,
+            )
+            .await
+        {
+            Ok(messages) => messages,
+            Err(error) => {
+                tracing::warn!(
+                    account_id = %context.account.id,
+                    offset,
+                    error = %error,
+                    "could not load a recent body-cache candidate page"
+                );
+                page_query_failed = true;
+                break;
+            }
+        };
+        pages_examined += 1;
+        if candidates.is_empty() {
+            saw_empty_page = true;
+            break;
+        }
+        select_recent_candidate_page(candidates, &mut failures, &mut selected);
+    }
+
+    let batch_is_full = selected.len() == BODY_CACHE_WARM_BATCH_LIMIT as usize;
+    *context.recent_candidate_offset.lock().await = if page_query_failed {
+        start_offset
+    } else {
+        next_recent_candidate_offset(start_offset, pages_examined, saw_empty_page, batch_is_full)
+    };
+    *context.recent_failures.lock().await = failures;
+    selected
 }
 
 fn notify_hydration_complete(hydration_complete: &HydrationCompleteHookStore) {
@@ -529,7 +809,7 @@ async fn hydrate_target(
     target: HydrationTarget,
     mut cancel: watch::Receiver<bool>,
 ) -> HydrationResult {
-    let started = std::time::Instant::now();
+    let started = Instant::now();
     if *cancel.borrow() {
         return HydrationResult {
             target,
@@ -539,63 +819,115 @@ async fn hydrate_target(
         };
     }
 
-    if target.kind == HydrationKind::Pending {
-        match store.claim_message_hydration(&target.message.id).await {
-            Ok(true) => {}
-            Ok(false) => {
-                return HydrationResult {
-                    target,
-                    started,
-                    result: Ok(None),
-                    cancelled: false,
-                };
-            }
-            Err(error) => {
-                return HydrationResult {
-                    target,
-                    started,
-                    result: Err(error),
-                    cancelled: false,
-                };
-            }
+    let claim = match store
+        .acquire_message_content_fetch(&target.message.id)
+        .await
+    {
+        Ok(Some(claim)) => claim,
+        // A foreground read owns the fetch/cache claim. It will either commit
+        // the cache or release the claim for a later background cycle.
+        Ok(None) => {
+            return HydrationResult {
+                target,
+                started,
+                result: Ok(None),
+                cancelled: false,
+            };
         }
-    }
+        Err(error) => {
+            return HydrationResult {
+                target,
+                started,
+                result: Err(error),
+                cancelled: false,
+            };
+        }
+    };
 
     let (result, cancelled) = {
-        let hydration = async {
-            match target.kind {
-                HydrationKind::Pending => {
-                    service
-                        .hydrate_inbox_message(&account, target.message.uid as u32)
-                        .await
-                }
-                HydrationKind::Starred => {
-                    service
-                        .hydrate_message(
-                            &account,
-                            &target.message.mailbox,
-                            target.message.uid as u32,
-                        )
-                        .await
-                }
-            }
-        };
-        tokio::pin!(hydration);
+        let fetch_and_cache = fetch_and_cache_target(&store, &service, &account, &target);
+        tokio::pin!(fetch_and_cache);
         tokio::select! {
-            result = &mut hydration => (result.map(Some), false),
+            result = &mut fetch_and_cache => (result, false),
             _ = wait_for_cancellation(&mut cancel) => (Ok(None), true),
         }
     };
-    if target.kind == HydrationKind::Pending && (cancelled || result.is_err()) {
-        let _ = store
-            .set_message_content_state(&target.message.id, "failed")
-            .await;
+    if let Err(error) = claim.release().await {
+        tracing::warn!(
+            message_id = %target.message.id,
+            error = %error,
+            "could not release background body-cache fetch claim"
+        );
     }
     HydrationResult {
         target,
         started,
         result,
         cancelled,
+    }
+}
+
+async fn fetch_and_cache_target(
+    store: &Store,
+    service: &MailService,
+    account: &Account,
+    target: &HydrationTarget,
+) -> anyhow::Result<Option<MailSummary>> {
+    let message = service
+        .fetch_message(account, &target.message.mailbox, target.message.uid as u32)
+        .await?;
+    if persist_display_cache(store, &message).await? {
+        // Cache readiness is local state. Do not upsert the provider snapshot
+        // here: a star/read operation may have finished while this body fetch
+        // was in flight, and stale FLAGS must not undo that user action.
+        store
+            .set_message_content_state(&message.id, "complete")
+            .await?;
+        Ok(Some(message))
+    } else {
+        Ok(None)
+    }
+}
+
+async fn persist_display_cache(store: &Store, message: &MailSummary) -> anyhow::Result<bool> {
+    if !store
+        .update_message_attachment_state(&message.id, message.has_attachments)
+        .await?
+    {
+        return Ok(false);
+    }
+    let content = display_cache_content(message);
+
+    if content_cache_destination(message) == ContentCacheDestination::Starred
+        && store
+            .cache_starred_message_content(&message.id, content.clone())
+            .await?
+    {
+        return Ok(true);
+    }
+
+    // A concurrent unstar makes the regular cache authoritative. Conversely,
+    // if a message was starred while this selective fetch was in flight, the
+    // regular-cache write declines and the final starred attempt owns it.
+    store
+        .cache_message_content(&message.id, false, content.clone())
+        .await?;
+    if store.cached_message_content(&message.id).await?.is_some() {
+        return Ok(true);
+    }
+    store
+        .cache_starred_message_content(&message.id, content)
+        .await
+}
+
+async fn run_cancellable<F, T>(future: F, mut cancel: watch::Receiver<bool>) -> Option<T>
+where
+    F: Future<Output = T>,
+{
+    tokio::pin!(future);
+    tokio::select! {
+        result = &mut future => Some(result),
+        _ = wait_for_cancellation(&mut cancel) => None,
     }
 }
 
@@ -804,10 +1136,17 @@ mod tests {
     }
 
     #[test]
-    fn hydration_plan_prioritizes_pending_and_deduplicates_starred() {
+    fn hydration_plan_prioritizes_pending_recent_and_starred_by_canonical_identity() {
+        let mut pending_duplicate = message("pending-duplicate");
+        pending_duplicate.message_id = Some("<SAME@example.test>".into());
+        let mut recent_duplicate = message("recent-duplicate");
+        recent_duplicate.message_id = Some("<same@example.test>".into());
+        let mut recent = message("recent-1");
+        recent.message_id = Some("<recent@example.test>".into());
         let plan = hydration_plan(
-            vec![message("pending-1"), message("both")],
-            vec![message("both"), message("starred-1")],
+            vec![message("pending-1"), pending_duplicate],
+            vec![recent_duplicate, recent],
+            vec![message("pending-1"), message("starred-1")],
         );
         assert_eq!(
             plan.iter()
@@ -815,10 +1154,165 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 ("pending-1", HydrationKind::Pending),
-                ("both", HydrationKind::Pending),
+                ("pending-duplicate", HydrationKind::Pending),
+                ("recent-1", HydrationKind::Recent),
                 ("starred-1", HydrationKind::Starred),
             ]
         );
+    }
+
+    #[test]
+    fn body_cache_warming_runs_immediately_then_every_fifteen_minutes() {
+        let start = Instant::now();
+        assert!(body_cache_warm_due(None, start));
+        assert!(!body_cache_warm_due(
+            Some(start),
+            start + BODY_CACHE_WARM_INTERVAL - Duration::from_secs(1),
+        ));
+        assert!(body_cache_warm_due(
+            Some(start),
+            start + BODY_CACHE_WARM_INTERVAL,
+        ));
+    }
+
+    #[test]
+    fn recent_body_failures_advance_past_more_than_twelve_hundred_cooling_messages() {
+        let now = Instant::now();
+        let cooling_count =
+            BODY_CACHE_WARM_BATCH_LIMIT * BODY_CACHE_WARM_CANDIDATE_PAGES_PER_CYCLE * 5;
+        let candidates = (0..=cooling_count)
+            .map(|index| message(&format!("recent-{index}")))
+            .collect::<Vec<_>>();
+        let mut failures = (0..cooling_count)
+            .map(|index| (format!("recent-{index}"), now + BODY_CACHE_FAILURE_COOLDOWN))
+            .collect::<HashMap<_, _>>();
+        let mut offset = 0;
+        let window = BODY_CACHE_WARM_BATCH_LIMIT * BODY_CACHE_WARM_CANDIDATE_PAGES_PER_CYCLE;
+
+        // Five bounded warm cycles traverse 1,500 cooling rows without ever
+        // scheduling one. The persisted cursor advances by one page window
+        // each time instead of repeatedly re-querying the newest 300 rows.
+        while offset < cooling_count {
+            let start_offset = offset;
+            let mut selected = Vec::new();
+            for page in 0..BODY_CACHE_WARM_CANDIDATE_PAGES_PER_CYCLE {
+                let page_offset = start_offset + page * BODY_CACHE_WARM_BATCH_LIMIT;
+                let page = candidates
+                    .iter()
+                    .skip(page_offset as usize)
+                    .take(BODY_CACHE_WARM_BATCH_LIMIT as usize)
+                    .cloned()
+                    .collect();
+                select_recent_candidate_page(page, &mut failures, &mut selected);
+            }
+            assert!(selected.is_empty());
+            offset = next_recent_candidate_offset(
+                start_offset,
+                BODY_CACHE_WARM_CANDIDATE_PAGES_PER_CYCLE,
+                false,
+                false,
+            );
+            assert_eq!(offset, start_offset + window);
+        }
+
+        let start_offset = offset;
+        let mut selected = Vec::new();
+        let mut pages_examined = 0;
+        let mut saw_empty_page = false;
+        for page in 0..BODY_CACHE_WARM_CANDIDATE_PAGES_PER_CYCLE {
+            let page_offset = start_offset + page * BODY_CACHE_WARM_BATCH_LIMIT;
+            let page = candidates
+                .iter()
+                .skip(page_offset as usize)
+                .take(BODY_CACHE_WARM_BATCH_LIMIT as usize)
+                .cloned()
+                .collect::<Vec<_>>();
+            pages_examined += 1;
+            if page.is_empty() {
+                saw_empty_page = true;
+                break;
+            }
+            select_recent_candidate_page(page, &mut failures, &mut selected);
+        }
+
+        let expected = format!("recent-{cooling_count}");
+        assert_eq!(
+            selected
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![expected.as_str()]
+        );
+        assert!(saw_empty_page);
+        assert_eq!(
+            next_recent_candidate_offset(start_offset, pages_examined, saw_empty_page, false),
+            0,
+            "an empty page wraps the worker cursor for the next warm cycle"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_drops_a_stalled_recent_header_refresh() {
+        let (cancel, receiver) = watch::channel(false);
+        cancel.send(true).unwrap();
+        assert!(run_cancellable(std::future::pending::<()>(), receiver)
+            .await
+            .is_none());
+
+        let (_cancel, receiver) = watch::channel(false);
+        assert_eq!(run_cancellable(async { 42 }, receiver).await, Some(42));
+    }
+
+    #[test]
+    fn display_cache_decision_uses_the_authoritative_flagged_cache() {
+        let regular = message("regular");
+        assert_eq!(
+            content_cache_destination(&regular),
+            ContentCacheDestination::Regular
+        );
+        let mut starred = regular.clone();
+        starred.is_flagged = true;
+        starred.body_text = "display body".into();
+        starred.body_html = Some("<p>display body</p>".into());
+        starred.unsubscribe_kind = Some("mailto".into());
+        assert_eq!(
+            content_cache_destination(&starred),
+            ContentCacheDestination::Starred
+        );
+        let content = display_cache_content(&starred);
+        assert_eq!(content.body_text, "display body");
+        assert_eq!(content.body_html.as_deref(), Some("<p>display body</p>"));
+        assert_eq!(content.unsubscribe_kind.as_deref(), Some("mailto"));
+    }
+
+    #[tokio::test]
+    async fn background_cache_commit_preserves_concurrent_star_changes() {
+        let store = Store::in_memory().await.unwrap();
+        let local = message("star-race");
+        store
+            .upsert_messages(std::slice::from_ref(&local))
+            .await
+            .unwrap();
+
+        let mut stale_starred = local.clone();
+        stale_starred.is_flagged = true;
+        stale_starred.body_text = "fetched while starred".into();
+        assert!(persist_display_cache(&store, &stale_starred).await.unwrap());
+        assert!(!store.message(&local.id).await.unwrap().unwrap().is_flagged);
+        assert!(store
+            .cached_message_content(&local.id)
+            .await
+            .unwrap()
+            .is_some());
+
+        store.set_message_flagged(&local.id, true).await.unwrap();
+        let mut stale_unstarred = local.clone();
+        stale_unstarred.body_text = "fetched before star".into();
+        assert!(persist_display_cache(&store, &stale_unstarred)
+            .await
+            .unwrap());
+        assert!(store.message(&local.id).await.unwrap().unwrap().is_flagged);
+        assert!(store.starred_body(&local.id).await.unwrap().is_some());
     }
 
     #[test]
@@ -837,41 +1331,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hydration_worker_queues_a_second_cycle_while_the_first_is_active() {
-        let (sender, receiver) = mpsc::channel(1);
+    async fn stalled_warm_batch_does_not_block_the_next_idle_arrival() {
+        let (arrival_sender, arrival_receiver) = mpsc::unbounded_channel();
+        let (maintenance_sender, maintenance_receiver) = mpsc::channel(1);
         let (_cancel, cancel_receiver) = watch::channel(false);
         let started = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let processed = Arc::new(Mutex::new(Vec::new()));
-        let worker = tokio::spawn(run_queued_hydration_batches(receiver, cancel_receiver, {
-            let started = started.clone();
-            let release = release.clone();
-            let processed = processed.clone();
-            move |batch: Vec<u32>, _| {
+        let worker = tokio::spawn(run_prioritized_hydration_batches(
+            arrival_receiver,
+            maintenance_receiver,
+            cancel_receiver,
+            {
                 let started = started.clone();
                 let release = release.clone();
                 let processed = processed.clone();
-                async move {
-                    if batch == [1] {
-                        started.notify_one();
-                        release.notified().await;
+                move |batch: Vec<u32>, _| {
+                    let started = started.clone();
+                    let release = release.clone();
+                    let processed = processed.clone();
+                    async move {
+                        if batch == [99] {
+                            started.notify_one();
+                            release.notified().await;
+                        }
+                        processed.lock().await.extend(batch);
                     }
-                    processed.lock().await.extend(batch);
                 }
-            }
-        }));
+            },
+        ));
 
-        sender.send(vec![1]).await.unwrap();
+        maintenance_sender.send(vec![99]).await.unwrap();
         started.notified().await;
-        sender
-            .send(vec![2])
-            .await
-            .expect("the later realtime cycle must be queued");
-        drop(sender);
+        // This is the next ~5-second IDLE cycle. Unlike the former bounded
+        // combined queue, sending its arrival cannot await the stalled warm.
+        arrival_sender
+            .send(vec![1])
+            .expect("the next arrival must queue without waiting for warming");
+        maintenance_sender
+            .try_send(vec![100])
+            .expect("one maintenance request may wait behind the active warm");
+        assert!(maintenance_sender.try_send(vec![101]).is_err());
+        drop(arrival_sender);
+        drop(maintenance_sender);
         release.notify_one();
         worker.await.unwrap();
 
-        assert_eq!(*processed.lock().await, vec![1, 2]);
+        assert_eq!(*processed.lock().await, vec![99, 1, 100]);
     }
 
     #[tokio::test]

@@ -537,7 +537,6 @@ function ThreadMessage({
   const [exporting, setExporting] = useState(false);
   const [exportStatus, setExportStatus] = useState<string>();
   const exportInFlight = useRef(false);
-  const [hydrationRequested, setHydrationRequested] = useState(false);
   const [recipientsExpanded, setRecipientsExpanded] = useState(false);
   const summaryDescriptionId = useId();
   const displayContent = translatedContent ?? content;
@@ -554,19 +553,6 @@ function ThreadMessage({
     setAttachments([]);
     setAttachmentsAuthoritative(false);
   }, [message.id]);
-
-  useEffect(() => {
-    if (
-      !isExpanded ||
-      !message.content_state ||
-      message.content_state === "complete" ||
-      message.content_state === "hydrating" ||
-      hydrationRequested
-    )
-      return;
-    setHydrationRequested(true);
-    void api.hydrateMessage(message.id).catch(() => undefined);
-  }, [hydrationRequested, isExpanded, message.content_state, message.id]);
 
   useEffect(() => {
     if (!isExpanded) return;
