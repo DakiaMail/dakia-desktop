@@ -41,7 +41,10 @@ jobs:
     name: Validate applicable scopes
     needs: classify
     runs-on: ubuntu-24.04
-    timeout-minutes: 9
+    # The first run for a new lockfile/toolchain must be able to populate the
+    # shared Cargo cache. Steady-state duration is measured separately against
+    # the strategy's warm-cache target.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:

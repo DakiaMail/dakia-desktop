@@ -194,6 +194,11 @@ test("ordinary pull-request workflow preserves the cost and release boundaries",
     [...workflow.matchAll(/^  ([a-z][a-z0-9-]+):$/gm)].map((match) => match[1]),
     ["classify", "validate"],
   );
+  assert.match(
+    workflow,
+    /validate:\n\s+name: Validate applicable scopes[\s\S]*?timeout-minutes: 20/,
+    "the cold-cache activation run must have time to populate the shared Cargo cache",
+  );
   assert.doesNotMatch(workflow, /runs-on:\s*macos/i);
   assert.doesNotMatch(workflow, /setup:worktree/);
   assert.doesNotMatch(workflow, /git lfs (?:pull|fetch)/);
