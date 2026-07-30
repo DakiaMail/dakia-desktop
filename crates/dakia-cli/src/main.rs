@@ -635,11 +635,24 @@ async fn download_attachment(
     args: DownloadAttachmentArgs,
     json: bool,
 ) -> Result<()> {
-    let message = fetch_message(store, &args.message_id).await?;
-    let attachment = message
-        .attachments
-        .into_iter()
-        .find(|item| item.attachment.id == args.attachment_id)
+    let summary = store
+        .message(&args.message_id)
+        .await?
+        .context("message not found")?;
+    let account_id =
+        Uuid::parse_str(&summary.account_id).context("stored message has an invalid account ID")?;
+    let account = store
+        .account(account_id)
+        .await?
+        .context("account not found")?;
+    let attachment = MailService::new(store.clone())
+        .fetch_attachment(
+            &account,
+            &summary.mailbox,
+            u32::try_from(summary.uid).context("stored message has an invalid UID")?,
+            &args.attachment_id,
+        )
+        .await
         .context("attachment not found")?;
     let mut output = OpenOptions::new()
         .write(true)
