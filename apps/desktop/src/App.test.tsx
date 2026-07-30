@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => {
     (progress: MailRebuildProgress) => void
   > = [];
   const hydratedHandlers: Array<() => void> = [];
+  const mailChangedHandlers: Array<() => void> = [];
   const nativeMenuHandlers: Array<(action: string) => void> = [];
   const notificationActionHandlers: Array<
     (extra: Record<string, unknown>) => void | Promise<void>
@@ -132,6 +133,7 @@ const mocks = vi.hoisted(() => {
     accountUpdatedHandlers,
     rebuildProgressHandlers,
     hydratedHandlers,
+    mailChangedHandlers,
     nativeMenuHandlers,
     notificationActionHandlers,
     desktopNotificationActionHandlers,
@@ -159,6 +161,10 @@ const mocks = vi.hoisted(() => {
     ),
     onMailHydrated: vi.fn(async (handler: () => void) => {
       hydratedHandlers.push(handler);
+      return unlisten;
+    }),
+    onMailChanged: vi.fn(async (handler: () => void) => {
+      mailChangedHandlers.push(handler);
       return unlisten;
     }),
   };
@@ -201,6 +207,7 @@ vi.mock("./nativeWindows", () => ({
   onAccountRemoved: mocks.onAccountRemoved,
   onAccountUpdated: mocks.onAccountUpdated,
   onMailArrived: mocks.noopListener,
+  onMailChanged: mocks.onMailChanged,
   onMailHydrated: mocks.onMailHydrated,
   onMailIndexRebuilt: mocks.noopListener,
   onMailRebuildProgress: mocks.onMailRebuildProgress,
@@ -225,6 +232,7 @@ describe("App read state", () => {
     vi.clearAllMocks();
     mocks.rebuildProgressHandlers.length = 0;
     mocks.hydratedHandlers.length = 0;
+    mocks.mailChangedHandlers.length = 0;
     mocks.nativeMenuHandlers.length = 0;
     mocks.notificationActionHandlers.length = 0;
     mocks.desktopNotificationActionHandlers.length = 0;
@@ -523,6 +531,26 @@ describe("App read state", () => {
     finishFirstPass(0);
     await waitFor(() =>
       expect(mocks.api.classifyPending).toHaveBeenCalledTimes(2),
+    );
+  });
+
+  it("reloads the visible catalogue after a quiet background mail refresh", async () => {
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    await screen.findByText("Unread thread");
+    await waitFor(() =>
+      expect(mocks.mailChangedHandlers.length).toBeGreaterThan(0),
+    );
+    const searchesBeforeRefresh = mocks.api.search.mock.calls.length;
+    act(() => mocks.mailChangedHandlers.at(-1)!());
+    await waitFor(() =>
+      expect(mocks.api.search.mock.calls.length).toBeGreaterThan(
+        searchesBeforeRefresh,
+      ),
     );
   });
 

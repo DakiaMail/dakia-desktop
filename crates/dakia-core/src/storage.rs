@@ -31,19 +31,64 @@ const VAULT_NONCE_LEN: usize = 12;
 /// Foreground-opened, non-starred mail is useful offline, but it must never
 /// grow into a second unbounded mail store. Starred mail has its own durable,
 /// authoritative cache and is intentionally not counted here.
-const MESSAGE_CONTENT_CACHE_MAX_ENTRIES: i64 = 64;
-const MESSAGE_CONTENT_CACHE_MAX_BYTES: i64 = 8 * 1024 * 1024;
-/// Attachment presentation changes when the selected HTML branch changes.
-/// Cached metadata written before this version could only tell us whether a
-/// MIME part was transport-inline, which is not enough to decide whether it
-/// should be shown to the user.
-const ATTACHMENT_PRESENTATION_CACHE_VERSION: &str = "1";
-const ATTACHMENT_PRESENTATION_VERSION: i64 = 1;
+const MESSAGE_CONTENT_CACHE_MAX_BYTES: i64 = 512 * 1024 * 1024;
+const MESSAGE_CONTENT_CACHE_RECENT_WINDOW_DAYS: i64 = 30;
+/// Attachment presentation and opaque IDs change when the selected HTML/MIME
+/// branch changes. Version 2 invalidates IDs written by the full-message
+/// parser, whose downloadable-only numbering can otherwise select a different
+/// part when interpreted by the sectioned MIME planner.
+const ATTACHMENT_PRESENTATION_CACHE_VERSION: &str = "2";
+const ATTACHMENT_PRESENTATION_VERSION: i64 = 2;
 
 #[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
     vault_key: Arc<[u8; VAULT_KEY_LEN]>,
+}
+
+/// Cancellation-safe ownership of one provider body fetch. Dropping the
+/// owning future schedules claim release so later readers do not wait for a
+/// process restart.
+pub struct MessageContentFetchClaim {
+    store: Store,
+    message_id: String,
+    released: bool,
+}
+
+/// Outcome of attempting to own one provider body fetch.
+///
+/// A reader needs to distinguish another live owner from a message that has
+/// already been moved or removed. Treating both as "not acquired" makes a
+/// stale UI row wait for the full fetch timeout.
+pub enum MessageContentFetchAcquire {
+    Claimed(MessageContentFetchClaim),
+    Busy,
+    Missing,
+}
+
+impl MessageContentFetchClaim {
+    pub async fn release(mut self) -> Result<()> {
+        self.store
+            .release_message_content_fetch(&self.message_id)
+            .await?;
+        self.released = true;
+        Ok(())
+    }
+}
+
+impl Drop for MessageContentFetchClaim {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        let store = self.store.clone();
+        let message_id = self.message_id.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = store.release_message_content_fetch(&message_id).await;
+            });
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +141,17 @@ pub struct MailSummary {
     #[serde(skip)]
     #[sqlx(skip)]
     pub attachments: Vec<AttachmentData>,
+}
+
+/// Local flags observed before a remote catalogue fetch. They form the
+/// compare-and-swap precondition when the delayed fetch is published.
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct ExpectedMessageFlags {
+    pub account_id: String,
+    pub mailbox: String,
+    pub uid: i64,
+    pub is_read: bool,
+    pub is_flagged: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -379,6 +435,7 @@ impl Store {
             "CREATE TABLE IF NOT EXISTS starred_attachment_metadata (id TEXT PRIMARY KEY, message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, filename TEXT NOT NULL, mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, is_inline INTEGER NOT NULL DEFAULT 0, presentation TEXT NOT NULL DEFAULT 'unknown', is_potentially_unsafe INTEGER NOT NULL DEFAULT 0)",
             "CREATE TABLE IF NOT EXISTS message_content_cache (message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, content_state TEXT NOT NULL CHECK(content_state = 'complete'), body_text TEXT NOT NULL, body_html TEXT, unsubscribe_kind TEXT, attachments_json TEXT NOT NULL, byte_size INTEGER NOT NULL CHECK(byte_size >= 0), last_accessed INTEGER NOT NULL)",
             "CREATE INDEX IF NOT EXISTS message_content_cache_lru ON message_content_cache(last_accessed, message_id)",
+            "CREATE TABLE IF NOT EXISTS message_content_fetches (message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, claimed_at TEXT NOT NULL)",
             "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
             "CREATE TABLE IF NOT EXISTS mailbox_catalog_state (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, remote_name TEXT NOT NULL, uid_validity INTEGER NOT NULL, remote_total INTEGER NOT NULL DEFAULT 0, historical_complete INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox))",
             "CREATE TABLE IF NOT EXISTS mail_rebuild_jobs (account_id TEXT PRIMARY KEY, phase TEXT NOT NULL, completed INTEGER NOT NULL DEFAULT 0, total INTEGER, updated_at TEXT NOT NULL)",
@@ -389,6 +446,12 @@ impl Store {
                 .await
                 .with_context(|| format!("storage migration statement failed: {statement}"))?;
         }
+        // Fetch claims coordinate only concurrent work in this process. A
+        // previous process cannot still be downloading, so never let its
+        // transient rows block a fresh store after restart.
+        sqlx::query("DELETE FROM message_content_fetches")
+            .execute(&self.pool)
+            .await?;
         // Provider work can outlive a UI action (for example, a hydration
         // task that fetched an IMAP message just before the account was
         // removed). These are deliberately database-level guards rather
@@ -1095,6 +1158,72 @@ impl Store {
         Ok(())
     }
 
+    /// Captures local flags before a remote catalogue fetch. The returned
+    /// values are later used as compare-and-swap preconditions at publication.
+    pub async fn capture_recent_catalogue_expected_flags(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        uids: &[u32],
+    ) -> Result<Vec<ExpectedMessageFlags>> {
+        if uids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = vec!["?"; uids.len()].join(",");
+        let sql = format!(
+            "SELECT account_id, mailbox, uid, is_read, is_flagged FROM messages WHERE account_id = ? AND mailbox = ? AND uid IN ({placeholders})"
+        );
+        let mut statement = sqlx::query_as::<_, ExpectedMessageFlags>(&sql)
+            .bind(account_id.to_string())
+            .bind(mailbox);
+        for uid in uids {
+            statement = statement.bind(i64::from(*uid));
+        }
+        Ok(statement.fetch_all(&self.pool).await?)
+    }
+
+    /// Publishes a delayed recent-catalogue refresh. Provider flags apply to
+    /// new rows, but conflict rows accept them only when their current local
+    /// flags still match the snapshot captured before the remote fetch.
+    pub async fn upsert_recent_catalog_messages(
+        &self,
+        messages: &[MailSummary],
+        expected_flags: &[ExpectedMessageFlags],
+    ) -> Result<()> {
+        let expected_by_locator: HashMap<(&str, &str, i64), (bool, bool)> = expected_flags
+            .iter()
+            .map(|expected| {
+                (
+                    (
+                        expected.account_id.as_str(),
+                        expected.mailbox.as_str(),
+                        expected.uid,
+                    ),
+                    (expected.is_read, expected.is_flagged),
+                )
+            })
+            .collect();
+        let mut tx = self.pool.begin().await?;
+        for message in messages {
+            persist_message_with_flag_policy(
+                &mut tx,
+                message,
+                FlagUpdatePolicy::CompareAndSwap(
+                    expected_by_locator
+                        .get(&(
+                            message.account_id.as_str(),
+                            message.mailbox.as_str(),
+                            message.uid,
+                        ))
+                        .copied(),
+                ),
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Stores one incremental mailbox batch and returns messages eligible for
     /// new-mail notification. The first successful batch establishes a silent
     /// baseline so connecting an account never alerts for historical mail.
@@ -1621,8 +1750,22 @@ impl Store {
         let Some((body_text, body_html, unsubscribe_kind, attachments_json)) = cached else {
             return Ok(None);
         };
-        let attachments: Vec<Attachment> = serde_json::from_str(&attachments_json)
-            .context("cached attachment metadata is invalid")?;
+        let attachments: Vec<Attachment> = match serde_json::from_str(&attachments_json) {
+            Ok(attachments) => attachments,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    %message_id,
+                    "discarding corrupt cached attachment metadata"
+                );
+                sqlx::query("DELETE FROM message_content_cache WHERE message_id = ?")
+                    .bind(message_id)
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+                return Ok(None);
+            }
+        };
         if attachments
             .iter()
             .any(|attachment| !attachment.presentation.is_current())
@@ -1663,6 +1806,22 @@ impl Store {
         is_flagged: bool,
         content: CachedMessageContent,
     ) -> Result<()> {
+        self.cache_message_content_with_budget(
+            message_id,
+            is_flagged,
+            content,
+            MESSAGE_CONTENT_CACHE_MAX_BYTES,
+        )
+        .await
+    }
+
+    async fn cache_message_content_with_budget(
+        &self,
+        message_id: &str,
+        is_flagged: bool,
+        content: CachedMessageContent,
+        max_bytes: i64,
+    ) -> Result<()> {
         let mut attachments = content.attachments;
         // The cache key is the current provider locator. Never retain parsed
         // metadata that refers to a different local message id.
@@ -1677,7 +1836,7 @@ impl Store {
             content.unsubscribe_kind.as_deref(),
             &attachments_json,
         )?;
-        if byte_size > MESSAGE_CONTENT_CACHE_MAX_BYTES {
+        if byte_size > max_bytes {
             sqlx::query("DELETE FROM message_content_cache WHERE message_id = ?")
                 .bind(message_id)
                 .execute(&self.pool)
@@ -1711,28 +1870,20 @@ impl Store {
             return Ok(());
         }
 
-        let entries: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_content_cache")
-            .fetch_one(&mut *tx)
-            .await?;
-        if entries > MESSAGE_CONTENT_CACHE_MAX_ENTRIES {
-            sqlx::query(
-                "DELETE FROM message_content_cache WHERE message_id IN (SELECT message_id FROM (SELECT message_id FROM message_content_cache ORDER BY last_accessed, message_id LIMIT ?))",
-            )
-            .bind(entries - MESSAGE_CONTENT_CACHE_MAX_ENTRIES)
-            .execute(&mut *tx)
-            .await?;
-        }
+        let recent_cutoff =
+            Utc::now() - chrono::Duration::days(MESSAGE_CONTENT_CACHE_RECENT_WINDOW_DAYS);
         loop {
             let used_bytes: i64 =
                 sqlx::query_scalar("SELECT COALESCE(SUM(byte_size), 0) FROM message_content_cache")
                     .fetch_one(&mut *tx)
                     .await?;
-            if used_bytes <= MESSAGE_CONTENT_CACHE_MAX_BYTES {
+            if used_bytes <= max_bytes {
                 break;
             }
             let removed = sqlx::query(
-                "DELETE FROM message_content_cache WHERE message_id = (SELECT message_id FROM message_content_cache ORDER BY last_accessed, message_id LIMIT 1)",
+                "DELETE FROM message_content_cache WHERE message_id = (SELECT message_id FROM (SELECT c.message_id FROM message_content_cache c JOIN messages m ON m.id = c.message_id ORDER BY CASE WHEN m.mailbox IN ('INBOX', 'Sent', 'Archive') AND m.received_at >= ? THEN 1 ELSE 0 END, c.last_accessed, c.message_id LIMIT 1))",
             )
+            .bind(recent_cutoff)
             .execute(&mut *tx)
             .await?
             .rows_affected();
@@ -1741,6 +1892,102 @@ impl Store {
             }
         }
         tx.commit().await?;
+        Ok(())
+    }
+
+    /// Returns recent primary-folder messages that still need their body in
+    /// the cache appropriate to their current flag state. Exact, non-empty
+    /// stored Message-IDs are deduplicated in SQL; malformed or variant IDs
+    /// deliberately remain distinct for the coordinator to deduplicate.
+    pub async fn recent_body_cache_candidates(
+        &self,
+        account_id: AccountId,
+        cutoff: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<Vec<MailSummary>> {
+        self.recent_body_cache_candidates_page(account_id, cutoff, limit, 0)
+            .await
+    }
+
+    /// Returns a deterministic page of recent body-cache candidates. The
+    /// duplicate ranking runs before pagination so pages neither overlap nor
+    /// resurrect a lower-ranked copy of an already-selected Message-ID.
+    pub async fn recent_body_cache_candidates_page(
+        &self,
+        account_id: AccountId,
+        cutoff: DateTime<Utc>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<MailSummary>> {
+        const SQL: &str = "WITH uncached AS (SELECT m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, m.body_text, m.body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, m.classification_signals, ROW_NUMBER() OVER (PARTITION BY CASE WHEN m.message_id IS NULL OR trim(m.message_id) = '' THEN m.id ELSE m.message_id END ORDER BY m.received_at DESC, m.id DESC) AS duplicate_rank FROM messages m LEFT JOIN message_content_cache c ON c.message_id = m.id LEFT JOIN starred_message_bodies b ON b.message_id = m.id AND b.attachment_presentation_version = ? WHERE m.account_id = ? AND m.mailbox IN ('INBOX', 'Sent', 'Archive') AND m.received_at >= ? AND ((m.is_flagged = 0 AND c.message_id IS NULL) OR (m.is_flagged = 1 AND b.message_id IS NULL))) SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM uncached WHERE duplicate_rank = 1 ORDER BY received_at DESC, id DESC LIMIT ? OFFSET ?";
+        Ok(sqlx::query_as::<_, MailSummary>(SQL)
+            .bind(ATTACHMENT_PRESENTATION_VERSION)
+            .bind(account_id.to_string())
+            .bind(cutoff)
+            .bind(i64::from(limit))
+            .bind(i64::from(offset))
+            .fetch_all(&self.pool)
+            .await?)
+    }
+
+    /// Claims a local message for an in-flight body fetch. Claims are
+    /// intentionally transient and are cleared when the store starts.
+    pub async fn claim_message_content_fetch(&self, message_id: &str) -> Result<bool> {
+        Ok(sqlx::query(
+            "INSERT OR IGNORE INTO message_content_fetches(message_id, claimed_at) SELECT ?, ? WHERE EXISTS (SELECT 1 FROM messages WHERE id = ?)",
+        )
+        .bind(message_id)
+        .bind(Utc::now())
+        .bind(message_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1)
+    }
+
+    pub async fn acquire_message_content_fetch(
+        &self,
+        message_id: &str,
+    ) -> Result<Option<MessageContentFetchClaim>> {
+        Ok(self
+            .claim_message_content_fetch(message_id)
+            .await?
+            .then(|| MessageContentFetchClaim {
+                store: self.clone(),
+                message_id: message_id.to_owned(),
+                released: false,
+            }))
+    }
+
+    /// Acquires a fetch claim while preserving why it was unavailable.
+    ///
+    /// Background work only needs a best-effort claim, but foreground opens
+    /// must fail a stale/deleted message immediately instead of polling it as
+    /// though another fetch still owned it.
+    pub async fn acquire_message_content_fetch_outcome(
+        &self,
+        message_id: &str,
+    ) -> Result<MessageContentFetchAcquire> {
+        if let Some(claim) = self.acquire_message_content_fetch(message_id).await? {
+            return Ok(MessageContentFetchAcquire::Claimed(claim));
+        }
+
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?)")
+            .bind(message_id)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(if exists {
+            MessageContentFetchAcquire::Busy
+        } else {
+            MessageContentFetchAcquire::Missing
+        })
+    }
+
+    pub async fn release_message_content_fetch(&self, message_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM message_content_fetches WHERE message_id = ?")
+            .bind(message_id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -1777,7 +2024,7 @@ impl Store {
         account_id: AccountId,
         limit: u32,
     ) -> Result<Vec<MailSummary>> {
-        const SQL: &str = "SELECT m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages m LEFT JOIN starred_message_bodies b ON b.message_id = m.id WHERE m.account_id = ? AND m.is_flagged = 1 AND (b.message_id IS NULL OR b.attachment_presentation_version != ?) ORDER BY m.received_at DESC LIMIT ?";
+        const SQL: &str = "SELECT m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, m.body_text, m.body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, m.classification_signals FROM messages m LEFT JOIN starred_message_bodies b ON b.message_id = m.id WHERE m.account_id = ? AND m.is_flagged = 1 AND (b.message_id IS NULL OR b.attachment_presentation_version != ?) ORDER BY m.received_at DESC LIMIT ?";
         Ok(sqlx::query_as::<_, MailSummary>(SQL)
             .bind(account_id.to_string())
             .bind(ATTACHMENT_PRESENTATION_VERSION)
@@ -2010,6 +2257,33 @@ impl Store {
         // Attachment identifiers encode the message locator. Invalidate the
         // source cache instead of cascading it to the destination locator.
         sqlx::query("DELETE FROM message_content_cache WHERE message_id IN (SELECT id FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?)")
+            .bind(&account_key)
+            .bind(source_mailbox)
+            .bind(source_uid)
+            .execute(&mut *tx)
+            .await?;
+        // Starred attachment metadata uses the same opaque IDs as the
+        // foreground cache. Do not cascade those IDs to the new locator:
+        // a later targeted download would resolve the old message prefix
+        // against the destination's MIME structure. Removing the durable
+        // starred body also makes the destination eligible for an
+        // authoritative refetch.
+        sqlx::query("DELETE FROM starred_attachment_metadata WHERE message_id IN (SELECT id FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?)")
+            .bind(&account_key)
+            .bind(source_mailbox)
+            .bind(source_uid)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM starred_message_bodies WHERE message_id IN (SELECT id FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?)")
+            .bind(&account_key)
+            .bind(source_mailbox)
+            .bind(source_uid)
+            .execute(&mut *tx)
+            .await?;
+        // In-flight fetch ownership is tied to the old locator. Revoke it
+        // before the message ID update instead of allowing the FK cascade to
+        // move a claim that its owner can only release by the old ID.
+        sqlx::query("DELETE FROM message_content_fetches WHERE message_id IN (SELECT id FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?)")
             .bind(&account_key)
             .bind(source_mailbox)
             .bind(source_uid)
@@ -2741,9 +3015,23 @@ fn participants_overlap(left: &ThreadRow, right: &ThreadRow) -> bool {
     left.contains(&right_from) || right.to_addresses.to_ascii_lowercase().contains(left_from)
 }
 
+#[derive(Clone, Copy)]
+enum FlagUpdatePolicy {
+    ProviderAuthoritative,
+    CompareAndSwap(Option<(bool, bool)>),
+}
+
 async fn persist_message(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     message: &MailSummary,
+) -> Result<()> {
+    persist_message_with_flag_policy(tx, message, FlagUpdatePolicy::ProviderAuthoritative).await
+}
+
+async fn persist_message_with_flag_policy(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    message: &MailSummary,
+    flag_policy: FlagUpdatePolicy,
 ) -> Result<()> {
     let suppressed: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM mailbox_action_tombstones WHERE account_id = ? AND mailbox = ? AND uid = ?)",
@@ -2756,7 +3044,12 @@ async fn persist_message(
     if suppressed {
         return Ok(());
     }
-    sqlx::query("INSERT INTO messages(id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, threading_scanned, recipient_headers_scanned, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, unsubscribe_scanned, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(account_id, mailbox, uid) DO UPDATE SET message_id=excluded.message_id, in_reply_to=excluded.in_reply_to, reference_ids=excluded.reference_ids, threading_scanned=1, recipient_headers_scanned=1, subject=excluded.subject, from_name=excluded.from_name, from_address=excluded.from_address, to_addresses=excluded.to_addresses, cc_addresses=excluded.cc_addresses, bcc_addresses=excluded.bcc_addresses, reply_to_addresses=excluded.reply_to_addresses, received_at=excluded.received_at, snippet=CASE WHEN excluded.content_state = 'complete' THEN excluded.snippet ELSE messages.snippet END, body_text=CASE WHEN excluded.content_state = 'complete' THEN excluded.body_text ELSE messages.body_text END, body_html=CASE WHEN excluded.content_state = 'complete' THEN excluded.body_html ELSE messages.body_html END, content_state=CASE WHEN messages.content_state = 'complete' THEN messages.content_state ELSE excluded.content_state END, unsubscribe_kind=CASE WHEN excluded.content_state = 'complete' THEN excluded.unsubscribe_kind ELSE messages.unsubscribe_kind END, unsubscribe_url=CASE WHEN excluded.content_state = 'complete' THEN excluded.unsubscribe_url ELSE messages.unsubscribe_url END, unsubscribe_scanned=CASE WHEN excluded.content_state = 'complete' THEN 1 ELSE messages.unsubscribe_scanned END, is_read=excluded.is_read, is_flagged=excluded.is_flagged, has_attachments=CASE WHEN excluded.content_state = 'complete' THEN excluded.has_attachments ELSE messages.has_attachments END, classification_signals=excluded.classification_signals")
+    let (provider_authoritative, expected_flags) = match flag_policy {
+        FlagUpdatePolicy::ProviderAuthoritative => (true, None),
+        FlagUpdatePolicy::CompareAndSwap(expected_flags) => (false, expected_flags),
+    };
+    let (expected_read, expected_flagged) = expected_flags.unwrap_or_default();
+    sqlx::query("INSERT INTO messages(id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, threading_scanned, recipient_headers_scanned, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, unsubscribe_scanned, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(account_id, mailbox, uid) DO UPDATE SET message_id=excluded.message_id, in_reply_to=excluded.in_reply_to, reference_ids=excluded.reference_ids, threading_scanned=1, recipient_headers_scanned=1, subject=excluded.subject, from_name=excluded.from_name, from_address=excluded.from_address, to_addresses=excluded.to_addresses, cc_addresses=excluded.cc_addresses, bcc_addresses=excluded.bcc_addresses, reply_to_addresses=excluded.reply_to_addresses, received_at=excluded.received_at, snippet=CASE WHEN excluded.content_state = 'complete' THEN excluded.snippet ELSE messages.snippet END, body_text=CASE WHEN excluded.content_state = 'complete' THEN excluded.body_text ELSE messages.body_text END, body_html=CASE WHEN excluded.content_state = 'complete' THEN excluded.body_html ELSE messages.body_html END, content_state=CASE WHEN messages.content_state = 'complete' THEN messages.content_state ELSE excluded.content_state END, unsubscribe_kind=CASE WHEN excluded.content_state = 'complete' THEN excluded.unsubscribe_kind ELSE messages.unsubscribe_kind END, unsubscribe_url=CASE WHEN excluded.content_state = 'complete' THEN excluded.unsubscribe_url ELSE messages.unsubscribe_url END, unsubscribe_scanned=CASE WHEN excluded.content_state = 'complete' THEN 1 ELSE messages.unsubscribe_scanned END, is_read=CASE WHEN ? OR (? AND messages.is_read = ? AND messages.is_flagged = ?) THEN excluded.is_read ELSE messages.is_read END, is_flagged=CASE WHEN ? OR (? AND messages.is_read = ? AND messages.is_flagged = ?) THEN excluded.is_flagged ELSE messages.is_flagged END, has_attachments=CASE WHEN excluded.content_state = 'complete' THEN excluded.has_attachments ELSE messages.has_attachments END, classification_signals=excluded.classification_signals")
         .bind(&message.id).bind(&message.account_id).bind(&message.mailbox).bind(message.uid)
         .bind(&message.message_id).bind(&message.in_reply_to).bind(&message.reference_ids).bind(&message.thread_id)
         .bind(&message.subject).bind(&message.from_name)
@@ -2772,8 +3065,28 @@ async fn persist_message(
         .bind(message.is_flagged).bind(message.has_attachments)
         .bind(&message.category).bind(message.classification_confidence)
         .bind(&message.classification_source).bind(&message.classification_signals)
+        .bind(provider_authoritative)
+        .bind(expected_flags.is_some())
+        .bind(expected_read)
+        .bind(expected_flagged)
+        .bind(provider_authoritative)
+        .bind(expected_flags.is_some())
+        .bind(expected_read)
+        .bind(expected_flagged)
         .execute(&mut **tx).await?;
-    if message.is_flagged && message.content_state == "complete" {
+    let effective_is_flagged = if matches!(flag_policy, FlagUpdatePolicy::CompareAndSwap(_)) {
+        sqlx::query_scalar(
+            "SELECT is_flagged FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?",
+        )
+        .bind(&message.account_id)
+        .bind(&message.mailbox)
+        .bind(message.uid)
+        .fetch_one(&mut **tx)
+        .await?
+    } else {
+        message.is_flagged
+    };
+    if effective_is_flagged && message.content_state == "complete" {
         sqlx::query("INSERT INTO starred_message_bodies(message_id, body_text, body_html, attachment_presentation_version, cached_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(message_id) DO UPDATE SET body_text=excluded.body_text, body_html=excluded.body_html, attachment_presentation_version=excluded.attachment_presentation_version, cached_at=excluded.cached_at")
             .bind(&message.id)
             .bind(&message.body_text)
@@ -2803,7 +3116,7 @@ async fn persist_message(
                 .execute(&mut **tx)
                 .await?;
         }
-    } else if !message.is_flagged {
+    } else if !effective_is_flagged {
         sqlx::query("DELETE FROM starred_message_bodies WHERE message_id = ?")
             .bind(&message.id)
             .execute(&mut **tx)
@@ -3085,6 +3398,22 @@ mod tests {
         }
     }
 
+    fn cache_candidate_message(
+        account_id: uuid::Uuid,
+        id: &str,
+        uid: i64,
+        mailbox: &str,
+        received_at: DateTime<Utc>,
+    ) -> MailSummary {
+        let mut message = message(id, "preview");
+        message.id = id.into();
+        message.account_id = account_id.to_string();
+        message.uid = uid;
+        message.mailbox = mailbox.into();
+        message.received_at = received_at;
+        message
+    }
+
     #[tokio::test]
     async fn recipient_headers_round_trip_and_refresh_without_inference() {
         let store = Store::in_memory().await.unwrap();
@@ -3221,13 +3550,16 @@ mod tests {
             1
         );
 
-        // Simulate a database written before attachment presentation metadata
-        // existed, then reopen it so migration follows the production path.
-        sqlx::query("DELETE FROM app_meta WHERE key = 'attachment_presentation_cache_version'")
-            .execute(&store.pool)
-            .await
-            .unwrap();
-        sqlx::query("UPDATE starred_message_bodies SET attachment_presentation_version = 0 WHERE message_id = ?")
+        // Simulate version 1, whose full-parser downloadable-only attachment
+        // indexes can point at a different MIME part under the sectioned
+        // planner, then reopen so migration follows the production path.
+        sqlx::query(
+            "UPDATE app_meta SET value = '1' WHERE key = 'attachment_presentation_cache_version'",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE starred_message_bodies SET attachment_presentation_version = 1 WHERE message_id = ?")
             .bind(&id)
             .execute(&store.pool)
             .await
@@ -3382,7 +3714,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn body_cache_replaces_accounting_and_evicts_entry_and_byte_lru() {
+    async fn body_cache_replaces_accounting_and_uses_global_byte_lru() {
         let store = Store::in_memory().await.unwrap();
         let first = message("First", "preview");
         let first_id = first.id.clone();
@@ -3408,7 +3740,7 @@ mod tests {
                 .unwrap();
         assert_eq!(used, expected);
 
-        for index in 0..=MESSAGE_CONTENT_CACHE_MAX_ENTRIES {
+        for index in 0..=64 {
             let mut entry = message("Entry", "preview");
             entry.id = format!("entry-{index}");
             entry.account_id = "cache-entry-account".into();
@@ -3427,14 +3759,14 @@ mod tests {
             .cached_message_content(&first_id)
             .await
             .unwrap()
-            .is_none());
+            .is_some());
         assert!(store
             .cached_message_content(&second_id)
             .await
             .unwrap()
             .is_none());
         assert!(store
-            .cached_message_content(&format!("entry-{MESSAGE_CONTENT_CACHE_MAX_ENTRIES}"))
+            .cached_message_content("entry-64")
             .await
             .unwrap()
             .is_some());
@@ -3442,7 +3774,7 @@ mod tests {
             .fetch_one(&store.pool)
             .await
             .unwrap();
-        assert_eq!(entries, MESSAGE_CONTENT_CACHE_MAX_ENTRIES);
+        assert!(entries > 64);
 
         let byte_store = Store::in_memory().await.unwrap();
         let byte_first = message("Byte first", "preview");
@@ -3455,13 +3787,31 @@ mod tests {
             .upsert_messages(&[byte_first, byte_second])
             .await
             .unwrap();
-        let half = "x".repeat((MESSAGE_CONTENT_CACHE_MAX_BYTES / 2) as usize);
         byte_store
-            .cache_message_content(&byte_first_id, false, cached_content(&half))
+            .cache_message_content(&byte_first_id, false, cached_content("first"))
             .await
             .unwrap();
         byte_store
-            .cache_message_content(&byte_second_id, false, cached_content(&half))
+            .cache_message_content(&byte_second_id, false, cached_content("second"))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE message_content_cache SET byte_size = ?")
+            .bind(MESSAGE_CONTENT_CACHE_MAX_BYTES / 2)
+            .execute(&byte_store.pool)
+            .await
+            .unwrap();
+        let mut byte_third = message("Byte third", "preview");
+        byte_third.account_id = byte_store
+            .message(&byte_second_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .account_id;
+        byte_third.uid = 3;
+        let byte_third_id = byte_third.id.clone();
+        byte_store.upsert_messages(&[byte_third]).await.unwrap();
+        byte_store
+            .cache_message_content(&byte_third_id, false, cached_content("third"))
             .await
             .unwrap();
         assert!(byte_store
@@ -3474,6 +3824,505 @@ mod tests {
             .await
             .unwrap()
             .is_some());
+        assert!(byte_store
+            .cached_message_content(&byte_third_id)
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn recent_body_cache_candidates_respect_cache_folder_cutoff_and_exact_message_id_dedupe()
+    {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let cutoff = Utc::now();
+        let mut duplicate_new = cache_candidate_message(
+            account_id,
+            "duplicate-new",
+            1,
+            "INBOX",
+            cutoff + chrono::Duration::seconds(10),
+        );
+        duplicate_new.message_id = Some("<duplicate@example.test>".into());
+        let mut duplicate_old = cache_candidate_message(
+            account_id,
+            "duplicate-old",
+            2,
+            "Sent",
+            cutoff + chrono::Duration::seconds(9),
+        );
+        duplicate_old.message_id = duplicate_new.message_id.clone();
+        let mut flagged_missing = cache_candidate_message(
+            account_id,
+            "flagged-missing",
+            3,
+            "INBOX",
+            cutoff + chrono::Duration::seconds(8),
+        );
+        flagged_missing.is_flagged = true;
+        flagged_missing.content_state = "headers_only".into();
+        let sent = cache_candidate_message(
+            account_id,
+            "sent-candidate",
+            4,
+            "Sent",
+            cutoff + chrono::Duration::seconds(7),
+        );
+        let archive = cache_candidate_message(
+            account_id,
+            "archive-candidate",
+            5,
+            "Archive",
+            cutoff + chrono::Duration::seconds(6),
+        );
+        let cached_regular = cache_candidate_message(
+            account_id,
+            "cached-regular",
+            6,
+            "INBOX",
+            cutoff + chrono::Duration::seconds(5),
+        );
+        let mut cached_starred = cache_candidate_message(
+            account_id,
+            "cached-starred",
+            7,
+            "INBOX",
+            cutoff + chrono::Duration::seconds(4),
+        );
+        cached_starred.is_flagged = true;
+        let boundary = cache_candidate_message(account_id, "cutoff-boundary", 8, "INBOX", cutoff);
+        let old = cache_candidate_message(
+            account_id,
+            "older-than-cutoff",
+            9,
+            "INBOX",
+            cutoff - chrono::Duration::nanoseconds(1),
+        );
+        let draft = cache_candidate_message(
+            account_id,
+            "draft-excluded",
+            10,
+            "Drafts",
+            cutoff + chrono::Duration::seconds(20),
+        );
+        store
+            .upsert_messages(&[
+                duplicate_new.clone(),
+                duplicate_old,
+                flagged_missing.clone(),
+                sent.clone(),
+                archive.clone(),
+                cached_regular.clone(),
+                cached_starred.clone(),
+                boundary.clone(),
+                old,
+                draft,
+            ])
+            .await
+            .unwrap();
+        store
+            .cache_message_content(&cached_regular.id, false, cached_content("regular"))
+            .await
+            .unwrap();
+        assert!(store
+            .cache_starred_message_content(&cached_starred.id, cached_content("starred"))
+            .await
+            .unwrap());
+
+        let candidates = store
+            .recent_body_cache_candidates(account_id, cutoff, 20)
+            .await
+            .unwrap();
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                duplicate_new.id.as_str(),
+                flagged_missing.id.as_str(),
+                sent.id.as_str(),
+                archive.id.as_str(),
+                boundary.id.as_str(),
+            ]
+        );
+        for (offset, expected) in [
+            (
+                0,
+                vec![duplicate_new.id.as_str(), flagged_missing.id.as_str()],
+            ),
+            (2, vec![sent.id.as_str(), archive.id.as_str()]),
+            (4, vec![boundary.id.as_str()]),
+        ] {
+            let page = store
+                .recent_body_cache_candidates_page(account_id, cutoff, 2, offset)
+                .await
+                .unwrap();
+            assert_eq!(
+                page.iter()
+                    .map(|message| message.id.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn body_cache_evicts_non_recent_entries_before_recent_primary_lru() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let now = Utc::now();
+        let old_primary = cache_candidate_message(
+            account_id,
+            "old-primary",
+            1,
+            "INBOX",
+            now - chrono::Duration::days(MESSAGE_CONTENT_CACHE_RECENT_WINDOW_DAYS + 1),
+        );
+        let non_primary = cache_candidate_message(account_id, "draft", 2, "Drafts", now);
+        let recent_primary = cache_candidate_message(account_id, "recent-primary", 3, "Sent", now);
+        let incoming = cache_candidate_message(account_id, "incoming", 4, "Archive", now);
+        store
+            .upsert_messages(&[
+                old_primary.clone(),
+                non_primary.clone(),
+                recent_primary.clone(),
+                incoming.clone(),
+            ])
+            .await
+            .unwrap();
+        for message in [&old_primary, &non_primary, &recent_primary] {
+            store
+                .cache_message_content(&message.id, false, cached_content(&message.id))
+                .await
+                .unwrap();
+        }
+        for (id, byte_size, last_accessed) in [
+            (
+                old_primary.id.as_str(),
+                MESSAGE_CONTENT_CACHE_MAX_BYTES / 2 + 1,
+                2,
+            ),
+            (
+                non_primary.id.as_str(),
+                MESSAGE_CONTENT_CACHE_MAX_BYTES / 2 - 1,
+                3,
+            ),
+            (recent_primary.id.as_str(), 1, 1),
+        ] {
+            sqlx::query("UPDATE message_content_cache SET byte_size = ?, last_accessed = ? WHERE message_id = ?")
+                .bind(byte_size)
+                .bind(last_accessed)
+                .bind(id)
+                .execute(&store.pool)
+                .await
+                .unwrap();
+        }
+        store
+            .cache_message_content(&incoming.id, false, cached_content("incoming"))
+            .await
+            .unwrap();
+
+        assert!(store
+            .cached_message_content(&old_primary.id)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .cached_message_content(&non_primary.id)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(store
+            .cached_message_content(&recent_primary.id)
+            .await
+            .unwrap()
+            .is_some());
+        let used: i64 =
+            sqlx::query_scalar("SELECT COALESCE(SUM(byte_size), 0) FROM message_content_cache")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert!(used <= MESSAGE_CONTENT_CACHE_MAX_BYTES);
+    }
+
+    #[tokio::test]
+    async fn message_content_fetch_claims_distinguish_busy_and_missing_messages() {
+        let store = Store::in_memory().await.unwrap();
+        let message = message("Claim", "preview");
+        let id = message.id.clone();
+        store.upsert_messages(&[message]).await.unwrap();
+
+        let claim = match store
+            .acquire_message_content_fetch_outcome(&id)
+            .await
+            .unwrap()
+        {
+            MessageContentFetchAcquire::Claimed(claim) => claim,
+            MessageContentFetchAcquire::Busy | MessageContentFetchAcquire::Missing => {
+                panic!("first reader must own the claim")
+            }
+        };
+        assert!(matches!(
+            store
+                .acquire_message_content_fetch_outcome(&id)
+                .await
+                .unwrap(),
+            MessageContentFetchAcquire::Busy
+        ));
+        assert!(matches!(
+            store
+                .acquire_message_content_fetch_outcome("missing-message")
+                .await
+                .unwrap(),
+            MessageContentFetchAcquire::Missing
+        ));
+        claim.release().await.unwrap();
+        let reacquired = match store
+            .acquire_message_content_fetch_outcome(&id)
+            .await
+            .unwrap()
+        {
+            MessageContentFetchAcquire::Claimed(claim) => claim,
+            MessageContentFetchAcquire::Busy | MessageContentFetchAcquire::Missing => {
+                panic!("released claim must be available to the next reader")
+            }
+        };
+        reacquired.release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropped_message_content_fetch_owner_releases_its_claim() {
+        let store = Store::in_memory().await.unwrap();
+        let message = message("Cancelled claim", "preview");
+        let id = message.id.clone();
+        store.upsert_messages(&[message]).await.unwrap();
+
+        let claim = match store
+            .acquire_message_content_fetch_outcome(&id)
+            .await
+            .unwrap()
+        {
+            MessageContentFetchAcquire::Claimed(claim) => claim,
+            MessageContentFetchAcquire::Busy | MessageContentFetchAcquire::Missing => {
+                panic!("first reader must own the claim")
+            }
+        };
+        assert!(matches!(
+            store
+                .acquire_message_content_fetch_outcome(&id)
+                .await
+                .unwrap(),
+            MessageContentFetchAcquire::Busy
+        ));
+        drop(claim);
+
+        let mut reacquired = false;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+            if let MessageContentFetchAcquire::Claimed(claim) = store
+                .acquire_message_content_fetch_outcome(&id)
+                .await
+                .unwrap()
+            {
+                claim.release().await.unwrap();
+                reacquired = true;
+                break;
+            }
+        }
+        assert!(reacquired, "drop must release the transient fetch claim");
+    }
+
+    #[tokio::test]
+    async fn moving_a_message_revokes_the_old_locator_fetch_claim() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let mut source = message("Moving claim", "preview");
+        source.id = stable_message_id(account_id, "INBOX", 1);
+        source.account_id = account_id.to_string();
+        source.uid = 1;
+        let source_id = source.id.clone();
+        store.upsert_messages(&[source]).await.unwrap();
+        let source_claim = match store
+            .acquire_message_content_fetch_outcome(&source_id)
+            .await
+            .unwrap()
+        {
+            MessageContentFetchAcquire::Claimed(claim) => claim,
+            MessageContentFetchAcquire::Busy | MessageContentFetchAcquire::Missing => {
+                panic!("source reader must own the claim")
+            }
+        };
+
+        store
+            .move_message(account_id, "INBOX", 1, "Archive", Some(3))
+            .await
+            .unwrap();
+
+        let destination_id = stable_message_id(account_id, "Archive", 3);
+        let destination_claim = match store
+            .acquire_message_content_fetch_outcome(&destination_id)
+            .await
+            .unwrap()
+        {
+            MessageContentFetchAcquire::Claimed(claim) => claim,
+            MessageContentFetchAcquire::Busy | MessageContentFetchAcquire::Missing => {
+                panic!("move must not strand the old fetch claim on the destination")
+            }
+        };
+        source_claim.release().await.unwrap();
+        destination_claim.release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn moving_a_starred_message_discards_stale_attachment_ids_and_refetches_after_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("dakia.db");
+        let store = Store::open(&path).await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let mut account = AccountDraft {
+            email: "moved-star@example.test".into(),
+            display_name: "Moved star".into(),
+            provider_id: Some("fastmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("fastmail").unwrap());
+        account.id = account_id;
+        store.save_account(&account).await.unwrap();
+
+        let source_id = stable_message_id(account_id, "INBOX", 1);
+        let mut source = cache_candidate_message(account_id, &source_id, 1, "INBOX", Utc::now());
+        source.is_flagged = true;
+        store.upsert_messages(&[source]).await.unwrap();
+        let stale_attachment_id = format!("{source_id}:mime-v1:1");
+        assert!(store
+            .cache_starred_message_content(
+                &source_id,
+                CachedMessageContent {
+                    body_text: "cached starred body".into(),
+                    body_html: None,
+                    unsubscribe_kind: None,
+                    attachments: vec![Attachment {
+                        id: stale_attachment_id.clone(),
+                        message_id: source_id.clone(),
+                        filename: "claim.pdf".into(),
+                        mime_type: "application/pdf".into(),
+                        size_bytes: 3,
+                        is_inline: false,
+                        presentation: AttachmentPresentation::Downloadable,
+                        is_potentially_unsafe: false,
+                    }],
+                },
+            )
+            .await
+            .unwrap());
+
+        store
+            .move_message(account_id, "INBOX", 1, "Archive", Some(3))
+            .await
+            .unwrap();
+        let destination_id = stable_message_id(account_id, "Archive", 3);
+        assert!(store.starred_body(&destination_id).await.unwrap().is_none());
+        assert!(store
+            .starred_attachment_metadata(&destination_id)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .uncached_starred_messages(account_id, 10)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|message| message.id)
+                .collect::<Vec<_>>(),
+            vec![destination_id.clone()]
+        );
+
+        drop(store);
+        let reopened = Store::open(&path).await.unwrap();
+        assert!(reopened
+            .starred_body(&destination_id)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(reopened
+            .starred_attachment_metadata(&destination_id)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            reopened
+                .uncached_starred_messages(account_id, 10)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|message| message.id)
+                .collect::<Vec<_>>(),
+            vec![destination_id]
+        );
+    }
+
+    #[tokio::test]
+    async fn message_content_fetch_claims_cascade_and_clear_on_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("dakia.db");
+        let store = Store::open(&path).await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let first = cache_candidate_message(account_id, "claimed-message", 1, "INBOX", Utc::now());
+        let second = cache_candidate_message(account_id, "account-claimed", 2, "INBOX", Utc::now());
+        store
+            .upsert_messages(&[first.clone(), second.clone()])
+            .await
+            .unwrap();
+        assert!(store.claim_message_content_fetch(&first.id).await.unwrap());
+        assert!(store.claim_message_content_fetch(&second.id).await.unwrap());
+        sqlx::query("DELETE FROM messages WHERE id = ?")
+            .bind(&first.id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let first_claims: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM message_content_fetches WHERE message_id = ?")
+                .bind(&first.id)
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(first_claims, 0);
+        store.delete_account(account_id).await.unwrap();
+        let claims: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_content_fetches")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(claims, 0);
+        let fresh_account_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO accounts(id, email, data, created_at) VALUES (?, ?, '{}', ?)")
+            .bind(fresh_account_id.to_string())
+            .bind("restart-claim@example.test")
+            .bind(Utc::now())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let fresh =
+            cache_candidate_message(fresh_account_id, "restart-claimed", 3, "INBOX", Utc::now());
+        store
+            .upsert_messages(std::slice::from_ref(&fresh))
+            .await
+            .unwrap();
+        assert!(store.claim_message_content_fetch(&fresh.id).await.unwrap());
+        drop(store);
+
+        let store = Store::open(&path).await.unwrap();
+        assert!(store.claim_message_content_fetch(&fresh.id).await.unwrap());
     }
 
     #[tokio::test]
@@ -3486,15 +4335,9 @@ mod tests {
             .cache_message_content(&id, false, cached_content("old"))
             .await
             .unwrap();
-        let exact = "x".repeat((MESSAGE_CONTENT_CACHE_MAX_BYTES - 2) as usize);
+        let oversized = "x".repeat(21);
         store
-            .cache_message_content(&id, false, cached_content(&exact))
-            .await
-            .unwrap();
-        assert!(store.cached_message_content(&id).await.unwrap().is_some());
-        let oversized = "x".repeat((MESSAGE_CONTENT_CACHE_MAX_BYTES + 1) as usize);
-        store
-            .cache_message_content(&id, false, cached_content(&oversized))
+            .cache_message_content_with_budget(&id, false, cached_content(&oversized), 20)
             .await
             .unwrap();
         assert!(store.cached_message_content(&id).await.unwrap().is_none());
@@ -3730,7 +4573,18 @@ mod tests {
         .execute(&store.pool)
         .await
         .unwrap();
-        assert!(store.cached_message_content(&id).await.is_err());
+        assert!(store.cached_message_content(&id).await.unwrap().is_none());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM message_content_cache WHERE message_id = ?",
+            )
+            .bind(&id)
+            .fetch_one(&store.pool)
+            .await
+            .unwrap(),
+            0,
+            "a retry must fetch from the provider instead of repeating the corrupt cache error"
+        );
     }
 
     #[tokio::test]
@@ -4578,6 +5432,120 @@ mod tests {
             .await
             .unwrap()
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn recent_catalogue_refresh_preserves_completed_local_flags_on_conflict() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let mut existing = message("Initial subject", "preview");
+        existing.id = stable_message_id(account_id, "INBOX", 12);
+        existing.account_id = account_id.to_string();
+        existing.uid = 12;
+        store
+            .upsert_catalog_messages(&[existing.clone()])
+            .await
+            .unwrap();
+        let expected_flags = store
+            .capture_recent_catalogue_expected_flags(account_id, "INBOX", &[12])
+            .await
+            .unwrap();
+
+        // Model a completed user action landing after the periodic refresh
+        // read the provider's old (unread, unstarred) flags.
+        store
+            .update_mailbox_flags(account_id, "INBOX", &[(12, true, true)])
+            .await
+            .unwrap();
+        let mut delayed_existing = existing.clone();
+        delayed_existing.subject = "Provider metadata still updates".into();
+        delayed_existing.is_read = false;
+        delayed_existing.is_flagged = false;
+        let mut inserted = message("New provider row", "preview");
+        inserted.id = stable_message_id(account_id, "INBOX", 13);
+        inserted.account_id = account_id.to_string();
+        inserted.uid = 13;
+        inserted.is_read = true;
+        inserted.is_flagged = true;
+
+        store
+            .upsert_recent_catalog_messages(&[delayed_existing, inserted.clone()], &expected_flags)
+            .await
+            .unwrap();
+
+        let retained = store.message(&existing.id).await.unwrap().unwrap();
+        assert_eq!(retained.subject, "Provider metadata still updates");
+        assert!(retained.is_read);
+        assert!(retained.is_flagged);
+        let new_row = store.message(&inserted.id).await.unwrap().unwrap();
+        assert!(new_row.is_read);
+        assert!(new_row.is_flagged);
+    }
+
+    #[tokio::test]
+    async fn recent_catalogue_refresh_applies_provider_flags_when_snapshot_is_current() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let mut existing = message("Initial", "preview");
+        existing.id = stable_message_id(account_id, "INBOX", 14);
+        existing.account_id = account_id.to_string();
+        existing.uid = 14;
+        store
+            .upsert_catalog_messages(&[existing.clone()])
+            .await
+            .unwrap();
+        let expected_flags = store
+            .capture_recent_catalogue_expected_flags(account_id, "INBOX", &[14])
+            .await
+            .unwrap();
+        let mut provider_refresh = existing.clone();
+        provider_refresh.is_read = true;
+        provider_refresh.is_flagged = true;
+
+        store
+            .upsert_recent_catalog_messages(&[provider_refresh], &expected_flags)
+            .await
+            .unwrap();
+
+        let stored = store.message(&existing.id).await.unwrap().unwrap();
+        assert!(stored.is_read);
+        assert!(stored.is_flagged);
+    }
+
+    #[tokio::test]
+    async fn recent_catalogue_refresh_does_not_reverse_local_unread_unstar_actions() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let mut existing = message("Initially read and starred", "preview");
+        existing.id = stable_message_id(account_id, "INBOX", 15);
+        existing.account_id = account_id.to_string();
+        existing.uid = 15;
+        existing.is_read = true;
+        existing.is_flagged = true;
+        store
+            .upsert_catalog_messages(&[existing.clone()])
+            .await
+            .unwrap();
+        let expected_flags = store
+            .capture_recent_catalogue_expected_flags(account_id, "INBOX", &[15])
+            .await
+            .unwrap();
+        store
+            .update_mailbox_flags(account_id, "INBOX", &[(15, false, false)])
+            .await
+            .unwrap();
+        let mut delayed_provider_flags = existing.clone();
+        delayed_provider_flags.is_read = true;
+        delayed_provider_flags.is_flagged = true;
+
+        store
+            .upsert_recent_catalog_messages(&[delayed_provider_flags], &expected_flags)
+            .await
+            .unwrap();
+
+        let stored = store.message(&existing.id).await.unwrap().unwrap();
+        assert!(!stored.is_read);
+        assert!(!stored.is_flagged);
     }
 
     #[tokio::test]
