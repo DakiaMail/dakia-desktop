@@ -24,6 +24,7 @@ cargo_version="$(awk '
   in_workspace_package && /^version = / { gsub(/"/, "", $3); print $3; exit }
 ' "$root_dir/Cargo.toml")"
 tauri_version="$(node -p "require('$root_dir/apps/desktop/src-tauri/tauri.conf.json').version")"
+release_notes_source="$root_dir/docs/releases/$tag.md"
 lock_versions="$(awk '
   /^name = "dakia-(core|cli|desktop)"$/ { read_version = 1; next }
   read_version && /^version = / { gsub(/"/, "", $3); print $3; read_version = 0 }
@@ -35,6 +36,12 @@ if [[ "$version" != "$package_version" || "$version" != "$cargo_version" || \
 fi
 if ! git -C "$root_dir" diff --quiet || ! git -C "$root_dir" diff --cached --quiet; then
   echo "Release source has tracked changes; commit or stash them before building." >&2
+  exit 1
+fi
+if ! git -C "$root_dir" ls-files --error-unmatch -- \
+  "docs/releases/$tag.md" >/dev/null 2>&1 ||
+  [[ ! -s "$release_notes_source" ]]; then
+  echo "Missing tracked release notes: $release_notes_source" >&2
   exit 1
 fi
 if [[ "$(uname -m)" != "arm64" ]]; then
@@ -105,9 +112,7 @@ dmg="$output_dir/Dakia_${version}_aarch64.dmg"
 "$root_dir/scripts/verify-macos-release-dmg.sh" "$dmg"
 "$root_dir/scripts/package-macos-updater.sh" "$version" "$output_dir"
 
-if [[ ! -s "$output_dir/release-notes.md" ]]; then
-  printf 'Dakia %s\n' "$tag" >"$output_dir/release-notes.md"
-fi
+cp "$release_notes_source" "$output_dir/release-notes.md"
 for filename in "${outputs[@]}"; do
   [[ -s "$output_dir/$filename" ]] || {
     echo "Release build is missing: $filename" >&2
