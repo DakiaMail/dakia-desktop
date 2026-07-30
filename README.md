@@ -46,4 +46,7 @@ Build platform installers:
 npm run build
 ```
 
-See [docs/architecture.md](docs/architecture.md), [docs/providers.md](docs/providers.md), and [docs/releasing.md](docs/releasing.md).
+See [docs/architecture.md](docs/architecture.md),
+[docs/providers.md](docs/providers.md),
+[docs/testing-strategy.md](docs/testing-strategy.md), and
+[docs/releasing.md](docs/releasing.md).
