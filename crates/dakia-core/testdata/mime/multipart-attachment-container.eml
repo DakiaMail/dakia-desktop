@@ -1,0 +1,29 @@
+X-Dakia-Corpus-Case: multipart-attachment-container
+X-Dakia-Corpus-Notes: Synthetic multipart attachment whose child text must not become parent content
+Date: Tue, 28 Jul 2026 10:10:00 +0000
+From: sender@example.test
+To: recipient@example.test
+Subject: Synthetic multipart attachment
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="outer-bundle"
+
+--outer-bundle
+Content-Type: text/plain; charset=utf-8
+
+Visible parent body.
+--outer-bundle
+Content-Type: multipart/mixed; boundary="attached-bundle"
+Content-Disposition: attachment; filename="bundle.mime"
+
+--attached-bundle
+Content-Type: text/plain; charset=utf-8
+
+Secret child text must stay inside the attachment.
+--attached-bundle
+Content-Type: application/pdf; name="child.pdf"
+Content-Disposition: attachment; filename="child.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQK
+--attached-bundle--
+--outer-bundle--

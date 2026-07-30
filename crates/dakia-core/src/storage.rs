@@ -1193,6 +1193,22 @@ impl Store {
             .transpose()
     }
 
+    pub(crate) async fn advance_mailbox_sync_watermark(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        uid: u32,
+    ) -> Result<()> {
+        sqlx::query("INSERT INTO mailbox_sync_state(account_id, mailbox, initialized_at, highest_uid) VALUES (?, ?, ?, ?) ON CONFLICT(account_id, mailbox) DO UPDATE SET initialized_at=excluded.initialized_at, highest_uid=MAX(COALESCE(mailbox_sync_state.highest_uid, 0), excluded.highest_uid)")
+            .bind(account_id.to_string())
+            .bind(mailbox)
+            .bind(Utc::now())
+            .bind(i64::from(uid))
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn mailbox_uids(&self, account_id: AccountId, mailbox: &str) -> Result<HashSet<u32>> {
         let rows: Vec<i64> =
             sqlx::query_scalar("SELECT uid FROM messages WHERE account_id = ? AND mailbox = ?")
@@ -2675,9 +2691,19 @@ fn normalize_message_id(value: &str) -> Option<String> {
 }
 
 fn parse_message_ids(value: &str) -> Vec<String> {
-    mailparse::msgidparse(value)
-        .map(|ids| ids.iter().map(|id| id.to_ascii_lowercase()).collect())
-        .unwrap_or_default()
+    let mut remaining = value.trim_start();
+    let mut ids = Vec::new();
+    while !remaining.is_empty() {
+        let Some(after_open) = remaining.strip_prefix('<') else {
+            return Vec::new();
+        };
+        let Some(end) = after_open.find('>') else {
+            return Vec::new();
+        };
+        ids.push(after_open[..end].to_ascii_lowercase());
+        remaining = after_open[end + 1..].trim_start();
+    }
+    ids
 }
 
 fn normalized_subject(subject: &str) -> String {
@@ -2921,6 +2947,59 @@ pub fn stable_message_id(account_id: AccountId, mailbox: &str, uid: u32) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_only_complete_canonical_message_id_lists() {
+        assert_eq!(
+            parse_message_ids(" <Root@Example.Test>\t<Reply@example.test> "),
+            vec!["root@example.test", "reply@example.test"]
+        );
+        assert!(parse_message_ids("<missing-close@example.test").is_empty());
+        assert!(parse_message_ids("prefix <id@example.test>").is_empty());
+    }
+
+    #[tokio::test]
+    async fn rejected_message_watermark_advances_without_a_message_row() {
+        let store = Store::in_memory().await.unwrap();
+        let account = AccountDraft {
+            email: "budget@example.test".into(),
+            display_name: "Budget".into(),
+            provider_id: Some("fastmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("fastmail").unwrap());
+        store.save_account(&account).await.unwrap();
+
+        store
+            .advance_mailbox_sync_watermark(account.id, "INBOX", 42)
+            .await
+            .unwrap();
+        store
+            .advance_mailbox_sync_watermark(account.id, "INBOX", 41)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .highest_mailbox_uid(account.id, "INBOX")
+                .await
+                .unwrap(),
+            Some(42)
+        );
+        assert!(store
+            .mailbox_uids(account.id, "INBOX")
+            .await
+            .unwrap()
+            .is_empty());
+    }
 
     #[tokio::test]
     async fn mail_rebuild_job_survives_until_explicitly_completed() {

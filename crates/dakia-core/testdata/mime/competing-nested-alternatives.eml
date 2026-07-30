@@ -1,0 +1,36 @@
+X-Dakia-Corpus-Case: competing-nested-alternatives
+Date: Tue, 28 Jul 2026 10:01:00 +0000
+From: sender@example.test
+To: recipient@example.test
+Subject: Synthetic nested alternatives
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mixed"
+
+--mixed
+Content-Type: multipart/alternative; boundary="body"
+
+--body
+Content-Type: text/plain; charset=utf-8
+
+Visible plain body.
+--body
+Content-Type: multipart/related; boundary="related"
+
+--related
+Content-Type: text/html; charset=utf-8
+
+<html><body><p>Visible <strong>HTML</strong> body.</p><img src="cid:logo@example.test"></body></html>
+--related
+Content-Type: image/png
+Content-ID: <logo@example.test>
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgo=
+--related--
+--body--
+--mixed
+Content-Type: text/plain; charset=utf-8
+Content-Disposition: attachment; filename="redacted-notes.txt"
+
+This attachment is not a message body.
+--mixed--
