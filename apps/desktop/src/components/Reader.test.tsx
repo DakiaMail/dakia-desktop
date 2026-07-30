@@ -8,7 +8,7 @@ import {
 import { MantineProvider } from "@mantine/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import "../i18n";
-import { api } from "../api";
+import { api, MessageContentError } from "../api";
 import freshdeskReplySection from "../test/fixtures/freshdesk-reply-section.html?raw";
 import type { MailSummary } from "../types";
 import { Reader } from "./Reader";
@@ -204,7 +204,7 @@ describe("Reader unsubscribe action", () => {
 
   it("retries content without foreground hydration after a load failure", async () => {
     vi.mocked(api.content)
-      .mockRejectedValueOnce(new Error("content unavailable"))
+      .mockRejectedValueOnce(new MessageContentError("transient"))
       .mockResolvedValueOnce({ body_text: "Recovered body", attachments: [] });
     render(
       <MantineProvider>
@@ -1039,13 +1039,10 @@ describe("Reader unsubscribe action", () => {
     ).toBeEnabled();
   });
 
-  it("shows the existing retry state when malformed message content cannot be loaded", async () => {
-    vi.mocked(api.content)
-      .mockRejectedValueOnce(new Error("Malformed message content"))
-      .mockResolvedValueOnce({
-        body_text: "Recovered message body",
-        attachments: [],
-      });
+  it("does not offer retry when a message exceeds the MIME resource limit", async () => {
+    vi.mocked(api.content).mockRejectedValueOnce(
+      new MessageContentError("resource_limit"),
+    );
     render(
       <MantineProvider>
         <Reader {...props} message={message} />
@@ -1054,16 +1051,34 @@ describe("Reader unsubscribe action", () => {
 
     expect(
       await screen.findByText(
-        "This message could not be fetched from the mail server.",
+        "This message is too large or complex for Dakia to open.",
       ),
     ).toBeVisible();
-    expect(screen.queryByText("Malformed message content")).toBeNull();
-
-    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
-    expect(await screen.findByText("Recovered message body")).toBeVisible();
-    expect(api.content).toHaveBeenCalledTimes(2);
-    expect(api.content).toHaveBeenLastCalledWith(message.id);
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(api.content).toHaveBeenCalledTimes(1);
   });
+
+  it.each([
+    ["malformed", "This message is malformed and cannot be opened."],
+    ["undecodable", "The contents of this message cannot be decoded."],
+    ["unsupported", "This message uses an unsupported format."],
+  ] as const)(
+    "shows the non-retryable %s content outcome",
+    async (kind, expectedCopy) => {
+      vi.mocked(api.content).mockRejectedValueOnce(
+        new MessageContentError(kind),
+      );
+      render(
+        <MantineProvider>
+          <Reader {...props} message={message} />
+        </MantineProvider>,
+      );
+
+      expect(await screen.findByText(expectedCopy)).toBeVisible();
+      expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+      expect(api.content).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("runs delete from the reader toolbar", () => {
     render(

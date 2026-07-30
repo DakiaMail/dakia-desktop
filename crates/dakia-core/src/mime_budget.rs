@@ -89,10 +89,11 @@ fn preflight_mime_part_count(raw: &[u8]) -> Result<(), MimeBudgetError> {
     let mut in_headers = true;
     let mut content_type = Vec::new();
     let mut collecting_content_type = false;
+    let mut content_type_over_budget = false;
     let mut opening_delimiters = 0;
     let mut over_budget = false;
     for_each_line(raw, |line| {
-        if too_many_boundaries || over_budget {
+        if too_many_boundaries || over_budget || content_type_over_budget {
             return;
         }
 
@@ -106,9 +107,16 @@ fn preflight_mime_part_count(raw: &[u8]) -> Result<(), MimeBudgetError> {
                 .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
                 && collecting_content_type
             {
-                if content_type.len() < 4_096 {
+                let continuation = trim_ascii_whitespace(line);
+                if content_type
+                    .len()
+                    .checked_add(1 + continuation.len())
+                    .is_some_and(|length| length <= MAX_MIME_HEADER_BYTES)
+                {
                     content_type.push(b' ');
-                    content_type.extend_from_slice(trim_ascii_whitespace(line));
+                    content_type.extend_from_slice(continuation);
+                } else {
+                    content_type_over_budget = true;
                 }
             } else {
                 record_mime_boundary(&mut content_type, &mut boundaries, &mut too_many_boundaries);
@@ -139,6 +147,9 @@ fn preflight_mime_part_count(raw: &[u8]) -> Result<(), MimeBudgetError> {
             boundaries.remove(closing);
         }
     });
+    if content_type_over_budget {
+        return Err(MimeBudgetError::MimeHeadersTooLarge);
+    }
     if too_many_boundaries {
         return Err(MimeBudgetError::TooManyMimeParts);
     }
@@ -154,13 +165,11 @@ fn record_mime_boundary(
     boundaries: &mut HashSet<Vec<u8>>,
     too_many_boundaries: &mut bool,
 ) {
-    if contains_ascii_case_insensitive(content_type, b"multipart/") {
-        if let Some(boundary) = mime_boundary_parameter(content_type) {
-            if !boundary.is_empty() && boundary.len() <= 200 {
-                boundaries.insert(boundary.to_vec());
-                if boundaries.len() >= MAX_MIME_PARTS {
-                    *too_many_boundaries = true;
-                }
+    if let Some(boundary) = mime_boundary_parameter(content_type) {
+        if !boundary.is_empty() && boundary.len() <= 200 {
+            boundaries.insert(boundary);
+            if boundaries.len() >= MAX_MIME_PARTS {
+                *too_many_boundaries = true;
             }
         }
     }
@@ -216,28 +225,100 @@ fn starts_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> bool {
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case(needle))
 }
 
-fn contains_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|window| window.eq_ignore_ascii_case(needle))
+fn mime_boundary_parameter(line: &[u8]) -> Option<Vec<u8>> {
+    let parameters = multipart_parameter_section(line)?;
+    let mut remaining = parameters;
+
+    while let Some((parameter, rest)) = next_parameter(remaining) {
+        if let Some(boundary) = boundary_parameter_value(parameter) {
+            return Some(boundary);
+        }
+        remaining = rest;
+    }
+
+    None
 }
 
-fn mime_boundary_parameter(line: &[u8]) -> Option<&[u8]> {
-    let marker = b"boundary=";
-    let offset = line
-        .windows(marker.len())
-        .position(|window| window.eq_ignore_ascii_case(marker))?;
-    let value = trim_ascii_whitespace(&line[offset + marker.len()..]);
+/// Returns the parameter portion of a multipart Content-Type header. This
+/// avoids treating boundary-like text in another media type as a delimiter.
+fn multipart_parameter_section(line: &[u8]) -> Option<&[u8]> {
+    let colon = line.iter().position(|byte| *byte == b':')?;
+    let value = trim_ascii_whitespace(&line[colon + 1..]);
+    let (media_type, after_media_type) = ascii_token(value);
+    if !media_type.eq_ignore_ascii_case(b"multipart") {
+        return None;
+    }
+
+    let after_slash = trim_ascii_whitespace(after_media_type).strip_prefix(b"/")?;
+    let (subtype, parameters) = ascii_token(trim_ascii_whitespace(after_slash));
+    (!subtype.is_empty()).then_some(parameters)
+}
+
+/// Splits the next parameter at a semicolon that is not inside a quoted value.
+fn next_parameter(value: &[u8]) -> Option<(&[u8], &[u8])> {
+    let start = value.iter().position(|byte| *byte == b';')? + 1;
+    let value = &value[start..];
+    let mut quoted = false;
+    let mut escaped = false;
+
+    for (index, byte) in value.iter().enumerate() {
+        match *byte {
+            b'\\' if quoted => escaped = !escaped,
+            b'"' if !escaped => quoted = !quoted,
+            b';' if !quoted => return Some((&value[..index], &value[index..])),
+            _ => escaped = false,
+        }
+    }
+
+    Some((value, &[]))
+}
+
+fn boundary_parameter_value(parameter: &[u8]) -> Option<Vec<u8>> {
+    let parameter = trim_ascii_whitespace(parameter);
+    let (name, after_name) = ascii_token(parameter);
+    if !name.eq_ignore_ascii_case(b"boundary") {
+        return None;
+    }
+
+    let value = trim_ascii_whitespace(after_name).strip_prefix(b"=")?;
+    let value = trim_ascii_whitespace(value);
     if let Some(value) = value.strip_prefix(b"\"") {
-        let end = value.iter().position(|byte| *byte == b'"')?;
-        Some(&value[..end])
+        unquote_boundary(value)
     } else {
         let end = value
             .iter()
-            .position(|byte| byte.is_ascii_whitespace() || *byte == b';')
+            .position(|byte| byte.is_ascii_whitespace())
             .unwrap_or(value.len());
-        Some(&value[..end])
+        Some(value[..end].to_vec())
     }
+}
+
+fn ascii_token(value: &[u8]) -> (&[u8], &[u8]) {
+    let end = value
+        .iter()
+        .position(|byte| matches!(*byte, b' ' | b'\t' | b'/' | b';' | b'='))
+        .unwrap_or(value.len());
+    (&value[..end], &value[end..])
+}
+
+fn unquote_boundary(value: &[u8]) -> Option<Vec<u8>> {
+    let mut boundary = Vec::with_capacity(value.len());
+    let mut escaped = false;
+
+    for byte in value {
+        if escaped {
+            boundary.push(*byte);
+            escaped = false;
+        } else if *byte == b'\\' {
+            escaped = true;
+        } else if *byte == b'"' {
+            return Some(boundary);
+        } else {
+            boundary.push(*byte);
+        }
+    }
+
+    None
 }
 
 /// Checks a parser-derived aggregate of all MIME header bytes.
@@ -295,6 +376,7 @@ fn outer_header_len(raw: &[u8]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mail_parser::MessageParser;
 
     #[test]
     fn accepts_messages_at_all_budgets() {
@@ -420,9 +502,93 @@ mod tests {
     }
 
     #[test]
+    fn mail_parser_accepts_boundary_with_whitespace_around_equals() {
+        let raw = b"Content-Type: multipart/mixed; boundary = storm\r\n\r\n\
+--storm\r\n\r\nbody\r\n\
+--storm--\r\n";
+
+        assert!(MessageParser::default().parse(raw).unwrap().parts.len() > 1);
+    }
+
+    #[test]
+    fn preflight_rejects_boundary_storms_with_tolerant_parameter_spacing() {
+        fn multipart(declaration: &[u8], boundary: &[u8], leaves: usize) -> Vec<u8> {
+            let mut raw = b"Content-Type: multipart/mixed; ".to_vec();
+            raw.extend_from_slice(declaration);
+            raw.extend_from_slice(b"\r\n\r\n");
+            for _ in 0..leaves {
+                raw.extend_from_slice(b"--");
+                raw.extend_from_slice(boundary);
+                raw.extend_from_slice(b"\r\n\r\nx\r\n");
+            }
+            raw.extend_from_slice(b"--");
+            raw.extend_from_slice(boundary);
+            raw.extend_from_slice(b"--\r\n");
+            raw
+        }
+
+        for (declaration, boundary) in [
+            (b"boundary = storm".as_slice(), b"storm".as_slice()),
+            (
+                b"BOUNDARY\t=\t\"quoted-token\"".as_slice(),
+                b"quoted-token".as_slice(),
+            ),
+            (b"boundary = ending--".as_slice(), b"ending--".as_slice()),
+        ] {
+            assert_eq!(
+                preflight_raw_message(&multipart(declaration, boundary, MAX_MIME_PARTS)),
+                Err(MimeBudgetError::TooManyMimeParts),
+                "failed to preflight {declaration:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn preflight_finds_a_boundary_after_a_long_folded_content_type_parameter() {
+        let mut raw = b"Content-Type: multipart/mixed;\r\n\tnote=\"".to_vec();
+        raw.extend(std::iter::repeat_n(b'x', 8_192));
+        raw.extend_from_slice(b"\";\r\n\tboundary = storm\r\n\r\n");
+        for _ in 0..MAX_MIME_PARTS {
+            raw.extend_from_slice(b"--storm\r\n\r\nx\r\n");
+        }
+        raw.extend_from_slice(b"--storm--\r\n");
+
+        assert_eq!(
+            preflight_raw_message(&raw),
+            Err(MimeBudgetError::TooManyMimeParts)
+        );
+    }
+
+    #[test]
+    fn preflight_rejects_an_oversized_inner_content_type_before_parsing() {
+        let mut raw =
+            b"Content-Type: multipart/mixed; boundary=outer\r\n\r\n--outer\r\nContent-Type: multipart/mixed;\r\n\tpadding=\""
+                .to_vec();
+        raw.extend(std::iter::repeat_n(b'x', MAX_MIME_HEADER_BYTES));
+        raw.extend_from_slice(b"\"; boundary=inner\r\n\r\n--inner--\r\n--outer--\r\n");
+
+        assert_eq!(
+            preflight_raw_message(&raw),
+            Err(MimeBudgetError::MimeHeadersTooLarge)
+        );
+    }
+
+    #[test]
     fn preflight_does_not_parse_quoted_mime_inside_plain_text() {
         let mut raw = b"Content-Type: text/plain; charset=utf-8\r\n\r\n".to_vec();
-        raw.extend_from_slice(b"Content-Type: multipart/mixed; boundary=storm\r\n");
+        raw.extend_from_slice(b"Content-Type: multipart/mixed; boundary = storm\r\n");
+        for _ in 0..MAX_MIME_PARTS {
+            raw.extend_from_slice(b"--storm\r\n");
+        }
+
+        assert!(preflight_raw_message(&raw).is_ok());
+    }
+
+    #[test]
+    fn preflight_does_not_treat_quoted_parameter_text_as_a_boundary() {
+        let mut raw =
+            b"Content-Type: multipart/mixed; note=\"boundary = storm\"; boundary=real\r\n\r\n"
+                .to_vec();
         for _ in 0..MAX_MIME_PARTS {
             raw.extend_from_slice(b"--storm\r\n");
         }
