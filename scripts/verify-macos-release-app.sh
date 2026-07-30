@@ -106,6 +106,17 @@ if [ "$cli_archs" != "arm64" ]; then
   echo "Packaged Dakia CLI is not exactly Apple Silicon arm64: $cli_archs" >&2
   exit 1
 fi
+if ! otool -l "$cli" | awk '
+  $1 == "cmd" && $2 == "LC_RPATH" { in_rpath = 1; next }
+  in_rpath && $1 == "path" {
+    if ($2 == "@executable_path/../Frameworks") found = 1
+    in_rpath = 0
+  }
+  END { exit(found ? 0 : 1) }
+'; then
+  echo "Packaged Dakia CLI cannot resolve the bundled ONNX Runtime framework." >&2
+  exit 1
+fi
 codesign --verify --strict --verbose=2 "$cli"
 app_team=$(
   codesign -dv --verbose=4 "$app" 2>&1 |

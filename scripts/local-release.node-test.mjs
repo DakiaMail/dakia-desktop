@@ -19,6 +19,7 @@ const publisher = join(root, "scripts/publish-release-to-r2.sh");
 const releaseEnvironment = join(root, "scripts/local-release-env.sh");
 const appVerifier = join(root, "scripts/verify-macos-release-app.sh");
 const releaseBuilder = join(root, "scripts/build-local-macos-release.sh");
+const cliBundler = join(root, "scripts/bundle-cli.sh");
 function createStaticAppFixture() {
   const fixtureRoot = mkdtempSync(join(tmpdir(), "dakia-release-app-test-"));
   const app = join(fixtureRoot, "Dakia.app");
@@ -77,7 +78,10 @@ function writeExecutable(path, source) {
   chmodSync(path, 0o755);
 }
 
-function createCliContractFixture({ invalidInputSucceeds = false } = {}) {
+function createCliContractFixture({
+  invalidInputSucceeds = false,
+  missingFrameworkRpath = false,
+} = {}) {
   const fixture = createStaticAppFixture();
   const { app } = fixture;
   const macOS = join(app, "Contents", "MacOS");
@@ -135,6 +139,19 @@ case "$1" in
   -dv) printf '%s\\n' TeamIdentifier=fixture-team >&2 ;;
   *) exit 64 ;;
 esac
+`,
+  );
+  writeExecutable(
+    join(mockBin, "otool"),
+    missingFrameworkRpath
+      ? "#!/bin/sh\nexit 0\n"
+      : `#!/bin/sh
+cat <<'OUTPUT'
+Load command 1
+          cmd LC_RPATH
+      cmdsize 48
+         path @executable_path/../Frameworks (offset 12)
+OUTPUT
 `,
   );
   return { ...fixture, mockBin };
@@ -265,6 +282,7 @@ test("static packaged-app verification rejects a symlinked CLI sidecar", () => {
 test("packaged-app verification declares an isolated CLI contract smoke", () => {
   const verifier = readFileSync(appVerifier, "utf8");
   assert.match(verifier, /lipo -archs "\$cli"/);
+  assert.match(verifier, /@executable_path\/\.\.\/Frameworks/);
   assert.match(verifier, /codesign --verify --strict --verbose=2 "\$cli"/);
   assert.match(verifier, /TeamIdentifier/);
   assert.match(verifier, /"\$cli" --data-dir "\$cli_contract_data" --version/);
@@ -284,6 +302,14 @@ test("packaged-app verification declares an isolated CLI contract smoke", () => 
   );
   assert.match(verifier, /CFBundleShortVersionString/);
   assert.match(verifier, /JSON\.parse/);
+});
+
+test("macOS CLI bundling injects the packaged framework lookup path", () => {
+  const bundler = readFileSync(cliBundler, "utf8");
+  assert.match(
+    bundler,
+    /install_name_tool -add_rpath "@executable_path\/\.\.\/Frameworks"/,
+  );
 });
 
 test(
@@ -315,6 +341,27 @@ test(
     } finally {
       rmSync(goodFixture.fixtureRoot, { recursive: true, force: true });
       rmSync(badFixture.fixtureRoot, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "packaged-app verification rejects a CLI without the framework rpath",
+  { skip: process.platform !== "darwin" },
+  () => {
+    const fixture = createCliContractFixture({ missingFrameworkRpath: true });
+    try {
+      const result = spawnSync(appVerifier, [fixture.app], {
+        encoding: "utf8",
+        env: { PATH: `${fixture.mockBin}:${process.env.PATH}` },
+      });
+      assert.notEqual(result.status, 0);
+      assert.match(
+        result.stderr,
+        /cannot resolve the bundled ONNX Runtime framework/,
+      );
+    } finally {
+      rmSync(fixture.fixtureRoot, { recursive: true, force: true });
     }
   },
 );
