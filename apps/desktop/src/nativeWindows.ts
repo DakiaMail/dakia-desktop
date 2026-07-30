@@ -195,6 +195,15 @@ export function onMailHydrated(
   );
 }
 
+export function onMailChanged(
+  handler: (accountId: string) => void,
+): Promise<UnlistenFn> {
+  if (!isTauri()) return Promise.resolve(() => undefined);
+  return listen<{ accountId: string }>("mail-changed", (event) =>
+    handler(event.payload.accountId),
+  );
+}
+
 export function onMailIndexRebuilt(
   handler: (accountId: string) => void,
 ): Promise<UnlistenFn> {

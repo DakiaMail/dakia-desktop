@@ -3,7 +3,8 @@ use crate::storage::ThreadingHeaders;
 use crate::{
     flowed::decode_format_flowed,
     mime_budget::{
-        preflight_raw_message, validate_header_bytes, validate_structure, MAX_RAW_MESSAGE_BYTES,
+        preflight_raw_message, validate_header_bytes, validate_structure, MAX_MIME_HEADER_BYTES,
+        MAX_MIME_PARTS, MAX_MULTIPART_NESTING, MAX_RAW_MESSAGE_BYTES,
     },
     oauth::OAuthTokens,
     provider::Security,
@@ -33,7 +34,11 @@ use mail_parser::{
 use percent_encoding::percent_decode_str;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::{net::IpAddr, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    net::IpAddr,
+    sync::Arc,
+};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::TcpStream,
@@ -54,6 +59,22 @@ const DKIM_VERIFY_TIMEOUT: Duration = Duration::from_secs(5);
 const UNSUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 const MAX_ATTACHMENT_TOTAL_BYTES: usize = 50 * 1024 * 1024;
+/// Display hydration is deliberately sectioned.  These limits apply before a
+/// server literal is allocated, so a malformed BODYSTRUCTURE cannot turn an
+/// ordinary message open into an unbounded allocation.
+const MAX_DISPLAY_PART_BYTES: usize = 25 * 1024 * 1024;
+const MAX_DISPLAY_TOTAL_BYTES: usize = 50 * 1024 * 1024;
+/// Base64 transport and line folding can make a valid 25 MiB attachment
+/// appreciably larger on the wire.  The decoded limit remains authoritative.
+const MAX_TARGETED_ATTACHMENT_ENCODED_BYTES: usize = 36 * 1024 * 1024;
+/// Do not let a malicious BODYSTRUCTURE response grow an unbounded String
+/// before the MIME parser has a chance to enforce its structural limits.
+const MAX_IMAP_RESPONSE_TRANSCRIPT_BYTES: usize = MAX_MIME_HEADER_BYTES;
+const MAX_IMAP_RESPONSE_LITERALS: usize = 64;
+/// Explicit raw export/full-forward operations may need transport encoding
+/// overhead beyond decoded attachment limits, but never receive an unbounded
+/// server response.
+const MAX_IMAP_RESPONSE_LITERAL_BYTES: usize = 100 * 1024 * 1024;
 const MAX_ATTACHMENT_COUNT: usize = 50;
 const MIME_CONTENT_UNDECODABLE: &str = "mime_content_undecodable";
 const MAX_OUTBOUND_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
@@ -396,10 +417,13 @@ impl MailService {
         let highest_processed_uid = uids.iter().copied().max();
         for uid in uids {
             let fields = "FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES CONTENT-TYPE LIST-ID PRECEDENCE AUTO-SUBMITTED)]";
-            let response = client
-                .command_with_literal(&format!("UID FETCH {uid} ({fields})"))
+            let mut response = client
+                .command_with_literal_limited(
+                    &format!("UID FETCH {uid} ({fields})"),
+                    MAX_MIME_HEADER_BYTES,
+                )
                 .await?;
-            if let Some(raw) = response.literal {
+            if let Some(raw) = response.take_header_literal_for(uid) {
                 match parse_header_message(account, "INBOX", uid, &response.lines, &raw) {
                     Ok(message) => messages.push(message),
                     Err(error) => {
@@ -433,34 +457,10 @@ impl MailService {
         mailbox: &str,
         uid: u32,
     ) -> Result<MailSummary> {
-        let secret = self.credentials.secret(account).await?;
-        let mut client = ImapClient::connect(account).await?;
-        client.authenticate(account, &secret).await?;
-        client
-            .command(&format!(
-                "SELECT {}",
-                quote_imap(&remote_mailbox(account, mailbox))
-            ))
-            .await?;
-        let response = client
-            .command_with_literal(&hydration_fetch_command(account, uid))
-            .await?;
-        let raw = response
-            .literal
-            .context("IMAP server did not return the requested message")?;
-        let message = parse_message(
-            account,
-            mailbox,
-            uid,
-            &response.lines,
-            &raw,
-            self.dkim_authenticator.as_ref(),
-        )
-        .await?;
+        let message = self.fetch_message(account, mailbox, uid).await?;
         self.store
             .upsert_messages(std::slice::from_ref(&message))
             .await?;
-        let _ = client.command("LOGOUT").await;
         Ok(message)
     }
 
@@ -799,10 +799,13 @@ impl MailService {
                     } else {
                         "FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)]"
                     };
-                    let response = client
-                        .command_with_literal(&format!("UID FETCH {uid} ({fields})"))
+                    let mut response = client
+                        .command_with_literal_limited(
+                            &format!("UID FETCH {uid} ({fields})"),
+                            MAX_MIME_HEADER_BYTES,
+                        )
                         .await?;
-                    if let Some(headers) = response.literal {
+                    if let Some(headers) = response.take_header_literal_for(*uid) {
                         if !item.plan.skip_gmail_system_labels
                             || gmail_all_mail_is_archive(&response.lines)
                         {
@@ -812,7 +815,9 @@ impl MailService {
                                 ))
                                 .await
                                 .ok()
-                                .and_then(|response| response.literal)
+                                .and_then(|mut response| {
+                                    response.take_body_literal_for(*uid, "TEXT")
+                                })
                                 .map(|raw| snippet_from_partial(&raw))
                                 .unwrap_or_default();
                             match parse_catalog_message(
@@ -901,9 +906,137 @@ impl MailService {
         })
     }
 
-    /// Fetches a complete message only for an explicit foreground action.
-    /// The returned body and attachment bytes are transient and are never
-    /// written back to the catalogue.
+    /// Refreshes a small, recent catalogue window for the primary reader
+    /// folders without hydrating message bodies. `max_messages` is an account
+    /// total (not a per-folder multiplier): work is allocated round-robin in
+    /// INBOX, Sent, Archive order, while each mailbox contributes its newest
+    /// UIDs first. This keeps a busy INBOX from starving Sent and Archive.
+    ///
+    /// The method deliberately requires established catalogue identities. A
+    /// UIDVALIDITY change is reported to the caller for a full sync; this
+    /// refresh never resets a mailbox or marks historical work complete.
+    pub async fn refresh_recent_main_mailboxes(
+        &self,
+        account: &Account,
+        cutoff: chrono::DateTime<Utc>,
+        max_messages: u32,
+    ) -> Result<Vec<MailSummary>> {
+        if max_messages == 0 {
+            return Ok(Vec::new());
+        }
+        let secret = self.credentials.secret(account).await?;
+        let mut client = ImapClient::connect(account).await?;
+        client.authenticate(account, &secret).await?;
+        let listing = client.command("LIST \"\" \"*\"").await.unwrap_or_default();
+        let plans =
+            refresh_main_mailbox_plans(resolve_special_mailboxes(mailbox_plans(account), &listing));
+        let since = imap_since_date(cutoff);
+        let mut work = Vec::new();
+
+        // First establish every selected mailbox identity and its recent UID
+        // set. No catalogue writes occur until all UIDVALIDITY checks pass.
+        for plan in plans {
+            let selected = match client
+                .command(&format!("SELECT {}", quote_imap(&plan.remote)))
+                .await
+            {
+                Ok(selected) => selected,
+                Err(error) if plan.local != "INBOX" => {
+                    tracing::debug!(%error, mailbox = %plan.remote, "recent refresh mailbox unavailable");
+                    continue;
+                }
+                Err(error) => return Err(error).context("IMAP server does not expose an inbox"),
+            };
+            let uid_validity = parse_uid_validity(&selected)
+                .context("IMAP server omitted UIDVALIDITY after SELECT")?;
+            let state = match self.store.mailbox_catalog_state(account.id, &plan.storage).await? {
+                Some(state) => state,
+                None if plan.local != "INBOX" => continue,
+                None => bail!("mailbox catalogue is not initialized; sync the account before refreshing recent mail"),
+            };
+            verify_mailbox_uid_validity(uid_validity, state.uid_validity, "refreshing recent")?;
+            let search = client.command(&recent_uid_search_command(&since)).await?;
+            work.push(RecentRefreshWork {
+                plan,
+                state,
+                uid_validity,
+                uids: recent_uids_newest_first(parse_search_uids(&search)),
+                selected_uids: Vec::new(),
+            });
+        }
+        allocate_recent_refresh_uids(&mut work, max_messages as usize);
+
+        let mut refreshed = Vec::new();
+        for item in &work {
+            if item.selected_uids.is_empty() {
+                continue;
+            }
+            let expected_flags = self
+                .store
+                .capture_recent_catalogue_expected_flags(
+                    account.id,
+                    &item.plan.storage,
+                    &item.selected_uids,
+                )
+                .await?;
+            client
+                .command(&format!("SELECT {}", quote_imap(&item.plan.remote)))
+                .await?;
+            let mut messages = Vec::with_capacity(item.selected_uids.len());
+            for uid in &item.selected_uids {
+                let mut response = client
+                    .command_with_literal_limited(
+                        &format!("UID FETCH {uid} ({})", catalogue_fetch_fields(account)),
+                        MAX_DISPLAY_PART_BYTES,
+                    )
+                    .await?;
+                if item.plan.skip_gmail_system_labels && !gmail_all_mail_is_archive(&response.lines)
+                {
+                    continue;
+                }
+                let snippet = recent_catalogue_snippet(&mut client, *uid, &response).await?;
+                let Some(headers) = response.take_header_literal_for(*uid) else {
+                    continue;
+                };
+                messages.push(parse_catalog_message(
+                    account,
+                    &item.plan.storage,
+                    *uid,
+                    &response.lines,
+                    &headers,
+                    snippet,
+                )?);
+            }
+            // Inserts carry provider FLAGS. Existing rows accept them only
+            // when their local flags still match the pre-FETCH snapshot, so
+            // remote-client changes propagate without undoing a concurrent
+            // local read/star action.
+            // We intentionally do not call `reconcile_mailbox_uids`: a SINCE
+            // result cannot distinguish an absent recent row from an older
+            // local row, so full reconciliation here could delete history.
+            self.store
+                .upsert_recent_catalog_messages(&messages, &expected_flags)
+                .await?;
+            self.store
+                .save_mailbox_catalog_state(
+                    account.id,
+                    &item.plan.storage,
+                    &item.plan.remote,
+                    item.uid_validity,
+                    item.state.remote_total.max(0) as usize,
+                    item.state.historical_complete,
+                )
+                .await?;
+            refreshed.extend(messages);
+        }
+        let _ = client.command("LOGOUT").await;
+        Ok(refreshed)
+    }
+
+    /// Fetches display-safe message content without retrieving the complete
+    /// RFC822 source or ordinary attachment bodies.  `AttachmentData::bytes`
+    /// is intentionally empty; callers that need bytes must use
+    /// [`Self::fetch_attachment`] or [`Self::fetch_full_message`].
     pub async fn fetch_message(
         &self,
         account: &Account,
@@ -923,18 +1056,53 @@ impl MailService {
             .await?;
         let current_uid_validity = parse_uid_validity(&selected)
             .context("IMAP server omitted UIDVALIDITY after SELECT")?;
-        if i64::from(current_uid_validity) != state.uid_validity {
-            bail!("mailbox identity changed; sync the account before opening this message");
-        }
-        let fields = if account.provider_id == "gmail" {
-            "FLAGS INTERNALDATE X-GM-LABELS RFC822"
-        } else {
-            "FLAGS INTERNALDATE RFC822"
-        };
-        let response = client
-            .command_with_literal(&format!("UID FETCH {uid} ({fields})"))
+        verify_mailbox_uid_validity(current_uid_validity, state.uid_validity, "opening")?;
+        let fields = selective_metadata_fetch_fields(account);
+        let mut response = client
+            .command_with_literal_limited(
+                &format!("UID FETCH {uid} ({fields})"),
+                MAX_MIME_HEADER_BYTES,
+            )
             .await?;
-        let raw = response.literal.context("message is no longer available")?;
+        let structure = parse_bodystructure_response(&response)?;
+        let headers = response
+            .take_header_literal_for(uid)
+            .context("message is no longer available")?;
+        let message = fetch_selective_message(
+            &mut client,
+            account,
+            mailbox,
+            uid,
+            &response.lines,
+            &headers,
+            &structure,
+        )
+        .await?;
+        let _ = client.command("LOGOUT").await;
+        Ok(message)
+    }
+
+    /// Fetches the complete RFC822 message for explicit operations such as
+    /// forwarding or saving every attachment.  This remains read-neutral but
+    /// is intentionally not used by reader display/prefetch.
+    pub async fn fetch_full_message(
+        &self,
+        account: &Account,
+        mailbox: &str,
+        uid: u32,
+    ) -> Result<MailSummary> {
+        let (mut client, _state) = self
+            .select_catalogued_mailbox(account, mailbox, "opening")
+            .await?;
+        let mut response = client
+            .command_with_literal_limited(
+                &hydration_fetch_command(account, uid),
+                MAX_IMAP_RESPONSE_LITERAL_BYTES,
+            )
+            .await?;
+        let raw = response
+            .take_body_literal_for(uid, "")
+            .context("message is no longer available")?;
         let message = parse_message(
             account,
             mailbox,
@@ -946,6 +1114,79 @@ impl MailService {
         .await?;
         let _ = client.command("LOGOUT").await;
         Ok(message)
+    }
+
+    /// Fetches exactly one downloadable attachment identified by the metadata
+    /// returned from [`Self::fetch_message`].
+    pub async fn fetch_attachment(
+        &self,
+        account: &Account,
+        mailbox: &str,
+        uid: u32,
+        attachment_id: &str,
+    ) -> Result<AttachmentData> {
+        let (mut client, _state) = self
+            .select_catalogued_mailbox(account, mailbox, "saving")
+            .await?;
+        let mut metadata = client
+            .command_with_literal_limited(
+                &format!(
+                    "UID FETCH {uid} ({})",
+                    selective_metadata_fetch_fields(account)
+                ),
+                MAX_MIME_HEADER_BYTES,
+            )
+            .await?;
+        let structure = parse_bodystructure_response(&metadata)?;
+        let headers = metadata
+            .take_header_literal_for(uid)
+            .context("message is no longer available")?;
+        let plan = selective_plan(&structure)?;
+        let id = stable_message_id(account.id, mailbox, uid);
+        let attachment = plan
+            .attachments
+            .into_iter()
+            .find(|part| part.attachment_id(&id) == attachment_id)
+            .context("attachment is not available for download")?;
+        let header =
+            fetch_section_mime_headers(&mut client, uid, &attachment.part.path, Some(&headers))
+                .await?;
+        let mut response = client
+            .command_with_literal_limited(
+                &section_fetch_command(uid, &attachment.part.path),
+                MAX_TARGETED_ATTACHMENT_ENCODED_BYTES,
+            )
+            .await?;
+        let bytes = response
+            .take_body_literal_for(uid, &response_body_section(&attachment.part.path))
+            .context("attachment is no longer available")?;
+        let data = attachment_data_from_part(&attachment, &id, &header, Some(bytes), false)?;
+        validate_targeted_attachment_bytes(&data.bytes)?;
+        let _ = client.command("LOGOUT").await;
+        Ok(data)
+    }
+
+    async fn select_catalogued_mailbox(
+        &self,
+        account: &Account,
+        mailbox: &str,
+        action: &str,
+    ) -> Result<(ImapClient, crate::storage::MailboxCatalogState)> {
+        let state = self
+            .store
+            .mailbox_catalog_state(account.id, mailbox)
+            .await?
+            .context("mailbox catalogue is not initialized")?;
+        let secret = self.credentials.secret(account).await?;
+        let mut client = ImapClient::connect(account).await?;
+        client.authenticate(account, &secret).await?;
+        let selected = client
+            .command(&format!("SELECT {}", quote_imap(&state.remote_name)))
+            .await?;
+        let current_uid_validity = parse_uid_validity(&selected)
+            .context("IMAP server omitted UIDVALIDITY after SELECT")?;
+        verify_mailbox_uid_validity(current_uid_validity, state.uid_validity, action)?;
+        Ok((client, state))
     }
 
     /// Fetches the original RFC 822 bytes for an explicit export without
@@ -974,13 +1215,13 @@ impl MailService {
             .await?;
         let current_uid_validity = parse_uid_validity(&selected)
             .context("IMAP server omitted UIDVALIDITY after SELECT")?;
-        if i64::from(current_uid_validity) != state.uid_validity {
-            bail!("mailbox identity changed; sync the account before exporting this message");
-        }
-        let response = client
+        verify_mailbox_uid_validity(current_uid_validity, state.uid_validity, "exporting")?;
+        let mut response = client
             .command_with_literal(&raw_message_fetch_command(uid))
             .await?;
-        let raw = response.literal.context("message is no longer available")?;
+        let raw = response
+            .take_body_literal_for(uid, "")
+            .context("message is no longer available")?;
         let _ = client.command("LOGOUT").await;
         Ok(raw)
     }
@@ -1049,10 +1290,13 @@ impl MailService {
                     } else {
                         "FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)]"
                     };
-                    let response = client
-                        .command_with_literal(&format!("UID FETCH {uid} ({fields})"))
+                    let mut response = client
+                        .command_with_literal_limited(
+                            &format!("UID FETCH {uid} ({fields})"),
+                            MAX_MIME_HEADER_BYTES,
+                        )
                         .await?;
-                    if let Some(headers) = response.literal {
+                    if let Some(headers) = response.take_header_literal_for(uid) {
                         if plan.skip_gmail_system_labels
                             && !gmail_all_mail_is_archive(&response.lines)
                         {
@@ -1062,7 +1306,7 @@ impl MailService {
                             .command_with_literal(&format!("UID FETCH {uid} (BODY.PEEK[]<0.8192>)"))
                             .await
                             .ok()
-                            .and_then(|response| response.literal)
+                            .and_then(|mut response| response.take_body_literal_for(uid, "TEXT"))
                             .map(|raw| snippet_from_partial(&raw))
                             .unwrap_or_default();
                         let Ok(message) = parse_catalog_message(
@@ -1603,7 +1847,56 @@ struct ImapClient {
 }
 struct ImapResponse {
     lines: Vec<String>,
-    literal: Option<Vec<u8>>,
+    /// Every server literal in transcript order. The associated FETCH item
+    /// keeps a literal BODYSTRUCTURE parameter from being mistaken for the
+    /// header/body requested by a caller.
+    literals: Vec<ImapLiteral>,
+}
+
+struct ImapLiteral {
+    /// UID from the untagged FETCH that introduced this literal.  IMAP may
+    /// interleave unsolicited FETCH replies while a command is outstanding.
+    uid: Option<u32>,
+    data_item: ImapLiteralItem,
+    bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ImapLiteralItem {
+    BodyStructure,
+    Body(String),
+    Other,
+}
+
+impl ImapResponse {
+    fn take_header_literal_for(&mut self, uid: u32) -> Option<Vec<u8>> {
+        self.take_literal_for(uid, |item| {
+            matches!(item, ImapLiteralItem::Body(value) if body_item_section(value).is_some_and(|section| section.to_ascii_uppercase().starts_with("HEADER")))
+        })
+    }
+
+    fn take_body_literal_for(&mut self, uid: u32, section: &str) -> Option<Vec<u8>> {
+        self.take_literal_for(uid, |item| {
+            matches!(item, ImapLiteralItem::Body(value) if body_item_section(value).is_some_and(|actual| actual.eq_ignore_ascii_case(section)))
+        })
+    }
+
+    fn take_literal_for(
+        &mut self,
+        uid: u32,
+        matches: impl Fn(&ImapLiteralItem) -> bool,
+    ) -> Option<Vec<u8>> {
+        self.literals
+            .iter()
+            .position(|literal| literal.uid == Some(uid) && matches(&literal.data_item))
+            .map(|index| self.literals.remove(index).bytes)
+    }
+}
+
+fn body_item_section(value: &str) -> Option<&str> {
+    let start = value.find('[')? + 1;
+    let end = value[start..].find(']')? + start;
+    Some(&value[start..end])
 }
 
 enum IdleOutcome {
@@ -1627,6 +1920,14 @@ struct MailboxSyncWork {
     previous_highest: Option<u32>,
     uids: Vec<u32>,
     offset: usize,
+}
+
+struct RecentRefreshWork {
+    plan: MailboxPlan,
+    state: crate::storage::MailboxCatalogState,
+    uid_validity: u32,
+    uids: Vec<u32>,
+    selected_uids: Vec<u32>,
 }
 
 impl MailboxPlan {
@@ -1808,6 +2109,1071 @@ fn hydration_fetch_command(account: &Account, uid: u32) -> String {
 
 fn raw_message_fetch_command(uid: u32) -> String {
     format!("UID FETCH {uid} (BODY.PEEK[])")
+}
+
+fn refresh_main_mailbox_plans(plans: Vec<MailboxPlan>) -> Vec<MailboxPlan> {
+    plans
+        .into_iter()
+        .filter(|plan| matches!(plan.local, "INBOX" | "Sent" | "Archive"))
+        .collect()
+}
+
+fn imap_since_date(cutoff: chrono::DateTime<Utc>) -> String {
+    cutoff.format("%d-%b-%Y").to_string()
+}
+
+fn recent_uid_search_command(since: &str) -> String {
+    format!("UID SEARCH SINCE {since}")
+}
+
+fn recent_uids_newest_first(mut uids: Vec<u32>) -> Vec<u32> {
+    uids.sort_unstable_by(|left, right| right.cmp(left));
+    uids.dedup();
+    uids
+}
+
+fn allocate_recent_refresh_uids(work: &mut [RecentRefreshWork], max_messages: usize) {
+    for item in work.iter_mut() {
+        item.selected_uids.clear();
+    }
+    let mut remaining = max_messages;
+    while remaining > 0 {
+        let mut allocated = false;
+        for item in work.iter_mut() {
+            if remaining == 0 {
+                break;
+            }
+            if let Some(uid) = item.uids.get(item.selected_uids.len()).copied() {
+                item.selected_uids.push(uid);
+                remaining -= 1;
+                allocated = true;
+            }
+        }
+        if !allocated {
+            break;
+        }
+    }
+}
+
+fn catalogue_fetch_fields(account: &Account) -> &'static str {
+    if account.provider_id == "gmail" {
+        "FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE X-GM-LABELS BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES CONTENT-TYPE CONTENT-TRANSFER-ENCODING LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)]"
+    } else {
+        "FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES CONTENT-TYPE CONTENT-TRANSFER-ENCODING LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)]"
+    }
+}
+
+fn section_partial_fetch_command(uid: u32, path: &[usize], length: usize) -> String {
+    let section = if path.is_empty() {
+        "TEXT".into()
+    } else {
+        section_name(path)
+    };
+    format!("UID FETCH {uid} (BODY.PEEK[{section}]<0.{length}>)")
+}
+
+async fn recent_catalogue_snippet(
+    client: &mut ImapClient,
+    uid: u32,
+    metadata_response: &ImapResponse,
+) -> Result<String> {
+    let structure = match parse_bodystructure_response(metadata_response)
+        .and_then(|structure| selective_plan(&structure))
+    {
+        Ok(plan) => plan,
+        Err(_) => return Ok(String::new()),
+    };
+    let Some(part) = structure.text_parts.first() else {
+        return Ok(String::new());
+    };
+    let mut response = client
+        .command_with_literal_limited(
+            &section_partial_fetch_command(uid, &part.part.path, 8192),
+            8192,
+        )
+        .await?;
+    let section = if part.part.path.is_empty() {
+        "TEXT".to_owned()
+    } else {
+        section_name(&part.part.path)
+    };
+    let Some(raw) = response.take_body_literal_for(uid, &section) else {
+        return Ok(String::new());
+    };
+    Ok(snippet_from_partial(&mime_part_headers(&part.part, &raw)))
+}
+
+fn mime_part_headers(part: &MimePart, body: &[u8]) -> Vec<u8> {
+    let mut headers = format!("Content-Type: {}", part.mime_type);
+    for (name, value) in &part.params {
+        headers.push_str(&format!("; {name}=\"{value}\""));
+    }
+    if !part.transfer_encoding.is_empty() {
+        headers.push_str(&format!(
+            "\r\nContent-Transfer-Encoding: {}",
+            part.transfer_encoding
+        ));
+    }
+    headers.push_str("\r\n\r\n");
+    let mut result = headers.into_bytes();
+    result.extend_from_slice(body);
+    result
+}
+
+fn selective_metadata_fetch_fields(account: &Account) -> &'static str {
+    if account.provider_id == "gmail" {
+        "FLAGS INTERNALDATE X-GM-LABELS BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES CONTENT-TYPE CONTENT-TRANSFER-ENCODING LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)]"
+    } else {
+        "FLAGS INTERNALDATE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES CONTENT-TYPE CONTENT-TRANSFER-ENCODING LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)]"
+    }
+}
+
+fn section_name(path: &[usize]) -> String {
+    path.iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn section_fetch_command(uid: u32, path: &[usize]) -> String {
+    let section = response_body_section(path);
+    format!("UID FETCH {uid} (BODY.PEEK[{section}])")
+}
+
+fn response_body_section(path: &[usize]) -> String {
+    if path.is_empty() {
+        "TEXT".into()
+    } else {
+        section_name(path)
+    }
+}
+
+fn section_mime_fetch_command(uid: u32, path: &[usize]) -> String {
+    let section = if path.is_empty() {
+        "MIME".into()
+    } else {
+        format!("{}.MIME", section_name(path))
+    };
+    format!("UID FETCH {uid} (BODY.PEEK[{section}])")
+}
+
+fn nested_section_mime_fetch_command(uid: u32, path: &[usize]) -> Option<String> {
+    (!path.is_empty()).then(|| section_mime_fetch_command(uid, path))
+}
+
+#[derive(Debug, Clone)]
+enum ImapBodyValue {
+    Atom(String),
+    String(String),
+    List(Vec<ImapBodyValue>),
+}
+
+impl ImapBodyValue {
+    fn atom(&self) -> Option<&str> {
+        match self {
+            Self::Atom(value) if !value.eq_ignore_ascii_case("NIL") => Some(value),
+            Self::String(value) => Some(value),
+            _ => None,
+        }
+    }
+    fn list(&self) -> Option<&[ImapBodyValue]> {
+        match self {
+            Self::List(values) => Some(values),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MimePart {
+    path: Vec<usize>,
+    mime_type: String,
+    params: BTreeMap<String, String>,
+    content_id: Option<String>,
+    disposition: Option<String>,
+    disposition_params: BTreeMap<String, String>,
+    transfer_encoding: String,
+    encoded_size: usize,
+    children: Vec<MimePart>,
+}
+
+impl MimePart {
+    fn is_leaf(&self) -> bool {
+        self.children.is_empty()
+    }
+    fn filename(&self) -> Option<&str> {
+        self.disposition_params
+            .get("filename")
+            .or_else(|| self.params.get("name"))
+            .map(String::as_str)
+            .filter(|value| !value.trim().is_empty())
+    }
+    fn is_explicit_attachment(&self) -> bool {
+        self.disposition
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("attachment"))
+    }
+    fn is_text_body(&self) -> bool {
+        self.mime_type.eq_ignore_ascii_case("text/plain")
+            || self.mime_type.eq_ignore_ascii_case("text/html")
+    }
+    fn is_attachment_candidate(&self) -> bool {
+        self.is_explicit_attachment()
+            || self.filename().is_some()
+            || (self.is_leaf() && !self.is_text_body())
+    }
+    fn is_attached_container(&self) -> bool {
+        !self.is_leaf() && self.is_attachment_candidate()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PlannedAttachment {
+    part: MimePart,
+    index: usize,
+}
+
+#[derive(Debug, Clone)]
+struct PlannedTextPart {
+    part: MimePart,
+    /// A multipart/alternative representation may have several candidates of
+    /// one kind.  They are fetched in preference order and only the first
+    /// decodable member of this group becomes the visible representation.
+    fallback_group: Option<usize>,
+}
+
+impl PlannedAttachment {
+    fn attachment_id(&self, message_id: &str) -> String {
+        mime_attachment_id(message_id, &self.part.path)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SelectivePlan {
+    text_parts: Vec<PlannedTextPart>,
+    attachments: Vec<PlannedAttachment>,
+}
+
+#[cfg(test)]
+fn parse_bodystructure(lines: &[String]) -> Result<MimePart> {
+    parse_bodystructure_with_literals(lines, &[])
+}
+
+fn parse_bodystructure_response(response: &ImapResponse) -> Result<MimePart> {
+    parse_bodystructure_with_literals(&response.lines, &response.literals)
+}
+
+fn parse_bodystructure_with_literals(
+    lines: &[String],
+    literals: &[ImapLiteral],
+) -> Result<MimePart> {
+    let source = imap_transcript_with_literals(lines, literals)?;
+    if source.len() > MAX_MIME_HEADER_BYTES {
+        bail!("mime_headers_too_large");
+    }
+    let offset = find_imap_atom_outside_quotes(&source, "BODYSTRUCTURE")
+        .context("IMAP server omitted BODYSTRUCTURE")?
+        + "BODYSTRUCTURE".len();
+    let (value, _) = parse_imap_body_value(source[offset..].trim_start())
+        .context("IMAP BODYSTRUCTURE is malformed")?;
+    bodystructure_part(&value, Vec::new())
+}
+
+fn find_imap_atom_outside_quotes(source: &str, atom: &str) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let atom = atom.as_bytes();
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut index = 0usize;
+    while index + atom.len() <= bytes.len() {
+        let byte = bytes[index];
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+            index += 1;
+            continue;
+        }
+        if byte == b'"' {
+            quoted = true;
+            index += 1;
+            continue;
+        }
+        let before_is_atom = index > 0 && bytes[index - 1].is_ascii_alphanumeric();
+        let after = index + atom.len();
+        let after_is_atom = after < bytes.len() && bytes[after].is_ascii_alphanumeric();
+        if !before_is_atom
+            && !after_is_atom
+            && bytes[index..]
+                .get(..atom.len())
+                .is_some_and(|value| value.eq_ignore_ascii_case(atom))
+        {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn imap_transcript_with_literals(lines: &[String], literals: &[ImapLiteral]) -> Result<String> {
+    let source = lines.join(" ");
+    let mut result = String::with_capacity(source.len());
+    let mut cursor = 0;
+    let mut literal_index = 0;
+    while let Some(offset) = source[cursor..].find('{') {
+        let start = cursor + offset;
+        let Some(end_offset) = source[start..].find('}') else {
+            break;
+        };
+        let end = start + end_offset;
+        let marker = &source[start + 1..end];
+        if marker.trim_end_matches('+').parse::<usize>().is_err() {
+            result.push_str(&source[cursor..end + 1]);
+            cursor = end + 1;
+            continue;
+        }
+        let literal = literals
+            .get(literal_index)
+            .context("IMAP response omitted a declared literal")?;
+        result.push_str(&source[cursor..start]);
+        result.push('"');
+        result.push_str(
+            &String::from_utf8_lossy(&literal.bytes)
+                .replace('\\', "\\\\")
+                .replace('"', "\\\""),
+        );
+        result.push('"');
+        cursor = end + 1;
+        literal_index += 1;
+    }
+    result.push_str(&source[cursor..]);
+    if literal_index != literals.len() {
+        bail!("IMAP response contains an unassociated literal");
+    }
+    Ok(result)
+}
+
+fn parse_imap_body_value(input: &str) -> Option<(ImapBodyValue, &str)> {
+    let mut values_seen = 0usize;
+    parse_imap_body_value_inner(input, 0, &mut values_seen)
+}
+
+fn parse_imap_body_value_inner<'a>(
+    input: &'a str,
+    depth: usize,
+    values_seen: &mut usize,
+) -> Option<(ImapBodyValue, &'a str)> {
+    if depth > MAX_MULTIPART_NESTING + 16 || *values_seen >= MAX_MIME_PARTS.saturating_mul(32) {
+        return None;
+    }
+    *values_seen += 1;
+    let input = input.trim_start();
+    let mut chars = input.chars();
+    match chars.next()? {
+        '(' => {
+            let mut rest = chars.as_str();
+            let mut values = Vec::new();
+            loop {
+                rest = rest.trim_start();
+                if let Some(after) = rest.strip_prefix(')') {
+                    return Some((ImapBodyValue::List(values), after));
+                }
+                let (value, after) = parse_imap_body_value_inner(rest, depth + 1, values_seen)?;
+                values.push(value);
+                rest = after;
+            }
+        }
+        '"' => {
+            let mut value = String::new();
+            let mut rest = chars.as_str();
+            while let Some(character) = rest.chars().next() {
+                rest = &rest[character.len_utf8()..];
+                match character {
+                    '"' => return Some((ImapBodyValue::String(value), rest)),
+                    '\\' => {
+                        let escaped = rest.chars().next()?;
+                        value.push(escaped);
+                        rest = &rest[escaped.len_utf8()..];
+                    }
+                    _ => value.push(character),
+                }
+            }
+            None
+        }
+        character => {
+            let end = input
+                .find(|value: char| value.is_ascii_whitespace() || matches!(value, '(' | ')'))
+                .unwrap_or(input.len());
+            let _ = character;
+            (end > 0).then(|| (ImapBodyValue::Atom(input[..end].to_owned()), &input[end..]))
+        }
+    }
+}
+
+fn bodystructure_params(value: Option<&[ImapBodyValue]>) -> BTreeMap<String, String> {
+    let mut params = BTreeMap::new();
+    let Some(values) = value else {
+        return params;
+    };
+    for pair in values.chunks_exact(2) {
+        if let (Some(name), Some(value)) = (pair[0].atom(), pair[1].atom()) {
+            params.insert(name.to_ascii_lowercase(), value.to_owned());
+        }
+    }
+    // BODYSTRUCTURE exposes RFC 2231 extended parameters verbatim on many
+    // providers.  Normalize the common single-value form so targeted
+    // attachment metadata agrees with the complete MIME parser.
+    for (extended, plain) in [("filename*", "filename"), ("name*", "name")] {
+        let Some(value) = params.get(extended) else {
+            continue;
+        };
+        let encoded = value
+            .split_once("''")
+            .map(|(_, encoded)| encoded)
+            .unwrap_or(value);
+        if valid_percent_escapes(encoded) {
+            if let Ok(decoded) = percent_decode_str(encoded).decode_utf8() {
+                if !decoded.trim().is_empty() {
+                    params.insert(plain.to_owned(), decoded.into_owned());
+                }
+            }
+        }
+    }
+    params
+}
+
+fn bodystructure_disposition(values: &[ImapBodyValue]) -> Option<&[ImapBodyValue]> {
+    values
+        .iter()
+        .filter_map(ImapBodyValue::list)
+        .find(|values| {
+            values
+                .first()
+                .and_then(ImapBodyValue::atom)
+                .is_some_and(|value| {
+                    matches!(value.to_ascii_lowercase().as_str(), "attachment" | "inline")
+                })
+        })
+}
+
+fn bodystructure_part(value: &ImapBodyValue, path: Vec<usize>) -> Result<MimePart> {
+    let mut part_count = 0usize;
+    bodystructure_part_inner(value, path, 0, &mut part_count)
+}
+
+fn bodystructure_part_inner(
+    value: &ImapBodyValue,
+    path: Vec<usize>,
+    depth: usize,
+    part_count: &mut usize,
+) -> Result<MimePart> {
+    if depth > MAX_MULTIPART_NESTING {
+        bail!("mime_multipart_nesting_too_deep");
+    }
+    *part_count = part_count
+        .checked_add(1)
+        .context("MIME part count overflow")?;
+    if *part_count > MAX_MIME_PARTS {
+        bail!("mime_too_many_parts");
+    }
+    let values = value.list().context("BODYSTRUCTURE part is not a list")?;
+    if values.first().is_some_and(|value| value.list().is_some()) {
+        let child_count = values
+            .iter()
+            .take_while(|value| value.list().is_some())
+            .count();
+        let subtype = values
+            .get(child_count)
+            .and_then(ImapBodyValue::atom)
+            .context("multipart BODYSTRUCTURE omitted subtype")?;
+        let mut children = Vec::with_capacity(child_count);
+        for (index, child) in values[..child_count].iter().enumerate() {
+            let mut child_path = path.clone();
+            child_path.push(index + 1);
+            children.push(bodystructure_part_inner(
+                child,
+                child_path,
+                depth + 1,
+                part_count,
+            )?);
+        }
+        let disposition_value =
+            bodystructure_disposition(values.get(child_count + 2..).unwrap_or_default());
+        let disposition = disposition_value
+            .and_then(|values| values.first())
+            .and_then(ImapBodyValue::atom)
+            .map(str::to_ascii_lowercase);
+        let disposition_params = disposition_value
+            .and_then(|values| values.get(1))
+            .and_then(ImapBodyValue::list)
+            .map(|values| bodystructure_params(Some(values)))
+            .unwrap_or_default();
+        return Ok(MimePart {
+            path,
+            mime_type: format!("multipart/{subtype}").to_ascii_lowercase(),
+            params: bodystructure_params(values.get(child_count + 1).and_then(ImapBodyValue::list)),
+            content_id: None,
+            disposition,
+            disposition_params,
+            transfer_encoding: String::new(),
+            encoded_size: 0,
+            children,
+        });
+    }
+    let kind = values
+        .first()
+        .and_then(ImapBodyValue::atom)
+        .context("BODYSTRUCTURE omitted media type")?;
+    let subtype = values
+        .get(1)
+        .and_then(ImapBodyValue::atom)
+        .context("BODYSTRUCTURE omitted media subtype")?;
+    let disposition_value = bodystructure_disposition(values.get(7..).unwrap_or_default());
+    let disposition = disposition_value
+        .and_then(|values| values.first())
+        .and_then(ImapBodyValue::atom)
+        .map(str::to_ascii_lowercase);
+    let disposition_params = disposition_value
+        .and_then(|values| values.get(1))
+        .and_then(ImapBodyValue::list)
+        .map(|values| bodystructure_params(Some(values)))
+        .unwrap_or_default();
+    Ok(MimePart {
+        path,
+        mime_type: format!("{kind}/{subtype}").to_ascii_lowercase(),
+        params: bodystructure_params(values.get(2).and_then(ImapBodyValue::list)),
+        content_id: values
+            .get(3)
+            .and_then(ImapBodyValue::atom)
+            .map(str::to_owned),
+        disposition,
+        disposition_params,
+        transfer_encoding: values
+            .get(5)
+            .and_then(ImapBodyValue::atom)
+            .unwrap_or_default()
+            .to_ascii_lowercase(),
+        encoded_size: values
+            .get(6)
+            .and_then(ImapBodyValue::atom)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0),
+        children: Vec::new(),
+    })
+}
+
+fn selective_plan(root: &MimePart) -> Result<SelectivePlan> {
+    let mut text_parts = Vec::new();
+    let mut fallback_groups = 0usize;
+    select_text_parts(root, &mut text_parts, &mut fallback_groups);
+    let mut candidates = Vec::new();
+    collect_attachment_candidates(root, &mut candidates);
+    if candidates.len() > MAX_ATTACHMENT_COUNT {
+        bail!("message has too many attachments");
+    }
+    Ok(SelectivePlan {
+        text_parts,
+        attachments: candidates
+            .into_iter()
+            .enumerate()
+            .map(|(index, part)| PlannedAttachment { part, index })
+            .collect(),
+    })
+}
+
+fn select_text_parts(
+    part: &MimePart,
+    selected: &mut Vec<PlannedTextPart>,
+    fallback_groups: &mut usize,
+) {
+    if part.is_attached_container() {
+        return;
+    }
+    if part.is_leaf() {
+        if part.is_text_body() && !part.is_attachment_candidate() {
+            selected.push(PlannedTextPart {
+                part: part.clone(),
+                fallback_group: None,
+            });
+        }
+        return;
+    }
+    if part.mime_type.eq_ignore_ascii_case("multipart/alternative") {
+        let mut candidates = Vec::new();
+        for child in &part.children {
+            select_text_parts(child, &mut candidates, fallback_groups);
+        }
+        for mime_type in ["text/plain", "text/html"] {
+            let matching = candidates
+                .iter()
+                .rev()
+                .filter(|candidate| candidate.part.mime_type.eq_ignore_ascii_case(mime_type))
+                .cloned()
+                .collect::<Vec<_>>();
+            if matching.is_empty() {
+                continue;
+            }
+            *fallback_groups += 1;
+            selected.extend(matching.into_iter().map(|mut candidate| {
+                candidate.fallback_group = Some(*fallback_groups);
+                candidate
+            }));
+        }
+    } else if part.mime_type.eq_ignore_ascii_case("multipart/related") {
+        let declared_start = part
+            .params
+            .get("start")
+            .map(|value| value.trim().trim_matches(['<', '>']).to_ascii_lowercase());
+        let root = declared_start
+            .as_deref()
+            .and_then(|start| {
+                part.children.iter().find(|child| {
+                    child
+                        .content_id
+                        .as_deref()
+                        .map(|value| {
+                            value
+                                .trim()
+                                .trim_matches(['<', '>'])
+                                .eq_ignore_ascii_case(start)
+                        })
+                        .unwrap_or(false)
+                })
+            })
+            .or_else(|| part.children.first());
+        if let Some(root) = root {
+            select_text_parts(root, selected, fallback_groups);
+        }
+    } else {
+        for child in &part.children {
+            select_text_parts(child, selected, fallback_groups);
+        }
+    }
+}
+
+fn collect_attachment_candidates(part: &MimePart, candidates: &mut Vec<MimePart>) {
+    if part.is_attached_container() {
+        candidates.push(part.clone());
+        return;
+    }
+    if part.is_leaf() {
+        if part.is_attachment_candidate() {
+            candidates.push(part.clone());
+        }
+        return;
+    }
+    for child in &part.children {
+        collect_attachment_candidates(child, candidates);
+    }
+}
+
+async fn fetch_section_mime_headers(
+    client: &mut ImapClient,
+    uid: u32,
+    path: &[usize],
+    root_headers: Option<&[u8]>,
+) -> Result<Vec<u8>> {
+    if path.is_empty() {
+        return root_headers
+            .map(ToOwned::to_owned)
+            .context("IMAP root MIME headers were not fetched");
+    }
+    let command = nested_section_mime_fetch_command(uid, path)
+        .context("IMAP MIME header section is missing")?;
+    let mut response = client
+        .command_with_literal_limited(&command, 256 * 1024)
+        .await?;
+    response
+        .take_body_literal_for(uid, &format!("{}.MIME", section_name(path)))
+        .context("IMAP server did not return MIME part headers")
+}
+
+async fn fetch_selective_message(
+    client: &mut ImapClient,
+    account: &Account,
+    mailbox: &str,
+    uid: u32,
+    response_lines: &[String],
+    headers: &[u8],
+    structure: &MimePart,
+) -> Result<MailSummary> {
+    let plan = selective_plan(structure)?;
+    let mut total = 0usize;
+    let mut plain = Vec::new();
+    let mut html = None;
+    let mut text_decode_failures = 0usize;
+    let mut successful_fallback_groups = BTreeSet::new();
+    let mut referenced_inline = BTreeMap::new();
+    for part in &plan.text_parts {
+        if part
+            .fallback_group
+            .is_some_and(|group| successful_fallback_groups.contains(&group))
+        {
+            continue;
+        }
+        let header =
+            fetch_section_mime_headers(client, uid, &part.part.path, Some(headers)).await?;
+        let remaining =
+            display_literal_limit(total, part.part.encoded_size, "message display part")?;
+        let mut response = client
+            .command_with_literal_limited(
+                &section_fetch_command(uid, &part.part.path),
+                remaining.min(MAX_DISPLAY_PART_BYTES),
+            )
+            .await?;
+        let bytes = response
+            .take_body_literal_for(uid, &response_body_section(&part.part.path))
+            .context("IMAP server did not return the requested MIME part")?;
+        total = total
+            .checked_add(bytes.len())
+            .context("message display body size overflow")?;
+        let decoded = match decode_mime_part_body(&header, &bytes) {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                text_decode_failures += 1;
+                tracing::warn!(
+                    %error,
+                    uid,
+                    section = %section_name(&part.part.path),
+                    "could not decode a selective MIME body candidate"
+                );
+                continue;
+            }
+        };
+        if let Some(group) = part.fallback_group {
+            successful_fallback_groups.insert(group);
+        }
+        if part.part.mime_type.eq_ignore_ascii_case("text/html") && html.is_none() {
+            html = Some(decoded);
+        } else if part.part.mime_type.eq_ignore_ascii_case("text/plain") {
+            plain.push(decoded);
+        }
+    }
+    let mut image_parts = BTreeMap::new();
+    let mut reference_counts = BTreeMap::new();
+    for attachment in &plan.attachments {
+        if !attachment.part.mime_type.starts_with("image/") {
+            for reference in unique_mime_part_references(&attachment.part) {
+                *reference_counts
+                    .entry(reference.to_ascii_lowercase())
+                    .or_insert(0usize) += 1;
+            }
+            continue;
+        }
+        let header =
+            fetch_section_mime_headers(client, uid, &attachment.part.path, Some(headers)).await?;
+        let part = mime_part_with_headers(&attachment.part, &header)?;
+        let references = unique_mime_part_references(&part);
+        for reference in &references {
+            *reference_counts
+                .entry(reference.to_ascii_lowercase())
+                .or_insert(0usize) += 1;
+        }
+        image_parts.insert(section_name(&part.path), (part, header, references));
+    }
+    let mut body_html = html;
+    if let Some(html) = &mut body_html {
+        for (path, (part, header, references)) in &image_parts {
+            let referenced = has_unambiguous_html_reference(html, references, &reference_counts);
+            referenced_inline.insert(path.clone(), referenced);
+            if !referenced {
+                continue;
+            }
+            let remaining = display_literal_limit(total, part.encoded_size, "inline image")?;
+            let mut response = client
+                .command_with_literal_limited(
+                    &section_fetch_command(uid, &part.path),
+                    remaining.min(MAX_DISPLAY_PART_BYTES),
+                )
+                .await?;
+            let bytes = response
+                .take_body_literal_for(uid, &response_body_section(&part.path))
+                .context("IMAP server did not return the referenced inline image")?;
+            total = total
+                .checked_add(bytes.len())
+                .context("message display body size overflow")?;
+            let image = decode_mime_part_raw(header, &bytes)?;
+            let data_url = format!(
+                "data:{};base64,{}",
+                safe_mime_type(&part.mime_type),
+                STANDARD.encode(image)
+            );
+            for reference in references {
+                *html = replace_resource_reference(html, reference, &data_url)?;
+            }
+        }
+    }
+    let mut body_text = plain
+        .into_iter()
+        .filter(|value| !value.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if body_text.trim().is_empty() {
+        if let Some(html) = &body_html {
+            body_text = mail_parser::decoders::html::html_to_text(html);
+        }
+    }
+    if !plan.text_parts.is_empty()
+        && text_decode_failures == plan.text_parts.len()
+        && body_text.trim().is_empty()
+        && body_html.is_none()
+    {
+        bail!(MIME_CONTENT_UNDECODABLE);
+    }
+    let id = stable_message_id(account.id, mailbox, uid);
+    let mut attachments = Vec::new();
+    for attachment in &plan.attachments {
+        let part = image_parts
+            .get(&section_name(&attachment.part.path))
+            .map(|(part, _, _)| part.clone())
+            .unwrap_or_else(|| attachment.part.clone());
+        let referenced = referenced_inline
+            .get(&section_name(&part.path))
+            .copied()
+            .unwrap_or(false);
+        let data = attachment_data_from_part(
+            &PlannedAttachment {
+                part,
+                index: attachment.index,
+            },
+            &id,
+            &[],
+            None,
+            referenced,
+        )?;
+        if data.attachment.presentation.is_downloadable() {
+            attachments.push(data);
+        }
+    }
+    let mut message = parse_catalog_message(
+        account,
+        mailbox,
+        uid,
+        response_lines,
+        headers,
+        clean_snippet(&body_text),
+    )?;
+    message.body_text = body_text;
+    message.body_html = body_html;
+    message.content_state = "complete".into();
+    message.has_attachments = !attachments.is_empty();
+    message.attachments = attachments;
+    Ok(message)
+}
+
+fn display_literal_limit(total: usize, advertised_size: usize, label: &str) -> Result<usize> {
+    let remaining = MAX_DISPLAY_TOTAL_BYTES
+        .checked_sub(total)
+        .context("message display body exceeds the 50 MiB safety limit")?;
+    if advertised_size > remaining || advertised_size > MAX_DISPLAY_PART_BYTES {
+        bail!(
+            "{label} exceeds the {} MiB safety limit",
+            MAX_DISPLAY_PART_BYTES / 1024 / 1024
+        );
+    }
+    Ok(remaining.min(MAX_DISPLAY_PART_BYTES))
+}
+
+fn validate_targeted_attachment_bytes(bytes: &[u8]) -> Result<()> {
+    if bytes.len() > MAX_ATTACHMENT_BYTES {
+        bail!(
+            "attachment exceeds the {} MiB safety limit",
+            MAX_ATTACHMENT_BYTES / 1024 / 1024
+        );
+    }
+    Ok(())
+}
+
+fn decode_mime_part_raw(headers: &[u8], bytes: &[u8]) -> Result<Vec<u8>> {
+    let mut source = Vec::with_capacity(headers.len() + bytes.len() + 4);
+    source.extend_from_slice(headers);
+    finish_mime_headers(&mut source);
+    source.extend_from_slice(bytes);
+    let parsed = parse_complete_message(&source)?;
+    let part = parsed
+        .part(0)
+        .context("MIME part parser omitted the root part")?;
+    decoded_part_bytes(parsed.raw_message(), part)
+        .context("MIME part uses an unsupported transfer encoding")
+}
+
+fn decode_mime_part_body(headers: &[u8], bytes: &[u8]) -> Result<String> {
+    let mut source = Vec::with_capacity(headers.len() + bytes.len() + 4);
+    source.extend_from_slice(headers);
+    finish_mime_headers(&mut source);
+    source.extend_from_slice(bytes);
+    let parsed = parse_complete_message(&source)?;
+    let part = parsed
+        .part(0)
+        .context("MIME part parser omitted the root part")?;
+    decode_text_candidate(&parsed, part)
+        .map(|text| {
+            if part.is_text_html() {
+                text
+            } else {
+                flowed_text(part, &text)
+            }
+        })
+        .map_err(|()| anyhow::anyhow!("MIME text part could not be decoded safely"))
+}
+
+fn mime_part_with_headers(part: &MimePart, headers: &[u8]) -> Result<MimePart> {
+    let mut source = headers.to_vec();
+    finish_mime_headers(&mut source);
+    let parsed = configured_message_parser()
+        .parse_headers(&source)
+        .context("MIME part headers are malformed")?;
+    let parsed = parsed
+        .part(0)
+        .context("MIME part parser omitted the root part")?;
+    let mut result = part.clone();
+    if let Some(content_type) = parsed.content_type() {
+        if let Some(subtype) = content_type.subtype() {
+            result.mime_type = format!("{}/{}", content_type.ctype(), subtype).to_ascii_lowercase();
+        }
+        if let Some(attributes) = content_type.attributes() {
+            result.params.extend(attributes.iter().map(|attribute| {
+                (
+                    attribute.name.to_ascii_lowercase(),
+                    attribute.value.to_string(),
+                )
+            }));
+        }
+    }
+    result.content_id = parsed
+        .content_id()
+        .map(ToOwned::to_owned)
+        .or(result.content_id);
+    if let Some(disposition) = parsed.content_disposition() {
+        result.disposition = Some(
+            if disposition.is_attachment() {
+                "attachment"
+            } else if disposition.is_inline() {
+                "inline"
+            } else {
+                ""
+            }
+            .to_owned(),
+        );
+        if let Some(attributes) = disposition.attributes() {
+            result
+                .disposition_params
+                .extend(attributes.iter().map(|attribute| {
+                    (
+                        attribute.name.to_ascii_lowercase(),
+                        attribute.value.to_string(),
+                    )
+                }));
+        }
+    }
+    if let Some(location) = parsed.content_location() {
+        result
+            .params
+            .insert("content-location".into(), location.to_owned());
+    }
+    Ok(result)
+}
+
+fn finish_mime_headers(source: &mut Vec<u8>) {
+    if source.ends_with(b"\r\n\r\n") || source.ends_with(b"\n\n") {
+        return;
+    }
+    if source.ends_with(b"\r\n") {
+        source.extend_from_slice(b"\r\n");
+    } else if source.ends_with(b"\n") {
+        source.extend_from_slice(b"\n");
+    } else {
+        source.extend_from_slice(b"\r\n\r\n");
+    }
+}
+
+fn mime_part_references(part: &MimePart) -> Vec<String> {
+    let mut references = Vec::new();
+    if let Some(content_id) = &part.content_id {
+        references.push(format!(
+            "cid:{}",
+            content_id.trim().trim_matches(['<', '>'])
+        ));
+    }
+    if let Some(location) = part.params.get("content-location") {
+        references.push(location.to_owned());
+    }
+    references
+}
+
+fn unique_mime_part_references(part: &MimePart) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    mime_part_references(part)
+        .into_iter()
+        .filter(|reference| seen.insert(reference.to_ascii_lowercase()))
+        .collect()
+}
+
+fn has_unambiguous_html_reference(
+    html: &str,
+    references: &[String],
+    reference_counts: &BTreeMap<String, usize>,
+) -> bool {
+    references.iter().any(|reference| {
+        html_contains_reference(html, reference)
+            && reference_counts
+                .get(&reference.to_ascii_lowercase())
+                .copied()
+                == Some(1)
+    })
+}
+
+fn attachment_data_from_part(
+    part: &PlannedAttachment,
+    message_id: &str,
+    headers: &[u8],
+    bytes: Option<Vec<u8>>,
+    referenced: bool,
+) -> Result<AttachmentData> {
+    let planned = part;
+    let part = if headers.is_empty() {
+        planned.part.clone()
+    } else {
+        mime_part_with_headers(&planned.part, headers)?
+    };
+    let filename = safe_attachment_filename(part.filename().unwrap_or("attachment"), planned.index);
+    let mime_type = safe_mime_type(&part.mime_type);
+    let is_inline = part
+        .disposition
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("inline"))
+        || part.content_id.is_some();
+    let presentation = match (part.is_explicit_attachment(), referenced) {
+        (true, true) => AttachmentPresentation::Both,
+        (true, false) => AttachmentPresentation::Downloadable,
+        (false, true) => AttachmentPresentation::Embedded,
+        (false, false) => AttachmentPresentation::Downloadable,
+    };
+    let bytes = match bytes {
+        Some(bytes) => decode_mime_part_raw(headers, &bytes)?,
+        None => Vec::new(),
+    };
+    Ok(AttachmentData {
+        attachment: Attachment {
+            id: planned.attachment_id(message_id),
+            message_id: message_id.to_owned(),
+            filename: filename.clone(),
+            mime_type: mime_type.clone(),
+            size_bytes: if bytes.is_empty() {
+                part.encoded_size as i64
+            } else {
+                bytes.len() as i64
+            },
+            is_inline,
+            presentation,
+            is_potentially_unsafe: is_potentially_unsafe(&filename, &mime_type),
+        },
+        bytes,
+    })
 }
 
 fn set_read_command(uid: u32, read: bool) -> String {
@@ -2039,15 +3405,28 @@ impl ImapClient {
     }
 
     async fn command_with_literal(&mut self, command: &str) -> Result<ImapResponse> {
+        self.command_with_literal_limited(command, MAX_IMAP_RESPONSE_LITERAL_BYTES)
+            .await
+    }
+
+    async fn command_with_literal_limited(
+        &mut self,
+        command: &str,
+        max_literal_bytes: usize,
+    ) -> Result<ImapResponse> {
         timeout(
             IMAP_COMMAND_TIMEOUT,
-            self.command_with_literal_inner(command),
+            self.command_with_literal_inner(command, max_literal_bytes),
         )
         .await
         .context("IMAP command timed out")?
     }
 
-    async fn command_with_literal_inner(&mut self, command: &str) -> Result<ImapResponse> {
+    async fn command_with_literal_inner(
+        &mut self,
+        command: &str,
+        max_literal_bytes: usize,
+    ) -> Result<ImapResponse> {
         self.tag += 1;
         let tag = format!("D{:04}", self.tag);
         self.reader
@@ -2056,23 +3435,50 @@ impl ImapClient {
             .await?;
         self.reader.get_mut().flush().await?;
         let mut lines = Vec::new();
-        let mut literal = None;
+        let mut literals = Vec::new();
+        let mut literal_bytes = 0usize;
+        let mut transcript_bytes = 0usize;
+        // A FETCH response may continue after a literal on a line that no
+        // longer repeats UID. Retain the owner until a new untagged FETCH
+        // starts; a new one replaces it, so unsolicited interleaving cannot
+        // donate its literal to the requested message.
+        let mut current_fetch_uid = None;
+        let mut pending_fetch_literals = Vec::new();
         loop {
-            let mut line = String::new();
-            if self.reader.read_line(&mut line).await? == 0 {
-                bail!("IMAP connection closed during command");
+            let line = self
+                .read_command_line_limited(MAX_IMAP_RESPONSE_TRANSCRIPT_BYTES)
+                .await?;
+            transcript_bytes = reserve_imap_transcript_budget(transcript_bytes, line.len())?;
+            if is_untagged_fetch_start(&line) {
+                current_fetch_uid = None;
+                pending_fetch_literals.clear();
             }
+            if let Some(uid) = fetch_uid_from_line(&line) {
+                current_fetch_uid = Some(uid);
+                backfill_fetch_literal_uids(&mut literals, &mut pending_fetch_literals, uid);
+            }
+            lines.push(line.clone());
             if let Some(length) = literal_length(&line) {
                 if length > MAX_RAW_MESSAGE_BYTES {
                     bail!("mime_raw_message_too_large");
                 }
+                reserve_imap_literal_budget(
+                    literals.len(),
+                    literal_bytes,
+                    length,
+                    max_literal_bytes,
+                )?;
                 let mut bytes = vec![0; length];
                 self.reader.read_exact(&mut bytes).await?;
-                literal = Some(bytes);
-                let mut tail = String::new();
-                self.reader.read_line(&mut tail).await?;
-                if !tail.trim().is_empty() {
-                    lines.push(tail);
+                literal_bytes += length;
+                let pending = current_fetch_uid.is_none();
+                literals.push(ImapLiteral {
+                    uid: current_fetch_uid,
+                    data_item: literal_data_item(&line),
+                    bytes,
+                });
+                if pending {
+                    pending_fetch_literals.push(literals.len() - 1);
                 }
             }
             if line.starts_with(&tag) {
@@ -2082,16 +3488,170 @@ impl ImapClient {
                 lines.push(line);
                 break;
             }
-            lines.push(line);
         }
-        Ok(ImapResponse { lines, literal })
+        Ok(ImapResponse { lines, literals })
     }
+
+    async fn read_command_line_limited(&mut self, max_bytes: usize) -> Result<String> {
+        let mut bytes = Vec::new();
+        loop {
+            let byte = self
+                .reader
+                .read_u8()
+                .await
+                .context("IMAP connection closed during command")?;
+            if bytes.len() >= max_bytes {
+                bail!("IMAP response line exceeds MIME safety limit");
+            }
+            bytes.push(byte);
+            if byte == b'\n' {
+                return String::from_utf8(bytes).context("IMAP response line is not valid UTF-8");
+            }
+        }
+    }
+}
+
+fn fetch_uid_from_line(line: &str) -> Option<u32> {
+    let bytes = line.as_bytes();
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut index = 0usize;
+    while index + 4 <= bytes.len() {
+        let byte = bytes[index];
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+            index += 1;
+            continue;
+        }
+        if byte == b'"' {
+            quoted = true;
+            index += 1;
+            continue;
+        }
+        if bytes[index..]
+            .get(..4)
+            .is_some_and(|token| token.eq_ignore_ascii_case(b"UID "))
+        {
+            let start = index + 4;
+            let end = bytes[start..]
+                .iter()
+                .position(|byte| !byte.is_ascii_digit())
+                .map(|offset| start + offset)
+                .unwrap_or(bytes.len());
+            return (end > start)
+                .then(|| line[start..end].parse().ok())
+                .flatten();
+        }
+        index += 1;
+    }
+    None
+}
+
+fn is_untagged_fetch_start(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with('*') && trimmed.to_ascii_uppercase().contains(" FETCH ")
+}
+
+fn backfill_fetch_literal_uids(literals: &mut [ImapLiteral], pending: &mut Vec<usize>, uid: u32) {
+    for index in pending.drain(..) {
+        literals[index].uid = Some(uid);
+    }
+}
+
+fn reserve_imap_literal_budget(
+    current_count: usize,
+    current_bytes: usize,
+    next_bytes: usize,
+    max_total_bytes: usize,
+) -> Result<()> {
+    if current_count >= MAX_IMAP_RESPONSE_LITERALS {
+        bail!("IMAP response exceeds the {MAX_IMAP_RESPONSE_LITERALS} literal safety limit");
+    }
+    let total = current_bytes
+        .checked_add(next_bytes)
+        .context("IMAP literal byte count overflow")?;
+    if next_bytes > max_total_bytes || total > max_total_bytes {
+        bail!(
+            "IMAP response literals exceed the {} MiB safety limit",
+            max_total_bytes / 1024 / 1024
+        );
+    }
+    Ok(())
+}
+
+fn reserve_imap_transcript_budget(current_bytes: usize, next_bytes: usize) -> Result<usize> {
+    let total = current_bytes
+        .checked_add(next_bytes)
+        .context("IMAP response transcript size overflow")?;
+    if total > MAX_IMAP_RESPONSE_TRANSCRIPT_BYTES {
+        bail!("IMAP response transcript exceeds MIME safety limit");
+    }
+    Ok(total)
+}
+
+fn literal_data_item(line: &str) -> ImapLiteralItem {
+    let bytes = line.as_bytes();
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut latest = None;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+            index += 1;
+            continue;
+        }
+        if byte == b'"' {
+            quoted = true;
+            index += 1;
+            continue;
+        }
+        let remaining = &bytes[index..];
+        if remaining
+            .get(.."BODYSTRUCTURE".len())
+            .is_some_and(|value| value.eq_ignore_ascii_case(b"BODYSTRUCTURE"))
+        {
+            latest = Some(ImapLiteralItem::BodyStructure);
+            index += "BODYSTRUCTURE".len();
+            continue;
+        }
+        if remaining
+            .get(.."BODY[".len())
+            .is_some_and(|value| value.eq_ignore_ascii_case(b"BODY["))
+        {
+            let end = remaining
+                .iter()
+                .position(|byte| *byte == b']')
+                .map(|offset| index + offset + 1)
+                .unwrap_or(bytes.len());
+            latest = Some(ImapLiteralItem::Body(
+                String::from_utf8_lossy(&bytes[index..end]).into_owned(),
+            ));
+            index = end;
+            continue;
+        }
+        index += 1;
+    }
+    latest.unwrap_or(ImapLiteralItem::Other)
 }
 
 fn literal_length(line: &str) -> Option<usize> {
     let start = line.rfind('{')? + 1;
     let end = line[start..].find('}')? + start;
-    line[start..end].parse().ok()
+    line[start..end].trim_end_matches('+').parse().ok()
 }
 
 fn quote_imap(value: &str) -> String {
@@ -2117,6 +3677,13 @@ fn parse_uid_validity(lines: &[String]) -> Option<u32> {
         let end = line[start..].find(']')? + start;
         line[start..end].trim().parse().ok()
     })
+}
+
+fn verify_mailbox_uid_validity(current: u32, catalogued: i64, action: &str) -> Result<()> {
+    if i64::from(current) != catalogued {
+        bail!("mailbox identity changed; sync the account before {action} this message");
+    }
+    Ok(())
 }
 
 fn parse_uid_flags(lines: &[String]) -> Vec<(u32, bool, bool)> {
@@ -3084,8 +4651,7 @@ fn resolve_inline_images_from_raw(
     mail: &ParsedMessage<'_>,
     raw: &[u8],
 ) -> Result<String> {
-    let lower_html = html.to_ascii_lowercase();
-    let inline_images = collect_inline_images(mail, raw, &lower_html);
+    let inline_images = collect_inline_images(mail, raw, &html);
     for (reference, data_url) in inline_images {
         html = replace_resource_reference(&html, &reference, &data_url)?;
     }
@@ -3095,7 +4661,7 @@ fn resolve_inline_images_from_raw(
 fn collect_inline_images(
     mail: &ParsedMessage<'_>,
     raw: &[u8],
-    lower_html: &str,
+    html: &str,
 ) -> Vec<(String, String)> {
     attachment_part_ids(mail)
         .into_iter()
@@ -3115,9 +4681,7 @@ fn collect_inline_images(
             ]
             .into_iter()
             .flatten()
-            .filter(|reference| {
-                !reference.is_empty() && lower_html.contains(&reference.to_ascii_lowercase())
-            })
+            .filter(|reference| !reference.is_empty() && html_contains_reference(html, reference))
             .collect::<Vec<_>>();
             if references.is_empty() {
                 return None;
@@ -3136,13 +4700,75 @@ fn collect_inline_images(
 }
 
 fn replace_resource_reference(input: &str, reference: &str, replacement: &str) -> Result<String> {
-    let mut output = input.to_owned();
-    for (needle, replacement) in [
-        (format!("\"{reference}\""), format!("\"{replacement}\"")),
-        (format!("'{reference}'"), format!("'{replacement}'")),
-        (format!("url({reference})"), format!("url({replacement})")),
-    ] {
-        output = replace_ascii_case_insensitive_bounded(&output, &needle, &replacement)?;
+    rewrite_html_resource_references(input, reference, Some(replacement))
+}
+
+fn html_contains_reference(html: &str, reference: &str) -> bool {
+    rewrite_html_resource_references(html, reference, None)
+        .map(|output| output != html)
+        .unwrap_or(false)
+}
+
+fn rewrite_html_resource_references(
+    input: &str,
+    reference: &str,
+    replacement: Option<&str>,
+) -> Result<String> {
+    let mut output = String::with_capacity(input.len());
+    let mut cursor = 0;
+    while let Some(offset) = input[cursor..].find('<') {
+        let start = cursor + offset;
+        output.push_str(&input[cursor..start]);
+        let Some(end_offset) = input[start..].find('>') else {
+            output.push_str(&input[start..]);
+            return Ok(output);
+        };
+        let end = start + end_offset + 1;
+        let tag = &input[start..end];
+        output.push_str(&rewrite_resource_references_in_tag(
+            tag,
+            reference,
+            replacement,
+        )?);
+        cursor = end;
+    }
+    output.push_str(&input[cursor..]);
+    if output.len() > MAX_RAW_MESSAGE_BYTES {
+        bail!("mime_resolved_html_too_large");
+    }
+    Ok(output)
+}
+
+fn rewrite_resource_references_in_tag(
+    tag: &str,
+    reference: &str,
+    replacement: Option<&str>,
+) -> Result<String> {
+    let lower = tag.to_ascii_lowercase();
+    let mut output = tag.to_owned();
+    for attribute in ["src", "href", "background", "poster", "data"] {
+        for quote in ['\"', '\''] {
+            let needle = format!("{attribute}={quote}{reference}{quote}");
+            if lower.contains(&needle.to_ascii_lowercase()) {
+                let replacement = replacement
+                    .map(|value| format!("{attribute}={quote}{value}{quote}"))
+                    .unwrap_or_default();
+                output = replace_ascii_case_insensitive_bounded(&output, &needle, &replacement)?;
+                if replacement.is_empty() {
+                    return Ok(String::new());
+                }
+            }
+        }
+    }
+    let url = format!("url({reference})");
+    if lower.contains(&url.to_ascii_lowercase()) {
+        let replacement = replacement
+            .map(|value| format!("url({value})"))
+            .unwrap_or_default();
+        output = replace_ascii_case_insensitive_bounded(&output, &url, &replacement)?;
+        if replacement.is_empty() {
+            return Ok(String::new());
+        }
     }
     Ok(output)
 }
@@ -3370,18 +4996,29 @@ fn has_attachment(mail: &ParsedMessage<'_>) -> bool {
 }
 
 fn attachment_part_ids(mail: &ParsedMessage<'_>) -> Vec<u32> {
+    attachment_part_paths(mail)
+        .into_iter()
+        .map(|(part_id, _)| part_id)
+        .collect()
+}
+
+fn attachment_part_paths(mail: &ParsedMessage<'_>) -> Vec<(u32, Vec<usize>)> {
     let mut attachments = Vec::new();
-    let mut pending = vec![0_u32];
-    while let Some(part_id) = pending.pop() {
+    let mut pending = vec![(0_u32, Vec::new())];
+    while let Some((part_id, path)) = pending.pop() {
         let Some(part) = mail.part(part_id) else {
             continue;
         };
         if is_attachment_part(mail, part) {
-            attachments.push(part_id);
+            attachments.push((part_id, path));
             continue;
         }
         if let PartType::Multipart(children) = &part.body {
-            pending.extend(children.iter().rev().copied());
+            pending.extend(children.iter().enumerate().rev().map(|(index, child)| {
+                let mut child_path = path.clone();
+                child_path.push(index + 1);
+                (*child, child_path)
+            }));
         }
     }
     attachments
@@ -3433,13 +5070,13 @@ fn extract_attachments_from_raw(
     message_id: &str,
     selected_html: Option<&str>,
 ) -> Result<Vec<AttachmentData>> {
-    let candidate_ids = attachment_part_ids(mail);
-    if candidate_ids.len() > MAX_ATTACHMENT_COUNT {
+    let candidate_parts = attachment_part_paths(mail);
+    if candidate_parts.len() > MAX_ATTACHMENT_COUNT {
         bail!("message has more than {MAX_ATTACHMENT_COUNT} attachments");
     }
     let mut attachments = Vec::new();
     let mut decoded_bytes = 0_usize;
-    for part_id in candidate_ids {
+    for (part_id, part_path) in candidate_parts {
         let Some(part) = mail.part(part_id) else {
             continue;
         };
@@ -3479,7 +5116,7 @@ fn extract_attachments_from_raw(
             .is_some_and(|value| value.is_inline())
             || part.content_id().is_some();
         let attachment = Attachment {
-            id: format!("{message_id}:{}", attachments.len()),
+            id: mime_attachment_id(message_id, &part_path),
             message_id: message_id.to_owned(),
             is_potentially_unsafe: is_potentially_unsafe(&filename, &mime_type),
             filename,
@@ -3491,6 +5128,15 @@ fn extract_attachments_from_raw(
         attachments.push(AttachmentData { attachment, bytes });
     }
     Ok(attachments)
+}
+
+fn mime_attachment_id(message_id: &str, path: &[usize]) -> String {
+    let section = if path.is_empty() {
+        "root".to_owned()
+    } else {
+        section_name(path)
+    };
+    format!("{message_id}:mime-v1:{section}")
 }
 
 fn add_decoded_attachment_bytes(total: &mut usize, part_bytes: usize) -> Result<()> {
@@ -3555,11 +5201,6 @@ fn attachment_references(part: &MessagePart<'_>) -> Vec<String> {
         }
     }
     references
-}
-
-fn html_contains_reference(html: &str, reference: &str) -> bool {
-    html.to_ascii_lowercase()
-        .contains(&reference.to_ascii_lowercase())
 }
 
 pub fn safe_attachment_filename(value: &str, index: usize) -> String {
@@ -4036,6 +5677,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn complete_parser_attachment_ids_match_selective_mime_section_ids() {
+        let account = test_account();
+        let raw = concat!(
+            "Date: Tue, 21 Jul 2026 10:00:00 +0000\r\n",
+            "From: sender@example.test\r\nTo: recipient@example.test\r\n",
+            "Subject: Section identity\r\nMIME-Version: 1.0\r\n",
+            "Content-Type: multipart/mixed; boundary=m\r\n\r\n",
+            "--m\r\nContent-Type: text/plain\r\n\r\nBody\r\n",
+            "--m\r\nContent-Type: application/pdf; name=receipt.pdf\r\n",
+            "Content-Disposition: attachment; filename=receipt.pdf\r\n",
+            "Content-Transfer-Encoding: base64\r\n\r\ncGRm\r\n--m--\r\n"
+        );
+        let message = parse_message(&account, "INBOX", 9, &[], raw.as_bytes(), None)
+            .await
+            .unwrap();
+        assert_eq!(message.attachments.len(), 1);
+        assert_eq!(
+            message.attachments[0].attachment.id,
+            format!("{}:mime-v1:2", message.id)
+        );
+    }
+
+    #[tokio::test]
     async fn duplicate_singleton_headers_use_the_first_value_in_every_parse_path() {
         let account = test_account();
         let raw = concat!(
@@ -4136,6 +5800,20 @@ mod tests {
         let html = message.body_html.unwrap();
         assert!(html.contains("a cat remains readable"));
         assert!(html.contains("src=\"data:image/png;base64,"));
+    }
+
+    #[test]
+    fn inline_resource_detection_and_rewriting_ignore_visible_cid_text() {
+        let html = "<p>\"cid:logo\" remains visible</p><img src=\"cid:logo\">";
+        assert!(html_contains_reference(html, "cid:logo"));
+        assert!(!html_contains_reference(
+            "<p>\"cid:logo\" remains visible</p>",
+            "cid:logo"
+        ));
+        let resolved =
+            replace_resource_reference(html, "cid:logo", "data:image/png;base64,AA").unwrap();
+        assert!(resolved.contains("<p>\"cid:logo\" remains visible</p>"));
+        assert!(resolved.contains("src=\"data:image/png;base64,AA\""));
     }
 
     #[tokio::test]
@@ -4535,7 +6213,7 @@ mod tests {
     }
 
     #[test]
-    fn automatic_hydration_fetches_are_read_neutral_for_gmail_and_generic_imap() {
+    fn full_foreground_fetches_are_read_neutral_for_gmail_and_generic_imap() {
         let gmail = AccountDraft {
             email: "person@gmail.com".into(),
             display_name: "Person".into(),
@@ -4581,6 +6259,666 @@ mod tests {
             assert!(command.contains("BODY.PEEK[]"));
             assert!(!command.contains("RFC822"));
         }
+    }
+
+    #[test]
+    fn selective_fetch_commands_are_sectioned_read_neutral_and_never_request_pdf_bodies() {
+        let structure = parse_bodystructure(&[concat!(
+            "* 1 FETCH (BODYSTRUCTURE (((\"TEXT\" \"HTML\" (\"CHARSET\" \"utf-8\") NIL NIL \"QUOTED-PRINTABLE\" 450 10) ",
+            "(\"IMAGE\" \"PNG\" (\"NAME\" \"image001.png\") \"<image001.png@redacted>\" NIL \"BASE64\" 8 NIL (\"INLINE\" (\"FILENAME\" \"image001.png\"))) \"RELATED\" (\"BOUNDARY\" \"related-redacted\")) ",
+            "(\"APPLICATION\" \"PDF\" (\"NAME\" \"claim-documents.pdf\") NIL NIL \"BASE64\" 4 NIL (\"ATTACHMENT\" (\"FILENAME\" \"claim-documents.pdf\"))) \"MIXED\" (\"BOUNDARY\" \"mixed-redacted\")))"
+        ).into()]).unwrap();
+        let plan = selective_plan(&structure).unwrap();
+
+        assert_eq!(
+            plan.text_parts
+                .iter()
+                .map(|part| section_name(&part.part.path))
+                .collect::<Vec<_>>(),
+            vec!["1.1"]
+        );
+        assert_eq!(
+            plan.attachments
+                .iter()
+                .map(|part| section_name(&part.part.path))
+                .collect::<Vec<_>>(),
+            vec!["1.2", "2"]
+        );
+        let commands = plan
+            .text_parts
+            .iter()
+            .flat_map(|part| {
+                [
+                    section_mime_fetch_command(2965, &part.part.path),
+                    section_fetch_command(2965, &part.part.path),
+                ]
+            })
+            .collect::<Vec<_>>();
+        assert!(commands
+            .iter()
+            .all(|command| command.contains("BODY.PEEK[1.1")));
+        assert!(commands
+            .iter()
+            .all(|command| !command.contains("BODY.PEEK[]")
+                && !command.contains("RFC822")
+                && !command.contains("BODY[")));
+        assert!(commands.iter().all(|command| !command.contains("[2]")));
+    }
+
+    #[test]
+    fn top_level_text_reuses_root_headers_and_never_fetches_a_mime_section() {
+        assert_eq!(
+            section_fetch_command(42, &[]),
+            "UID FETCH 42 (BODY.PEEK[TEXT])"
+        );
+        assert_eq!(nested_section_mime_fetch_command(42, &[]), None);
+        assert_eq!(
+            nested_section_mime_fetch_command(42, &[1]),
+            Some("UID FETCH 42 (BODY.PEEK[1.MIME])".into())
+        );
+    }
+
+    #[test]
+    fn recent_refresh_limits_main_folder_selection_and_formats_imap_since_dates() {
+        let mut gmail = test_account();
+        gmail.provider_id = "gmail".into();
+        gmail.archive_mailbox = "[Gmail]/All Mail".into();
+        let plans = refresh_main_mailbox_plans(mailbox_plans(&gmail));
+        assert_eq!(
+            plans.iter().map(|plan| plan.local).collect::<Vec<_>>(),
+            vec!["INBOX", "Sent", "Archive"]
+        );
+        assert_eq!(plans[1].remote, "[Gmail]/Sent Mail");
+        assert_eq!(plans[2].remote, "[Gmail]/All Mail");
+        let cutoff = chrono::DateTime::parse_from_rfc3339("2026-07-15T23:59:59+00:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        let since = imap_since_date(cutoff);
+        assert_eq!(since, "15-Jul-2026");
+        assert_eq!(
+            recent_uid_search_command(&since),
+            "UID SEARCH SINCE 15-Jul-2026"
+        );
+    }
+
+    #[test]
+    fn recent_refresh_is_account_bounded_and_newest_first_with_fair_folder_allocation() {
+        let state = crate::storage::MailboxCatalogState {
+            account_id: "account".into(),
+            mailbox: "INBOX".into(),
+            remote_name: "INBOX".into(),
+            uid_validity: 1,
+            remote_total: 4,
+            historical_complete: false,
+        };
+        let mut work = vec![
+            RecentRefreshWork {
+                plan: MailboxPlan::new("INBOX", "INBOX"),
+                state: state.clone(),
+                uid_validity: 1,
+                uids: recent_uids_newest_first(vec![4, 9, 7]),
+                selected_uids: Vec::new(),
+            },
+            RecentRefreshWork {
+                plan: MailboxPlan::new("Sent", "Sent"),
+                state: state.clone(),
+                uid_validity: 1,
+                uids: recent_uids_newest_first(vec![2, 8]),
+                selected_uids: Vec::new(),
+            },
+            RecentRefreshWork {
+                plan: MailboxPlan::new("Archive", "Archive"),
+                state,
+                uid_validity: 1,
+                uids: recent_uids_newest_first(vec![6]),
+                selected_uids: Vec::new(),
+            },
+        ];
+        allocate_recent_refresh_uids(&mut work, 4);
+
+        assert_eq!(
+            work.iter()
+                .map(|item| item.selected_uids.len())
+                .sum::<usize>(),
+            4
+        );
+        assert_eq!(work[0].selected_uids, vec![9, 7]);
+        assert_eq!(work[1].selected_uids, vec![8]);
+        assert_eq!(work[2].selected_uids, vec![6]);
+    }
+
+    #[test]
+    fn recent_refresh_fetches_only_catalogue_headers_and_sectioned_snippets() {
+        let account = test_account();
+        let fields = catalogue_fetch_fields(&account);
+        let snippet = section_partial_fetch_command(42, &[1, 1], 8192);
+
+        assert!(fields.contains("BODYSTRUCTURE"));
+        assert!(fields.contains("BODY.PEEK[HEADER.FIELDS"));
+        assert!(fields.contains("RFC822.SIZE"));
+        assert!(!fields.contains("BODY.PEEK[]"));
+        assert!(!fields.contains(" RFC822)"));
+        assert_eq!(snippet, "UID FETCH 42 (BODY.PEEK[1.1]<0.8192>)");
+        assert!(!snippet.contains("BODY.PEEK[]"));
+    }
+
+    #[test]
+    fn selective_bodystructure_parser_keeps_provider_signature_html_and_pdf_metadata_separate() {
+        let structure = parse_bodystructure(&[concat!(
+            "* 1 FETCH (BODYSTRUCTURE (((\"TEXT\" \"HTML\" (\"CHARSET\" \"utf-8\") NIL NIL \"QUOTED-PRINTABLE\" 450 10) ",
+            "(\"IMAGE\" \"PNG\" (\"NAME\" \"image001.png\") \"<image001.png@redacted>\" NIL \"BASE64\" 8 NIL (\"INLINE\" (\"FILENAME\" \"image001.png\"))) \"RELATED\") ",
+            "(\"APPLICATION\" \"PDF\" (\"NAME\" \"claim-documents.pdf\") NIL NIL \"BASE64\" 4 NIL (\"ATTACHMENT\" (\"FILENAME\" \"claim-documents.pdf\"))) \"MIXED\"))"
+        ).into()]).unwrap();
+        let plan = selective_plan(&structure).unwrap();
+        let id = "message-2965";
+        let image = attachment_data_from_part(&plan.attachments[0], id, b"Content-Type: image/png\r\nContent-ID: <image001.png@redacted>\r\nContent-Disposition: inline; filename=image001.png\r\n", None, true).unwrap();
+        let pdf = attachment_data_from_part(&plan.attachments[1], id, &[], None, false).unwrap();
+
+        assert!(image.bytes.is_empty());
+        assert_eq!(
+            image.attachment.presentation,
+            AttachmentPresentation::Embedded
+        );
+        assert!(pdf.bytes.is_empty());
+        assert_eq!(pdf.attachment.filename, "claim-documents.pdf");
+        assert_eq!(pdf.attachment.id, "message-2965:mime-v1:2");
+        assert_eq!(
+            pdf.attachment.presentation,
+            AttachmentPresentation::Downloadable
+        );
+    }
+
+    #[test]
+    fn selective_attachment_only_messages_keep_metadata_and_targeted_pdf_bytes() {
+        let structure = parse_bodystructure(&[concat!(
+            "* 1 FETCH (BODYSTRUCTURE (\"APPLICATION\" \"PDF\" (\"NAME\" \"claim-documents.pdf\") NIL NIL \"BASE64\" 4 NIL ",
+            "(\"ATTACHMENT\" (\"FILENAME\" \"claim-documents.pdf\"))))"
+        )
+        .into()])
+        .unwrap();
+        let plan = selective_plan(&structure).unwrap();
+        let data = attachment_data_from_part(
+            &plan.attachments[0],
+            "message-2965",
+            b"Content-Type: application/pdf\r\nContent-Transfer-Encoding: base64\r\nContent-Disposition: attachment; filename=claim-documents.pdf\r\n",
+            Some(b"cGRm".to_vec()),
+            false,
+        )
+        .unwrap();
+
+        assert!(plan.text_parts.is_empty());
+        assert_eq!(plan.attachments.len(), 1);
+        assert_eq!(data.attachment.id, "message-2965:mime-v1:root");
+        assert_eq!(data.attachment.filename, "claim-documents.pdf");
+        assert_eq!(data.bytes, b"pdf");
+    }
+
+    #[test]
+    fn selective_image_only_messages_do_not_require_a_text_part() {
+        let structure = parse_bodystructure(&[concat!(
+            "* 1 FETCH (BODYSTRUCTURE (\"IMAGE\" \"PNG\" (\"NAME\" \"logo.png\") \"<logo@example>\" NIL \"BASE64\" 8 NIL ",
+            "(\"INLINE\" (\"FILENAME\" \"logo.png\"))))"
+        )
+        .into()])
+        .unwrap();
+        let plan = selective_plan(&structure).unwrap();
+        let data =
+            attachment_data_from_part(&plan.attachments[0], "message-1", &[], None, false).unwrap();
+
+        assert!(plan.text_parts.is_empty());
+        assert_eq!(data.attachment.filename, "logo.png");
+        assert_eq!(
+            data.attachment.presentation,
+            AttachmentPresentation::Downloadable
+        );
+    }
+
+    #[test]
+    fn selective_empty_text_filename_remains_a_body_candidate() {
+        let structure = parse_bodystructure(&[concat!(
+            "* 1 FETCH (BODYSTRUCTURE (\"TEXT\" \"HTML\" (\"NAME\" \"\") \"<body@example>\" NIL ",
+            "\"7BIT\" 12 1 NIL (\"INLINE\" (\"FILENAME\" \"\"))))"
+        )
+        .into()])
+        .unwrap();
+        let plan = selective_plan(&structure).unwrap();
+
+        assert_eq!(plan.text_parts.len(), 1);
+        assert!(plan.attachments.is_empty());
+        assert_eq!(plan.text_parts[0].part.mime_type, "text/html");
+    }
+
+    #[test]
+    fn attached_multipart_branch_is_one_downloadable_candidate_not_outer_body_content() {
+        let structure = parse_bodystructure(&[concat!(
+            "* 1 FETCH (BODYSTRUCTURE (((\"TEXT\" \"HTML\" NIL NIL NIL \"7BIT\" 12 1) \"RELATED\" NIL ",
+            "(\"ATTACHMENT\" (\"FILENAME\" \"forwarded.eml\"))) \"MIXED\"))"
+        )
+        .into()])
+        .unwrap();
+        let plan = selective_plan(&structure).unwrap();
+
+        assert!(plan.text_parts.is_empty());
+        assert_eq!(plan.attachments.len(), 1);
+        assert_eq!(plan.attachments[0].part.path, vec![1]);
+        assert_eq!(plan.attachments[0].part.filename(), Some("forwarded.eml"));
+    }
+
+    #[test]
+    fn attached_message_rfc822_keeps_its_outer_disposition_instead_of_descending_into_it() {
+        let structure = parse_bodystructure(&[concat!(
+            "* 1 FETCH (BODYSTRUCTURE (\"MESSAGE\" \"RFC822\" (\"NAME\" \"forwarded.eml\") NIL NIL \"7BIT\" 123 ",
+            "(NIL NIL NIL NIL NIL NIL NIL NIL NIL NIL) (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 5 1) 1 NIL ",
+            "(\"ATTACHMENT\" (\"FILENAME\" \"forwarded.eml\"))))"
+        )
+        .into()])
+        .unwrap();
+        let plan = selective_plan(&structure).unwrap();
+
+        assert!(plan.text_parts.is_empty());
+        assert_eq!(plan.attachments.len(), 1);
+        assert!(plan.attachments[0].part.is_explicit_attachment());
+        assert_eq!(plan.attachments[0].part.filename(), Some("forwarded.eml"));
+    }
+
+    #[test]
+    fn duplicate_inline_references_are_ambiguous_and_remain_downloadable() {
+        let html = "<img src=\"cid:duplicate@example\">";
+        let references = vec!["cid:duplicate@example".to_owned()];
+        let counts = BTreeMap::from([("cid:duplicate@example".to_owned(), 2usize)]);
+
+        assert!(!has_unambiguous_html_reference(html, &references, &counts));
+    }
+
+    #[test]
+    fn selective_part_decoding_preserves_visible_html_cid_data_and_remote_urls() {
+        // The checked-in provider-shaped fixture is the real regression shape:
+        // multipart/mixed -> related, quoted-printable HTML, CID logo, PDF.
+        let fixture = include_str!("../tests/fixtures/provider-signature-inline.eml");
+        let parsed = parse_complete_message(fixture.as_bytes()).unwrap();
+        let html = format!(
+            "{}<img src=\"https://images.example.test/logo.png\">",
+            select_bodies(&parsed).unwrap().html.unwrap()
+        );
+        let resolved = resolve_inline_images_from_raw(html, &parsed, fixture.as_bytes()).unwrap();
+
+        assert!(resolved.contains("Redacted message content"));
+        assert!(resolved.contains("data:image/png;base64,iVBORw0KGgo="));
+        assert!(resolved.contains("https://images.example.test/logo.png"));
+    }
+
+    #[test]
+    fn selective_text_decoding_uses_hardened_charset_transfer_and_flowed_rules() {
+        assert_eq!(
+            decode_mime_part_body(
+                b"Content-Type: text/plain; charset=iso-8859-1\r\nContent-Transfer-Encoding: quoted-printable\r\n",
+                b"caf=E9",
+            )
+            .unwrap(),
+            "café"
+        );
+        assert_eq!(
+            decode_mime_part_body(
+                b"Content-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n",
+                b"PHA+aGVsbG88L3A+",
+            )
+            .unwrap(),
+            "<p>hello</p>"
+        );
+        assert_eq!(
+            decode_mime_part_body(
+                b"Content-Type: text/plain; charset=utf-8; format=flowed; delsp=yes\r\nContent-Transfer-Encoding: 7bit\r\n",
+                b"flowed \r\nline",
+            )
+            .unwrap(),
+            "flowedline"
+        );
+        assert!(decode_mime_part_body(
+            b"Content-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: x-broken\r\n",
+            b"<p>ignored</p>",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn selective_alternative_keeps_plain_fallback_when_html_is_undecodable() {
+        let structure = parse_bodystructure(&[concat!(
+            "* 1 FETCH (BODYSTRUCTURE ((\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 5 1) ",
+            "(\"TEXT\" \"HTML\" NIL NIL NIL \"7BIT\" 8 1) ",
+            "(\"TEXT\" \"HTML\" NIL NIL NIL \"X-BROKEN\" 9 1) \"ALTERNATIVE\"))"
+        )
+        .into()])
+        .unwrap();
+        let plan = selective_plan(&structure).unwrap();
+
+        assert_eq!(
+            plan.text_parts
+                .iter()
+                .map(|part| (part.part.mime_type.as_str(), part.part.path.as_slice()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("text/plain", [1].as_slice()),
+                // The last alternative is attempted first, but a broken
+                // transfer encoding falls back to the previous HTML body.
+                ("text/html", [3].as_slice()),
+                ("text/html", [2].as_slice())
+            ]
+        );
+        assert_eq!(
+            plan.text_parts[1].fallback_group,
+            plan.text_parts[2].fallback_group
+        );
+    }
+
+    #[test]
+    fn selective_related_honors_the_declared_start_root() {
+        let structure = parse_bodystructure(&[concat!(
+            "* 1 FETCH (BODYSTRUCTURE ((\"TEXT\" \"HTML\" NIL \"<wrong>\" NIL \"7BIT\" 5 1) ",
+            "(\"TEXT\" \"PLAIN\" NIL \"<declared-root>\" NIL \"7BIT\" 4 1) ",
+            "\"RELATED\" (\"START\" \"<declared-root>\")))"
+        )
+        .into()])
+        .unwrap();
+        let plan = selective_plan(&structure).unwrap();
+
+        assert_eq!(plan.text_parts.len(), 1);
+        assert_eq!(plan.text_parts[0].part.mime_type, "text/plain");
+        assert_eq!(plan.text_parts[0].part.path, vec![2]);
+    }
+
+    #[test]
+    fn selective_related_without_a_matching_start_uses_its_first_child() {
+        let structure = parse_bodystructure(&[concat!(
+            "* 1 FETCH (BODYSTRUCTURE ((\"TEXT\" \"PLAIN\" NIL \"<first>\" NIL \"7BIT\" 5 1) ",
+            "(\"TEXT\" \"HTML\" NIL \"<second>\" NIL \"7BIT\" 5 1) ",
+            "\"RELATED\" (\"START\" \"<missing>\")))"
+        )
+        .into()])
+        .unwrap();
+        let plan = selective_plan(&structure).unwrap();
+        assert_eq!(plan.text_parts.len(), 1);
+        assert_eq!(plan.text_parts[0].part.path, vec![1]);
+        assert_eq!(plan.text_parts[0].part.mime_type, "text/plain");
+    }
+
+    #[test]
+    fn targeted_attachment_allows_transport_overhead_but_enforces_decoded_limit() {
+        assert!(validate_targeted_attachment_bytes(&vec![0; MAX_ATTACHMENT_BYTES]).is_ok());
+        assert!(validate_targeted_attachment_bytes(&vec![0; MAX_ATTACHMENT_BYTES + 1]).is_err());
+    }
+
+    #[test]
+    fn selective_bodystructure_decodes_extended_rfc2231_filenames() {
+        let structure = parse_bodystructure(&[concat!(
+            "* 1 FETCH (BODYSTRUCTURE (\"APPLICATION\" \"PDF\" (\"NAME*\" ",
+            "\"utf-8''caf%C3%A9.pdf\") NIL NIL \"BASE64\" 4 NIL ",
+            "(\"ATTACHMENT\" (\"FILENAME*\" \"utf-8''caf%C3%A9.pdf\"))))"
+        )
+        .into()])
+        .unwrap();
+        assert_eq!(structure.filename(), Some("café.pdf"));
+    }
+
+    #[test]
+    fn selective_bodystructure_rejects_malformed_and_oversized_parts_before_literal_allocation() {
+        assert!(parse_bodystructure(&["* 1 FETCH (BODYSTRUCTURE (\"TEXT\"".into()]).is_err());
+        assert!(display_literal_limit(0, MAX_DISPLAY_PART_BYTES + 1, "text").is_err());
+        assert!(display_literal_limit(MAX_DISPLAY_TOTAL_BYTES - 10, 11, "text").is_err());
+        assert_eq!(
+            display_literal_limit(0, 1024, "text").unwrap(),
+            MAX_DISPLAY_PART_BYTES
+        );
+    }
+
+    #[test]
+    fn selective_bodystructure_enforces_depth_part_and_attachment_budgets() {
+        let text_leaf = || {
+            ImapBodyValue::List(vec![
+                ImapBodyValue::Atom("TEXT".into()),
+                ImapBodyValue::Atom("PLAIN".into()),
+                ImapBodyValue::Atom("NIL".into()),
+                ImapBodyValue::Atom("NIL".into()),
+                ImapBodyValue::Atom("NIL".into()),
+                ImapBodyValue::Atom("7BIT".into()),
+                ImapBodyValue::Atom("1".into()),
+            ])
+        };
+        let multipart = |children: Vec<ImapBodyValue>| {
+            let mut values = children;
+            values.push(ImapBodyValue::Atom("MIXED".into()));
+            values.push(ImapBodyValue::Atom("NIL".into()));
+            ImapBodyValue::List(values)
+        };
+
+        let mut deeply_nested = text_leaf();
+        for _ in 0..=MAX_MULTIPART_NESTING {
+            deeply_nested = multipart(vec![deeply_nested]);
+        }
+        assert!(bodystructure_part(&deeply_nested, Vec::new())
+            .unwrap_err()
+            .to_string()
+            .contains("mime_multipart_nesting_too_deep"));
+
+        let too_many_parts = multipart((0..MAX_MIME_PARTS).map(|_| text_leaf()).collect());
+        assert!(bodystructure_part(&too_many_parts, Vec::new())
+            .unwrap_err()
+            .to_string()
+            .contains("mime_too_many_parts"));
+
+        let attachment_leaf = || {
+            ImapBodyValue::List(vec![
+                ImapBodyValue::Atom("APPLICATION".into()),
+                ImapBodyValue::Atom("OCTET-STREAM".into()),
+                ImapBodyValue::Atom("NIL".into()),
+                ImapBodyValue::Atom("NIL".into()),
+                ImapBodyValue::Atom("NIL".into()),
+                ImapBodyValue::Atom("BASE64".into()),
+                ImapBodyValue::Atom("1".into()),
+            ])
+        };
+        let too_many_attachments = bodystructure_part(
+            &multipart(
+                (0..=MAX_ATTACHMENT_COUNT)
+                    .map(|_| attachment_leaf())
+                    .collect(),
+            ),
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(selective_plan(&too_many_attachments)
+            .unwrap_err()
+            .to_string()
+            .contains("too many attachments"));
+    }
+
+    #[test]
+    fn bodystructure_transcript_retains_literal_parameters_before_later_header_and_body_literals() {
+        let response = ImapResponse {
+            lines: vec![
+                "* 1 FETCH (BODYSTRUCTURE (\"APPLICATION\" \"PDF\" (\"NAME\" {19}\r\n".into(),
+                ") NIL NIL \"BASE64\" 4 NIL (\"ATTACHMENT\" (\"FILENAME\" {19}\r\n".into(),
+                "))) BODY[HEADER.FIELDS (SUBJECT)] {17}\r\n".into(),
+                " BODY[1] {4}\r\n".into(),
+                ")\r\n".into(),
+                "D0001 OK Fetch complete\r\n".into(),
+            ],
+            literals: vec![
+                ImapLiteral {
+                    uid: Some(1),
+                    data_item: ImapLiteralItem::BodyStructure,
+                    bytes: b"claim-documents.pdf".to_vec(),
+                },
+                ImapLiteral {
+                    uid: Some(1),
+                    data_item: ImapLiteralItem::BodyStructure,
+                    bytes: b"claim-documents.pdf".to_vec(),
+                },
+                ImapLiteral {
+                    uid: Some(1),
+                    data_item: ImapLiteralItem::Body("BODY[HEADER.FIELDS (SUBJECT)]".into()),
+                    bytes: b"Subject: Test\r\n\r\n".to_vec(),
+                },
+                ImapLiteral {
+                    uid: Some(1),
+                    data_item: ImapLiteralItem::Body("BODY[1]".into()),
+                    bytes: b"body".to_vec(),
+                },
+            ],
+        };
+        let structure = parse_bodystructure_response(&response).unwrap();
+
+        assert_eq!(structure.filename(), Some("claim-documents.pdf"));
+        assert_eq!(response.literals.len(), 4);
+        let mut response = response;
+        assert_eq!(
+            response.take_header_literal_for(1).as_deref(),
+            Some(b"Subject: Test\r\n\r\n".as_slice())
+        );
+        assert_eq!(
+            response.take_body_literal_for(1, "1").as_deref(),
+            Some(b"body".as_slice())
+        );
+    }
+
+    #[test]
+    fn header_literal_selection_survives_reverse_order_before_bodystructure_literals() {
+        let mut response = ImapResponse {
+            lines: vec![
+                "* 1 FETCH (BODY[HEADER.FIELDS (SUBJECT)] {17}\r\n".into(),
+                " BODYSTRUCTURE (\"APPLICATION\" \"PDF\" (\"NAME\" {19}\r\n".into(),
+                ") NIL NIL \"BASE64\" 4 NIL (\"ATTACHMENT\" (\"FILENAME\" \"claim-documents.pdf\")))\r\n".into(),
+                "D0001 OK Fetch complete\r\n".into(),
+            ],
+            literals: vec![
+                ImapLiteral {
+                    uid: Some(1),
+                    data_item: ImapLiteralItem::Body("BODY[HEADER.FIELDS (SUBJECT)]".into()),
+                    bytes: b"Subject: Test\r\n\r\n".to_vec(),
+                },
+                ImapLiteral {
+                    uid: Some(1),
+                    data_item: ImapLiteralItem::BodyStructure,
+                    bytes: b"claim-documents.pdf".to_vec(),
+                },
+            ],
+        };
+
+        let structure = parse_bodystructure_response(&response).unwrap();
+        assert_eq!(structure.filename(), Some("claim-documents.pdf"));
+        assert_eq!(
+            response.take_header_literal_for(1).as_deref(),
+            Some(b"Subject: Test\r\n\r\n".as_slice())
+        );
+    }
+
+    #[test]
+    fn bodystructure_locator_ignores_header_literal_text() {
+        let response = ImapResponse {
+            lines: vec![
+                "* 1 FETCH (BODY[HEADER.FIELDS (SUBJECT)] {28}\r\n".into(),
+                " BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 4 1))\r\n".into(),
+            ],
+            literals: vec![ImapLiteral {
+                uid: Some(42),
+                data_item: ImapLiteralItem::Body("BODY[HEADER.FIELDS (SUBJECT)]".into()),
+                bytes: b"Subject: BODYSTRUCTURE\r\n\r\n".to_vec(),
+            }],
+        };
+        let structure = parse_bodystructure_response(&response).unwrap();
+        assert_eq!(structure.mime_type, "text/plain");
+    }
+
+    #[test]
+    fn literal_labels_ignore_body_tokens_inside_quoted_parameters() {
+        assert_eq!(
+            literal_data_item(
+                "* 1 FETCH (BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"NAME\" \"BODY[HEADER]\") NIL NIL \"7BIT\" {4}\r\n"
+            ),
+            ImapLiteralItem::BodyStructure
+        );
+        assert_eq!(
+            literal_data_item("* 1 FETCH (BODYSTRUCTURE NIL BODY[HEADER.FIELDS (SUBJECT)] {4}\r\n"),
+            ImapLiteralItem::Body("BODY[HEADER.FIELDS (SUBJECT)]".into())
+        );
+    }
+
+    #[test]
+    fn literal_selection_requires_the_requested_fetch_uid_and_body_section() {
+        let mut response = ImapResponse {
+            lines: vec![],
+            literals: vec![
+                ImapLiteral {
+                    uid: Some(7),
+                    data_item: ImapLiteralItem::Body("BODY[1]".into()),
+                    bytes: b"unsolicited-other-message".to_vec(),
+                },
+                ImapLiteral {
+                    uid: Some(42),
+                    data_item: ImapLiteralItem::Body("BODY[2]".into()),
+                    bytes: b"unsolicited-other-section".to_vec(),
+                },
+                ImapLiteral {
+                    uid: Some(42),
+                    data_item: ImapLiteralItem::Body("BODY[1]".into()),
+                    bytes: b"requested".to_vec(),
+                },
+            ],
+        };
+        assert_eq!(
+            response.take_body_literal_for(42, "1").as_deref(),
+            Some(b"requested".as_slice())
+        );
+        assert_eq!(response.literals.len(), 2);
+        assert_eq!(
+            fetch_uid_from_line("* 3 FETCH (UID 42 BODY[1] {9}\r\n"),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn uid_after_a_body_literal_backfills_only_that_fetch_response() {
+        let mut literals = vec![ImapLiteral {
+            uid: None,
+            data_item: ImapLiteralItem::Body("BODY[TEXT]".into()),
+            bytes: b"requested-root-body".to_vec(),
+        }];
+        let mut pending = vec![0];
+        backfill_fetch_literal_uids(&mut literals, &mut pending, 42);
+        assert_eq!(literals[0].uid, Some(42));
+        let mut response = ImapResponse {
+            lines: vec![],
+            literals,
+        };
+        assert_eq!(
+            response.take_body_literal_for(42, "TEXT").as_deref(),
+            Some(b"requested-root-body".as_slice())
+        );
+        assert!(is_untagged_fetch_start("* 7 FETCH (BODY[TEXT] {19}\r\n"));
+        assert!(is_untagged_fetch_start("* 8 FETCH (UID 7 BODY[1] {4}\r\n"));
+    }
+
+    #[test]
+    fn aggregate_literal_budget_rejects_many_small_literals_before_allocation() {
+        assert!(reserve_imap_literal_budget(3, 24, 9, 32).is_err());
+        assert!(reserve_imap_literal_budget(MAX_IMAP_RESPONSE_LITERALS, 0, 1, 32).is_err());
+        assert!(reserve_imap_literal_budget(3, 24, 8, 32).is_ok());
+    }
+
+    #[test]
+    fn response_transcript_budget_rejects_bodystructure_growth_before_joining_lines() {
+        assert_eq!(
+            reserve_imap_transcript_budget(MAX_IMAP_RESPONSE_TRANSCRIPT_BYTES - 1, 1).unwrap(),
+            MAX_IMAP_RESPONSE_TRANSCRIPT_BYTES
+        );
+        assert!(reserve_imap_transcript_budget(MAX_IMAP_RESPONSE_TRANSCRIPT_BYTES, 1).is_err());
+    }
+
+    #[test]
+    fn selective_fetch_rejects_recycled_uids_when_catalogue_uidvalidity_differs() {
+        let error = verify_mailbox_uid_validity(8, 7, "opening").unwrap_err();
+        assert!(error.to_string().contains("mailbox identity changed"));
+        assert!(error.to_string().contains("sync the account"));
+        assert!(verify_mailbox_uid_validity(7, 7, "opening").is_ok());
     }
 
     #[test]
