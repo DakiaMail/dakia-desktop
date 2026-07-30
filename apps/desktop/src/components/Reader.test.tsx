@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { MantineProvider } from "@mantine/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import "../i18n";
@@ -187,7 +193,7 @@ describe("Reader unsubscribe action", () => {
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "Forward" }));
     expect(props.onForward).toHaveBeenCalledOnce();
-    expect(props.onForward.mock.calls[0]).toEqual([]);
+    expect(props.onForward).toHaveBeenCalledWith(message);
   });
 
   it("exports the selected message once and reports the saved path", async () => {
@@ -281,7 +287,217 @@ describe("Reader unsubscribe action", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Quick reply" }));
     expect(props.onReply).toHaveBeenCalledOnce();
-    expect(props.onReply.mock.calls[0]).toEqual([]);
+    expect(props.onReply).toHaveBeenCalledWith(message);
+  });
+
+  it("routes actions from an expanded older message to that message", async () => {
+    const older = {
+      ...message,
+      id: "message-older",
+      from_name: "Older sender",
+    };
+    const latest = {
+      ...message,
+      id: "message-latest",
+      from_name: "Latest sender",
+    };
+    vi.mocked(api.content).mockResolvedValue({
+      body_text: "Expanded body",
+      attachments: [],
+    });
+    render(
+      <MantineProvider>
+        <Reader {...props} message={older} messages={[older, latest]} />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Expand message from Older sender" }),
+    );
+    await screen.findByText("Expanded body");
+    fireEvent.click(screen.getByRole("button", { name: "Quick reply" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reply all" }));
+    fireEvent.click(screen.getByRole("button", { name: "Forward" }));
+
+    expect(props.onReply).toHaveBeenCalledWith(older);
+    expect(props.onReplyAll).toHaveBeenCalledWith(older);
+    expect(props.onForward).toHaveBeenCalledWith(older);
+  });
+
+  it("keeps the subject as one heading and compacts it after its sentinel leaves the reader", async () => {
+    const observers: Array<{
+      callback: IntersectionObserverCallback;
+      observe: ReturnType<typeof vi.fn>;
+      disconnect: ReturnType<typeof vi.fn>;
+    }> = [];
+    class MockIntersectionObserver {
+      callback: IntersectionObserverCallback;
+      observe = vi.fn();
+      disconnect = vi.fn();
+      constructor(callback: IntersectionObserverCallback) {
+        this.callback = callback;
+        observers.push(this);
+      }
+    }
+    vi.stubGlobal("IntersectionObserver", MockIntersectionObserver);
+    try {
+      const longSubject =
+        "A subject that stays available while reading a long conversation";
+      const { rerender } = render(
+        <MantineProvider>
+          <Reader {...props} message={{ ...message, subject: longSubject }} />
+        </MantineProvider>,
+      );
+      const heading = screen.getByRole("heading", {
+        level: 1,
+        name: longSubject,
+      });
+      expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
+      expect(heading).not.toHaveAttribute("data-compact");
+      expect(observers).toHaveLength(1);
+
+      act(() => {
+        observers[0].callback(
+          [{ isIntersecting: false } as IntersectionObserverEntry],
+          {} as IntersectionObserver,
+        );
+      });
+      expect(heading).toHaveAttribute("data-compact", "true");
+      expect(heading).toHaveAttribute("title", longSubject);
+
+      rerender(
+        <MantineProvider>
+          <Reader
+            {...props}
+            message={{
+              ...message,
+              id: "message-next",
+              thread_id: "thread-next",
+              subject: "Next conversation",
+            }}
+          />
+        </MantineProvider>,
+      );
+      await waitFor(() =>
+        expect(screen.getByRole("heading", { level: 1 })).not.toHaveAttribute(
+          "data-compact",
+        ),
+      );
+      expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not show a stale attachment panel for embedded signature artwork", async () => {
+    vi.mocked(api.content).mockResolvedValue({
+      body_text: "Signed message",
+      attachments: [
+        {
+          id: "signature-logo",
+          message_id: message.id,
+          filename: "image001.png",
+          mime_type: "image/png",
+          size_bytes: 7_000,
+          is_inline: true,
+          presentation: "embedded",
+          is_potentially_unsafe: false,
+        },
+      ],
+    });
+    render(
+      <MantineProvider>
+        <Reader {...props} message={{ ...message, has_attachments: true }} />
+      </MantineProvider>,
+    );
+
+    await screen.findByText("Signed message");
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("region", { name: "Attachments" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.queryByRole("button", { name: "Save all" })).toBeNull();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: `Collapse message from ${message.from_name || message.from_address}`,
+      }),
+    );
+    expect(screen.queryByLabelText("Has attachments")).toBeNull();
+  });
+
+  it("lists returned downloadable attachments and saves all only when there are multiple", async () => {
+    vi.mocked(api.content).mockResolvedValue({
+      body_text: "Files included",
+      attachments: [
+        {
+          id: "embedded-logo",
+          message_id: message.id,
+          filename: "image001.png",
+          mime_type: "image/png",
+          size_bytes: 7_000,
+          is_inline: true,
+          presentation: "embedded",
+          is_potentially_unsafe: false,
+        },
+        {
+          id: "invoice",
+          message_id: message.id,
+          filename: "invoice.pdf",
+          mime_type: "application/pdf",
+          size_bytes: 12_000,
+          is_inline: false,
+          presentation: "downloadable",
+          is_potentially_unsafe: false,
+        },
+        {
+          id: "attached-inline",
+          message_id: message.id,
+          filename: "diagram.png",
+          mime_type: "image/png",
+          size_bytes: 8_000,
+          is_inline: true,
+          presentation: "both",
+          is_potentially_unsafe: false,
+        },
+      ],
+    });
+    render(
+      <MantineProvider>
+        <Reader {...props} message={{ ...message, has_attachments: true }} />
+      </MantineProvider>,
+    );
+
+    expect(await screen.findByText("invoice.pdf")).toBeVisible();
+    expect(screen.getByText("diagram.png")).toBeVisible();
+    expect(screen.queryByText("image001.png")).toBeNull();
+    expect(screen.getByRole("button", { name: "Save all" })).toBeVisible();
+  });
+
+  it("does not offer Save all for one downloadable attachment", async () => {
+    vi.mocked(api.content).mockResolvedValue({
+      body_text: "One file included",
+      attachments: [
+        {
+          id: "invoice",
+          message_id: message.id,
+          filename: "invoice.pdf",
+          mime_type: "application/pdf",
+          size_bytes: 12_000,
+          is_inline: false,
+          presentation: "downloadable",
+          is_potentially_unsafe: false,
+        },
+      ],
+    });
+    render(
+      <MantineProvider>
+        <Reader {...props} message={{ ...message, has_attachments: true }} />
+      </MantineProvider>,
+    );
+
+    expect(await screen.findByText("invoice.pdf")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Save all" })).toBeNull();
   });
 
   it("opens a conversation on its final message and fetches earlier messages only when expanded", async () => {
@@ -665,37 +881,56 @@ describe("Reader unsubscribe action", () => {
       </MantineProvider>,
     );
 
-    expect(
-      await screen.findByText("Earlier message remains independently visible."),
-    ).toBeVisible();
     const latestMessage = await screen.findByRole("document", {
       name: "Latest Freshdesk reply",
     });
-    const surface = latestMessage.shadowRoot
+    const currentSurface = latestMessage.shadowRoot
       ?.firstElementChild as HTMLElement | null;
-    const root = surface?.shadowRoot;
-    const details = root?.querySelector<HTMLDetailsElement>(
-      "details.dakia-quoted-history",
+    const currentDocument = currentSurface?.shadowRoot;
+    const historyHost = latestMessage.querySelector<HTMLElement>(
+      '[data-dakia-email-surface="history"]',
     );
+    const historySurface = historyHost?.shadowRoot
+      ?.firstElementChild as HTMLElement | null;
+    const historyDocument = historySurface?.shadowRoot;
+    const historyButton = screen.getByRole("button", { name: "Show history" });
 
-    expect(details).not.toBeNull();
-    if (!details) return;
-    const visible = root?.textContent?.replace(details.textContent ?? "", "");
-    expect(visible).toContain("Good afternoon, Customer");
-    expect(visible).toContain("Thank you for letting us know.");
-    expect(visible).not.toContain("Earlier support reply.");
-    expect(details.open).toBe(false);
+    expect(
+      screen.getAllByRole("button", { name: "Show history" }),
+    ).toHaveLength(1);
+    expect(historyButton).toHaveAttribute("aria-expanded", "false");
+    expect(currentDocument?.textContent).toContain("Good afternoon, Customer");
+    expect(currentDocument?.textContent).toContain(
+      "Thank you for letting us know.",
+    );
+    expect(currentDocument?.textContent).not.toContain(
+      "Earlier support reply.",
+    );
+    expect(historyHost?.parentElement).toHaveAttribute("aria-hidden", "true");
 
     for (let cycle = 0; cycle < 2; cycle += 1) {
-      fireEvent.click(details.querySelector("summary")!);
-      expect(details.open).toBe(true);
-      expect(details.textContent).toContain("Earlier support reply.");
+      fireEvent.click(historyButton);
+      expect(historyButton).toHaveAccessibleName("Hide history");
+      expect(historyButton).toHaveAttribute("aria-expanded", "true");
+      expect(historyHost?.parentElement).toHaveAttribute(
+        "aria-hidden",
+        "false",
+      );
+      expect(historyDocument?.textContent).toContain("Earlier support reply.");
+      expect(currentDocument?.textContent).toContain(
+        "Good afternoon, Customer",
+      );
 
-      fireEvent.click(details.querySelector("summary")!);
-      expect(details.open).toBe(false);
+      fireEvent.click(historyButton);
+      expect(historyButton).toHaveAccessibleName("Show history");
+      expect(historyButton).toHaveAttribute("aria-expanded", "false");
+      expect(historyHost?.parentElement).toHaveAttribute("aria-hidden", "true");
+      expect(currentDocument?.textContent).toContain(
+        "Thank you for letting us know.",
+      );
     }
-    expect(api.content).toHaveBeenCalledWith("message-older");
     expect(api.content).toHaveBeenCalledWith("message-latest");
+    expect(api.content).not.toHaveBeenCalledWith("message-older");
   });
 
   it("runs delete from the reader toolbar", () => {

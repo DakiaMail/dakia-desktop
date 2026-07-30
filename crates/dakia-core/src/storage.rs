@@ -33,6 +33,12 @@ const VAULT_NONCE_LEN: usize = 12;
 /// authoritative cache and is intentionally not counted here.
 const MESSAGE_CONTENT_CACHE_MAX_ENTRIES: i64 = 64;
 const MESSAGE_CONTENT_CACHE_MAX_BYTES: i64 = 8 * 1024 * 1024;
+/// Attachment presentation changes when the selected HTML branch changes.
+/// Cached metadata written before this version could only tell us whether a
+/// MIME part was transport-inline, which is not enough to decide whether it
+/// should be shown to the user.
+const ATTACHMENT_PRESENTATION_CACHE_VERSION: &str = "1";
+const ATTACHMENT_PRESENTATION_VERSION: i64 = 1;
 
 #[derive(Clone)]
 pub struct Store {
@@ -157,7 +163,35 @@ pub struct Attachment {
     pub mime_type: String,
     pub size_bytes: i64,
     pub is_inline: bool,
+    /// Whether this part is used by the selected rendered HTML, is available
+    /// for download, or both. `Unknown` is only accepted while reading legacy
+    /// serialized metadata and is invalidated before it reaches callers.
+    #[serde(default)]
+    pub presentation: AttachmentPresentation,
     pub is_potentially_unsafe: bool,
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, sqlx::Type,
+)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "TEXT", rename_all = "snake_case")]
+pub enum AttachmentPresentation {
+    #[default]
+    Unknown,
+    Embedded,
+    Downloadable,
+    Both,
+}
+
+impl AttachmentPresentation {
+    pub fn is_downloadable(self) -> bool {
+        matches!(self, Self::Downloadable | Self::Both)
+    }
+
+    fn is_current(self) -> bool {
+        !matches!(self, Self::Unknown)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -339,10 +373,10 @@ impl Store {
             "CREATE INDEX IF NOT EXISTS messages_account_mailbox_date ON messages(account_id, mailbox, received_at DESC)",
             "CREATE TABLE IF NOT EXISTS mailbox_sync_state (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, initialized_at TEXT NOT NULL, highest_uid INTEGER, uid_validity INTEGER, PRIMARY KEY(account_id, mailbox))",
             "CREATE TABLE IF NOT EXISTS mailbox_action_tombstones (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, uid INTEGER NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox, uid))",
-            "CREATE TABLE IF NOT EXISTS attachments (id TEXT PRIMARY KEY, message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, filename TEXT NOT NULL, mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, is_inline INTEGER NOT NULL DEFAULT 0, is_potentially_unsafe INTEGER NOT NULL DEFAULT 0, data BLOB NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS attachments (id TEXT PRIMARY KEY, message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, filename TEXT NOT NULL, mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, is_inline INTEGER NOT NULL DEFAULT 0, presentation TEXT NOT NULL DEFAULT 'unknown', is_potentially_unsafe INTEGER NOT NULL DEFAULT 0, data BLOB NOT NULL)",
             "CREATE INDEX IF NOT EXISTS attachments_message_id ON attachments(message_id)",
-            "CREATE TABLE IF NOT EXISTS starred_message_bodies (message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, body_text TEXT NOT NULL, body_html TEXT, cached_at TEXT NOT NULL)",
-            "CREATE TABLE IF NOT EXISTS starred_attachment_metadata (id TEXT PRIMARY KEY, message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, filename TEXT NOT NULL, mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, is_inline INTEGER NOT NULL DEFAULT 0, is_potentially_unsafe INTEGER NOT NULL DEFAULT 0)",
+            "CREATE TABLE IF NOT EXISTS starred_message_bodies (message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, body_text TEXT NOT NULL, body_html TEXT, attachment_presentation_version INTEGER NOT NULL DEFAULT 0, cached_at TEXT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS starred_attachment_metadata (id TEXT PRIMARY KEY, message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, filename TEXT NOT NULL, mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, is_inline INTEGER NOT NULL DEFAULT 0, presentation TEXT NOT NULL DEFAULT 'unknown', is_potentially_unsafe INTEGER NOT NULL DEFAULT 0)",
             "CREATE TABLE IF NOT EXISTS message_content_cache (message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, content_state TEXT NOT NULL CHECK(content_state = 'complete'), body_text TEXT NOT NULL, body_html TEXT, unsubscribe_kind TEXT, attachments_json TEXT NOT NULL, byte_size INTEGER NOT NULL CHECK(byte_size >= 0), last_accessed INTEGER NOT NULL)",
             "CREATE INDEX IF NOT EXISTS message_content_cache_lru ON message_content_cache(last_accessed, message_id)",
             "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
@@ -504,6 +538,7 @@ impl Store {
                 .await?;
             }
         }
+        self.migrate_attachment_presentation_metadata().await?;
         if !sync_state_exists {
             sqlx::query("INSERT OR IGNORE INTO mailbox_sync_state(account_id, mailbox, initialized_at) SELECT id, 'INBOX', ? FROM accounts")
                 .bind(Utc::now())
@@ -526,6 +561,64 @@ impl Store {
                 self.rebuild_threads_for_account(&account_id).await?;
             }
         }
+        Ok(())
+    }
+
+    /// Legacy attachment rows only record MIME transport disposition. Rather
+    /// than guessing whether a CID/logo is a user-facing file, discard stale
+    /// attachment metadata and let the next authoritative MIME fetch classify
+    /// the selected HTML branch. This also prevents stale paperclips from
+    /// surviving the schema upgrade.
+    async fn migrate_attachment_presentation_metadata(&self) -> Result<()> {
+        for table in ["attachments", "starred_attachment_metadata"] {
+            let columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
+                sqlx::query_as(&format!("PRAGMA table_info({table})"))
+                    .fetch_all(&self.pool)
+                    .await?;
+            if !columns.iter().any(|column| column.1 == "presentation") {
+                sqlx::query(&format!(
+                    "ALTER TABLE {table} ADD COLUMN presentation TEXT NOT NULL DEFAULT 'unknown'"
+                ))
+                .execute(&self.pool)
+                .await?;
+            }
+        }
+        let starred_body_columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
+            sqlx::query_as("PRAGMA table_info(starred_message_bodies)")
+                .fetch_all(&self.pool)
+                .await?;
+        if !starred_body_columns
+            .iter()
+            .any(|column| column.1 == "attachment_presentation_version")
+        {
+            sqlx::query("ALTER TABLE starred_message_bodies ADD COLUMN attachment_presentation_version INTEGER NOT NULL DEFAULT 0")
+                .execute(&self.pool)
+                .await?;
+        }
+
+        let version: Option<String> = sqlx::query_scalar(
+            "SELECT value FROM app_meta WHERE key = 'attachment_presentation_cache_version'",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        if version.as_deref() == Some(ATTACHMENT_PRESENTATION_CACHE_VERSION) {
+            return Ok(());
+        }
+
+        let mut tx = self.pool.begin().await?;
+        for statement in [
+            "DELETE FROM attachments",
+            "DELETE FROM starred_attachment_metadata",
+            "DELETE FROM message_content_cache",
+            "UPDATE messages SET has_attachments = 0",
+        ] {
+            sqlx::query(statement).execute(&mut *tx).await?;
+        }
+        sqlx::query("INSERT INTO app_meta(key, value) VALUES ('attachment_presentation_cache_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+            .bind(ATTACHMENT_PRESENTATION_CACHE_VERSION)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1357,9 +1450,10 @@ impl Store {
             .await?;
         if let Some(message) = message.as_mut() {
             if let Some((body_text, body_html)) = sqlx::query_as::<_, (String, Option<String>)>(
-                "SELECT body_text, body_html FROM starred_message_bodies WHERE message_id = ?",
+                "SELECT body_text, body_html FROM starred_message_bodies WHERE message_id = ? AND attachment_presentation_version = ?",
             )
             .bind(id)
+            .bind(ATTACHMENT_PRESENTATION_VERSION)
             .fetch_optional(&self.pool)
             .await?
             {
@@ -1407,7 +1501,7 @@ impl Store {
     }
 
     pub async fn starred_attachment_metadata(&self, message_id: &str) -> Result<Vec<Attachment>> {
-        Ok(sqlx::query_as::<_, Attachment>("SELECT id, message_id, filename, mime_type, size_bytes, is_inline, is_potentially_unsafe FROM starred_attachment_metadata WHERE message_id = ? ORDER BY filename, id")
+        Ok(sqlx::query_as::<_, Attachment>("SELECT id, message_id, filename, mime_type, size_bytes, is_inline, presentation, is_potentially_unsafe FROM starred_attachment_metadata WHERE message_id = ? AND presentation IN ('downloadable', 'both') ORDER BY filename, id")
             .bind(message_id)
             .fetch_all(&self.pool)
             .await?)
@@ -1415,11 +1509,83 @@ impl Store {
 
     pub async fn starred_body(&self, message_id: &str) -> Result<Option<(String, Option<String>)>> {
         Ok(sqlx::query_as(
-            "SELECT body_text, body_html FROM starred_message_bodies WHERE message_id = ?",
+            "SELECT body_text, body_html FROM starred_message_bodies WHERE message_id = ? AND attachment_presentation_version = ?",
         )
         .bind(message_id)
+        .bind(ATTACHMENT_PRESENTATION_VERSION)
         .fetch_optional(&self.pool)
         .await?)
+    }
+
+    /// Records the attachment state observed during an authoritative remote
+    /// fetch without changing the message locator, flags, or cached body.
+    /// Returns false when the local message disappeared before the fetch
+    /// completed, preventing a stale provider response from reviving it.
+    pub async fn update_message_attachment_state(
+        &self,
+        message_id: &str,
+        has_attachments: bool,
+    ) -> Result<bool> {
+        let updated = sqlx::query("UPDATE messages SET has_attachments = ? WHERE id = ?")
+            .bind(has_attachments)
+            .bind(message_id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        Ok(updated == 1)
+    }
+
+    /// Promotes freshly fetched content into the durable starred cache only
+    /// while the same local message remains starred. It intentionally does
+    /// not update message flags or any provider identity fields.
+    pub async fn cache_starred_message_content(
+        &self,
+        message_id: &str,
+        content: CachedMessageContent,
+    ) -> Result<bool> {
+        let mut attachments = content.attachments;
+        for attachment in &mut attachments {
+            attachment.message_id = message_id.to_owned();
+        }
+        attachments.retain(|attachment| attachment.presentation.is_downloadable());
+
+        let mut tx = self.pool.begin().await?;
+        let still_flagged: Option<bool> =
+            sqlx::query_scalar("SELECT is_flagged FROM messages WHERE id = ?")
+                .bind(message_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if still_flagged != Some(true) {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        sqlx::query("INSERT INTO starred_message_bodies(message_id, body_text, body_html, attachment_presentation_version, cached_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(message_id) DO UPDATE SET body_text=excluded.body_text, body_html=excluded.body_html, attachment_presentation_version=excluded.attachment_presentation_version, cached_at=excluded.cached_at")
+            .bind(message_id)
+            .bind(&content.body_text)
+            .bind(&content.body_html)
+            .bind(ATTACHMENT_PRESENTATION_VERSION)
+            .bind(Utc::now())
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM starred_attachment_metadata WHERE message_id = ?")
+            .bind(message_id)
+            .execute(&mut *tx)
+            .await?;
+        for attachment in attachments {
+            sqlx::query("INSERT INTO starred_attachment_metadata(id, message_id, filename, mime_type, size_bytes, is_inline, presentation, is_potentially_unsafe) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+                .bind(&attachment.id)
+                .bind(message_id)
+                .bind(&attachment.filename)
+                .bind(&attachment.mime_type)
+                .bind(attachment.size_bytes)
+                .bind(attachment.is_inline)
+                .bind(attachment.presentation)
+                .bind(attachment.is_potentially_unsafe)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(true)
     }
 
     /// Returns a complete non-starred foreground cache entry and promotes it
@@ -1439,8 +1605,22 @@ impl Store {
         let Some((body_text, body_html, unsubscribe_kind, attachments_json)) = cached else {
             return Ok(None);
         };
-        let attachments = serde_json::from_str(&attachments_json)
+        let attachments: Vec<Attachment> = serde_json::from_str(&attachments_json)
             .context("cached attachment metadata is invalid")?;
+        if attachments
+            .iter()
+            .any(|attachment| !attachment.presentation.is_current())
+        {
+            // A legacy `is_inline` bit cannot tell whether a resource was
+            // referenced by the selected HTML branch. Re-fetch instead of
+            // exposing a plausible but incorrect attachment list.
+            sqlx::query("DELETE FROM message_content_cache WHERE message_id = ?")
+                .bind(message_id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            return Ok(None);
+        }
         // Use a monotonic sequence instead of wall-clock time so closely
         // spaced opens still have deterministic LRU ordering.
         sqlx::query(
@@ -1473,6 +1653,7 @@ impl Store {
         for attachment in &mut attachments {
             attachment.message_id = message_id.to_owned();
         }
+        attachments.retain(|attachment| attachment.presentation.is_downloadable());
         let attachments_json = serde_json::to_string(&attachments)?;
         let byte_size = cache_entry_byte_size(
             &content.body_text,
@@ -1580,9 +1761,10 @@ impl Store {
         account_id: AccountId,
         limit: u32,
     ) -> Result<Vec<MailSummary>> {
-        const SQL: &str = "SELECT m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, m.body_text, m.body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, m.classification_signals FROM messages m LEFT JOIN starred_message_bodies b ON b.message_id = m.id WHERE m.account_id = ? AND m.is_flagged = 1 AND b.message_id IS NULL ORDER BY m.received_at DESC LIMIT ?";
+        const SQL: &str = "SELECT m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages m LEFT JOIN starred_message_bodies b ON b.message_id = m.id WHERE m.account_id = ? AND m.is_flagged = 1 AND (b.message_id IS NULL OR b.attachment_presentation_version != ?) ORDER BY m.received_at DESC LIMIT ?";
         Ok(sqlx::query_as::<_, MailSummary>(SQL)
             .bind(account_id.to_string())
+            .bind(ATTACHMENT_PRESENTATION_VERSION)
             .bind(i64::from(limit))
             .fetch_all(&self.pool)
             .await?)
@@ -2289,7 +2471,7 @@ impl Store {
     }
 
     pub async fn attachments(&self, message_id: &str) -> Result<Vec<Attachment>> {
-        sqlx::query_as::<_, Attachment>("SELECT id, message_id, filename, mime_type, size_bytes, is_inline, is_potentially_unsafe FROM attachments WHERE message_id = ? ORDER BY filename COLLATE NOCASE, id")
+        sqlx::query_as::<_, Attachment>("SELECT id, message_id, filename, mime_type, size_bytes, is_inline, presentation, is_potentially_unsafe FROM attachments WHERE message_id = ? AND presentation IN ('downloadable', 'both') ORDER BY filename COLLATE NOCASE, id")
             .bind(message_id)
             .fetch_all(&self.pool)
             .await
@@ -2301,7 +2483,7 @@ impl Store {
         message_id: &str,
         attachment_id: &str,
     ) -> Result<AttachmentData> {
-        let row: (String, String, String, String, i64, bool, bool, Vec<u8>) = sqlx::query_as("SELECT id, message_id, filename, mime_type, size_bytes, is_inline, is_potentially_unsafe, data FROM attachments WHERE message_id = ? AND id = ?")
+        let row: (String, String, String, String, i64, bool, AttachmentPresentation, bool, Vec<u8>) = sqlx::query_as("SELECT id, message_id, filename, mime_type, size_bytes, is_inline, presentation, is_potentially_unsafe, data FROM attachments WHERE message_id = ? AND id = ? AND presentation IN ('downloadable', 'both')")
             .bind(message_id)
             .bind(attachment_id)
             .fetch_one(&self.pool)
@@ -2314,9 +2496,10 @@ impl Store {
                 mime_type: row.3,
                 size_bytes: row.4,
                 is_inline: row.5,
-                is_potentially_unsafe: row.6,
+                presentation: row.6,
+                is_potentially_unsafe: row.7,
             },
-            bytes: row.7,
+            bytes: row.8,
         })
     }
 
@@ -2565,10 +2748,11 @@ async fn persist_message(
         .bind(&message.classification_source).bind(&message.classification_signals)
         .execute(&mut **tx).await?;
     if message.is_flagged && message.content_state == "complete" {
-        sqlx::query("INSERT INTO starred_message_bodies(message_id, body_text, body_html, cached_at) VALUES (?, ?, ?, ?) ON CONFLICT(message_id) DO UPDATE SET body_text=excluded.body_text, body_html=excluded.body_html, cached_at=excluded.cached_at")
+        sqlx::query("INSERT INTO starred_message_bodies(message_id, body_text, body_html, attachment_presentation_version, cached_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(message_id) DO UPDATE SET body_text=excluded.body_text, body_html=excluded.body_html, attachment_presentation_version=excluded.attachment_presentation_version, cached_at=excluded.cached_at")
             .bind(&message.id)
             .bind(&message.body_text)
             .bind(&message.body_html)
+            .bind(ATTACHMENT_PRESENTATION_VERSION)
             .bind(Utc::now())
             .execute(&mut **tx)
             .await?;
@@ -2576,14 +2760,19 @@ async fn persist_message(
             .bind(&message.id)
             .execute(&mut **tx)
             .await?;
-        for attachment in &message.attachments {
-            sqlx::query("INSERT INTO starred_attachment_metadata(id, message_id, filename, mime_type, size_bytes, is_inline, is_potentially_unsafe) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        for attachment in message
+            .attachments
+            .iter()
+            .filter(|attachment| attachment.attachment.presentation.is_downloadable())
+        {
+            sqlx::query("INSERT INTO starred_attachment_metadata(id, message_id, filename, mime_type, size_bytes, is_inline, presentation, is_potentially_unsafe) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
                 .bind(&attachment.attachment.id)
                 .bind(&message.id)
                 .bind(&attachment.attachment.filename)
                 .bind(&attachment.attachment.mime_type)
                 .bind(attachment.attachment.size_bytes)
                 .bind(attachment.attachment.is_inline)
+                .bind(attachment.attachment.presentation)
                 .bind(attachment.attachment.is_potentially_unsafe)
                 .execute(&mut **tx)
                 .await?;
@@ -2869,6 +3058,7 @@ mod tests {
                 mime_type: "application/pdf".into(),
                 size_bytes: 42,
                 is_inline: false,
+                presentation: AttachmentPresentation::Downloadable,
                 is_potentially_unsafe: false,
             }],
         };
@@ -2903,6 +3093,213 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(attachment_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn attachment_presentation_migration_invalidates_starred_body_until_refetch_restores_real_files(
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("dakia.db");
+        let store = Store::open(&database).await.unwrap();
+        let account = AccountDraft {
+            email: "attachment-migration@example.test".into(),
+            display_name: "Attachment migration".into(),
+            provider_id: Some("fastmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("fastmail").unwrap());
+        store.save_account(&account).await.unwrap();
+        let mut legacy = message("Claim", "stale body");
+        legacy.account_id = account.id.to_string();
+        legacy.is_flagged = true;
+        legacy.has_attachments = true;
+        legacy.attachments.push(AttachmentData {
+            attachment: Attachment {
+                id: "legacy-pdf".into(),
+                message_id: legacy.id.clone(),
+                filename: "claim.pdf".into(),
+                mime_type: "application/pdf".into(),
+                size_bytes: 3,
+                is_inline: false,
+                presentation: AttachmentPresentation::Downloadable,
+                is_potentially_unsafe: false,
+            },
+            bytes: b"pdf".to_vec(),
+        });
+        let id = legacy.id.clone();
+        store.upsert_messages(&[legacy.clone()]).await.unwrap();
+        assert!(store.starred_body(&id).await.unwrap().is_some());
+        assert_eq!(
+            store.starred_attachment_metadata(&id).await.unwrap().len(),
+            1
+        );
+
+        // Simulate a database written before attachment presentation metadata
+        // existed, then reopen it so migration follows the production path.
+        sqlx::query("DELETE FROM app_meta WHERE key = 'attachment_presentation_cache_version'")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE starred_message_bodies SET attachment_presentation_version = 0 WHERE message_id = ?")
+            .bind(&id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store.pool.close().await;
+        let store = Store::open(&database).await.unwrap();
+
+        // Durable text survives migration, but the public cache API refuses
+        // to return it with stale attachment metadata.
+        let durable_body: String =
+            sqlx::query_scalar("SELECT body_text FROM starred_message_bodies WHERE message_id = ?")
+                .bind(&id)
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(durable_body, "stale body");
+        assert!(store.starred_body(&id).await.unwrap().is_none());
+        assert!(store
+            .starred_attachment_metadata(&id)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(!store.message(&id).await.unwrap().unwrap().has_attachments);
+
+        // Header-only catalogue publication cannot blank durable starred text
+        // or mark the stale body fresh.
+        let mut catalogue = legacy.clone();
+        catalogue.content_state = "headers_only".into();
+        catalogue.body_text.clear();
+        catalogue.body_html = None;
+        catalogue.has_attachments = false;
+        catalogue.attachments.clear();
+        store.upsert_catalog_messages(&[catalogue]).await.unwrap();
+        let durable_after_catalogue: String =
+            sqlx::query_scalar("SELECT body_text FROM starred_message_bodies WHERE message_id = ?")
+                .bind(&id)
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(durable_after_catalogue, "stale body");
+        assert!(store.starred_body(&id).await.unwrap().is_none());
+
+        // The authoritative fetch path can update exactly this message's
+        // paperclip state and refresh the starred cache without touching flags.
+        assert!(store
+            .update_message_attachment_state(&id, true)
+            .await
+            .unwrap());
+        assert!(store
+            .cache_starred_message_content(
+                &id,
+                CachedMessageContent {
+                    body_text: legacy.body_text.clone(),
+                    body_html: legacy.body_html.clone(),
+                    unsubscribe_kind: legacy.unsubscribe_kind.clone(),
+                    attachments: legacy
+                        .attachments
+                        .iter()
+                        .map(|attachment| attachment.attachment.clone())
+                        .collect(),
+                },
+            )
+            .await
+            .unwrap());
+        assert!(store.message(&id).await.unwrap().unwrap().has_attachments);
+        assert_eq!(
+            store.starred_body(&id).await.unwrap().unwrap().0,
+            "stale body"
+        );
+        assert_eq!(
+            store.starred_attachment_metadata(&id).await.unwrap().len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn authoritative_content_cache_never_revives_an_unstarred_or_missing_message() {
+        let store = Store::in_memory().await.unwrap();
+        let message = message("Current", "preview");
+        let id = message.id.clone();
+        store.upsert_messages(&[message]).await.unwrap();
+        let content = CachedMessageContent {
+            body_text: "authoritative body".into(),
+            body_html: None,
+            unsubscribe_kind: None,
+            attachments: vec![Attachment {
+                id: "foreign-attachment".into(),
+                message_id: "other-message".into(),
+                filename: "claim.pdf".into(),
+                mime_type: "application/pdf".into(),
+                size_bytes: 3,
+                is_inline: false,
+                presentation: AttachmentPresentation::Downloadable,
+                is_potentially_unsafe: false,
+            }],
+        };
+
+        assert!(!store
+            .cache_starred_message_content(&id, content.clone())
+            .await
+            .unwrap());
+        assert!(store.starred_body(&id).await.unwrap().is_none());
+        assert!(!store
+            .update_message_attachment_state("missing-message", true)
+            .await
+            .unwrap());
+
+        store.set_message_flagged(&id, true).await.unwrap();
+        assert!(store
+            .cache_starred_message_content(&id, content)
+            .await
+            .unwrap());
+        let attachment = store
+            .starred_attachment_metadata(&id)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(attachment.message_id, id);
+        assert_eq!(attachment.filename, "claim.pdf");
+    }
+
+    #[tokio::test]
+    async fn cached_legacy_attachment_metadata_is_deleted_instead_of_guessed_from_inline() {
+        let store = Store::in_memory().await.unwrap();
+        let message = message("Legacy", "preview");
+        let id = message.id.clone();
+        store.upsert_messages(&[message]).await.unwrap();
+        sqlx::query("INSERT INTO message_content_cache(message_id, content_state, body_text, body_html, unsubscribe_kind, attachments_json, byte_size, last_accessed) VALUES (?, 'complete', 'old', NULL, NULL, ?, 3, 1)")
+            .bind(&id)
+            .bind(serde_json::json!([{
+                "id": "old-inline",
+                "message_id": id,
+                "filename": "image001.png",
+                "mime_type": "image/png",
+                "size_bytes": 7,
+                "is_inline": true,
+                "is_potentially_unsafe": false
+            }]).to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        assert!(store.cached_message_content(&id).await.unwrap().is_none());
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM message_content_cache WHERE message_id = ?")
+                .bind(&id)
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]
@@ -3049,6 +3446,7 @@ mod tests {
             mime_type: "application/pdf".into(),
             size_bytes: 42,
             is_inline: false,
+            presentation: AttachmentPresentation::Downloadable,
             is_potentially_unsafe: false,
         });
         store
@@ -4602,6 +5000,7 @@ mod tests {
                 mime_type: "application/pdf".into(),
                 size_bytes: 3,
                 is_inline: false,
+                presentation: AttachmentPresentation::Downloadable,
                 is_potentially_unsafe: false,
             },
             bytes: b"pdf".to_vec(),
@@ -4945,6 +5344,7 @@ mod tests {
                 mime_type: "text/plain".into(),
                 size_bytes: 10,
                 is_inline: true,
+                presentation: AttachmentPresentation::Unknown,
                 is_potentially_unsafe: false,
             },
             bytes: b"Sent reply".to_vec(),
@@ -5410,6 +5810,7 @@ mod tests {
                 mime_type: "application/pdf".into(),
                 size_bytes: 4,
                 is_inline: false,
+                presentation: AttachmentPresentation::Downloadable,
                 is_potentially_unsafe: false,
             },
             bytes: vec![1, 2, 3, 4],

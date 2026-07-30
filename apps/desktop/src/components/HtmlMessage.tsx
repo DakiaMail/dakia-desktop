@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { IconChevronDown } from "@tabler/icons-react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import type { RefObject } from "react";
 import { api } from "../api";
 
 type Props = {
@@ -10,6 +12,7 @@ type Props = {
 
 type EmailDocument = {
   source: string;
+  historySource?: string;
   dark: boolean;
 };
 
@@ -76,10 +79,8 @@ function safeUrl(value: string, attribute: string) {
 export function buildEmailDocument(
   html: string,
   darkMode: boolean,
-  historyLabels = { show: "Show history", hide: "Hide history" },
 ): EmailDocument {
   const document = new DOMParser().parseFromString(html, "text/html");
-  const dark = darkMode && supportsDarkAppearance(document);
   document
     .querySelectorAll(blockedElements.join(","))
     .forEach((node) => node.remove());
@@ -130,7 +131,14 @@ export function buildEmailDocument(
     if (!anchor.hasAttribute("tabindex")) anchor.tabIndex = 0;
   }
 
-  collapseQuotedHistory(document, historyLabels);
+  const dark = darkMode && supportsDarkAppearance(document);
+  normalizePathologicalTypography(document);
+  if (dark) normalizeNeutralPresentation(document);
+  collapseEmptySpacers(document);
+  if (!document.body.querySelector("table, img, picture, svg")) {
+    document.body.classList.add("dakia-reader-content");
+  }
+  const history = extractQuotedHistory(document);
 
   const policy = document.createElement("meta");
   policy.httpEquiv = "Content-Security-Policy";
@@ -138,6 +146,19 @@ export function buildEmailDocument(
     "default-src 'none'; script-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'; img-src data: http: https:; style-src 'unsafe-inline' http: https:; font-src data: http: https:;";
   document.head.prepend(policy);
 
+  installCompatibilityStyles(document, dark);
+
+  const historySource = history
+    ? documentSourceWithBody(document, history)
+    : undefined;
+  return {
+    source: documentSource(document),
+    historySource,
+    dark,
+  };
+}
+
+function installCompatibilityStyles(document: Document, dark: boolean) {
   const compatibilityStyles = document.createElement("style");
   compatibilityStyles.textContent = `
     :root { color-scheme: ${dark ? "dark" : "light"}; }
@@ -148,9 +169,16 @@ export function buildEmailDocument(
       background: ${dark ? "#191a19" : "transparent"};
       color: ${dark ? "#d9dedb" : "CanvasText"};
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 16px;
     }
     html { overflow-x: auto; overflow-y: hidden; }
-    body { overflow-wrap: anywhere; overflow-y: hidden; }
+    body {
+      box-sizing: border-box;
+      padding: 20px;
+      overflow-wrap: anywhere;
+      overflow-y: hidden;
+    }
+    body.dakia-reader-content > * { max-width: 72ch; }
     img { max-width: 100%; height: auto; }
     table { max-width: 100%; }
     pre { white-space: pre-wrap; }
@@ -159,41 +187,24 @@ export function buildEmailDocument(
       cursor: pointer;
       text-decoration: underline;
     }
-    details.dakia-quoted-history {
-      display: block !important;
-      visibility: visible !important;
-      opacity: 1 !important;
-      margin-top: 1em;
-    }
-    details.dakia-quoted-history > summary {
-      display: list-item !important;
-      visibility: visible !important;
-      opacity: 1 !important;
-      color: #2474c6;
-      cursor: pointer;
-      font: 600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      list-style-position: inside;
-    }
-    details.dakia-quoted-history[open] .dakia-history-show,
-    details.dakia-quoted-history:not([open]) .dakia-history-hide {
-      display: none;
-    }
-    details.dakia-quoted-history:not([open]) > .dakia-history-content {
-      display: none !important;
-    }
-    .dakia-history-content { margin-top: .75em; }
   `;
   document.head.append(compatibilityStyles);
-  return {
-    source: `<!doctype html>${document.documentElement.outerHTML}`,
-    dark,
-  };
 }
 
-function collapseQuotedHistory(
-  document: Document,
-  labels: { show: string; hide: string },
-) {
+function documentSource(document: Document) {
+  return `<!doctype html>${document.documentElement.outerHTML}`;
+}
+
+function documentSourceWithBody(document: Document, content: HTMLElement) {
+  const historyDocument = new DOMParser().parseFromString(
+    documentSource(document),
+    "text/html",
+  );
+  historyDocument.body.replaceChildren(content.cloneNode(true));
+  return documentSource(historyDocument);
+}
+
+function extractQuotedHistory(document: Document) {
   const candidate =
     [
       ...document.querySelectorAll<HTMLElement>(
@@ -213,56 +224,17 @@ function collapseQuotedHistory(
         Node.DOCUMENT_POSITION_PRECEDING) !==
         0)
   ) {
-    if (outlookHeader.closest("details.dakia-quoted-history")) return;
     const boundary = outlookQuoteBoundary(outlookHeader);
-    if (!hasMeaningfulFollowingContent(boundary)) return;
+    if (!hasMeaningfulFollowingContent(boundary)) return null;
     outlookBoundary = boundary;
-  } else if (!candidate || candidate.closest("details.dakia-quoted-history")) {
-    return;
+  } else if (!candidate) {
+    return null;
   }
 
-  const details = document.createElement("details");
-  details.className = "dakia-quoted-history";
-  details.style.setProperty("all", "revert", "important");
-  details.style.setProperty("display", "block", "important");
-  details.style.setProperty("visibility", "visible", "important");
-  details.style.setProperty("opacity", "1", "important");
-  details.style.setProperty("position", "static", "important");
-  details.style.setProperty("inset", "auto", "important");
-  details.style.setProperty("transform", "none", "important");
-  details.style.setProperty("clip", "auto", "important");
-  details.style.setProperty("clip-path", "none", "important");
-  details.style.setProperty("content-visibility", "visible", "important");
-  details.style.setProperty("pointer-events", "auto", "important");
-  details.style.setProperty("overflow", "visible", "important");
-  details.style.setProperty("margin", "1em 0 0", "important");
-  const summary = document.createElement("summary");
-  summary.style.setProperty("all", "revert", "important");
-  summary.style.setProperty("display", "list-item", "important");
-  summary.style.setProperty("visibility", "visible", "important");
-  summary.style.setProperty("opacity", "1", "important");
-  summary.style.setProperty("position", "static", "important");
-  summary.style.setProperty("inset", "auto", "important");
-  summary.style.setProperty("transform", "none", "important");
-  summary.style.setProperty("clip", "auto", "important");
-  summary.style.setProperty("clip-path", "none", "important");
-  summary.style.setProperty("content-visibility", "visible", "important");
-  summary.style.setProperty("pointer-events", "auto", "important");
-  summary.style.setProperty("overflow", "visible", "important");
-  summary.style.setProperty("width", "fit-content", "important");
-  summary.style.setProperty("height", "auto", "important");
-  const show = document.createElement("span");
-  show.className = "dakia-history-show";
-  show.textContent = labels.show;
-  const hide = document.createElement("span");
-  hide.className = "dakia-history-hide";
-  hide.textContent = labels.hide;
-  summary.append(show, hide);
   const content = document.createElement("div");
   content.className = "dakia-history-content";
 
   if (outlookBoundary) {
-    outlookBoundary.before(details);
     let node: Node | null = outlookBoundary;
     while (node) {
       const next: Node | null = node.nextSibling;
@@ -280,16 +252,14 @@ function collapseQuotedHistory(
       nodes.push(node);
       node = node.nextElementSibling;
     }
-    candidate.before(details);
     nodes.forEach((item) => content.append(item));
   } else if (candidate) {
     const nodes = contiguousQuotedNodes(candidate);
     const citation = precedingCitation(nodes[0] as HTMLElement);
-    nodes[0].before(details);
     if (citation) content.append(citation);
     nodes.forEach((node) => content.append(node));
   }
-  details.append(summary, content);
+  return content.childNodes.length ? content : null;
 }
 
 function contiguousQuotedNodes(candidate: HTMLElement) {
@@ -406,57 +376,250 @@ function isCitationLine(value: string) {
   return /^On\s.+(?:,\s*)?wrote:\s*$/i.test(value.replace(/\s+/g, " ").trim());
 }
 
+type ColorRole = "background" | "foreground";
+
+function normalizeNeutralPresentation(document: Document) {
+  for (const element of document.querySelectorAll<HTMLElement>("*")) {
+    for (const attribute of ["bgcolor", "color"] as const) {
+      const value = element.getAttribute(attribute);
+      if (!value) continue;
+      const normalized = darkNeutralColor(
+        value,
+        attribute === "bgcolor" ? "background" : "foreground",
+      );
+      if (normalized) element.setAttribute(attribute, normalized);
+    }
+    const style = element.getAttribute("style");
+    if (style) element.setAttribute("style", normalizePresentationStyle(style));
+  }
+  for (const style of document.querySelectorAll("style")) {
+    style.textContent = normalizePresentationStyle(style.textContent ?? "");
+  }
+}
+
+function normalizePathologicalTypography(document: Document) {
+  const style = document.body.getAttribute("style");
+  if (style) document.body.setAttribute("style", capFontSizes(style));
+}
+
+function normalizePresentationStyle(style: string) {
+  const colorDeclarations =
+    /((?:^|[;{])\s*)((?:color|background(?:-color)?))(\s*:\s*)([^;}]+)/gi;
+  return style.replace(
+    colorDeclarations,
+    (
+      match,
+      leading: string,
+      property: string,
+      colon: string,
+      value: string,
+    ) => {
+      if (/\b(?:url|gradient)\s*\(/i.test(value)) return match;
+      const role: ColorRole = /^background/i.test(property)
+        ? "background"
+        : "foreground";
+      return `${leading}${property}${colon}${replaceNeutralColors(value, role)}`;
+    },
+  );
+}
+
+function capFontSizes(value: string) {
+  return value.replace(
+    /(font-size\s*:\s*)(-?\d+(?:\.\d+)?)px/gi,
+    (match, prefix: string, size: string) =>
+      Number(size) > 48 ? `${prefix}32px` : match,
+  );
+}
+
+function replaceNeutralColors(value: string, role: ColorRole) {
+  return value.replace(
+    /#(?:[\da-f]{3}|[\da-f]{6})\b|rgba?\([^)]*\)|\b(?:white|black|gray|grey)\b/gi,
+    (color) => darkNeutralColor(color, role) ?? color,
+  );
+}
+
+function darkNeutralColor(value: string, role: ColorRole) {
+  const rgb = parseRgb(value);
+  if (!rgb || Math.max(...rgb) - Math.min(...rgb) > 18) return null;
+  const luminance = (rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722) / 255;
+  if (role === "background") {
+    if (luminance > 0.72) return "#191a19";
+    if (luminance > 0.32) return "#242625";
+    return null;
+  }
+  if (luminance < 0.55) return "#d9dedb";
+  return null;
+}
+
+function parseRgb(value: string): [number, number, number] | null {
+  const normalized = value
+    .trim()
+    .replace(/\s*!important\s*$/i, "")
+    .toLowerCase();
+  if (normalized === "white") return [255, 255, 255];
+  if (normalized === "black") return [0, 0, 0];
+  if (normalized === "gray" || normalized === "grey") return [128, 128, 128];
+  const hex = normalized.match(/^#([\da-f]{3}|[\da-f]{6})$/i)?.[1];
+  if (hex) {
+    const expanded =
+      hex.length === 3 ? [...hex].map((part) => part + part).join("") : hex;
+    return [
+      Number.parseInt(expanded.slice(0, 2), 16),
+      Number.parseInt(expanded.slice(2, 4), 16),
+      Number.parseInt(expanded.slice(4, 6), 16),
+    ];
+  }
+  const channels = normalized.match(
+    /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i,
+  );
+  if (!channels) return null;
+  const rgb = channels.slice(1, 4).map(Number);
+  return rgb.every((channel) => channel >= 0 && channel <= 255)
+    ? (rgb as [number, number, number])
+    : null;
+}
+
+function collapseEmptySpacers(document: Document) {
+  for (const row of [
+    ...document.querySelectorAll<HTMLTableRowElement>("tr"),
+  ].reverse()) {
+    if (isEmptySpacerRow(row)) row.remove();
+  }
+  for (const element of [
+    ...document.querySelectorAll<HTMLElement>(
+      "[height], [style], [class], [id], p",
+    ),
+  ].reverse()) {
+    const style = element.getAttribute("style") ?? "";
+    const hasSpacerSignal =
+      element.hasAttribute("height") || /\b(?:min-)?height\s*:/i.test(style);
+    const bareEmptyParagraph =
+      element.localName === "p" &&
+      !element.id &&
+      !element.classList.length &&
+      !style &&
+      !element.hasAttribute("height");
+    if (element.matches("td, th, tr")) continue;
+    if (
+      (!hasSpacerSignal && !bareEmptyParagraph) ||
+      hasMeaningfulSpacerContent(element) ||
+      ((element.id || element.classList.length) && !isSpacerElement(element))
+    ) {
+      continue;
+    }
+    element.remove();
+  }
+}
+
+function isEmptySpacerRow(row: HTMLTableRowElement) {
+  if (hasMeaningfulSpacerContent(row)) return false;
+  const cells = [
+    ...row.querySelectorAll<HTMLElement>(":scope > td, :scope > th"),
+  ];
+  if (!cells.length) return false;
+  return (
+    isSpacerElement(row) ||
+    cells.every((cell) => {
+      const style = cell.getAttribute("style") ?? "";
+      return (
+        (isSpacerElement(cell) || (!cell.id && !cell.classList.length)) &&
+        (cell.hasAttribute("height") ||
+          /\b(?:min-)?height\s*:/i.test(style) ||
+          isSpacerElement(cell))
+      );
+    })
+  );
+}
+
+function isSpacerElement(element: HTMLElement) {
+  return [...element.classList].some((className) =>
+    /(?:^|[-_])spacer(?:$|[-_])/i.test(className),
+  );
+}
+
+function hasMeaningfulSpacerContent(element: HTMLElement) {
+  if ((element.textContent ?? "").replace(/[\s\u00a0]/g, "")) return true;
+  if (element.querySelector("img, picture, svg, video, canvas, iframe, table"))
+    return true;
+  const style = element.getAttribute("style") ?? "";
+  return (
+    /\b(?:border(?:-[a-z]+)?|background(?:-color|-image)?)\s*:/i.test(style) ||
+    element.hasAttribute("background") ||
+    element.hasAttribute("bgcolor")
+  );
+}
+
 function supportsDarkAppearance(document: Document) {
+  if (document.querySelector("[background]")) return false;
   if (
-    document.querySelector(
-      "style, table, img, picture, svg, [background], [bgcolor], [color]",
+    [...document.querySelectorAll("style")].some((element) =>
+      /\b(?:background-image|url|gradient)\s*\(/i.test(
+        element.textContent ?? "",
+      ),
     )
   ) {
     return false;
   }
-  return ![...document.querySelectorAll("*")].some((element) =>
-    /\b(?:background(?:-color|-image)?|color)\s*:/i.test(
-      element.getAttribute("style") ?? "",
-    ),
-  );
+  for (const element of document.querySelectorAll<HTMLElement>(
+    "[bgcolor], [style]",
+  )) {
+    const style = element.getAttribute("style") ?? "";
+    if (/\b(?:background-image|url|gradient)\s*\(/i.test(style)) return false;
+    const background =
+      element.getAttribute("bgcolor") ??
+      style.match(/\bbackground(?:-color)?\s*:\s*([^;]+)/i)?.[1];
+    if (background && isExplicitDarkColor(background)) return false;
+  }
+  return !hasAmbiguousPalette(document);
 }
 
-export function HtmlMessage({
-  html,
-  title,
-  showHistoryLabel,
-  hideHistoryLabel,
-}: Props) {
-  const host = useRef<HTMLDivElement>(null);
-  const [darkMode, setDarkMode] = useState(
-    () => document.documentElement.dataset.mantineColorScheme === "dark",
-  );
-  const email = useMemo(
-    () =>
-      buildEmailDocument(html, darkMode, {
-        show: showHistoryLabel,
-        hide: hideHistoryLabel,
-      }),
-    [darkMode, hideHistoryLabel, html, showHistoryLabel],
-  );
+function hasAmbiguousPalette(document: Document) {
+  const declarations = /\b(?:color|background(?:-color)?)\s*:\s*([^;}]+)/gi;
+  const values = [
+    ...[...document.querySelectorAll<HTMLElement>("[style]")].map(
+      (element) => element.getAttribute("style") ?? "",
+    ),
+    ...[...document.querySelectorAll("style")].map(
+      (element) => element.textContent ?? "",
+    ),
+  ];
+  return values.some((value) => {
+    for (const declaration of value.matchAll(declarations)) {
+      const palette = declaration[1].trim();
+      if (
+        /\b(?:var|hsla?|transparent)\s*\(/i.test(palette) ||
+        /\btransparent\b/i.test(palette) ||
+        /\brgb\(\s*\d+\s+\d+/i.test(palette)
+      ) {
+        return true;
+      }
+      const alpha = palette.match(
+        /\brgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*([\d.]+)/i,
+      )?.[1];
+      if (alpha && Number(alpha) < 1) return true;
+    }
+    return false;
+  });
+}
 
-  useEffect(() => {
-    const root = document.documentElement;
-    const updateDarkMode = () => {
-      setDarkMode(root.dataset.mantineColorScheme === "dark");
-    };
-    const observer = new MutationObserver(updateDarkMode);
-    observer.observe(root, {
-      attributes: true,
-      attributeFilter: ["data-mantine-color-scheme"],
-    });
-    updateDarkMode();
-    return () => observer.disconnect();
-  }, []);
+function isExplicitDarkColor(value: string) {
+  const rgb = parseRgb(value);
+  if (!rgb) return false;
+  return (rgb[0] + rgb[1] + rgb[2]) / 3 < 60;
+}
 
+function useShadowEmailDocument(
+  host: RefObject<HTMLDivElement | null>,
+  source?: string,
+  slotLightDom = false,
+) {
   useEffect(() => {
     const element = host.current;
     if (!element) return;
+    if (!source) {
+      element.replaceChildren();
+      return;
+    }
     const outerShadow =
       element.shadowRoot ?? element.attachShadow({ mode: "open" });
     const surface = window.document.createElement("div");
@@ -472,14 +635,18 @@ export function HtmlMessage({
       "transform:none!important",
     ].join(";");
     const shadow = surface.attachShadow({ mode: "open" });
-    const parsedDocument = new DOMParser().parseFromString(
-      email.source,
-      "text/html",
-    );
+    const parsedDocument = new DOMParser().parseFromString(source, "text/html");
     const root = parsedDocument.documentElement;
     root.querySelector('meta[http-equiv="Content-Security-Policy"]')?.remove();
     shadow.replaceChildren(root);
-    outerShadow.replaceChildren(surface);
+    if (slotLightDom) {
+      outerShadow.replaceChildren(
+        surface,
+        window.document.createElement("slot"),
+      );
+    } else {
+      outerShadow.replaceChildren(surface);
+    }
 
     const activateLink = (event: Event) => {
       if (event.type === "keydown" && (event as KeyboardEvent).key !== "Enter")
@@ -515,8 +682,7 @@ export function HtmlMessage({
       } catch {
         return;
       }
-      const target = shadow.getElementById(id);
-      target?.scrollIntoView({ block: "nearest" });
+      shadow.getElementById(id)?.scrollIntoView({ block: "nearest" });
     };
     shadow.addEventListener("click", activateLink, true);
     shadow.addEventListener("auxclick", activateLink, true);
@@ -526,7 +692,44 @@ export function HtmlMessage({
       shadow.removeEventListener("auxclick", activateLink, true);
       shadow.removeEventListener("keydown", activateLink, true);
     };
-  }, [email.source]);
+  }, [host, slotLightDom, source]);
+}
+
+export function HtmlMessage({
+  html,
+  title,
+  showHistoryLabel,
+  hideHistoryLabel,
+}: Props) {
+  const host = useRef<HTMLDivElement>(null);
+  const historyHost = useRef<HTMLDivElement>(null);
+  const historyId = useId();
+  const [historyVisible, setHistoryVisible] = useState(false);
+  const [darkMode, setDarkMode] = useState(
+    () => document.documentElement.dataset.mantineColorScheme === "dark",
+  );
+  const email = useMemo(
+    () => buildEmailDocument(html, darkMode),
+    [darkMode, html],
+  );
+
+  useEffect(() => {
+    const root = document.documentElement;
+    const updateDarkMode = () => {
+      setDarkMode(root.dataset.mantineColorScheme === "dark");
+    };
+    const observer = new MutationObserver(updateDarkMode);
+    observer.observe(root, {
+      attributes: true,
+      attributeFilter: ["data-mantine-color-scheme"],
+    });
+    updateDarkMode();
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => setHistoryVisible(false), [html]);
+  useShadowEmailDocument(host, email.source, true);
+  useShadowEmailDocument(historyHost, email.historySource);
 
   return (
     <div
@@ -535,6 +738,49 @@ export function HtmlMessage({
       role="document"
       aria-label={title}
       style={{ contain: "layout paint", isolation: "isolate" }}
-    />
+    >
+      {email.historySource && (
+        <div style={{ marginTop: 8 }}>
+          <button
+            type="button"
+            className="html-message-history-toggle"
+            aria-expanded={historyVisible}
+            aria-controls={historyId}
+            onClick={() => setHistoryVisible((visible) => !visible)}
+            style={{
+              alignItems: "center",
+              background: "transparent",
+              border: 0,
+              borderRadius: 8,
+              color: "inherit",
+              cursor: "pointer",
+              display: "inline-flex",
+              font: "inherit",
+              fontWeight: 600,
+              gap: 7,
+              minHeight: 44,
+              padding: "8px 10px",
+            }}
+          >
+            <IconChevronDown
+              size={18}
+              aria-hidden="true"
+              style={{
+                transform: historyVisible ? "rotate(180deg)" : "rotate(0deg)",
+                transition: "transform 120ms ease",
+              }}
+            />
+            {historyVisible ? hideHistoryLabel : showHistoryLabel}
+          </button>
+          <div
+            id={historyId}
+            aria-hidden={!historyVisible}
+            style={{ display: historyVisible ? "block" : "none" }}
+          >
+            <div ref={historyHost} data-dakia-email-surface="history" />
+          </div>
+        </div>
+      )}
+    </div>
   );
 }

@@ -1164,7 +1164,147 @@ describe("App read state", () => {
       ),
     );
     expect(mocks.api.content).toHaveBeenCalledTimes(1);
-    expect(mocks.api.content).toHaveBeenCalledWith("message-1");
+    expect(mocks.api.content).toHaveBeenCalledWith("message-2");
+  });
+
+  it("replies and forwards the expanded older message instead of the thread latest message", async () => {
+    const older = {
+      ...mocks.message,
+      id: "older-message",
+      subject: "Older question",
+      from_name: "Older sender",
+      from_address: "older@example.com",
+      received_at: "2026-07-19T09:00:00Z",
+    };
+    const latest = {
+      ...mocks.message,
+      id: "latest-message",
+      subject: "Latest answer",
+      from_name: "Latest sender",
+      from_address: "latest@example.com",
+      received_at: "2026-07-19T10:00:00Z",
+    };
+    mocks.api.search.mockResolvedValue({
+      conversations: groupMessages([older, latest]),
+      nextCursor: null,
+    });
+    mocks.api.content.mockImplementation(async (messageId) => ({
+      body_text:
+        messageId === older.id ? "Older full body" : "Latest full body",
+      attachments: [],
+    }));
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(
+      (await screen.findByText("Latest answer")).closest("button")!,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Expand message from Older sender",
+      }),
+    );
+    await screen.findByText("Older full body");
+    mocks.openComposeWindow.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Quick reply" }));
+
+    await waitFor(() =>
+      expect(mocks.openComposeWindow).toHaveBeenCalledWith(
+        expect.objectContaining({
+          accountId: "account-1",
+          to: "Older sender <older@example.com>",
+          subject: "Re: Older question",
+        }),
+      ),
+    );
+    expect(mocks.api.content).toHaveBeenLastCalledWith(older.id);
+
+    mocks.openComposeWindow.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Forward" }));
+    await waitFor(() =>
+      expect(mocks.openComposeWindow).toHaveBeenCalledWith(
+        expect.objectContaining({
+          accountId: "account-1",
+          subject: "Fwd: Older question",
+          contextMessageIds: [older.id],
+        }),
+      ),
+    );
+  });
+
+  it("keeps an expanded sent message as the reply provenance", async () => {
+    const receivedA = {
+      ...mocks.message,
+      id: "received-a",
+      subject: "Received A",
+      from_name: "Sender A",
+      from_address: "sender-a@example.com",
+      message_id: "<received-a@example.com>",
+      received_at: "2026-07-19T09:00:00Z",
+    };
+    const sentB = {
+      ...mocks.message,
+      id: "sent-b",
+      subject: "Sent B",
+      from_name: "Me",
+      from_address: "me@example.com",
+      to_addresses: "sender-a@example.com",
+      message_id: "<sent-b@example.com>",
+      reference_ids: "<received-a@example.com>",
+      received_at: "2026-07-19T10:00:00Z",
+    };
+    const receivedC = {
+      ...mocks.message,
+      id: "received-c",
+      subject: "Received C",
+      from_name: "Sender C",
+      from_address: "sender-c@example.com",
+      message_id: "<received-c@example.com>",
+      received_at: "2026-07-19T11:00:00Z",
+    };
+    mocks.api.search.mockResolvedValue({
+      conversations: groupMessages([receivedA, sentB, receivedC]),
+      nextCursor: null,
+    });
+    mocks.api.content.mockImplementation(async (messageId) => ({
+      body_text:
+        messageId === sentB.id ? "Sent B full body" : "Received message body",
+      attachments: [],
+    }));
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    fireEvent.click((await screen.findByText("Received C")).closest("button")!);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Expand message from Me" }),
+    );
+    await screen.findByText("Sent B full body");
+
+    for (const action of ["Quick reply", "Reply all"]) {
+      mocks.openComposeWindow.mockClear();
+      mocks.api.content.mockClear();
+      fireEvent.click(screen.getByRole("button", { name: action }));
+      await waitFor(() =>
+        expect(mocks.openComposeWindow).toHaveBeenCalledWith(
+          expect.objectContaining({
+            accountId: "account-1",
+            subject: "Re: Sent B",
+            inReplyTo: "<sent-b@example.com>",
+            references: "<received-a@example.com> <sent-b@example.com>",
+            body: expect.stringContaining("Sent B full body"),
+            bodyHtml: expect.stringContaining("Sent B full body"),
+            contextMessageIds: ["received-a", "sent-b", "received-c"],
+          }),
+        ),
+      );
+      expect(mocks.api.content).toHaveBeenCalledWith("sent-b");
+    }
   });
 
   it("opens Reply All with Reply-To and deduplicated non-self Cc recipients", async () => {

@@ -1074,6 +1074,11 @@ async fn message_attachments(
         .await?
         .attachments
         .into_iter()
+        // `is_inline` describes MIME transport, not whether a part belongs in
+        // a user-facing attachment list. Never let an embedded CID resource
+        // escape through a command even if an older cache or parser supplied
+        // it here.
+        .filter(|item| is_downloadable_attachment(&item.attachment))
         .map(|item| item.attachment)
         .collect())
 }
@@ -1099,7 +1104,10 @@ async fn message_content(
                 .store
                 .starred_attachment_metadata(&message_id)
                 .await
-                .map_err(error)?,
+                .map_err(error)?
+                .into_iter()
+                .filter(is_downloadable_attachment)
+                .collect(),
         });
     }
     if let Some(cached) = state
@@ -1112,7 +1120,11 @@ async fn message_content(
             body_text: cached.body_text,
             body_html: cached.body_html,
             unsubscribe_kind: cached.unsubscribe_kind,
-            attachments: cached.attachments,
+            attachments: cached
+                .attachments
+                .into_iter()
+                .filter(is_downloadable_attachment)
+                .collect(),
         });
     }
     let message = fetch_remote_message(state.inner(), &message_id).await?;
@@ -1123,15 +1135,19 @@ async fn message_content(
         attachments: message
             .attachments
             .iter()
+            .filter(|item| is_downloadable_attachment(&item.attachment))
             .map(|item| item.attachment.clone())
             .collect(),
     };
-    if let Err(cache_error) = state
-        .store
-        .cache_message_content(&message_id, message.is_flagged, cached.clone())
-        .await
-    {
-        tracing::warn!(%cache_error, %message_id, "could not persist foreground message cache");
+    let still_starred = persist_foreground_message_content(&state.store, &message, &cached).await?;
+    if !still_starred {
+        if let Err(cache_error) = state
+            .store
+            .cache_message_content(&message_id, false, cached.clone())
+            .await
+        {
+            tracing::warn!(%cache_error, %message_id, "could not persist foreground message cache");
+        }
     }
     Ok(MessageContent {
         body_text: cached.body_text,
@@ -1152,6 +1168,7 @@ async fn save_attachment(
         .await?
         .attachments
         .into_iter()
+        .filter(|item| is_downloadable_attachment(&item.attachment))
         .find(|item| item.attachment.id == attachment_id)
         .ok_or_else(|| "Attachment not found".to_owned())?;
     save_to_downloads(&app, &attachment.attachment, &attachment.bytes).map_err(error)
@@ -1210,7 +1227,10 @@ async fn save_all_attachments(
 ) -> Result<Vec<String>, String> {
     let attachments = fetch_remote_message(state.inner(), &message_id)
         .await?
-        .attachments;
+        .attachments
+        .into_iter()
+        .filter(|item| is_downloadable_attachment(&item.attachment))
+        .collect::<Vec<_>>();
     let mut saved = Vec::with_capacity(attachments.len());
     for attachment in attachments {
         saved.push(
@@ -1227,7 +1247,10 @@ async fn forward_attachments(
 ) -> Result<Vec<DroppedAttachment>, String> {
     let attachments = fetch_remote_message(state.inner(), &message_id)
         .await?
-        .attachments;
+        .attachments
+        .into_iter()
+        .filter(|item| is_downloadable_attachment(&item.attachment))
+        .collect::<Vec<_>>();
     if attachments.len() > MAX_DROPPED_ATTACHMENTS {
         return Err(format!(
             "This message has more than {MAX_DROPPED_ATTACHMENTS} attachments"
@@ -1253,6 +1276,288 @@ async fn forward_attachments(
             content_base64: STANDARD.encode(attachment.bytes),
         })
         .collect())
+}
+
+fn is_downloadable_attachment(attachment: &Attachment) -> bool {
+    attachment.presentation.is_downloadable()
+}
+
+/// Authoritative foreground parsing corrects paperclip state for every
+/// message. Starred content is written only when the current local row remains
+/// starred; a fetched provider snapshot must never undo a concurrent unstar.
+async fn persist_foreground_message_content(
+    store: &Store,
+    message: &MailSummary,
+    content: &CachedMessageContent,
+) -> Result<bool, String> {
+    let exists = store
+        .update_message_attachment_state(&message.id, message.has_attachments)
+        .await
+        .map_err(error)?;
+    if !exists {
+        return Ok(false);
+    }
+    if !message.is_flagged {
+        return Ok(false);
+    }
+    store
+        .cache_starred_message_content(&message.id, content.clone())
+        .await
+        .map_err(error)
+}
+
+#[cfg(test)]
+mod attachment_presentation_command_tests {
+    use super::*;
+    use chrono::Utc;
+    use dakia_core::{storage::AttachmentData, AttachmentPresentation};
+    use tempfile::tempdir;
+
+    fn attachment(id: &str, presentation: AttachmentPresentation) -> Attachment {
+        Attachment {
+            id: id.into(),
+            message_id: "message-attachment-presentation".into(),
+            filename: format!("{id}.bin"),
+            mime_type: "application/octet-stream".into(),
+            size_bytes: 3,
+            is_inline: matches!(presentation, AttachmentPresentation::Embedded),
+            presentation,
+            is_potentially_unsafe: false,
+        }
+    }
+
+    fn complete_message(account_id: String, is_flagged: bool) -> MailSummary {
+        MailSummary {
+            id: "message-attachment-presentation".into(),
+            account_id,
+            mailbox: "INBOX".into(),
+            uid: 1,
+            message_id: Some("<attachment-presentation@example.test>".into()),
+            in_reply_to: None,
+            reference_ids: None,
+            thread_id: "message-attachment-presentation".into(),
+            subject: "Attachment presentation".into(),
+            from_name: None,
+            from_address: "sender@example.test".into(),
+            to_addresses: "recipient@example.test".into(),
+            cc_addresses: String::new(),
+            bcc_addresses: String::new(),
+            reply_to_addresses: String::new(),
+            received_at: Utc::now(),
+            snippet: "authoritative body".into(),
+            body_text: "authoritative body".into(),
+            body_html: Some("<p>authoritative body</p>".into()),
+            content_state: "complete".into(),
+            unsubscribe_kind: None,
+            unsubscribe_url: None,
+            is_read: true,
+            is_flagged,
+            has_attachments: true,
+            category: None,
+            classification_confidence: None,
+            classification_source: None,
+            classification_signals: String::new(),
+            attachments: vec![
+                AttachmentData {
+                    attachment: attachment("signature-logo", AttachmentPresentation::Embedded),
+                    bytes: b"logo".to_vec(),
+                },
+                AttachmentData {
+                    attachment: attachment("claim", AttachmentPresentation::Downloadable),
+                    bytes: b"pdf".to_vec(),
+                },
+            ],
+        }
+    }
+
+    fn cached_content(message: &MailSummary) -> CachedMessageContent {
+        CachedMessageContent {
+            body_text: message.body_text.clone(),
+            body_html: message.body_html.clone(),
+            unsubscribe_kind: message.unsubscribe_kind.clone(),
+            attachments: message
+                .attachments
+                .iter()
+                .filter(|item| is_downloadable_attachment(&item.attachment))
+                .map(|item| item.attachment.clone())
+                .collect(),
+        }
+    }
+
+    async fn save_test_account(store: &Store) -> Account {
+        let account = AccountDraft {
+            email: "attachment-presentation@example.test".into(),
+            display_name: "Attachment presentation".into(),
+            provider_id: Some("fastmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("fastmail").expect("Fastmail preset"));
+        store.save_account(&account).await.expect("save account");
+        account
+    }
+
+    #[test]
+    fn command_boundary_exposes_only_downloadable_presentations() {
+        let visible = [
+            attachment("legacy", AttachmentPresentation::Unknown),
+            attachment("signature", AttachmentPresentation::Embedded),
+            attachment("document", AttachmentPresentation::Downloadable),
+            attachment("explicit-cid", AttachmentPresentation::Both),
+        ]
+        .into_iter()
+        .filter(is_downloadable_attachment)
+        .map(|attachment| attachment.id)
+        .collect::<Vec<_>>();
+
+        assert_eq!(visible, ["document", "explicit-cid"]);
+    }
+
+    #[tokio::test]
+    async fn authoritative_flagged_foreground_fetch_restores_starred_body_and_real_metadata() {
+        let store = Store::in_memory().await.expect("in-memory store");
+        let account = save_test_account(&store).await;
+
+        // This is the post-migration state: the flagged catalogue message
+        // survives, but its old starred body/attachment metadata was cleared.
+        let catalogue = complete_message(account.id.to_string(), false);
+        let message_id = catalogue.id.clone();
+        store
+            .upsert_messages(&[catalogue])
+            .await
+            .expect("save catalogue message");
+        store
+            .set_message_flagged(&message_id, true)
+            .await
+            .expect("flag message without a durable body");
+        assert!(store
+            .starred_body(&message_id)
+            .await
+            .expect("read starred body")
+            .is_none());
+
+        let fetched = complete_message(account.id.to_string(), true);
+        assert!(
+            persist_foreground_message_content(&store, &fetched, &cached_content(&fetched))
+                .await
+                .expect("persist authoritative foreground fetch")
+        );
+
+        assert_eq!(
+            store
+                .starred_body(&message_id)
+                .await
+                .expect("read restored starred body")
+                .expect("restored body")
+                .0,
+            "authoritative body"
+        );
+        let metadata = store
+            .starred_attachment_metadata(&message_id)
+            .await
+            .expect("read restored attachment metadata");
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata[0].id, "claim");
+        assert_eq!(
+            metadata[0].presentation,
+            AttachmentPresentation::Downloadable
+        );
+    }
+
+    #[tokio::test]
+    async fn ordinary_foreground_fetch_persists_named_inline_paperclip_across_restart() {
+        let directory = tempdir().expect("temporary store directory");
+        let database = directory.path().join("dakia.db");
+        let store = Store::open(&database).await.expect("open store");
+        let account = save_test_account(&store).await;
+        let mut catalogue = complete_message(account.id.to_string(), false);
+        let message_id = catalogue.id.clone();
+        // Header-only catalogue parsing cannot know whether an inline named
+        // resource is used by the selected HTML branch.
+        catalogue.has_attachments = false;
+        catalogue.attachments.clear();
+        store
+            .upsert_messages(&[catalogue])
+            .await
+            .expect("save header-only catalogue message");
+
+        let mut fetched = complete_message(account.id.to_string(), false);
+        fetched.attachments[1].attachment.is_inline = true;
+        assert!(
+            !persist_foreground_message_content(&store, &fetched, &cached_content(&fetched))
+                .await
+                .expect("persist ordinary foreground metadata")
+        );
+        assert!(
+            store
+                .message(&message_id)
+                .await
+                .expect("read collapsed message")
+                .expect("message remains")
+                .has_attachments
+        );
+
+        drop(store);
+        let reopened = Store::open(&database).await.expect("reopen store");
+        assert!(
+            reopened
+                .message(&message_id)
+                .await
+                .expect("read restarted message")
+                .expect("message survives restart")
+                .has_attachments
+        );
+    }
+
+    #[tokio::test]
+    async fn foreground_fetch_cannot_restore_a_message_unstarred_while_it_was_in_flight() {
+        let store = Store::in_memory().await.expect("in-memory store");
+        let account = save_test_account(&store).await;
+        let fetched = complete_message(account.id.to_string(), true);
+        let message_id = fetched.id.clone();
+        store
+            .upsert_messages(std::slice::from_ref(&fetched))
+            .await
+            .expect("save initially starred catalogue message");
+
+        // The remote fetch observed `\\Flagged`, then the user unstarred the
+        // current local row before its response could be persisted.
+        store
+            .set_message_flagged(&message_id, false)
+            .await
+            .expect("unstar during fetch");
+        assert!(
+            !persist_foreground_message_content(&store, &fetched, &cached_content(&fetched))
+                .await
+                .expect("persist stale fetch without resurrecting the star")
+        );
+
+        assert!(
+            !store
+                .message(&message_id)
+                .await
+                .expect("read current message")
+                .expect("message remains")
+                .is_flagged
+        );
+        assert!(store
+            .starred_body(&message_id)
+            .await
+            .expect("read starred cache")
+            .is_none());
+        assert!(store
+            .starred_attachment_metadata(&message_id)
+            .await
+            .expect("read starred metadata")
+            .is_empty());
+    }
 }
 
 async fn fetch_remote_message(
