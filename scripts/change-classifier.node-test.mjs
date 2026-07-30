@@ -206,6 +206,11 @@ test("ordinary pull-request workflow preserves the cost and release boundaries",
     /--localstorage-file/,
     "Node 20 rejects --localstorage-file in NODE_OPTIONS on hosted runners",
   );
+  assert.match(
+    workflow,
+    /rustup toolchain install 1\.82\.0 --profile minimal --component rustfmt --component clippy/,
+    "rustup requires one --component flag per requested component",
+  );
   for (const action of workflow.matchAll(/uses:\s*[^@\s]+@([^\s#]+)/g)) {
     assert.match(action[1], /^[a-f0-9]{40}$/, `unpinned action: ${action[0]}`);
   }

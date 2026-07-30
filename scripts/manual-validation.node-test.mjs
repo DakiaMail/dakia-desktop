@@ -194,6 +194,11 @@ test("manual workflow remains dispatch-only and runs bounded infrastructure", ()
   assert.match(workflow, /provider-smoke-contract\.mjs/);
   assert.match(workflow, /dakia-provider-smoke/);
   assert.match(workflow, /RUSTUP_TOOLCHAIN=1\.82\.0/);
+  assert.match(
+    workflow,
+    /rustup toolchain install 1\.82\.0 --profile minimal --component rustfmt --component clippy/,
+    "rustup requires one --component flag per requested component",
+  );
   const providerJob = workflow.slice(workflow.indexOf("\n  provider-smoke:"));
   assert.match(
     providerJob,
