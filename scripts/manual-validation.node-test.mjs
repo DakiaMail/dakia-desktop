@@ -221,6 +221,11 @@ test("manual workflow remains dispatch-only and runs bounded infrastructure", ()
     2,
     "full-source and coverage must prepare Tauri externalBin",
   );
+  assert.doesNotMatch(
+    workflow,
+    /--localstorage-file/,
+    "Node 20 rejects --localstorage-file in NODE_OPTIONS on hosted runners",
+  );
 });
 
 test("fixed-seed lane executes the property targets and exact MIME regression", () => {

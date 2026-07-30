@@ -201,6 +201,11 @@ test("ordinary pull-request workflow preserves the cost and release boundaries",
     workflow,
     /release:(?:build|publish)|notari[sz]|codesign|live-provider/i,
   );
+  assert.doesNotMatch(
+    workflow,
+    /--localstorage-file/,
+    "Node 20 rejects --localstorage-file in NODE_OPTIONS on hosted runners",
+  );
   for (const action of workflow.matchAll(/uses:\s*[^@\s]+@([^\s#]+)/g)) {
     assert.match(action[1], /^[a-f0-9]{40}$/, `unpinned action: ${action[0]}`);
   }

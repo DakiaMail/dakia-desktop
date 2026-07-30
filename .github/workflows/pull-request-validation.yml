@@ -71,7 +71,7 @@ jobs:
         run: |
           npm run format:check
           npm run typecheck
-          NODE_OPTIONS="--localstorage-file=/tmp/dakia-vitest-localstorage" npm run test -- --maxWorkers=1
+          npm run test -- --maxWorkers=1
           node --test scripts/tauri-contract-inventory.node-test.mjs
           node scripts/tauri-contract-inventory.mjs
       - name: Install pinned Rust toolchain
@@ -107,7 +107,7 @@ jobs:
           node --test scripts/validate-realistic-fixtures.node-test.mjs
           node scripts/validate-realistic-fixtures.mjs
           if [ "${{ needs.classify.outputs.frontend }}" != "true" ]; then
-            NODE_OPTIONS="--localstorage-file=/tmp/dakia-mail-boundary-vitest-localstorage" npx vitest run apps/desktop/src/apiMessageContent.test.ts apps/desktop/src/components/HtmlMessage.test.tsx apps/desktop/src/components/Reader.test.tsx --maxWorkers=1
+            npx vitest run apps/desktop/src/apiMessageContent.test.ts apps/desktop/src/components/HtmlMessage.test.tsx apps/desktop/src/components/Reader.test.tsx --maxWorkers=1
           fi
       - name: Install Linux dependencies for Tauri command tests
         if: needs.classify.outputs.tauri_boundary == 'true'

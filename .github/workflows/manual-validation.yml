@@ -86,7 +86,7 @@ jobs:
           cargo test --workspace
           npm run typecheck
           npm run format:check
-          NODE_OPTIONS="--localstorage-file=/tmp/dakia-manual-vitest-localstorage" npm run test -- --maxWorkers=1
+          npm run test -- --maxWorkers=1
           npm run test:release-scripts
           npm run build:web
 
