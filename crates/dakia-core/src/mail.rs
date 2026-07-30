@@ -1,6 +1,10 @@
 #[cfg(test)]
 use crate::storage::ThreadingHeaders;
 use crate::{
+    flowed::decode_format_flowed,
+    mime_budget::{
+        preflight_raw_message, validate_header_bytes, validate_structure, MAX_RAW_MESSAGE_BYTES,
+    },
     oauth::OAuthTokens,
     provider::Security,
     storage::{stable_message_id, Attachment, AttachmentData, AttachmentPresentation, MailSummary},
@@ -18,7 +22,14 @@ use lettre::{
     Address, AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
 };
 use mail_auth::{AuthenticatedMessage, DkimResult, MessageAuthenticator};
-use mailparse::MailHeaderMap;
+use mail_parser::{
+    decoders::{
+        base64::base64_decode, charsets::map::charset_decoder,
+        quoted_printable::quoted_printable_decode,
+    },
+    Address as ParsedAddress, HeaderForm, HeaderName, HeaderValue, Message as ParsedMessage,
+    MessageParser, MessagePart, MimeHeaders, PartType,
+};
 use percent_encoding::percent_decode_str;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -44,6 +55,7 @@ const UNSUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 const MAX_ATTACHMENT_TOTAL_BYTES: usize = 50 * 1024 * 1024;
 const MAX_ATTACHMENT_COUNT: usize = 50;
+const MIME_CONTENT_UNDECODABLE: &str = "mime_content_undecodable";
 const MAX_OUTBOUND_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 const MAX_OUTBOUND_ATTACHMENT_TOTAL_BYTES: usize = 50 * 1024 * 1024;
 /// Existing databases are enriched gradually during ordinary catalogue syncs.
@@ -381,25 +393,30 @@ impl MailService {
             }
         }
         let mut messages = Vec::with_capacity(uids.len());
+        let highest_processed_uid = uids.iter().copied().max();
         for uid in uids {
             let fields = "FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES CONTENT-TYPE LIST-ID PRECEDENCE AUTO-SUBMITTED)]";
             let response = client
                 .command_with_literal(&format!("UID FETCH {uid} ({fields})"))
                 .await?;
             if let Some(raw) = response.literal {
-                messages.push(parse_header_message(
-                    account,
-                    "INBOX",
-                    uid,
-                    &response.lines,
-                    &raw,
-                )?);
+                match parse_header_message(account, "INBOX", uid, &response.lines, &raw) {
+                    Ok(message) => messages.push(message),
+                    Err(error) => {
+                        eprintln!("Dakia rejected INBOX UID {uid} before persistence: {error}")
+                    }
+                }
             }
         }
         let new_messages = self
             .store
             .save_synced_messages(account.id, "INBOX", &messages)
             .await?;
+        if let Some(uid) = highest_processed_uid {
+            self.store
+                .advance_mailbox_sync_watermark(account.id, "INBOX", uid)
+                .await?;
+        }
         self.store
             .set_mailbox_uid_validity(account.id, "INBOX", uid_validity)
             .await?;
@@ -798,14 +815,20 @@ impl MailService {
                                 .and_then(|response| response.literal)
                                 .map(|raw| snippet_from_partial(&raw))
                                 .unwrap_or_default();
-                            messages.push(parse_catalog_message(
+                            match parse_catalog_message(
                                 account,
                                 &item.plan.storage,
                                 *uid,
                                 &response.lines,
                                 &headers,
                                 snippet,
-                            )?);
+                            ) {
+                                Ok(message) => messages.push(message),
+                                Err(error) => eprintln!(
+                                    "Dakia rejected {} UID {} before persistence: {error}",
+                                    item.plan.storage, uid
+                                ),
+                            }
                         }
                     }
                     completed += 1;
@@ -1042,14 +1065,16 @@ impl MailService {
                             .and_then(|response| response.literal)
                             .map(|raw| snippet_from_partial(&raw))
                             .unwrap_or_default();
-                        let message = parse_catalog_message(
+                        let Ok(message) = parse_catalog_message(
                             account,
                             &plan.storage,
                             uid,
                             &response.lines,
                             &headers,
                             snippet,
-                        )?;
+                        ) else {
+                            continue;
+                        };
                         self.store
                             .upsert_catalog_messages(std::slice::from_ref(&message))
                             .await?;
@@ -2038,6 +2063,9 @@ impl ImapClient {
                 bail!("IMAP connection closed during command");
             }
             if let Some(length) = literal_length(&line) {
+                if length > MAX_RAW_MESSAGE_BYTES {
+                    bail!("mime_raw_message_too_large");
+                }
                 let mut bytes = vec![0; length];
                 self.reader.read_exact(&mut bytes).await?;
                 literal = Some(bytes);
@@ -2134,14 +2162,177 @@ fn parse_internal_date(lines: &[String]) -> Option<chrono::DateTime<Utc>> {
     })
 }
 
+fn configured_message_parser() -> MessageParser {
+    MessageParser::new()
+        .with_minimal_headers()
+        .with_message_ids()
+        .header_text(HeaderName::Other("List-Unsubscribe-Post".into()))
+        .header_text(HeaderName::Other("Precedence".into()))
+        .header_text(HeaderName::Other("Auto-Submitted".into()))
+}
+
+fn parse_complete_message(raw: &[u8]) -> Result<ParsedMessage<'_>> {
+    preflight_raw_message(raw)?;
+    let parser = configured_message_parser();
+    let message = if uses_cr_only_headers(raw) {
+        // Some providers still emit CR-only line endings. Normalize only that
+        // nonstandard form for MIME parsing; DKIM verification retains `raw`.
+        let normalized = raw
+            .iter()
+            .enumerate()
+            .map(|(index, byte)| {
+                if *byte == b'\r' && raw.get(index + 1) != Some(&b'\n') {
+                    b'\n'
+                } else {
+                    *byte
+                }
+            })
+            .collect::<Vec<_>>();
+        parser.parse(&normalized).map(ParsedMessage::into_owned)
+    } else {
+        parser.parse(raw)
+    }
+    .context("message parser could not find RFC 5322 headers")?;
+    validate_message_budget(&message)?;
+    Ok(message)
+}
+
+fn parse_header_block(raw: &[u8]) -> Result<ParsedMessage<'_>> {
+    preflight_raw_message(raw)?;
+    let parser = configured_message_parser();
+    let message = if uses_cr_only_headers(raw) {
+        let normalized = raw
+            .iter()
+            .enumerate()
+            .map(|(index, byte)| {
+                if *byte == b'\r' && raw.get(index + 1) != Some(&b'\n') {
+                    b'\n'
+                } else {
+                    *byte
+                }
+            })
+            .collect::<Vec<_>>();
+        parser
+            .parse_headers(&normalized)
+            .map(ParsedMessage::into_owned)
+    } else {
+        parser.parse_headers(raw)
+    }
+    .context("message parser could not find RFC 5322 headers")?;
+    validate_message_budget(&message)?;
+    Ok(message)
+}
+
+fn uses_cr_only_headers(raw: &[u8]) -> bool {
+    let cr_separator = raw.windows(2).position(|pair| pair == b"\r\r");
+    let first_lf = raw.iter().position(|byte| *byte == b'\n');
+    cr_separator.is_some_and(|separator| first_lf.is_none_or(|lf| separator < lf))
+}
+
+fn validate_message_budget(message: &ParsedMessage<'_>) -> Result<()> {
+    let mut part_count = 0;
+    let mut header_bytes = 0;
+    let mut multipart_depth = 0;
+    let mut pending = vec![(message, 0_u32, 0_usize)];
+    while let Some((current_message, part_id, depth)) = pending.pop() {
+        let Some(part) = current_message.part(part_id) else {
+            continue;
+        };
+        part_count += 1;
+        header_bytes += part
+            .raw_body_offset()
+            .saturating_sub(part.raw_header_offset()) as usize;
+        match &part.body {
+            PartType::Multipart(children) => {
+                let child_depth = depth + 1;
+                multipart_depth = multipart_depth.max(child_depth);
+                pending.extend(
+                    children
+                        .iter()
+                        .rev()
+                        .map(|child| (current_message, *child, child_depth)),
+                );
+            }
+            PartType::Message(nested) if !nested.parts.is_empty() => {
+                pending.push((nested, 0, depth + 1));
+            }
+            _ => {}
+        }
+    }
+    validate_header_bytes(header_bytes)?;
+    validate_structure(part_count, multipart_depth)?;
+    Ok(())
+}
+
+fn decoded_header(message: &ParsedMessage<'_>, name: &str) -> String {
+    message
+        .header_as(name, HeaderForm::Text)
+        .into_iter()
+        .find_map(|value| value.into_text())
+        .map(|value| value.into_owned())
+        .unwrap_or_default()
+}
+
+fn header_values(message: &ParsedMessage<'_>, name: &str) -> Vec<String> {
+    message
+        .headers_raw()
+        .filter(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.replace(['\r', '\n'], " ").trim().to_owned())
+        .collect()
+}
+
+fn mime_type(part: &MessagePart<'_>) -> String {
+    part.content_type()
+        .and_then(|content_type| {
+            content_type
+                .subtype()
+                .map(|subtype| format!("{}/{}", content_type.ctype(), subtype))
+        })
+        .map(|value| safe_mime_type(&value))
+        .unwrap_or_else(|| {
+            if part.is_text_html() {
+                "text/html".into()
+            } else if part.is_text() {
+                "text/plain".into()
+            } else {
+                "application/octet-stream".into()
+            }
+        })
+}
+
+fn flowed_text(part: &MessagePart<'_>, text: &str) -> String {
+    let Some(content_type) = part.content_type() else {
+        return text.to_owned();
+    };
+    if !content_type
+        .attribute("format")
+        .is_some_and(|format| format.eq_ignore_ascii_case("flowed"))
+    {
+        return text.to_owned();
+    }
+    let delsp = content_type
+        .attribute("delsp")
+        .is_some_and(|value| value.eq_ignore_ascii_case("yes"));
+    decode_format_flowed(text, delsp)
+}
+
+fn has_supported_text_charset(part: &MessagePart<'_>) -> bool {
+    let Some(charset) = part
+        .content_type()
+        .and_then(|content_type| mime_attribute(content_type, "charset"))
+    else {
+        return true;
+    };
+    charset_decoder(charset.trim().as_bytes()).is_some()
+}
+
 fn message_received_at(
-    parsed: &mailparse::ParsedMail<'_>,
+    parsed: &ParsedMessage<'_>,
     response_lines: &[String],
 ) -> Result<chrono::DateTime<Utc>> {
     if let Some(date) = parsed
-        .headers
-        .get_first_value("Date")
-        .and_then(|date| mail_parser::DateTime::parse_rfc822(&date))
+        .header_values(HeaderName::Date)
+        .find_map(HeaderValue::as_datetime)
         .and_then(|date| chrono::DateTime::from_timestamp(date.to_timestamp(), 0))
     {
         return Ok(date);
@@ -2183,8 +2374,8 @@ async fn parse_message(
     raw: &[u8],
     dkim_authenticator: Option<&MessageAuthenticator>,
 ) -> Result<MailSummary> {
-    let parsed = mailparse::parse_mail(raw)?;
-    let header = |name| parsed.headers.get_first_value(name).unwrap_or_default();
+    let parsed = parse_complete_message(raw)?;
+    let header = |name| decoded_header(&parsed, name);
     let received_at = message_received_at(&parsed, response_lines)?;
     let from_header = header("From");
     let (from_name, from_address) = parse_first_address(&from_header);
@@ -2192,12 +2383,13 @@ async fn parse_message(
     // Classification must see the selected HTML before CID/Content-Location
     // URLs are rewritten to data URLs. MIME transport-inline is not the same
     // as a user-facing attachment.
-    let selected_html = extract_html(&parsed)?;
-    let attachments = extract_attachments(&parsed, &id)?;
+    let selected_bodies = select_bodies(&parsed)?;
+    let selected_html = selected_bodies.html;
+    let attachments = extract_attachments_from_raw(&parsed, raw, &id, selected_html.as_deref())?;
     let body_html = selected_html
-        .map(|html| resolve_inline_images(html, &parsed))
+        .map(|html| resolve_inline_images_from_raw(html, &parsed, raw))
         .transpose()?;
-    let mut body_text = extract_text(&parsed)?;
+    let mut body_text = selected_bodies.text;
     if body_text.trim().is_empty() {
         if let Some(html) = &body_html {
             body_text = mail_parser::decoders::html::html_to_text(html);
@@ -2251,8 +2443,8 @@ fn parse_catalog_message(
     raw_headers: &[u8],
     snippet: String,
 ) -> Result<MailSummary> {
-    let parsed = mailparse::parse_mail(raw_headers)?;
-    let header = |name| parsed.headers.get_first_value(name).unwrap_or_default();
+    let parsed = parse_header_block(raw_headers)?;
+    let header = |name| decoded_header(&parsed, name);
     let received_at = message_received_at(&parsed, response_lines)?;
     let (from_name, from_address) = parse_first_address(&header("From"));
     let id = stable_message_id(account.id, mailbox, uid);
@@ -2263,9 +2455,7 @@ fn parse_catalog_message(
     // is safe to surface provisionally; complete MIME parsing supplies the
     // authoritative user-facing attachment state.
     let has_attachments = structure.contains("attachment");
-    let unsubscribe_url = parsed
-        .headers
-        .get_all_values("List-Unsubscribe")
+    let unsubscribe_url = header_values(&parsed, "List-Unsubscribe")
         .into_iter()
         .flat_map(|value| parse_list_urls(&value))
         .find(|url| matches!(url.scheme(), "https" | "http" | "mailto"));
@@ -2321,33 +2511,27 @@ fn parse_catalog_message(
 }
 
 fn snippet_from_partial(raw: &[u8]) -> String {
-    parsed_snippet(raw)
-        .filter(|snippet| !looks_like_mime_artifact(snippet))
-        .or_else(|| {
-            partial_text_parts(raw)
-                .into_iter()
-                .filter_map(|part| parsed_snippet(part.as_bytes()))
-                .find(|snippet| !looks_like_mime_artifact(snippet))
-        })
+    partial_text_parts(raw)
+        .into_iter()
+        .filter_map(|part| parsed_snippet(part.as_bytes()))
+        .find(|snippet| !looks_like_mime_artifact(snippet))
+        .or_else(|| parsed_snippet(raw).filter(|snippet| !looks_like_mime_artifact(snippet)))
         .map(|text| clean_snippet(&text))
         .unwrap_or_default()
 }
 
 fn parsed_snippet(raw: &[u8]) -> Option<String> {
-    let parsed = mailparse::parse_mail(raw).ok()?;
-    let plain = extract_text(&parsed).ok()?;
+    let parsed = parse_complete_message(raw).ok()?;
+    let plain = extract_text(&parsed);
     if !plain.trim().is_empty() {
         return Some(plain);
     }
-    extract_html(&parsed)
-        .ok()
-        .flatten()
-        .map(|html| mail_parser::decoders::html::html_to_text(&html))
+    extract_html(&parsed).map(|html| mail_parser::decoders::html::html_to_text(&html))
 }
 
 /// A partial RFC822 fetch often ends before a multipart message's closing
-/// boundary. `mailparse` correctly rejects that incomplete container, but the
-/// first text leaf can still be complete enough to decode. Extract only MIME
+/// boundary. A complete parser may not have enough structure to select a body,
+/// but the first text leaf can still be complete enough to decode. Extract only MIME
 /// leaf blocks whose headers explicitly identify text; never expose the raw
 /// partial payload as a user-facing preview.
 fn partial_text_parts(raw: &[u8]) -> Vec<String> {
@@ -2415,8 +2599,8 @@ fn parse_header_message(
     response_lines: &[String],
     raw_headers: &[u8],
 ) -> Result<MailSummary> {
-    let parsed = mailparse::parse_mail(raw_headers)?;
-    let header = |name| parsed.headers.get_first_value(name).unwrap_or_default();
+    let parsed = parse_header_block(raw_headers)?;
+    let header = |name| decoded_header(&parsed, name);
     let from_header = header("From");
     let (from_name, from_address) = parse_first_address(&from_header);
     let id = stable_message_id(account.id, mailbox, uid);
@@ -2456,14 +2640,26 @@ fn parse_header_message(
 }
 
 fn canonical_message_ids(value: &str) -> Option<String> {
-    let ids = mailparse::msgidparse(value).ok()?;
-    (!ids.is_empty()).then(|| ids.to_string())
+    if !value.contains('<') || !value.contains('>') {
+        return None;
+    }
+    let raw = format!("Message-ID: {value}\r\n\r\n");
+    let message = parse_header_block(raw.as_bytes()).ok()?;
+    let ids = message
+        .header(HeaderName::MessageId)
+        .and_then(HeaderValue::as_text_list)?;
+    (!ids.is_empty()).then(|| {
+        ids.iter()
+            .map(|id| format!("<{id}>"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    })
 }
 
 #[cfg(test)]
 fn parse_threading_headers(raw: &[u8]) -> Result<ThreadingHeaders> {
-    let parsed = mailparse::parse_mail(raw)?;
-    let header = |name| parsed.headers.get_first_value(name).unwrap_or_default();
+    let parsed = parse_header_block(raw)?;
+    let header = |name| decoded_header(&parsed, name);
     Ok(ThreadingHeaders {
         message_id: canonical_message_ids(&header("Message-ID")),
         in_reply_to: canonical_message_ids(&header("In-Reply-To")),
@@ -2472,15 +2668,11 @@ fn parse_threading_headers(raw: &[u8]) -> Result<ThreadingHeaders> {
 }
 
 async fn extract_unsubscribe(
-    parsed: &mailparse::ParsedMail<'_>,
+    parsed: &ParsedMessage<'_>,
     raw: &[u8],
     dkim_authenticator: Option<&MessageAuthenticator>,
 ) -> (Option<String>, Option<String>) {
-    let unsubscribe_headers = parsed
-        .headers
-        .get_all_values("List-Unsubscribe")
-        .into_iter()
-        .collect::<Vec<_>>();
+    let unsubscribe_headers = header_values(parsed, "List-Unsubscribe");
     let urls = unsubscribe_headers
         .iter()
         .flat_map(|value| parse_list_urls(value))
@@ -2489,7 +2681,7 @@ async fn extract_unsubscribe(
         return (None, None);
     }
 
-    let post_headers = parsed.headers.get_all_values("List-Unsubscribe-Post");
+    let post_headers = header_values(parsed, "List-Unsubscribe-Post");
     // RFC 8058 requires one instance of each header. With duplicates, a DKIM
     // signature can cover a different occurrence from the URL we selected.
     let one_click_requested = unsubscribe_headers.len() == 1
@@ -2563,33 +2755,32 @@ async fn dkim_covers_unsubscribe_headers(
 /// Extract only category-relevant structure from RFC headers. Values such as
 /// unsubscribe URLs are intentionally not retained: their presence is the
 /// useful signal, and the model does not need a per-recipient tracking URL.
-fn classification_signals(mail: &mailparse::ParsedMail<'_>, response_lines: &[String]) -> String {
-    let headers = &mail.headers;
+fn classification_signals(mail: &ParsedMessage<'_>, response_lines: &[String]) -> String {
     let mut signals = Vec::new();
-    if headers.get_first_value("List-Unsubscribe").is_some() {
+    if !header_values(mail, "List-Unsubscribe").is_empty() {
         signals.push("Mailing-list unsubscribe header present");
     }
-    if headers.get_first_value("List-Id").is_some() {
+    if !header_values(mail, "List-Id").is_empty() {
         signals.push("Mailing-list identifier header present");
     }
-    if let Some(value) = headers.get_first_value("Precedence") {
+    if let Some(value) = header_values(mail, "Precedence").into_iter().next() {
         signals.push(match value.trim().to_ascii_lowercase().as_str() {
             "bulk" => "Bulk-mail precedence header",
             "list" => "Mailing-list precedence header",
             _ => "Precedence header present",
         });
     }
-    if let Some(value) = headers.get_first_value("Auto-Submitted") {
+    if let Some(value) = header_values(mail, "Auto-Submitted").into_iter().next() {
         signals.push(match value.trim().to_ascii_lowercase().as_str() {
             "auto-generated" => "Automatically generated message header",
             "auto-replied" => "Automatically replied message header",
             _ => "Auto-Submitted header present",
         });
     }
-    if headers.get_first_value("In-Reply-To").is_some() {
+    if !decoded_header(mail, "In-Reply-To").is_empty() {
         signals.push("Reply thread header present");
     }
-    if headers.get_first_value("Reply-To").is_some() {
+    if !decoded_header(mail, "Reply-To").is_empty() {
         signals.push("Reply-To header present");
     }
     // Gmail exposes server-side category labels through X-GM-LABELS. Retain
@@ -2629,114 +2820,358 @@ fn merge_gmail_category_signal(existing: &str, gmail_category: Option<&str>) -> 
 }
 
 fn parse_first_address(value: &str) -> (Option<String>, String) {
-    match mailparse::addrparse(value)
-        .ok()
-        .and_then(|list| list.first().cloned())
+    let raw = format!("From: {value}\r\n\r\n");
+    let Some(parsed) = parse_header_block(raw.as_bytes()).ok() else {
+        return (None, value.to_owned());
+    };
+    match parsed
+        .header(HeaderName::From)
+        .and_then(HeaderValue::as_address)
     {
-        Some(mailparse::MailAddr::Single(info)) => (info.display_name, info.addr),
-        Some(mailparse::MailAddr::Group(group)) => group
-            .addrs
+        Some(ParsedAddress::List(addresses)) => addresses
             .first()
-            .map(|info| (info.display_name.clone(), info.addr.clone()))
+            .and_then(|address| {
+                address.address.as_ref().map(|email| {
+                    (
+                        address.name.as_ref().map(ToString::to_string),
+                        email.to_string(),
+                    )
+                })
+            })
+            .unwrap_or((None, value.to_owned())),
+        Some(ParsedAddress::Group(groups)) => groups
+            .iter()
+            .flat_map(|group| group.addresses.iter())
+            .find_map(|address| {
+                address.address.as_ref().map(|email| {
+                    (
+                        address.name.as_ref().map(ToString::to_string),
+                        email.to_string(),
+                    )
+                })
+            })
             .unwrap_or((None, value.to_owned())),
         None => (None, value.to_owned()),
     }
 }
 
-fn extract_text(mail: &mailparse::ParsedMail<'_>) -> Result<String> {
-    if !mail.subparts.is_empty() && is_attachment_part(mail) {
-        return Ok(String::new());
-    }
-    if mail.subparts.is_empty() {
-        return if mail.ctype.mimetype.eq_ignore_ascii_case("text/plain")
-            && !is_attachment_part(mail)
-        {
-            Ok(mail.get_body()?)
-        } else {
-            Ok(String::new())
-        };
-    }
-    let parts = mail
-        .subparts
-        .iter()
-        .map(extract_text)
-        .collect::<Result<Vec<_>>>()?;
-    Ok(parts
-        .into_iter()
-        .filter(|part| !part.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n"))
+#[derive(Default)]
+struct BodySelection {
+    plain: Vec<String>,
+    html: Vec<String>,
+    valid_candidates: usize,
+    undecodable_candidates: usize,
 }
 
-fn extract_html(mail: &mailparse::ParsedMail<'_>) -> Result<Option<String>> {
-    if !mail.subparts.is_empty() && is_attachment_part(mail) {
-        return Ok(None);
+impl BodySelection {
+    fn merge(&mut self, mut other: Self) {
+        self.plain.append(&mut other.plain);
+        self.html.append(&mut other.html);
+        self.valid_candidates += other.valid_candidates;
+        self.undecodable_candidates += other.undecodable_candidates;
     }
-    if mail.subparts.is_empty() {
-        return if mail.ctype.mimetype.eq_ignore_ascii_case("text/html") && !is_attachment_part(mail)
-        {
-            Ok(Some(mail.get_body()?))
-        } else {
-            Ok(None)
-        };
-    }
-    for part in &mail.subparts {
-        if let Some(html) = extract_html(part)? {
-            return Ok(Some(html));
+
+    fn into_body_content(self) -> Result<SelectedBodyContent> {
+        if self.valid_candidates == 0 && self.undecodable_candidates > 0 {
+            bail!("{MIME_CONTENT_UNDECODABLE}");
         }
+        Ok(SelectedBodyContent {
+            text: self
+                .plain
+                .into_iter()
+                .filter(|value| !value.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+            html: {
+                let html = self
+                    .html
+                    .into_iter()
+                    .filter(|value| !value.trim().is_empty())
+                    .collect::<Vec<_>>();
+                (!html.is_empty()).then(|| html.join("\n"))
+            },
+        })
     }
-    Ok(None)
 }
 
-fn resolve_inline_images(mut html: String, mail: &mailparse::ParsedMail<'_>) -> Result<String> {
-    let mut images = Vec::new();
-    collect_inline_images(mail, &mut images)?;
-    for (reference, data_url) in images {
-        html = replace_ascii_case_insensitive(&html, &reference, &data_url);
+struct SelectedBodyContent {
+    text: String,
+    html: Option<String>,
+}
+
+fn select_bodies(mail: &ParsedMessage<'_>) -> Result<SelectedBodyContent> {
+    select_body_part(mail, 0).into_body_content()
+}
+
+fn select_body_part(mail: &ParsedMessage<'_>, part_id: u32) -> BodySelection {
+    let Some(part) = mail.part(part_id) else {
+        return BodySelection::default();
+    };
+    if is_attachment_part(mail, part) {
+        return BodySelection::default();
+    }
+    match &part.body {
+        PartType::Multipart(children) => {
+            let subtype = part
+                .content_type()
+                .and_then(|value| value.subtype())
+                .unwrap_or_default();
+            if subtype.eq_ignore_ascii_case("alternative") {
+                select_alternative(mail, children)
+            } else if subtype.eq_ignore_ascii_case("related") {
+                select_related(mail, part, children)
+            } else {
+                let mut selected = BodySelection::default();
+                for child in children {
+                    selected.merge(select_body_part(mail, *child));
+                }
+                selected
+            }
+        }
+        PartType::Message(_) => BodySelection::default(),
+        PartType::Text(_) | PartType::Html(_) => select_text_leaf(mail, part),
+        PartType::Binary(_) | PartType::InlineBinary(_) => BodySelection::default(),
+    }
+}
+
+fn select_alternative(mail: &ParsedMessage<'_>, children: &[u32]) -> BodySelection {
+    let mut selected = BodySelection::default();
+    let mut chosen_plain = None;
+    let mut chosen_html = None;
+    for child in children {
+        let candidate = select_body_part(mail, *child);
+        // RFC multipart/alternative orders representations by increasing
+        // faithfulness. Keep only the last supported representation of each
+        // kind; never concatenate competing alternatives.
+        if !candidate.plain.is_empty() {
+            chosen_plain = Some(candidate.plain.join("\n\n"));
+        }
+        if !candidate.html.is_empty() {
+            chosen_html = Some(candidate.html.join("\n"));
+        }
+        selected.valid_candidates += candidate.valid_candidates;
+        selected.undecodable_candidates += candidate.undecodable_candidates;
+    }
+    selected.plain.extend(chosen_plain);
+    selected.html.extend(chosen_html);
+    selected
+}
+
+fn select_related(
+    mail: &ParsedMessage<'_>,
+    container: &MessagePart<'_>,
+    children: &[u32],
+) -> BodySelection {
+    let declared_start = container
+        .content_type()
+        .and_then(|content_type| mime_attribute(content_type, "start"))
+        .map(normalized_content_reference);
+    let root = declared_start
+        .as_deref()
+        .and_then(|start| {
+            children.iter().copied().find(|child| {
+                mail.part(*child)
+                    .and_then(MessagePart::content_id)
+                    .map(normalized_content_reference)
+                    .is_some_and(|content_id| content_id == start)
+            })
+        })
+        .or_else(|| children.first().copied());
+    root.map(|part_id| select_body_part(mail, part_id))
+        .unwrap_or_default()
+}
+
+fn normalized_content_reference(value: &str) -> String {
+    value.trim().trim_matches(['<', '>']).to_ascii_lowercase()
+}
+
+fn mime_attribute<'a>(
+    content_type: &'a mail_parser::ContentType<'a>,
+    name: &str,
+) -> Option<&'a str> {
+    content_type
+        .attributes()?
+        .iter()
+        .find(|attribute| attribute.name.eq_ignore_ascii_case(name))
+        .map(|attribute| attribute.value.as_ref())
+}
+
+fn select_text_leaf(mail: &ParsedMessage<'_>, part: &MessagePart<'_>) -> BodySelection {
+    let content_type = mime_type(part);
+    if !matches!(content_type.as_str(), "text/plain" | "text/html")
+        || is_attachment_part(mail, part)
+    {
+        return BodySelection::default();
+    }
+    let mut selected = BodySelection::default();
+    match decode_text_candidate(mail, part) {
+        Ok(text) => {
+            selected.valid_candidates = 1;
+            if part.is_text_html() {
+                selected.html.push(text);
+            } else {
+                selected.plain.push(flowed_text(part, &text));
+            }
+        }
+        Err(()) => selected.undecodable_candidates = 1,
+    }
+    selected
+}
+
+fn decode_text_candidate(
+    mail: &ParsedMessage<'_>,
+    part: &MessagePart<'_>,
+) -> std::result::Result<String, ()> {
+    if !has_supported_transfer_encoding(part) {
+        return Err(());
+    }
+    let decoded_transport = decoded_part_bytes(mail.raw_message(), part).ok_or(())?;
+    let declared_charset = part
+        .content_type()
+        .and_then(|content_type| mime_attribute(content_type, "charset"));
+    if declared_charset.is_some_and(|_| !has_supported_text_charset(part)) {
+        return std::str::from_utf8(&decoded_transport)
+            .map(ToOwned::to_owned)
+            .map_err(|_| ());
+    }
+    if part.is_encoding_problem {
+        return Err(());
+    }
+    part.text_contents().map(ToOwned::to_owned).ok_or(())
+}
+
+fn has_supported_transfer_encoding(part: &MessagePart<'_>) -> bool {
+    part.content_transfer_encoding().is_none_or(|encoding| {
+        matches!(
+            encoding.trim().to_ascii_lowercase().as_str(),
+            "7bit" | "8bit" | "binary" | "base64" | "quoted-printable"
+        )
+    })
+}
+
+fn decoded_part_bytes(raw_message: &[u8], part: &MessagePart<'_>) -> Option<Vec<u8>> {
+    let raw = raw_message.get(part.raw_body_offset() as usize..part.raw_end_offset() as usize)?;
+    match part
+        .content_transfer_encoding()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("base64") => base64_decode(raw),
+        Some("quoted-printable") => quoted_printable_decode(raw),
+        Some("7bit" | "8bit" | "binary") | None => Some(raw.to_vec()),
+        Some(_) => None,
+    }
+}
+
+fn extract_text(mail: &ParsedMessage<'_>) -> String {
+    select_bodies(mail)
+        .map(|body| body.text)
+        .unwrap_or_default()
+}
+
+fn extract_html(mail: &ParsedMessage<'_>) -> Option<String> {
+    select_bodies(mail).ok().and_then(|body| body.html)
+}
+
+#[cfg(test)]
+fn resolve_inline_images(html: String, mail: &ParsedMessage<'_>) -> Result<String> {
+    resolve_inline_images_from_raw(html, mail, mail.raw_message())
+}
+
+fn resolve_inline_images_from_raw(
+    mut html: String,
+    mail: &ParsedMessage<'_>,
+    raw: &[u8],
+) -> Result<String> {
+    let lower_html = html.to_ascii_lowercase();
+    let inline_images = collect_inline_images(mail, raw, &lower_html);
+    for (reference, data_url) in inline_images {
+        html = replace_resource_reference(&html, &reference, &data_url)?;
     }
     Ok(html)
 }
 
 fn collect_inline_images(
-    mail: &mailparse::ParsedMail<'_>,
-    images: &mut Vec<(String, String)>,
-) -> Result<()> {
-    // Do not resolve a resource from an attached forwarded message into the
-    // selected outer HTML document, even if the two happen to reuse a CID.
-    if !mail.subparts.is_empty() && is_attachment_part(mail) {
-        return Ok(());
-    }
-    if mail.subparts.is_empty()
-        && mail
-            .ctype
-            .mimetype
-            .to_ascii_lowercase()
-            .starts_with("image/")
-    {
-        let references = [
-            mail.headers
-                .get_first_value("Content-ID")
-                .map(|value| format!("cid:{}", value.trim().trim_matches(['<', '>']))),
-            mail.headers.get_first_value("Content-Location"),
-        ];
-        let encoded = STANDARD.encode(mail.get_body_raw()?);
-        let data_url = format!("data:{};base64,{encoded}", mail.ctype.mimetype);
-        for reference in references.into_iter().flatten() {
-            if !reference.is_empty() {
-                images.push((reference, data_url.clone()));
+    mail: &ParsedMessage<'_>,
+    raw: &[u8],
+    lower_html: &str,
+) -> Vec<(String, String)> {
+    attachment_part_ids(mail)
+        .into_iter()
+        .filter_map(|part_id| mail.part(part_id))
+        .filter(|part| {
+            !part.is_encoding_problem && part.is_binary() && has_supported_transfer_encoding(part)
+        })
+        .filter_map(|part| {
+            let mime_type = mime_type(part);
+            if !mime_type.starts_with("image/") {
+                return None;
             }
-        }
-    }
-    for part in &mail.subparts {
-        collect_inline_images(part, images)?;
-    }
-    Ok(())
+            let references = [
+                part.content_id()
+                    .map(|value| format!("cid:{}", value.trim().trim_matches(['<', '>']))),
+                part.content_location().map(ToOwned::to_owned),
+            ]
+            .into_iter()
+            .flatten()
+            .filter(|reference| {
+                !reference.is_empty() && lower_html.contains(&reference.to_ascii_lowercase())
+            })
+            .collect::<Vec<_>>();
+            if references.is_empty() {
+                return None;
+            }
+            let encoded = STANDARD.encode(decoded_part_bytes(raw, part)?);
+            let data_url = format!("data:{mime_type};base64,{encoded}");
+            Some(
+                references
+                    .into_iter()
+                    .map(|reference| (reference, data_url.clone()))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .flatten()
+        .collect()
 }
 
-fn replace_ascii_case_insensitive(input: &str, needle: &str, replacement: &str) -> String {
-    let mut output = String::with_capacity(input.len());
+fn replace_resource_reference(input: &str, reference: &str, replacement: &str) -> Result<String> {
+    let mut output = input.to_owned();
+    for (needle, replacement) in [
+        (format!("\"{reference}\""), format!("\"{replacement}\"")),
+        (format!("'{reference}'"), format!("'{replacement}'")),
+        (format!("url({reference})"), format!("url({replacement})")),
+    ] {
+        output = replace_ascii_case_insensitive_bounded(&output, &needle, &replacement)?;
+    }
+    Ok(output)
+}
+
+fn replace_ascii_case_insensitive_bounded(
+    input: &str,
+    needle: &str,
+    replacement: &str,
+) -> Result<String> {
+    if needle.is_empty() {
+        return Ok(input.to_owned());
+    }
     let lower_input = input.to_ascii_lowercase();
     let lower_needle = needle.to_ascii_lowercase();
+    let occurrences = lower_input.match_indices(&lower_needle).count();
+    let projected_len = input
+        .len()
+        .checked_add(
+            replacement
+                .len()
+                .saturating_sub(needle.len())
+                .checked_mul(occurrences)
+                .context("mime_resolved_html_too_large")?,
+        )
+        .context("mime_resolved_html_too_large")?;
+    if projected_len > MAX_RAW_MESSAGE_BYTES {
+        bail!("mime_resolved_html_too_large");
+    }
+    let mut output = String::with_capacity(projected_len);
     let mut cursor = 0;
     while let Some(offset) = lower_input[cursor..].find(&lower_needle) {
         let start = cursor + offset;
@@ -2745,167 +3180,344 @@ fn replace_ascii_case_insensitive(input: &str, needle: &str, replacement: &str) 
         cursor = start + needle.len();
     }
     output.push_str(&input[cursor..]);
-    output
+    Ok(output)
+}
+
+fn supplied_attachment_name(mail: &ParsedMessage<'_>, part: &MessagePart<'_>) -> Option<String> {
+    [
+        raw_parameter_value(
+            mail,
+            part,
+            HeaderName::ContentDisposition,
+            "Content-Disposition",
+            "attachment",
+            "filename",
+            true,
+        ),
+        raw_parameter_value(
+            mail,
+            part,
+            HeaderName::ContentDisposition,
+            "Content-Disposition",
+            "attachment",
+            "filename",
+            false,
+        ),
+        raw_parameter_value(
+            mail,
+            part,
+            HeaderName::ContentType,
+            "Content-Type",
+            "application/octet-stream",
+            "name",
+            true,
+        ),
+        raw_parameter_value(
+            mail,
+            part,
+            HeaderName::ContentType,
+            "Content-Type",
+            "application/octet-stream",
+            "name",
+            false,
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|value| !value.trim().is_empty())
+    .or_else(|| {
+        part.attachment_name()
+            .filter(|value| !value.trim().is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
+fn raw_parameter_value(
+    mail: &ParsedMessage<'_>,
+    part: &MessagePart<'_>,
+    header_name: HeaderName<'_>,
+    header_label: &str,
+    header_base: &str,
+    parameter: &str,
+    extended: bool,
+) -> Option<String> {
+    let header = part
+        .headers
+        .iter()
+        .find(|header| header.name == header_name)?;
+    let raw_value = std::str::from_utf8(
+        mail.raw_message()
+            .get(header.offset_start as usize..header.offset_end as usize)?,
+    )
+    .ok()?;
+    let parameters = split_mime_parameters(raw_value);
+    let parameter_lower = parameter.to_ascii_lowercase();
+    let selected = if extended {
+        let standalone = format!("{parameter_lower}*");
+        let standalone = parameters
+            .iter()
+            .find(|(name, value, _)| {
+                name.eq_ignore_ascii_case(&standalone) && valid_percent_escapes(value)
+            })
+            .map(|(_, _, raw)| vec![raw.as_str()]);
+        standalone.or_else(|| {
+            let continued = parameters
+                .iter()
+                .filter(|(name, value, _)| {
+                    let suffix = name
+                        .to_ascii_lowercase()
+                        .strip_prefix(&parameter_lower)
+                        .unwrap_or_default()
+                        .to_owned();
+                    suffix.starts_with('*')
+                        && suffix[1..]
+                            .chars()
+                            .next()
+                            .is_some_and(|ch| ch.is_ascii_digit())
+                        && valid_percent_escapes(value)
+                })
+                .map(|(_, _, raw)| raw.as_str())
+                .collect::<Vec<_>>();
+            (!continued.is_empty()).then_some(continued)
+        })?
+    } else {
+        vec![parameters
+            .iter()
+            .find(|(name, _, _)| name.eq_ignore_ascii_case(&parameter_lower))?
+            .2
+            .as_str()]
+    };
+    let raw = format!(
+        "{header_label}: {header_base}; {}\r\n\r\n",
+        selected.join("; ")
+    );
+    let parsed = configured_message_parser().parse_headers(raw.as_bytes())?;
+    let parsed_part = parsed.part(0)?;
+    let value = match header_name {
+        HeaderName::ContentDisposition => parsed_part
+            .content_disposition()
+            .and_then(|content_type| mime_attribute(content_type, parameter)),
+        HeaderName::ContentType => parsed_part
+            .content_type()
+            .and_then(|content_type| mime_attribute(content_type, parameter)),
+        _ => None,
+    }?;
+    (!value.trim().is_empty()).then(|| value.to_owned())
+}
+
+fn split_mime_parameters(value: &str) -> Vec<(String, String, String)> {
+    let mut tokens = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, character) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match character {
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            ';' if !quoted => {
+                if start > 0 {
+                    push_mime_parameter(&mut tokens, &value[start..index]);
+                }
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if start > 0 {
+        push_mime_parameter(&mut tokens, &value[start..]);
+    }
+    tokens
+}
+
+fn push_mime_parameter(parameters: &mut Vec<(String, String, String)>, token: &str) {
+    let raw = token.trim();
+    let Some((name, value)) = raw.split_once('=') else {
+        return;
+    };
+    parameters.push((
+        name.trim().to_ascii_lowercase(),
+        value.trim().trim_matches('"').to_owned(),
+        raw.to_owned(),
+    ));
+}
+
+fn valid_percent_escapes(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len()
+                || !bytes[index + 1].is_ascii_hexdigit()
+                || !bytes[index + 2].is_ascii_hexdigit()
+            {
+                return false;
+            }
+            index += 3;
+        } else {
+            index += 1;
+        }
+    }
+    true
 }
 
 #[cfg(test)]
-fn has_attachment(mail: &mailparse::ParsedMail<'_>) -> bool {
-    is_attachment_part(mail) || mail.subparts.iter().any(has_attachment)
+fn has_attachment(mail: &ParsedMessage<'_>) -> bool {
+    !attachment_part_ids(mail).is_empty()
 }
 
-fn is_attachment_part(mail: &mailparse::ParsedMail<'_>) -> bool {
-    let disposition = mail.get_content_disposition();
-    let has_filename_parameter =
-        disposition.params.contains_key("filename") || mail.ctype.params.contains_key("name");
-    let has_nonempty_filename = disposition
-        .params
-        .get("filename")
-        .is_some_and(|value| !value.trim().is_empty())
-        || mail
-            .ctype
-            .params
-            .get("name")
-            .is_some_and(|value| !value.trim().is_empty());
-    let is_text_body = matches!(
-        mail.ctype.mimetype.to_ascii_lowercase().as_str(),
-        "text/plain" | "text/html"
-    );
+fn attachment_part_ids(mail: &ParsedMessage<'_>) -> Vec<u32> {
+    let mut attachments = Vec::new();
+    let mut pending = vec![0_u32];
+    while let Some(part_id) = pending.pop() {
+        let Some(part) = mail.part(part_id) else {
+            continue;
+        };
+        if is_attachment_part(mail, part) {
+            attachments.push(part_id);
+            continue;
+        }
+        if let PartType::Multipart(children) = &part.body {
+            pending.extend(children.iter().rev().copied());
+        }
+    }
+    attachments
+}
+
+fn is_attachment_part(mail: &ParsedMessage<'_>, part: &MessagePart<'_>) -> bool {
+    let content_type = mime_type(part);
+    let is_text_body = matches!(content_type.as_str(), "text/plain" | "text/html");
+    let is_message_attachment = matches!(
+        content_type.as_str(),
+        "message/rfc822" | "message/global" | "message/news"
+    ) || part.is_message();
+    let disposition = part.content_disposition();
+    let has_nonempty_filename = supplied_attachment_name(mail, part).is_some();
+    if part.is_multipart() {
+        return has_nonempty_filename || disposition.is_some_and(|value| value.is_attachment());
+    }
     let is_unnamed_text_body = is_text_body && !has_nonempty_filename;
-    disposition.disposition == mailparse::DispositionType::Attachment
+    is_message_attachment
+        // Non-text leaves are never message bodies. This also preserves an
+        // explicitly empty `name` parameter that mail-parser intentionally
+        // normalizes away from its typed Content-Type attributes.
+        || part.is_binary()
+        || (part.is_text() && !is_text_body)
+        || disposition.is_some_and(|value| value.is_attachment())
         || if is_text_body {
             has_nonempty_filename
         } else {
-            has_filename_parameter
+            false
         }
-        || (mail.headers.get_first_value("Content-ID").is_some() && !is_unnamed_text_body)
-        || (mail
-            .headers
-            .get_first_value("Content-Disposition")
-            .is_some()
-            && disposition.disposition == mailparse::DispositionType::Inline
-            && !is_unnamed_text_body)
+        || (part.content_id().is_some() && !is_unnamed_text_body)
+        || (disposition.is_some_and(|value| value.is_inline()) && !is_unnamed_text_body)
 }
 
-fn extract_attachments(
-    mail: &mailparse::ParsedMail<'_>,
+#[cfg(test)]
+fn extract_attachments(mail: &ParsedMessage<'_>, message_id: &str) -> Result<Vec<AttachmentData>> {
+    let selected_html = select_bodies(mail)?.html;
+    extract_attachments_from_raw(
+        mail,
+        mail.raw_message(),
+        message_id,
+        selected_html.as_deref(),
+    )
+}
+
+fn extract_attachments_from_raw(
+    mail: &ParsedMessage<'_>,
+    raw: &[u8],
     message_id: &str,
+    selected_html: Option<&str>,
 ) -> Result<Vec<AttachmentData>> {
-    let selected_html = extract_html(mail)?;
-    extract_attachments_for_html(mail, message_id, selected_html.as_deref())
-}
-
-fn extract_attachments_for_html(
-    mail: &mailparse::ParsedMail<'_>,
-    message_id: &str,
-    selected_html: Option<&str>,
-) -> Result<Vec<AttachmentData>> {
-    let mut collection = AttachmentCollection::default();
-    collect_attachment_parts(mail, mail, message_id, selected_html, &mut collection)?;
-    Ok(collection.parts)
-}
-
-#[derive(Default)]
-struct AttachmentCollection {
-    parts: Vec<AttachmentData>,
-    candidate_count: usize,
-    decoded_bytes: usize,
-}
-
-fn collect_attachment_parts(
-    mail: &mailparse::ParsedMail<'_>,
-    root: &mailparse::ParsedMail<'_>,
-    message_id: &str,
-    selected_html: Option<&str>,
-    collection: &mut AttachmentCollection,
-) -> Result<()> {
-    if !mail.subparts.is_empty()
-        && mail.ctype.mimetype.eq_ignore_ascii_case("message/rfc822")
-        && is_attachment_part(mail)
-    {
-        // A forwarded .eml is one downloadable unit. Its nested HTML and CID
-        // resources belong to the forwarded message, not to this reader.
-        return collect_attachment_candidate(mail, root, message_id, selected_html, collection);
-    }
-    if mail.subparts.is_empty() {
-        if !is_attachment_part(mail) {
-            return Ok(());
-        }
-        return collect_attachment_candidate(mail, root, message_id, selected_html, collection);
-    }
-    for part in &mail.subparts {
-        collect_attachment_parts(part, root, message_id, selected_html, collection)?;
-    }
-    Ok(())
-}
-
-fn collect_attachment_candidate(
-    mail: &mailparse::ParsedMail<'_>,
-    root: &mailparse::ParsedMail<'_>,
-    message_id: &str,
-    selected_html: Option<&str>,
-    collection: &mut AttachmentCollection,
-) -> Result<()> {
-    collection.candidate_count += 1;
-    if collection.candidate_count > MAX_ATTACHMENT_COUNT {
+    let candidate_ids = attachment_part_ids(mail);
+    if candidate_ids.len() > MAX_ATTACHMENT_COUNT {
         bail!("message has more than {MAX_ATTACHMENT_COUNT} attachments");
     }
-    let bytes = mail.get_body_raw()?;
-    if bytes.len() > MAX_ATTACHMENT_BYTES {
-        bail!(
-            "attachment exceeds the {} MiB safety limit",
-            MAX_ATTACHMENT_BYTES / 1024 / 1024
-        );
+    let mut attachments = Vec::new();
+    let mut decoded_bytes = 0_usize;
+    for part_id in candidate_ids {
+        let Some(part) = mail.part(part_id) else {
+            continue;
+        };
+        // An undecodable transfer encoding must never be stored as a plausible
+        // attachment. Keeping it absent is safer than exposing raw transport bytes.
+        if part.is_encoding_problem || !has_supported_transfer_encoding(part) {
+            continue;
+        }
+        let Some(bytes) = decoded_part_bytes(raw, part) else {
+            continue;
+        };
+        if bytes.len() > MAX_ATTACHMENT_BYTES {
+            bail!(
+                "attachment exceeds the {} MiB safety limit",
+                MAX_ATTACHMENT_BYTES / 1024 / 1024
+            );
+        }
+        add_decoded_attachment_bytes(&mut decoded_bytes, bytes.len())?;
+        let presentation = attachment_presentation(mail, part, selected_html);
+        if !presentation.is_downloadable() {
+            continue;
+        }
+        let mime_type = mime_type(part);
+        let supplied_name = supplied_attachment_name(mail, part).unwrap_or_else(|| {
+            if mime_type.starts_with("message/") {
+                "attached-message.eml".into()
+            } else {
+                "attachment".into()
+            }
+        });
+        let mut filename = safe_attachment_filename(&supplied_name, attachments.len());
+        if mime_type.starts_with("message/") && !filename.to_ascii_lowercase().ends_with(".eml") {
+            filename.push_str(".eml");
+        }
+        let is_inline = part
+            .content_disposition()
+            .is_some_and(|value| value.is_inline())
+            || part.content_id().is_some();
+        let attachment = Attachment {
+            id: format!("{message_id}:{}", attachments.len()),
+            message_id: message_id.to_owned(),
+            is_potentially_unsafe: is_potentially_unsafe(&filename, &mime_type),
+            filename,
+            mime_type,
+            size_bytes: bytes.len() as i64,
+            is_inline,
+            presentation,
+        };
+        attachments.push(AttachmentData { attachment, bytes });
     }
-    collection.decoded_bytes = collection
-        .decoded_bytes
-        .checked_add(bytes.len())
+    Ok(attachments)
+}
+
+fn add_decoded_attachment_bytes(total: &mut usize, part_bytes: usize) -> Result<()> {
+    *total = total
+        .checked_add(part_bytes)
         .context("attachment bytes overflowed the safety limit")?;
-    if collection.decoded_bytes > MAX_ATTACHMENT_TOTAL_BYTES {
+    if *total > MAX_ATTACHMENT_TOTAL_BYTES {
         bail!(
             "message attachments exceed the {} MiB safety limit",
             MAX_ATTACHMENT_TOTAL_BYTES / 1024 / 1024
         );
     }
-    let disposition = mail.get_content_disposition();
-    let presentation = attachment_presentation(mail, root, selected_html);
-    if !presentation.is_downloadable() {
-        return Ok(());
-    }
-    let supplied_name = disposition
-        .params
-        .get("filename")
-        .or_else(|| mail.ctype.params.get("name"))
-        .map(String::as_str)
-        .unwrap_or("attachment");
-    let filename = safe_attachment_filename(supplied_name, collection.parts.len());
-    let mime_type = safe_mime_type(&mail.ctype.mimetype);
-    let is_inline = matches!(disposition.disposition, mailparse::DispositionType::Inline)
-        || mail.headers.get_first_value("Content-ID").is_some();
-    let attachment = Attachment {
-        id: format!("{message_id}:{}", collection.parts.len()),
-        message_id: message_id.to_owned(),
-        is_potentially_unsafe: is_potentially_unsafe(&filename, &mime_type),
-        filename,
-        mime_type,
-        size_bytes: bytes.len() as i64,
-        is_inline,
-        presentation,
-    };
-    collection.parts.push(AttachmentData { attachment, bytes });
     Ok(())
 }
 
 fn attachment_presentation(
-    mail: &mailparse::ParsedMail<'_>,
-    root: &mailparse::ParsedMail<'_>,
+    mail: &ParsedMessage<'_>,
+    part: &MessagePart<'_>,
     selected_html: Option<&str>,
 ) -> AttachmentPresentation {
-    let disposition = mail.get_content_disposition();
-    let explicitly_attached = disposition.disposition == mailparse::DispositionType::Attachment;
+    let explicitly_attached = part
+        .content_disposition()
+        .is_some_and(|disposition| disposition.is_attachment());
     let referenced = selected_html.is_some_and(|html| {
-        attachment_references(mail).iter().any(|reference| {
+        attachment_references(part).iter().any(|reference| {
             html_contains_reference(html, reference)
-                && attachment_reference_count(root, reference) == 1
+                && attachment_reference_count(mail, reference) == 1
         })
     });
     match (explicitly_attached, referenced) {
@@ -2916,36 +3528,27 @@ fn attachment_presentation(
     }
 }
 
-fn attachment_reference_count(mail: &mailparse::ParsedMail<'_>, reference: &str) -> usize {
-    if !mail.subparts.is_empty()
-        && mail.ctype.mimetype.eq_ignore_ascii_case("message/rfc822")
-        && is_attachment_part(mail)
-    {
-        return 0;
-    }
-    if mail.subparts.is_empty() {
-        return usize::from(
-            is_attachment_part(mail)
-                && attachment_references(mail)
-                    .iter()
-                    .any(|candidate| candidate.eq_ignore_ascii_case(reference)),
-        );
-    }
-    mail.subparts
-        .iter()
-        .map(|part| attachment_reference_count(part, reference))
-        .sum()
+fn attachment_reference_count(mail: &ParsedMessage<'_>, reference: &str) -> usize {
+    attachment_part_ids(mail)
+        .into_iter()
+        .filter_map(|part_id| mail.part(part_id))
+        .filter(|part| {
+            attachment_references(part)
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(reference))
+        })
+        .count()
 }
 
-fn attachment_references(mail: &mailparse::ParsedMail<'_>) -> Vec<String> {
+fn attachment_references(part: &MessagePart<'_>) -> Vec<String> {
     let mut references = Vec::new();
-    if let Some(content_id) = mail.headers.get_first_value("Content-ID") {
+    if let Some(content_id) = part.content_id() {
         let content_id = content_id.trim().trim_matches(['<', '>']);
         if !content_id.is_empty() {
             references.push(format!("cid:{content_id}"));
         }
     }
-    if let Some(location) = mail.headers.get_first_value("Content-Location") {
+    if let Some(location) = part.content_location() {
         let location = location.trim();
         if !location.is_empty() {
             references.push(location.to_owned());
@@ -2966,7 +3569,15 @@ pub fn safe_attachment_filename(value: &str, index: usize) -> String {
         .unwrap_or_default()
         .chars()
         .filter(|character| {
-            !character.is_control() && !matches!(character, ':' | '<' | '>' | '"' | '|' | '?' | '*')
+            !character.is_control()
+                && !matches!(
+                    character,
+                    ':' | '<' | '>' | '"' | '|' | '?' | '*'
+                        | '\u{200e}'
+                        | '\u{200f}'
+                        | '\u{202a}'..='\u{202e}'
+                        | '\u{2066}'..='\u{2069}'
+                )
         })
         .collect::<String>();
     let value = value.trim().trim_matches('.').trim();
@@ -2975,12 +3586,33 @@ pub fn safe_attachment_filename(value: &str, index: usize) -> String {
     } else {
         value
     };
-    let truncated = value.chars().take(180).collect::<String>();
+    let truncated = truncate_filename_bytes(value, 180);
     if truncated.is_empty() {
         format!("attachment-{}", index + 1)
     } else {
         truncated
     }
+}
+
+fn truncate_filename_bytes(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_owned();
+    }
+    let extension = value
+        .rsplit_once('.')
+        .map(|(_, extension)| format!(".{extension}"))
+        .filter(|extension| extension.len() < max_bytes);
+    let suffix = extension.as_deref().unwrap_or_default();
+    let prefix_budget = max_bytes - suffix.len();
+    let mut truncated = String::new();
+    for character in value.chars() {
+        if truncated.len() + character.len_utf8() > prefix_budget {
+            break;
+        }
+        truncated.push(character);
+    }
+    truncated.push_str(suffix);
+    truncated
 }
 
 pub fn safe_mime_type(value: &str) -> String {
@@ -3049,6 +3681,670 @@ mod tests {
             spam_mailbox: None,
         }
         .into_account(provider::by_id("fastmail").unwrap())
+    }
+
+    fn mime_corpus(name: &str) -> &'static [u8] {
+        match name {
+            "attached-message-rfc822" => {
+                include_bytes!("../testdata/mime/attached-message-rfc822.eml")
+            }
+            "charset-matrix" => include_bytes!("../testdata/mime/charset-matrix.eml"),
+            "competing-nested-alternatives" => {
+                include_bytes!("../testdata/mime/competing-nested-alternatives.eml")
+            }
+            "disposition-type-name-matrix" => {
+                include_bytes!("../testdata/mime/disposition-type-name-matrix.eml")
+            }
+            "filename-parameters-and-encodings" => {
+                include_bytes!("../testdata/mime/filename-parameters-and-encodings.eml")
+            }
+            "format-flowed-delsp" => include_bytes!("../testdata/mime/format-flowed-delsp.eml"),
+            "invalid-transfer-encodings" => {
+                include_bytes!("../testdata/mime/invalid-transfer-encodings.eml")
+            }
+            "line-endings-cr-only" => include_bytes!("../testdata/mime/line-endings-cr-only.eml"),
+            "linkedin-inline-content-id" => {
+                include_bytes!("../testdata/mime/linkedin-inline-content-id.eml")
+            }
+            "multipart-attachment-container" => {
+                include_bytes!("../testdata/mime/multipart-attachment-container.eml")
+            }
+            "truncated-multipart-lf" => {
+                include_bytes!("../testdata/mime/truncated-multipart-lf.eml")
+            }
+            _ => panic!("unknown MIME corpus fixture: {name}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn parses_the_checked_in_mime_regression_corpus() {
+        let account = test_account();
+        let linked_in = parse_message(
+            &account,
+            "INBOX",
+            1,
+            &[],
+            mime_corpus("linkedin-inline-content-id"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            linked_in.body_text.trim(),
+            "Redacted plain text=content with a foldedline."
+        );
+        assert!(linked_in
+            .body_html
+            .as_deref()
+            .is_some_and(|body| body.contains("Redacted HTML=content")));
+        assert_eq!(
+            linked_in.snippet,
+            "Redacted plain text=content with a foldedline."
+        );
+        assert!(linked_in.attachments.is_empty());
+
+        let nested = parse_message(
+            &account,
+            "INBOX",
+            2,
+            &[],
+            mime_corpus("competing-nested-alternatives"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(nested.body_text.trim(), "Visible plain body.");
+        assert!(!nested.body_text.contains("redacted-notes"));
+        assert!(nested
+            .body_html
+            .as_deref()
+            .is_some_and(|body| body.contains("Visible <strong>HTML</strong> body.")));
+        assert_eq!(nested.attachments.len(), 1);
+        assert!(nested
+            .attachments
+            .iter()
+            .any(|attachment| attachment.attachment.filename == "redacted-notes.txt"));
+
+        let attached = parse_message(
+            &account,
+            "INBOX",
+            3,
+            &[],
+            mime_corpus("attached-message-rfc822"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(attached
+            .body_text
+            .contains("The attached message is synthetic"));
+        assert!(!attached.body_text.contains("Original plain text."));
+        assert_eq!(attached.attachments.len(), 1);
+        assert_eq!(
+            attached.attachments[0].attachment.filename,
+            "forwarded-message.eml"
+        );
+        assert_eq!(
+            attached.attachments[0].attachment.mime_type,
+            "message/rfc822"
+        );
+        let attached_bytes = std::str::from_utf8(&attached.attachments[0].bytes).unwrap();
+        assert!(attached_bytes.starts_with("Date: Mon, 27 Jul 2026"));
+        assert!(attached_bytes.contains("Original plain text."));
+        assert!(!attached_bytes.contains("--outer"));
+
+        let flowed = parse_message(
+            &account,
+            "INBOX",
+            4,
+            &[],
+            mime_corpus("format-flowed-delsp"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(flowed.body_text.contains("soft spacethat continues"));
+        assert!(flowed
+            .body_text
+            .contains("> Quoted flowed textcontinues too."));
+
+        let filenames = parse_message(
+            &account,
+            "INBOX",
+            5,
+            &[],
+            mime_corpus("filename-parameters-and-encodings"),
+            None,
+        )
+        .await
+        .unwrap();
+        let filenames = filenames
+            .attachments
+            .iter()
+            .map(|attachment| attachment.attachment.filename.as_str())
+            .collect::<Vec<_>>();
+        assert!(filenames.contains(&"quarterly report final.pdf"));
+        assert!(filenames.contains(&"report-test.txt"));
+        assert!(filenames.contains(&"invoice;final.pdf"));
+        assert!(filenames
+            .iter()
+            .all(|name| !name.contains(['/', '\\', '\u{202e}'])));
+
+        let invalid = parse_message(
+            &account,
+            "INBOX",
+            6,
+            &[],
+            mime_corpus("invalid-transfer-encodings"),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(invalid.to_string(), MIME_CONTENT_UNDECODABLE);
+
+        let charset = parse_message(
+            &account,
+            "INBOX",
+            7,
+            &[],
+            mime_corpus("charset-matrix"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(charset.body_text.trim(), "Zażółć");
+        let parsed_charset = parse_complete_message(mime_corpus("charset-matrix")).unwrap();
+        let charset_parts = parsed_charset
+            .part(0)
+            .and_then(MessagePart::sub_parts)
+            .unwrap();
+        let decoded = charset_parts
+            .iter()
+            .map(|part_id| {
+                decode_text_candidate(&parsed_charset, parsed_charset.part(*part_id).unwrap())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(decoded[0].as_deref(), Ok("こんにちは"));
+        assert_eq!(decoded[1].as_deref(), Ok("こんにちは"));
+        assert_eq!(decoded[2].as_deref(), Ok("café"));
+        assert_eq!(decoded[3].as_deref(), Ok("Zażółć"));
+        assert!(decoded[4].is_err());
+
+        let disposition = parse_message(
+            &account,
+            "INBOX",
+            8,
+            &[],
+            mime_corpus("disposition-type-name-matrix"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(disposition.body_text.trim(), "Unnamed inline plain body.");
+        assert!(disposition
+            .body_html
+            .as_deref()
+            .is_some_and(|html| html.contains("Unnamed inline HTML body.")));
+        assert_eq!(disposition.attachments.len(), 4);
+        assert!(disposition
+            .attachments
+            .iter()
+            .any(|attachment| attachment.attachment.filename == "named-inline.txt"));
+
+        let cr_only = parse_message(
+            &account,
+            "INBOX",
+            9,
+            &[],
+            mime_corpus("line-endings-cr-only"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(cr_only.body_text.contains("CR-only plain text."));
+
+        let multipart_attachment = parse_message(
+            &account,
+            "INBOX",
+            10,
+            &[],
+            mime_corpus("multipart-attachment-container"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            multipart_attachment.body_text.trim(),
+            "Visible parent body."
+        );
+        assert!(!multipart_attachment.body_text.contains("Secret child text"));
+        assert_eq!(multipart_attachment.attachments.len(), 1);
+        assert_eq!(
+            multipart_attachment.attachments[0].attachment.filename,
+            "bundle.mime"
+        );
+        assert_eq!(
+            multipart_attachment.attachments[0].attachment.mime_type,
+            "multipart/mixed"
+        );
+        assert!(
+            std::str::from_utf8(&multipart_attachment.attachments[0].bytes)
+                .unwrap()
+                .contains("Secret child text must stay inside the attachment.")
+        );
+
+        assert_eq!(
+            snippet_from_partial(mime_corpus("truncated-multipart-lf")),
+            "The first leaf is complete and is a candidate for a safe partial preview."
+        );
+    }
+
+    #[tokio::test]
+    async fn every_mime_corpus_fixture_uses_all_publication_parse_paths() {
+        let account = test_account();
+        let cases = [
+            ("attached-message-rfc822", true),
+            ("charset-matrix", true),
+            ("competing-nested-alternatives", true),
+            ("disposition-type-name-matrix", true),
+            ("filename-parameters-and-encodings", true),
+            ("format-flowed-delsp", true),
+            ("invalid-transfer-encodings", false),
+            ("line-endings-cr-only", true),
+            ("linkedin-inline-content-id", true),
+            ("multipart-attachment-container", true),
+            ("truncated-multipart-lf", true),
+        ];
+
+        for (index, (name, complete_succeeds)) in cases.into_iter().enumerate() {
+            let raw = mime_corpus(name);
+            let uid = index as u32 + 100;
+            let complete = parse_message(&account, "INBOX", uid, &[], raw, None).await;
+            if complete_succeeds {
+                let complete = complete
+                    .unwrap_or_else(|error| panic!("{name} complete parse failed: {error}"));
+                assert!(!complete.subject.is_empty(), "{name}");
+                assert_eq!(complete.content_state, "complete", "{name}");
+            } else {
+                assert_eq!(
+                    complete.unwrap_err().to_string(),
+                    MIME_CONTENT_UNDECODABLE,
+                    "{name}"
+                );
+            }
+
+            let catalog =
+                parse_catalog_message(&account, "INBOX", uid, &[], raw, "catalog preview".into())
+                    .unwrap_or_else(|error| panic!("{name} catalog parse failed: {error}"));
+            let headers = parse_header_message(&account, "INBOX", uid, &[], raw)
+                .unwrap_or_else(|error| panic!("{name} header-only parse failed: {error}"));
+            assert_eq!(catalog.subject, headers.subject, "{name}");
+            assert_eq!(catalog.from_address, headers.from_address, "{name}");
+            assert_eq!(catalog.to_addresses, headers.to_addresses, "{name}");
+            assert_eq!(catalog.received_at, headers.received_at, "{name}");
+            assert_eq!(catalog.snippet, "catalog preview", "{name}");
+            assert!(headers.snippet.is_empty(), "{name}");
+            assert!(headers.body_text.is_empty(), "{name}");
+            assert!(headers.attachments.is_empty(), "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn parsed_corpus_content_and_attachment_metadata_round_trip_through_storage() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("mail.sqlite");
+        let store = Store::open(&database).await.unwrap();
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        let response_lines = vec![r#"* 1 FETCH (FLAGS (\Flagged) UID 42)"#.to_owned()];
+        let message = parse_message(
+            &account,
+            "INBOX",
+            42,
+            &response_lines,
+            mime_corpus("attached-message-rfc822"),
+            None,
+        )
+        .await
+        .unwrap();
+        store
+            .upsert_messages(std::slice::from_ref(&message))
+            .await
+            .unwrap();
+        drop(store);
+
+        let reopened = Store::open(&database).await.unwrap();
+        let stored = reopened.message(&message.id).await.unwrap().unwrap();
+        assert_eq!(stored.body_text, message.body_text);
+        assert_eq!(stored.body_html, message.body_html);
+        assert_eq!(stored.snippet, message.snippet);
+        assert!(!stored.body_text.contains("Original plain text."));
+        let metadata = reopened
+            .starred_attachment_metadata(&message.id)
+            .await
+            .unwrap();
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata[0].filename, "forwarded-message.eml");
+        assert_eq!(
+            metadata[0].mime_type,
+            message.attachments[0].attachment.mime_type
+        );
+        assert_eq!(
+            metadata[0].size_bytes,
+            message.attachments[0].attachment.size_bytes
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_singleton_headers_use_the_first_value_in_every_parse_path() {
+        let account = test_account();
+        let raw = concat!(
+            "Date: Tue, 21 Jul 2026 10:00:00 +0000\r\n",
+            "Date: Wed, 22 Jul 2026 11:00:00 +0000\r\n",
+            "From: First Sender <first@example.test>\r\n",
+            "From: Second Sender <second@example.test>\r\n",
+            "To: recipient@example.test\r\n",
+            "Subject: First subject\r\n",
+            "Subject: Second subject\r\n",
+            "\r\n",
+            "First body"
+        );
+
+        let complete = parse_message(&account, "INBOX", 1, &[], raw.as_bytes(), None)
+            .await
+            .unwrap();
+        let catalog =
+            parse_catalog_message(&account, "INBOX", 2, &[], raw.as_bytes(), String::new())
+                .unwrap();
+        let headers = parse_header_message(&account, "INBOX", 3, &[], raw.as_bytes()).unwrap();
+
+        for message in [complete, catalog, headers] {
+            assert_eq!(message.subject, "First subject");
+            assert_eq!(message.from_name.as_deref(), Some("First Sender"));
+            assert_eq!(message.from_address, "first@example.test");
+            assert_eq!(
+                message.received_at,
+                chrono::DateTime::parse_from_rfc2822("Tue, 21 Jul 2026 10:00:00 +0000")
+                    .unwrap()
+                    .with_timezone(&Utc)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn related_start_selects_the_declared_root_and_only_resolves_references() {
+        let account = test_account();
+        let raw = concat!(
+            "Date: Tue, 21 Jul 2026 10:00:00 +0000\r\n",
+            "From: sender@example.test\r\n",
+            "To: recipient@example.test\r\n",
+            "Subject: Related start\r\n",
+            "MIME-Version: 1.0\r\n",
+            "Content-Type: multipart/related; boundary=rel; start=\"<chosen>\"\r\n",
+            "\r\n",
+            "--rel\r\n",
+            "Content-Type: text/html; charset=utf-8\r\n",
+            "Content-ID: <not-chosen>\r\n\r\n",
+            "<p>Wrong root</p>\r\n",
+            "--rel\r\n",
+            "Content-Type: text/html; charset=utf-8\r\n",
+            "Content-ID: <chosen>\r\n\r\n",
+            "<p>Chosen root<img src=\"cid:used\"></p>\r\n",
+            "--rel\r\n",
+            "Content-Type: image/png\r\n",
+            "Content-ID: <used>\r\n",
+            "Content-Transfer-Encoding: base64\r\n\r\n",
+            "iVBORw0KGgo=\r\n",
+            "--rel\r\n",
+            "Content-Type: image/png\r\n",
+            "Content-ID: <unused>\r\n",
+            "Content-Transfer-Encoding: base64\r\n\r\n",
+            "iVBORw0KGgo=\r\n",
+            "--rel--\r\n"
+        );
+
+        let message = parse_message(&account, "INBOX", 4, &[], raw.as_bytes(), None)
+            .await
+            .unwrap();
+        let html = message.body_html.unwrap();
+        assert!(html.contains("Chosen root"));
+        assert!(!html.contains("Wrong root"));
+        assert!(html.contains("data:image/png;base64,"));
+        assert!(!html.contains("unused"));
+    }
+
+    #[tokio::test]
+    async fn content_location_rewriting_does_not_modify_html_text() {
+        let account = test_account();
+        let raw = concat!(
+            "Date: Tue, 21 Jul 2026 10:00:00 +0000\r\n",
+            "From: sender@example.test\r\n",
+            "To: recipient@example.test\r\n",
+            "Subject: Content location\r\n",
+            "MIME-Version: 1.0\r\n",
+            "Content-Type: multipart/related; boundary=rel\r\n\r\n",
+            "--rel\r\nContent-Type: text/html; charset=utf-8\r\n\r\n",
+            "<p>a cat remains readable</p><img src=\"a\">\r\n",
+            "--rel\r\nContent-Type: image/png\r\n",
+            "Content-Location: a\r\n",
+            "Content-Transfer-Encoding: base64\r\n\r\n",
+            "iVBORw0KGgo=\r\n--rel--\r\n"
+        );
+        let message = parse_message(&account, "INBOX", 8, &[], raw.as_bytes(), None)
+            .await
+            .unwrap();
+        let html = message.body_html.unwrap();
+        assert!(html.contains("a cat remains readable"));
+        assert!(html.contains("src=\"data:image/png;base64,"));
+    }
+
+    #[tokio::test]
+    async fn cr_only_normalization_preserves_unencoded_attachment_bytes() {
+        let account = test_account();
+        let mut raw = concat!(
+            "Date: Tue, 21 Jul 2026 10:00:00 +0000\r",
+            "From: sender@example.test\r",
+            "To: recipient@example.test\r",
+            "Subject: CR-only binary\r",
+            "MIME-Version: 1.0\r",
+            "Content-Type: multipart/mixed; boundary=b\r\r",
+            "--b\rContent-Type: text/plain; charset=utf-8\r\rBody\r",
+            "--b\rContent-Type: application/octet-stream; name=data.bin\r",
+            "Content-Disposition: attachment; filename=data.bin\r\r"
+        )
+        .as_bytes()
+        .to_vec();
+        raw.extend_from_slice(b"A\rB");
+        raw.extend_from_slice(b"\r--b--\r");
+
+        let message = parse_message(&account, "INBOX", 9, &[], &raw, None)
+            .await
+            .unwrap();
+        assert_eq!(message.attachments.len(), 1);
+        assert_eq!(message.attachments[0].bytes, [b'A', b'\r', b'B']);
+    }
+
+    #[tokio::test]
+    async fn repeated_cid_references_cannot_expand_reader_html_past_the_message_budget() {
+        let account = test_account();
+        let references = "<img src=\"cid:large\">".repeat(100);
+        let image = STANDARD.encode(vec![0_u8; 600_000]);
+        let raw = format!(
+            concat!(
+                "Date: Tue, 21 Jul 2026 10:00:00 +0000\r\n",
+                "From: sender@example.test\r\n",
+                "To: recipient@example.test\r\n",
+                "Subject: CID budget\r\n",
+                "MIME-Version: 1.0\r\n",
+                "Content-Type: multipart/related; boundary=rel\r\n\r\n",
+                "--rel\r\nContent-Type: text/html; charset=utf-8\r\n\r\n",
+                "{}\r\n",
+                "--rel\r\nContent-Type: image/png\r\n",
+                "Content-ID: <large>\r\n",
+                "Content-Transfer-Encoding: base64\r\n\r\n",
+                "{}\r\n--rel--\r\n"
+            ),
+            references, image
+        );
+        let error = parse_message(&account, "INBOX", 10, &[], raw.as_bytes(), None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "mime_resolved_html_too_large");
+    }
+
+    #[tokio::test]
+    async fn attachment_filename_precedence_ignores_empty_and_malformed_candidates() {
+        let account = test_account();
+        let raw = concat!(
+            "Date: Tue, 21 Jul 2026 10:00:00 +0000\r\n",
+            "From: sender@example.test\r\n",
+            "To: recipient@example.test\r\n",
+            "Subject: Filename precedence\r\n",
+            "MIME-Version: 1.0\r\n",
+            "Content-Type: multipart/mixed; boundary=files\r\n\r\n",
+            "--files\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nBody\r\n",
+            "--files\r\n",
+            "Content-Type: application/octet-stream; name=\"type-name.txt\"\r\n",
+            "Content-Disposition: attachment; filename=\"plain.txt\"; ",
+            "filename*=utf-8''extended%2Etxt\r\n\r\none\r\n",
+            "--files\r\n",
+            "Content-Type: text/plain; charset=utf-8; name=\"notes.txt\"\r\n",
+            "Content-Disposition: inline; filename=\"\"\r\n\r\nnotes\r\n",
+            "--files\r\n",
+            "Content-Type: application/octet-stream; name=\"fallback.bin\"\r\n",
+            "Content-Disposition: attachment; filename*=utf-8''bad%ZZ.exe\r\n\r\nthree\r\n",
+            "--files--\r\n"
+        );
+
+        let message = parse_message(&account, "INBOX", 5, &[], raw.as_bytes(), None)
+            .await
+            .unwrap();
+        let filenames = message
+            .attachments
+            .iter()
+            .map(|attachment| attachment.attachment.filename.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(filenames, vec!["extended.txt", "notes.txt", "fallback.bin"]);
+        assert!(!message.body_text.contains("notes"));
+    }
+
+    #[tokio::test]
+    async fn unknown_charset_requires_valid_utf8_when_it_is_the_only_body() {
+        let account = test_account();
+        let valid = concat!(
+            "Date: Tue, 21 Jul 2026 10:00:00 +0000\r\n",
+            "From: sender@example.test\r\n",
+            "To: recipient@example.test\r\n",
+            "Subject: Unknown charset\r\n",
+            "Content-Type: text/plain; charset=x-unknown\r\n\r\n",
+            "Valid UTF-8 café"
+        );
+        let valid = parse_message(&account, "INBOX", 6, &[], valid.as_bytes(), None)
+            .await
+            .unwrap();
+        assert_eq!(valid.body_text, "Valid UTF-8 café");
+
+        let mut invalid = concat!(
+            "Date: Tue, 21 Jul 2026 10:00:00 +0000\r\n",
+            "From: sender@example.test\r\n",
+            "To: recipient@example.test\r\n",
+            "Subject: Unknown charset\r\n",
+            "Content-Type: text/plain; charset=x-unknown\r\n\r\n"
+        )
+        .as_bytes()
+        .to_vec();
+        invalid.extend_from_slice(&[0xff, 0xfe]);
+        let error = parse_message(&account, "INBOX", 7, &[], &invalid, None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), MIME_CONTENT_UNDECODABLE);
+    }
+
+    #[test]
+    fn production_parser_enforces_raw_header_part_and_depth_budgets() {
+        let oversized_raw = vec![b'x'; MAX_RAW_MESSAGE_BYTES + 1];
+        assert_eq!(
+            parse_complete_message(&oversized_raw)
+                .unwrap_err()
+                .to_string(),
+            "mime_raw_message_too_large"
+        );
+
+        let oversized_headers = vec![b'x'; crate::mime_budget::MAX_MIME_HEADER_BYTES + 1];
+        assert_eq!(
+            parse_complete_message(&oversized_headers)
+                .unwrap_err()
+                .to_string(),
+            "mime_headers_too_large"
+        );
+
+        let at_part_limit = multipart_with_leaf_count(999);
+        parse_complete_message(&at_part_limit).unwrap();
+        let over_part_limit = multipart_with_leaf_count(1_000);
+        assert_eq!(
+            parse_complete_message(&over_part_limit)
+                .unwrap_err()
+                .to_string(),
+            "mime_too_many_parts"
+        );
+
+        let at_depth_limit = nested_multipart(64);
+        parse_complete_message(&at_depth_limit).unwrap();
+        let over_depth_limit = nested_multipart(65);
+        assert_eq!(
+            parse_complete_message(&over_depth_limit)
+                .unwrap_err()
+                .to_string(),
+            "mime_multipart_nesting_too_deep"
+        );
+
+        let mut aggregate_headers = b"Content-Type: multipart/mixed; boundary=h\r\n\r\n".to_vec();
+        for index in 0..2 {
+            aggregate_headers.extend_from_slice(b"--h\r\nX-Fill: ");
+            aggregate_headers.extend(std::iter::repeat_n(b'x', 525_000));
+            aggregate_headers.extend_from_slice(
+                format!(
+                    "\r\nContent-Type: application/octet-stream; name={index}.bin\r\n\r\nx\r\n"
+                )
+                .as_bytes(),
+            );
+        }
+        aggregate_headers.extend_from_slice(b"--h--\r\n");
+        assert_eq!(
+            parse_complete_message(&aggregate_headers)
+                .unwrap_err()
+                .to_string(),
+            "mime_headers_too_large"
+        );
+    }
+
+    fn multipart_with_leaf_count(count: usize) -> Vec<u8> {
+        let mut raw = b"Content-Type: multipart/mixed; boundary=p\r\n\r\n".to_vec();
+        for index in 0..count {
+            raw.extend_from_slice(
+                format!(
+                    "--p\r\nContent-Type: application/octet-stream; name={index}.bin\r\n\r\nx\r\n"
+                )
+                .as_bytes(),
+            );
+        }
+        raw.extend_from_slice(b"--p--\r\n");
+        raw
+    }
+
+    fn nested_multipart(depth: usize) -> Vec<u8> {
+        let mut raw = Vec::new();
+        for level in 0..depth {
+            raw.extend_from_slice(
+                format!("Content-Type: multipart/mixed; boundary=b{level}\r\n\r\n--b{level}\r\n")
+                    .as_bytes(),
+            );
+        }
+        raw.extend_from_slice(b"Content-Type: text/plain; charset=utf-8\r\n\r\nbody\r\n");
+        for level in (0..depth).rev() {
+            raw.extend_from_slice(format!("--b{level}--\r\n").as_bytes());
+        }
+        raw
     }
 
     #[tokio::test]
@@ -3548,7 +4844,7 @@ For you, Alex =E2=80=94 related to your saved topic."
 
     #[test]
     fn uses_the_message_date_when_it_is_valid() {
-        let parsed = mailparse::parse_mail(
+        let parsed = parse_complete_message(
             b"Date: Tue, 10 Feb 2026 12:34:56 +0200\r\nSubject: hello\r\n\r\nHi",
         )
         .unwrap();
@@ -3570,7 +4866,7 @@ For you, Alex =E2=80=94 related to your saved topic."
             b"Subject: missing date\r\n\r\nHi".as_slice(),
             b"Date: definitely not a date\r\nSubject: invalid date\r\n\r\nHi".as_slice(),
         ] {
-            let parsed = mailparse::parse_mail(raw).unwrap();
+            let parsed = parse_complete_message(raw).unwrap();
             let response = vec![
                 "* 1 FETCH (UID 7 INTERNALDATE \"09-Feb-2026 07:16:47 +0100\" RFC822 {1}\r\n"
                     .into(),
@@ -3587,7 +4883,7 @@ For you, Alex =E2=80=94 related to your saved topic."
 
     #[test]
     fn rejects_a_message_when_no_real_date_is_available() {
-        let parsed = mailparse::parse_mail(b"Subject: no date\r\n\r\nHi").unwrap();
+        let parsed = parse_complete_message(b"Subject: no date\r\n\r\nHi").unwrap();
         let error =
             message_received_at(&parsed, &["* 1 FETCH (UID 7 RFC822 {1}\r\n".into()]).unwrap_err();
 
@@ -3625,8 +4921,8 @@ For you, Alex =E2=80=94 related to your saved topic."
             "iVBORw0KGgo=\r\n",
             "--related--\r\n"
         );
-        let parsed = mailparse::parse_mail(raw.as_bytes()).unwrap();
-        let html = extract_html(&parsed).unwrap().unwrap();
+        let parsed = parse_complete_message(raw.as_bytes()).unwrap();
+        let html = extract_html(&parsed).unwrap();
         let resolved = resolve_inline_images(html, &parsed).unwrap();
         assert!(resolved.contains("<strong>Hello</strong>"));
         assert!(resolved.contains("src=\"data:image/png;base64,iVBORw0KGgo=\""));
@@ -3701,7 +4997,7 @@ For you, Alex =E2=80=94 related to your saved topic."
             "Content-Transfer-Encoding: base64\r\n\r\naW1n\r\n",
             "--related--\r\n"
         );
-        let parsed = mailparse::parse_mail(raw.as_bytes()).unwrap();
+        let parsed = parse_complete_message(raw.as_bytes()).unwrap();
         let attachments = extract_attachments(&parsed, "message-1").unwrap();
 
         assert_eq!(attachments.len(), 2);
@@ -3721,10 +5017,12 @@ For you, Alex =E2=80=94 related to your saved topic."
     fn only_references_in_the_selected_html_branch_embed_inline_resources() {
         let raw = concat!(
             "Content-Type: multipart/mixed; boundary=mixed\r\n\r\n",
-            "--mixed\r\nContent-Type: text/html; charset=utf-8\r\n\r\n",
-            "<img src=\"cid:selected@example\">\r\n",
-            "--mixed\r\nContent-Type: text/html; charset=utf-8\r\n\r\n",
+            "--mixed\r\nContent-Type: multipart/alternative; boundary=alternative\r\n\r\n",
+            "--alternative\r\nContent-Type: text/html; charset=utf-8\r\n\r\n",
             "<img src=\"cid:unselected@example\">\r\n",
+            "--alternative\r\nContent-Type: text/html; charset=utf-8\r\n\r\n",
+            "<img src=\"cid:selected@example\">\r\n",
+            "--alternative--\r\n",
             "--mixed\r\nContent-Type: image/png; name=selected.png\r\n",
             "Content-ID: <selected@example>\r\n",
             "Content-Disposition: inline; filename=selected.png\r\n",
@@ -3735,7 +5033,7 @@ For you, Alex =E2=80=94 related to your saved topic."
             "Content-Transfer-Encoding: base64\r\n\r\naW1n\r\n",
             "--mixed--\r\n"
         );
-        let parsed = mailparse::parse_mail(raw.as_bytes()).unwrap();
+        let parsed = parse_complete_message(raw.as_bytes()).unwrap();
         let attachments = extract_attachments(&parsed, "message-1").unwrap();
 
         assert_eq!(attachments.len(), 1);
@@ -3769,13 +5067,13 @@ For you, Alex =E2=80=94 related to your saved topic."
     #[test]
     fn bounds_embedded_and_mixed_attachment_candidates_before_filtering_them() {
         let fifty = related_inline_images(MAX_ATTACHMENT_COUNT, true);
-        let parsed = mailparse::parse_mail(fifty.as_bytes()).unwrap();
+        let parsed = parse_complete_message(fifty.as_bytes()).unwrap();
         assert!(extract_attachments(&parsed, "message-1")
             .unwrap()
             .is_empty());
 
         let fifty_one = related_inline_images(MAX_ATTACHMENT_COUNT + 1, true);
-        let parsed = mailparse::parse_mail(fifty_one.as_bytes()).unwrap();
+        let parsed = parse_complete_message(fifty_one.as_bytes()).unwrap();
         assert!(extract_attachments(&parsed, "message-1")
             .unwrap_err()
             .to_string()
@@ -3787,29 +5085,17 @@ For you, Alex =E2=80=94 related to your saved topic."
             "--related\r\nContent-Type: application/pdf; name=first.pdf\r\nContent-Disposition: attachment; filename=first.pdf\r\nContent-Transfer-Encoding: base64\r\n\r\ncGRm\r\n--related\r\nContent-Type: application/pdf; name=second.pdf\r\nContent-Disposition: attachment; filename=second.pdf\r\nContent-Transfer-Encoding: base64\r\n\r\ncGRm\r\n--related--\r\n",
             1,
         );
-        let parsed = mailparse::parse_mail(mixed.as_bytes()).unwrap();
+        let parsed = parse_complete_message(mixed.as_bytes()).unwrap();
         assert!(extract_attachments(&parsed, "message-1").is_err());
     }
 
     #[test]
     fn bounds_total_decoded_bytes_even_for_embedded_only_resources() {
-        let raw = related_inline_images(1, true);
-        let parsed = mailparse::parse_mail(raw.as_bytes()).unwrap();
-        let mut collection = AttachmentCollection {
-            decoded_bytes: MAX_ATTACHMENT_TOTAL_BYTES,
-            ..Default::default()
-        };
-
-        assert!(collect_attachment_parts(
-            &parsed,
-            &parsed,
-            "message-1",
-            extract_html(&parsed).unwrap().as_deref(),
-            &mut collection,
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("attachments exceed"));
+        let mut decoded_bytes = MAX_ATTACHMENT_TOTAL_BYTES;
+        assert!(add_decoded_attachment_bytes(&mut decoded_bytes, 1)
+            .unwrap_err()
+            .to_string()
+            .contains("attachments exceed"));
     }
 
     #[test]
@@ -3820,12 +5106,12 @@ For you, Alex =E2=80=94 related to your saved topic."
             "--related\r\nContent-Type: image/png; name=one.png\r\nContent-ID: <logo@example>\r\nContent-Disposition: inline; filename=one.png\r\nContent-Transfer-Encoding: base64\r\n\r\naW1n\r\n",
             "--related\r\nContent-Type: image/png; name=two.png\r\nContent-ID: <logo@example>\r\nContent-Disposition: inline; filename=two.png\r\nContent-Transfer-Encoding: base64\r\n\r\naW1n\r\n--related--\r\n"
         );
-        let parsed = mailparse::parse_mail(duplicate.as_bytes()).unwrap();
+        let parsed = parse_complete_message(duplicate.as_bytes()).unwrap();
         assert_eq!(extract_attachments(&parsed, "message-1").unwrap().len(), 2);
 
         let missing = related_inline_images(1, false)
             .replace("</body>", "<img src=\"cid:missing@example.test\"></body>");
-        let parsed = mailparse::parse_mail(missing.as_bytes()).unwrap();
+        let parsed = parse_complete_message(missing.as_bytes()).unwrap();
         assert_eq!(extract_attachments(&parsed, "message-1").unwrap().len(), 1);
     }
 
@@ -3841,8 +5127,8 @@ For you, Alex =E2=80=94 related to your saved topic."
             "--inner\r\nContent-Type: image/png\r\nContent-ID: <outer@example>\r\nContent-Disposition: inline; filename=inner.png\r\nContent-Transfer-Encoding: base64\r\n\r\naW5uZXI=\r\n",
             "--inner--\r\n--outer--\r\n"
         );
-        let parsed = mailparse::parse_mail(raw.as_bytes()).unwrap();
-        let html = extract_html(&parsed).unwrap().unwrap();
+        let parsed = parse_complete_message(raw.as_bytes()).unwrap();
+        let html = extract_html(&parsed).unwrap();
         let resolved = resolve_inline_images(html, &parsed).unwrap();
         let attachments = extract_attachments(&parsed, "message-1").unwrap();
 
@@ -3855,8 +5141,8 @@ For you, Alex =E2=80=94 related to your saved topic."
     #[test]
     fn html_only_messages_get_searchable_plain_text() {
         let raw = b"Content-Type: text/html; charset=utf-8\r\n\r\n<p>Hello <b>Tallinn</b></p>";
-        let parsed = mailparse::parse_mail(raw).unwrap();
-        let html = extract_html(&parsed).unwrap().unwrap();
+        let parsed = parse_complete_message(raw).unwrap();
+        let html = extract_html(&parsed).unwrap();
         assert_eq!(
             mail_parser::decoders::html::html_to_text(&html).trim(),
             "Hello Tallinn"
@@ -3882,11 +5168,11 @@ For you, Alex =E2=80=94 related to your saved topic."
             "<p>HTML sent body</p>\r\n",
             "--body--\r\n"
         );
-        let parsed = mailparse::parse_mail(raw.as_bytes()).unwrap();
+        let parsed = parse_complete_message(raw.as_bytes()).unwrap();
 
-        assert_eq!(extract_text(&parsed).unwrap().trim(), "Plain sent body");
+        assert_eq!(extract_text(&parsed).trim(), "Plain sent body");
         assert_eq!(
-            extract_html(&parsed).unwrap().unwrap().trim(),
+            extract_html(&parsed).unwrap().trim(),
             "<p>HTML sent body</p>"
         );
         assert!(!has_attachment(&parsed));
@@ -3903,9 +5189,9 @@ For you, Alex =E2=80=94 related to your saved topic."
             "\r\n",
             "Attached notes\r\n"
         );
-        let parsed = mailparse::parse_mail(raw.as_bytes()).unwrap();
+        let parsed = parse_complete_message(raw.as_bytes()).unwrap();
 
-        assert!(extract_text(&parsed).unwrap().is_empty());
+        assert!(extract_text(&parsed).is_empty());
         let attachments = extract_attachments(&parsed, "message-1").unwrap();
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0].attachment.filename, "notes.txt");
@@ -3918,8 +5204,7 @@ For you, Alex =E2=80=94 related to your saved topic."
             "\r\n",
             "%PDF"
         );
-        let parsed = mailparse::parse_mail(raw.as_bytes()).unwrap();
-
+        let parsed = parse_complete_message(raw.as_bytes()).unwrap();
         let attachments = extract_attachments(&parsed, "message-1").unwrap();
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0].attachment.filename, "attachment");
@@ -4242,7 +5527,7 @@ For you, Alex =E2=80=94 related to your saved topic."
             "\r\n",
             "Hello"
         );
-        let parsed = mailparse::parse_mail(raw.as_bytes()).unwrap();
+        let parsed = parse_complete_message(raw.as_bytes()).unwrap();
         assert_eq!(
             extract_unsubscribe(&parsed, raw.as_bytes(), None).await,
             (
@@ -4260,7 +5545,7 @@ For you, Alex =E2=80=94 related to your saved topic."
             "\r\n",
             "Hello"
         );
-        let parsed = mailparse::parse_mail(raw.as_bytes()).unwrap();
+        let parsed = parse_complete_message(raw.as_bytes()).unwrap();
         assert_eq!(
             extract_unsubscribe(&parsed, raw.as_bytes(), None).await,
             (
@@ -4323,7 +5608,7 @@ For you, Alex =E2=80=94 related to your saved topic."
             "cGRm\r\n",
             "--mixed--\r\n"
         );
-        let parsed = mailparse::parse_mail(raw.as_bytes()).unwrap();
+        let parsed = parse_complete_message(raw.as_bytes()).unwrap();
         let attachments = extract_attachments(&parsed, "message-1").unwrap();
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0].attachment.filename, "invoice.pdf");
@@ -4335,12 +5620,20 @@ For you, Alex =E2=80=94 related to your saved topic."
     fn flags_executable_attachments_without_blocking_a_save() {
         assert!(is_potentially_unsafe("invoice.command", "text/plain"));
         assert!(!is_potentially_unsafe("invoice.pdf", "application/pdf"));
+        let long_name = format!("{}.exe", "🧪".repeat(100));
+        let sanitized = safe_attachment_filename(&long_name, 0);
+        assert!(sanitized.len() <= 180);
+        assert!(sanitized.ends_with(".exe"));
+        assert!(is_potentially_unsafe(
+            &sanitized,
+            "application/octet-stream"
+        ));
     }
 
     #[test]
     fn extracts_safe_structural_classification_signals() {
         let raw = b"List-Unsubscribe: <https://example.test/unsubscribe?recipient=private>\r\nList-Id: <product.example.test>\r\nPrecedence: bulk\r\nAuto-Submitted: auto-generated\r\nReply-To: support@example.test\r\n\r\nHello";
-        let parsed = mailparse::parse_mail(raw).unwrap();
+        let parsed = parse_complete_message(raw).unwrap();
         let signals = classification_signals(&parsed, &[]);
 
         assert!(signals.contains("Mailing-list unsubscribe header present"));
@@ -4353,7 +5646,7 @@ For you, Alex =E2=80=94 related to your saved topic."
 
     #[test]
     fn records_only_gmail_category_metadata() {
-        let parsed = mailparse::parse_mail(b"Subject: hello\r\n\r\nHi").unwrap();
+        let parsed = parse_complete_message(b"Subject: hello\r\n\r\nHi").unwrap();
         let signals = classification_signals(
             &parsed,
             &["* 1 FETCH (X-GM-LABELS (\\Inbox \\Category_Promotions))".into()],

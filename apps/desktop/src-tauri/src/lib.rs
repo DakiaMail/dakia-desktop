@@ -2159,7 +2159,7 @@ fn save_private_download(
 ) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(downloads)?;
     for counter in 0..10_000 {
-        let candidate = downloads.join(download_name(&filename, counter));
+        let candidate = downloads.join(download_name(filename, counter));
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -2225,7 +2225,7 @@ mod download_tests {
 
         assert!(filename.len() <= MAX_EXPORT_FILENAME_BYTES);
         assert!(filename.ends_with(".eml"));
-        assert_eq!(filename.trim_end_matches(".eml").chars().count(), 81);
+        assert_eq!(filename.trim_end_matches(".eml").len(), 180);
         assert!(
             download_name(&filename, 9999).len() <= MAX_EXPORT_FILENAME_BYTES,
             "the longest collision suffix must still fit"

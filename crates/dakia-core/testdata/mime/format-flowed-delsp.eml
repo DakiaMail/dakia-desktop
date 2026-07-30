@@ -1,0 +1,20 @@
+X-Dakia-Corpus-Case: format-flowed-delsp
+Date: Tue, 28 Jul 2026 10:06:00 +0000
+From: sender@example.test
+To: recipient@example.test
+Subject: Synthetic flowed text
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="flowed"
+
+--flowed
+Content-Type: text/plain; charset=utf-8; format=flowed; delsp=yes
+
+This is a flowed line with a soft space 
+that continues without adding a visible space.
+> Quoted flowed text 
+> continues too.
+--flowed
+Content-Type: text/html; charset=utf-8
+
+<p>This is the HTML alternative.</p>
+--flowed--

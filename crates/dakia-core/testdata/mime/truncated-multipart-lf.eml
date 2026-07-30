@@ -1,0 +1,17 @@
+X-Dakia-Corpus-Case: truncated-multipart-lf
+X-Dakia-Corpus-Notes: LF-only input and deliberately absent closing boundary
+Date: Tue, 28 Jul 2026 10:07:00 +0000
+From: sender@example.test
+To: recipient@example.test
+Subject: Synthetic truncated MIME
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="truncated"
+
+--truncated
+Content-Type: text/plain; charset=utf-8
+
+The first leaf is complete and is a candidate for a safe partial preview.
+--truncated
+Content-Type: text/html; charset=utf-8
+
+<p>The second leaf and closing boundary are deliberately missing.

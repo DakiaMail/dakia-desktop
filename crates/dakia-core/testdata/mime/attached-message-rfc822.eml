@@ -1,0 +1,33 @@
+X-Dakia-Corpus-Case: attached-message-rfc822
+Date: Tue, 28 Jul 2026 10:00:00 +0000
+From: sender@example.test
+To: recipient@example.test
+Subject: Synthetic attached message
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="outer"
+
+--outer
+Content-Type: text/plain; charset=utf-8
+
+The attached message is synthetic and fully redacted.
+--outer
+Content-Type: message/rfc822; name="forwarded-message.eml"
+Content-Disposition: attachment; filename="forwarded-message.eml"
+
+Date: Mon, 27 Jul 2026 09:00:00 +0000
+From: original-sender@example.test
+To: original-recipient@example.test
+Subject: Synthetic original
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="inner"
+
+--inner
+Content-Type: text/plain; charset=utf-8
+
+Original plain text.
+--inner
+Content-Type: text/html; charset=utf-8
+
+<p>Original <strong>HTML</strong>.</p>
+--inner--
+--outer--

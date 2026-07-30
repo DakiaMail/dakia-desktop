@@ -1,0 +1,42 @@
+X-Dakia-Corpus-Case: disposition-type-name-matrix
+Date: Tue, 28 Jul 2026 10:05:00 +0000
+From: sender@example.test
+To: recipient@example.test
+Subject: Synthetic disposition matrix
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="matrix"
+
+--matrix
+Content-Type: text/plain; charset=utf-8
+Content-Disposition: inline; filename=""
+Content-ID: <plain-body@example.test>
+
+Unnamed inline plain body.
+--matrix
+Content-Type: text/html; charset=utf-8; name=""
+Content-Disposition: inline
+Content-ID: <html-body@example.test>
+
+<p>Unnamed inline HTML body.</p>
+--matrix
+Content-Type: text/plain; charset=utf-8
+Content-Disposition: inline; filename="named-inline.txt"
+
+Named inline text attachment.
+--matrix
+Content-Type: application/pdf; name=""
+
+%PDF-redacted
+--matrix
+Content-Type: image/png
+Content-Disposition: inline
+Content-ID: <inline-image@example.test>
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgo=
+--matrix
+Content-Type: text/plain; charset=utf-8
+Content-Disposition: attachment
+
+Explicit attachment without a filename.
+--matrix--
