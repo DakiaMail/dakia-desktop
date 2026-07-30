@@ -208,7 +208,7 @@ test("ordinary pull-request workflow preserves the cost and release boundaries",
   );
   assert.match(
     workflow,
-    /rustup toolchain install 1\.82\.0 --profile minimal --component rustfmt --component clippy/,
+    /rustup toolchain install 1\.89\.0 --profile minimal --component rustfmt --component clippy/,
     "rustup requires one --component flag per requested component",
   );
   for (const action of workflow.matchAll(/uses:\s*[^@\s]+@([^\s#]+)/g)) {

@@ -64,15 +64,15 @@ jobs:
           key: npm-${{ runner.os }}-${{ runner.arch }}-node-20.19.0-${{ hashFiles('package-lock.json') }}
       - name: Install pinned Rust toolchain
         run: |
-          rustup toolchain install 1.82.0 --profile minimal --component rustfmt --component clippy
-          echo 'RUSTUP_TOOLCHAIN=1.82.0' >> "$GITHUB_ENV"
+          rustup toolchain install 1.89.0 --profile minimal --component rustfmt --component clippy
+          echo 'RUSTUP_TOOLCHAIN=1.89.0' >> "$GITHUB_ENV"
       - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-rust-1.82.0-${{ hashFiles('Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-${{ hashFiles('Cargo.lock') }}
       - name: Install Linux dependencies for workspace tests
         run: |
           sudo apt-get update
@@ -105,8 +105,8 @@ jobs:
           node-version: 20.19.0
       - name: Install pinned Rust coverage tooling
         run: |
-          rustup toolchain install 1.82.0 --profile minimal --component llvm-tools-preview
-          echo 'RUSTUP_TOOLCHAIN=1.82.0' >> "$GITHUB_ENV"
+          rustup toolchain install 1.89.0 --profile minimal --component llvm-tools-preview
+          echo 'RUSTUP_TOOLCHAIN=1.89.0' >> "$GITHUB_ENV"
           cargo install cargo-llvm-cov --version 0.6.13 --locked
       - name: Install Linux dependencies for workspace coverage
         run: |
@@ -158,8 +158,8 @@ jobs:
           node-version: 20.19.0
       - name: Install pinned Rust toolchain
         run: |
-          rustup toolchain install 1.82.0 --profile minimal
-          echo 'RUSTUP_TOOLCHAIN=1.82.0' >> "$GITHUB_ENV"
+          rustup toolchain install 1.89.0 --profile minimal
+          echo 'RUSTUP_TOOLCHAIN=1.89.0' >> "$GITHUB_ENV"
       - run: npm ci --ignore-scripts
       - name: Fetch classifier fixtures needed to compile the core test crate
         run: git lfs pull --include='apps/desktop/src-tauri/resources/email-classifier-v2/model.onnx,apps/desktop/src-tauri/resources/email-classifier-v2/tokenizer.json'
@@ -183,8 +183,8 @@ jobs:
           node-version: 20.19.0
       - name: Install pinned Rust toolchain
         run: |
-          rustup toolchain install 1.82.0 --profile minimal
-          echo 'RUSTUP_TOOLCHAIN=1.82.0' >> "$GITHUB_ENV"
+          rustup toolchain install 1.89.0 --profile minimal
+          echo 'RUSTUP_TOOLCHAIN=1.89.0' >> "$GITHUB_ENV"
       - name: Compile the exact locked provider smoke binary
         run: cargo build --locked -p dakia-cli --bin dakia-provider-smoke
       - name: Run the read-neutral IMAP and SMTP auth/QUIT smoke

@@ -77,8 +77,8 @@ jobs:
       - name: Install pinned Rust toolchain
         if: needs.classify.outputs.rust_core == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.tauri_boundary == 'true'
         run: |
-          rustup toolchain install 1.82.0 --profile minimal --component rustfmt --component clippy
-          echo 'RUSTUP_TOOLCHAIN=1.82.0' >> "$GITHUB_ENV"
+          rustup toolchain install 1.89.0 --profile minimal --component rustfmt --component clippy
+          echo 'RUSTUP_TOOLCHAIN=1.89.0' >> "$GITHUB_ENV"
       - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         if: needs.classify.outputs.rust_core == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.tauri_boundary == 'true'
         with:
@@ -86,7 +86,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-rust-1.82.0-${{ hashFiles('Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-${{ hashFiles('Cargo.lock') }}
       - id: rust_core
         name: Validate Rust core scope
         if: needs.classify.outputs.rust_core == 'true'

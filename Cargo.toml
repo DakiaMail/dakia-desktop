@@ -11,7 +11,7 @@ version = "0.3.0"
 edition = "2021"
 license = "MPL-2.0"
 repository = "https://github.com/DakiaMail/dakia-desktop"
-rust-version = "1.82"
+rust-version = "1.89"
 
 [workspace.dependencies]
 anyhow = "1.0"
