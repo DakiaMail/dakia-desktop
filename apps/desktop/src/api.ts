@@ -12,6 +12,7 @@ import type {
   MessageContent,
   MailThread,
   MailThreadPage,
+  MessageContentErrorKind,
   Provider,
   SyncProgress,
   SyncResult,
@@ -21,6 +22,44 @@ import type {
   TranslationModelFiles,
   TranslationModelStatus,
 } from "./types";
+
+const messageContentErrorKinds = new Set<MessageContentErrorKind>([
+  "resource_limit",
+  "malformed",
+  "undecodable",
+  "unsupported",
+  "transient",
+]);
+
+export class MessageContentError extends Error {
+  readonly retryable: boolean;
+
+  constructor(readonly kind: MessageContentErrorKind) {
+    super("Message content could not be loaded");
+    this.name = "MessageContentError";
+    this.retryable = kind === "transient";
+  }
+}
+
+/**
+ * Converts the native error envelope into the only error shape Reader needs.
+ * Unknown/rejected IPC payloads remain retryable and never become user text.
+ */
+export function messageContentErrorFromUnknown(
+  error: unknown,
+): MessageContentError {
+  if (error instanceof MessageContentError) return error;
+  if (
+    error &&
+    typeof error === "object" &&
+    "kind" in error &&
+    typeof error.kind === "string" &&
+    messageContentErrorKinds.has(error.kind as MessageContentErrorKind)
+  ) {
+    return new MessageContentError(error.kind as MessageContentErrorKind);
+  }
+  return new MessageContentError("transient");
+}
 
 const desktopApi = {
   providers: () => invoke<Provider[]>("provider_presets"),
@@ -134,8 +173,13 @@ const desktopApi = {
     });
   },
   mailRebuildStatus: () => invoke<MailRebuildProgress[]>("mail_rebuild_status"),
-  content: (messageId: string) =>
-    invoke<MessageContent>("message_content", { messageId }),
+  content: async (messageId: string) => {
+    try {
+      return await invoke<MessageContent>("message_content", { messageId });
+    } catch (error) {
+      throw messageContentErrorFromUnknown(error);
+    }
+  },
   attachments: (messageId: string) =>
     invoke<Attachment[]>("message_attachments", { messageId }),
   saveAttachment: (messageId: string, attachmentId: string) =>

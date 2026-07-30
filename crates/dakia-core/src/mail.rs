@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     net::IpAddr,
+    ops::Range,
     sync::Arc,
 };
 use tokio::{
@@ -2336,10 +2337,20 @@ struct PlannedAttachment {
 #[derive(Debug, Clone)]
 struct PlannedTextPart {
     part: MimePart,
-    /// A multipart/alternative representation may have several candidates of
-    /// one kind.  They are fetched in preference order and only the first
-    /// decodable member of this group becomes the visible representation.
-    fallback_group: Option<usize>,
+    /// Each enclosing multipart/alternative contributes one branch marker.
+    /// A successful later branch suppresses only earlier sibling branches;
+    /// text leaves in the same selected branch remain visible together.
+    alternative_branches: Vec<AlternativeBranch>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AlternativeBranch {
+    group: usize,
+    branch: usize,
+    /// Only the first candidate for a representation may select a composite
+    /// branch. A decoded footer sibling must not hide a substantive fallback
+    /// when the branch's primary body is undecodable.
+    decisive: bool,
 }
 
 impl PlannedAttachment {
@@ -2688,7 +2699,7 @@ fn selective_plan(root: &MimePart) -> Result<SelectivePlan> {
 fn select_text_parts(
     part: &MimePart,
     selected: &mut Vec<PlannedTextPart>,
-    fallback_groups: &mut usize,
+    alternative_groups: &mut usize,
 ) {
     if part.is_attached_container() {
         return;
@@ -2697,31 +2708,48 @@ fn select_text_parts(
         if part.is_text_body() && !part.is_attachment_candidate() {
             selected.push(PlannedTextPart {
                 part: part.clone(),
-                fallback_group: None,
+                alternative_branches: Vec::new(),
             });
         }
         return;
     }
     if part.mime_type.eq_ignore_ascii_case("multipart/alternative") {
-        let mut candidates = Vec::new();
-        for child in &part.children {
-            select_text_parts(child, &mut candidates, fallback_groups);
-        }
-        for mime_type in ["text/plain", "text/html"] {
-            let matching = candidates
-                .iter()
-                .rev()
-                .filter(|candidate| candidate.part.mime_type.eq_ignore_ascii_case(mime_type))
-                .cloned()
-                .collect::<Vec<_>>();
-            if matching.is_empty() {
-                continue;
+        *alternative_groups += 1;
+        let group = *alternative_groups;
+        // RFC multipart/alternative orders direct children from least to most
+        // faithful. Plan the preferred branch first, but do not flatten its
+        // nested mixed/related siblings into competing alternatives.
+        for (branch, child) in part.children.iter().enumerate().rev() {
+            let mut candidates = Vec::new();
+            select_text_parts(child, &mut candidates, alternative_groups);
+            let mut first_plain = true;
+            let mut first_html = true;
+            for candidate in &mut candidates {
+                let first_for_representation =
+                    if candidate.part.mime_type.eq_ignore_ascii_case("text/html") {
+                        std::mem::take(&mut first_html)
+                    } else {
+                        std::mem::take(&mut first_plain)
+                    };
+                // A nested alternative may legitimately fall back from its
+                // first leaf. Propagate each nested branch's primary body to
+                // the enclosing branch, while plain mixed siblings still use
+                // only their first body as the decisive candidate.
+                let decisive = if candidate.alternative_branches.is_empty() {
+                    first_for_representation
+                } else {
+                    candidate
+                        .alternative_branches
+                        .iter()
+                        .all(|branch| branch.decisive)
+                };
+                candidate.alternative_branches.push(AlternativeBranch {
+                    group,
+                    branch,
+                    decisive,
+                });
             }
-            *fallback_groups += 1;
-            selected.extend(matching.into_iter().map(|mut candidate| {
-                candidate.fallback_group = Some(*fallback_groups);
-                candidate
-            }));
+            selected.extend(candidates);
         }
     } else if part.mime_type.eq_ignore_ascii_case("multipart/related") {
         let declared_start = part
@@ -2746,13 +2774,51 @@ fn select_text_parts(
             })
             .or_else(|| part.children.first());
         if let Some(root) = root {
-            select_text_parts(root, selected, fallback_groups);
+            select_text_parts(root, selected, alternative_groups);
         }
     } else {
         for child in &part.children {
-            select_text_parts(child, selected, fallback_groups);
+            select_text_parts(child, selected, alternative_groups);
         }
     }
+}
+
+fn alternative_branch_is_eligible(
+    part: &PlannedTextPart,
+    successful_branches: &BTreeMap<(usize, bool), usize>,
+) -> bool {
+    let html = part.part.mime_type.eq_ignore_ascii_case("text/html");
+    part.alternative_branches.iter().all(|branch| {
+        successful_branches
+            .get(&(branch.group, html))
+            .is_none_or(|selected| *selected == branch.branch)
+    })
+}
+
+fn record_successful_alternative_branches(
+    part: &PlannedTextPart,
+    successful_branches: &mut BTreeMap<(usize, bool), usize>,
+) {
+    let html = part.part.mime_type.eq_ignore_ascii_case("text/html");
+    for branch in &part.alternative_branches {
+        if branch.decisive {
+            successful_branches
+                .entry((branch.group, html))
+                .or_insert(branch.branch);
+        }
+    }
+}
+
+fn alternative_branch_is_selected(
+    part: &PlannedTextPart,
+    successful_branches: &BTreeMap<(usize, bool), usize>,
+) -> bool {
+    let html = part.part.mime_type.eq_ignore_ascii_case("text/html");
+    part.alternative_branches.iter().all(|branch| {
+        successful_branches
+            .get(&(branch.group, html))
+            .is_none_or(|selected| *selected == branch.branch)
+    })
 }
 
 fn collect_attachment_candidates(part: &MimePart, candidates: &mut Vec<MimePart>) {
@@ -2803,16 +2869,12 @@ async fn fetch_selective_message(
 ) -> Result<MailSummary> {
     let plan = selective_plan(structure)?;
     let mut total = 0usize;
-    let mut plain = Vec::new();
-    let mut html = None;
+    let mut decoded_text_parts = Vec::new();
     let mut text_decode_failures = 0usize;
-    let mut successful_fallback_groups = BTreeSet::new();
+    let mut successful_alternative_branches = BTreeMap::new();
     let mut referenced_inline = BTreeMap::new();
     for part in &plan.text_parts {
-        if part
-            .fallback_group
-            .is_some_and(|group| successful_fallback_groups.contains(&group))
-        {
+        if !alternative_branch_is_eligible(part, &successful_alternative_branches) {
             continue;
         }
         let header =
@@ -2844,11 +2906,17 @@ async fn fetch_selective_message(
                 continue;
             }
         };
-        if let Some(group) = part.fallback_group {
-            successful_fallback_groups.insert(group);
+        record_successful_alternative_branches(part, &mut successful_alternative_branches);
+        decoded_text_parts.push((part.clone(), decoded));
+    }
+    let mut plain = Vec::new();
+    let mut html = Vec::new();
+    for (part, decoded) in decoded_text_parts {
+        if !alternative_branch_is_selected(&part, &successful_alternative_branches) {
+            continue;
         }
-        if part.part.mime_type.eq_ignore_ascii_case("text/html") && html.is_none() {
-            html = Some(decoded);
+        if part.part.mime_type.eq_ignore_ascii_case("text/html") {
+            html.push(decoded);
         } else if part.part.mime_type.eq_ignore_ascii_case("text/plain") {
             plain.push(decoded);
         }
@@ -2875,10 +2943,13 @@ async fn fetch_selective_message(
         }
         image_parts.insert(section_name(&part.path), (part, header, references));
     }
-    let mut body_html = html;
+    let mut body_html = join_visible_html_segments(html);
     if let Some(html) = &mut body_html {
+        let html_references = html_resource_references(html);
+        let mut replacements = BTreeMap::new();
         for (path, (part, header, references)) in &image_parts {
-            let referenced = has_unambiguous_html_reference(html, references, &reference_counts);
+            let referenced =
+                has_unambiguous_html_reference(&html_references, references, &reference_counts);
             referenced_inline.insert(path.clone(), referenced);
             if !referenced {
                 continue;
@@ -2903,9 +2974,12 @@ async fn fetch_selective_message(
                 STANDARD.encode(image)
             );
             for reference in references {
-                *html = replace_resource_reference(html, reference, &data_url)?;
+                replacements
+                    .entry(reference.to_ascii_lowercase())
+                    .or_insert_with(|| data_url.clone());
             }
         }
+        *html = rewrite_html_resource_references(html, &replacements)?;
     }
     let mut body_text = plain
         .into_iter()
@@ -3114,12 +3188,12 @@ fn unique_mime_part_references(part: &MimePart) -> Vec<String> {
 }
 
 fn has_unambiguous_html_reference(
-    html: &str,
+    html_references: &BTreeSet<String>,
     references: &[String],
     reference_counts: &BTreeMap<String, usize>,
 ) -> bool {
     references.iter().any(|reference| {
-        html_contains_reference(html, reference)
+        html_references.contains(&reference.to_ascii_lowercase())
             && reference_counts
                 .get(&reference.to_ascii_lowercase())
                 .copied()
@@ -4449,14 +4523,7 @@ impl BodySelection {
                 .filter(|value| !value.trim().is_empty())
                 .collect::<Vec<_>>()
                 .join("\n\n"),
-            html: {
-                let html = self
-                    .html
-                    .into_iter()
-                    .filter(|value| !value.trim().is_empty())
-                    .collect::<Vec<_>>();
-                (!html.is_empty()).then(|| html.join("\n"))
-            },
+            html: { join_visible_html_segments(self.html) },
         })
     }
 }
@@ -4507,21 +4574,33 @@ fn select_alternative(mail: &ParsedMessage<'_>, children: &[u32]) -> BodySelecti
     let mut chosen_html = None;
     for child in children {
         let candidate = select_body_part(mail, *child);
-        // RFC multipart/alternative orders representations by increasing
-        // faithfulness. Keep only the last supported representation of each
-        // kind; never concatenate competing alternatives.
+        // RFC multipart/alternative orders direct children by increasing
+        // faithfulness. Keep the latest direct branch for each representation,
+        // but retain every mixed/related text sibling inside that branch.
         if !candidate.plain.is_empty() {
-            chosen_plain = Some(candidate.plain.join("\n\n"));
+            chosen_plain = Some(candidate.plain);
         }
         if !candidate.html.is_empty() {
-            chosen_html = Some(candidate.html.join("\n"));
+            chosen_html = Some(candidate.html);
         }
         selected.valid_candidates += candidate.valid_candidates;
         selected.undecodable_candidates += candidate.undecodable_candidates;
     }
-    selected.plain.extend(chosen_plain);
-    selected.html.extend(chosen_html);
+    if let Some(plain) = chosen_plain {
+        selected.plain.extend(plain);
+    }
+    if let Some(html) = chosen_html {
+        selected.html.extend(html);
+    }
     selected
+}
+
+fn join_visible_html_segments(segments: Vec<String>) -> Option<String> {
+    let selected = segments
+        .into_iter()
+        .filter(|value| !value.trim().is_empty())
+        .collect::<Vec<_>>();
+    (!selected.is_empty()).then(|| selected.join("\n"))
 }
 
 fn select_related(
@@ -4647,15 +4726,18 @@ fn resolve_inline_images(html: String, mail: &ParsedMessage<'_>) -> Result<Strin
 }
 
 fn resolve_inline_images_from_raw(
-    mut html: String,
+    html: String,
     mail: &ParsedMessage<'_>,
     raw: &[u8],
 ) -> Result<String> {
     let inline_images = collect_inline_images(mail, raw, &html);
+    let mut replacements = BTreeMap::new();
     for (reference, data_url) in inline_images {
-        html = replace_resource_reference(&html, &reference, &data_url)?;
+        replacements
+            .entry(reference.to_ascii_lowercase())
+            .or_insert(data_url);
     }
-    Ok(html)
+    rewrite_html_resource_references(&html, &replacements)
 }
 
 fn collect_inline_images(
@@ -4663,6 +4745,7 @@ fn collect_inline_images(
     raw: &[u8],
     html: &str,
 ) -> Vec<(String, String)> {
+    let html_references = html_resource_references(html);
     attachment_part_ids(mail)
         .into_iter()
         .filter_map(|part_id| mail.part(part_id))
@@ -4681,7 +4764,9 @@ fn collect_inline_images(
             ]
             .into_iter()
             .flatten()
-            .filter(|reference| !reference.is_empty() && html_contains_reference(html, reference))
+            .filter(|reference| {
+                !reference.is_empty() && html_references.contains(&reference.to_ascii_lowercase())
+            })
             .collect::<Vec<_>>();
             if references.is_empty() {
                 return None;
@@ -4699,114 +4784,310 @@ fn collect_inline_images(
         .collect()
 }
 
+#[cfg(test)]
 fn replace_resource_reference(input: &str, reference: &str, replacement: &str) -> Result<String> {
-    rewrite_html_resource_references(input, reference, Some(replacement))
+    rewrite_html_resource_references(
+        input,
+        &BTreeMap::from([(reference.to_ascii_lowercase(), replacement.to_owned())]),
+    )
 }
 
 fn html_contains_reference(html: &str, reference: &str) -> bool {
-    rewrite_html_resource_references(html, reference, None)
-        .map(|output| output != html)
-        .unwrap_or(false)
+    html_resource_references(html).contains(&reference.to_ascii_lowercase())
+}
+
+fn html_resource_references(input: &str) -> BTreeSet<String> {
+    let mut references = BTreeSet::new();
+    let mut cursor = 0;
+    while let Some(offset) = input[cursor..].find('<') {
+        let start = cursor + offset;
+        if input[start..].starts_with("<!--") {
+            cursor = input[start + 4..]
+                .find("-->")
+                .map_or(input.len(), |offset| start + 4 + offset + 3);
+            continue;
+        }
+        let Some(end) = html_tag_end(input, start) else {
+            break;
+        };
+        collect_html_tag_resource_references(&input[start..end], &mut references);
+        cursor = raw_text_element_end(input, start, end).unwrap_or(end);
+    }
+    references
 }
 
 fn rewrite_html_resource_references(
     input: &str,
-    reference: &str,
-    replacement: Option<&str>,
+    replacements: &BTreeMap<String, String>,
 ) -> Result<String> {
+    if replacements.is_empty() {
+        return Ok(input.to_owned());
+    }
     let mut output = String::with_capacity(input.len());
     let mut cursor = 0;
     while let Some(offset) = input[cursor..].find('<') {
         let start = cursor + offset;
-        output.push_str(&input[cursor..start]);
-        let Some(end_offset) = input[start..].find('>') else {
-            output.push_str(&input[start..]);
+        push_resolved_html(&mut output, &input[cursor..start])?;
+        if input[start..].starts_with("<!--") {
+            let end = input[start + 4..]
+                .find("-->")
+                .map_or(input.len(), |offset| start + 4 + offset + 3);
+            push_resolved_html(&mut output, &input[start..end])?;
+            cursor = end;
+            continue;
+        }
+        let Some(end) = html_tag_end(input, start) else {
+            push_resolved_html(&mut output, &input[start..])?;
             return Ok(output);
         };
-        let end = start + end_offset + 1;
         let tag = &input[start..end];
-        output.push_str(&rewrite_resource_references_in_tag(
-            tag,
-            reference,
-            replacement,
-        )?);
-        cursor = end;
+        push_resolved_html(
+            &mut output,
+            &rewrite_resource_references_in_tag(tag, replacements)?,
+        )?;
+        if let Some(raw_text_end) = raw_text_element_end(input, start, end) {
+            push_resolved_html(&mut output, &input[end..raw_text_end])?;
+            cursor = raw_text_end;
+        } else {
+            cursor = end;
+        }
     }
-    output.push_str(&input[cursor..]);
-    if output.len() > MAX_RAW_MESSAGE_BYTES {
+    push_resolved_html(&mut output, &input[cursor..])?;
+    Ok(output)
+}
+
+fn push_resolved_html(output: &mut String, value: &str) -> Result<()> {
+    if output
+        .len()
+        .checked_add(value.len())
+        .is_none_or(|length| length > MAX_RAW_MESSAGE_BYTES)
+    {
         bail!("mime_resolved_html_too_large");
     }
-    Ok(output)
+    output.push_str(value);
+    Ok(())
+}
+
+fn html_tag_end(input: &str, start: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut quote = None;
+    for (index, byte) in bytes.iter().enumerate().skip(start + 1) {
+        match quote {
+            Some(current) if *byte == current => quote = None,
+            Some(_) => {}
+            None if matches!(byte, b'\'' | b'"') => quote = Some(*byte),
+            None if *byte == b'>' => return Some(index + 1),
+            None => {}
+        }
+    }
+    None
+}
+
+fn raw_text_element_end(input: &str, start: usize, opening_end: usize) -> Option<usize> {
+    let after_open = input.get(start + 1..opening_end)?;
+    let name_end = after_open
+        .find(|character: char| character.is_ascii_whitespace() || matches!(character, '/' | '>'))
+        .unwrap_or(after_open.len());
+    let name = &after_open[..name_end];
+    if ![
+        "script",
+        "style",
+        "textarea",
+        "title",
+        "xmp",
+        "iframe",
+        "noembed",
+        "noframes",
+        "plaintext",
+    ]
+    .iter()
+    .any(|candidate| name.eq_ignore_ascii_case(candidate))
+    {
+        return None;
+    }
+    if name.eq_ignore_ascii_case("plaintext") {
+        return Some(input.len());
+    }
+
+    let closing = format!("</{name}");
+    let remainder = input.get(opening_end..)?;
+    let offset = remainder
+        .as_bytes()
+        .windows(closing.len())
+        .enumerate()
+        .find(|(offset, window)| {
+            window.eq_ignore_ascii_case(closing.as_bytes())
+                && remainder
+                    .as_bytes()
+                    .get(offset + closing.len())
+                    .is_none_or(|byte| byte.is_ascii_whitespace() || matches!(byte, b'/' | b'>'))
+        })
+        .map(|(offset, _)| offset);
+    let Some(closing_start) = offset.map(|offset| opening_end + offset) else {
+        return Some(input.len());
+    };
+    Some(html_tag_end(input, closing_start).unwrap_or(input.len()))
 }
 
 fn rewrite_resource_references_in_tag(
     tag: &str,
-    reference: &str,
-    replacement: Option<&str>,
+    replacements: &BTreeMap<String, String>,
 ) -> Result<String> {
-    let lower = tag.to_ascii_lowercase();
-    let mut output = tag.to_owned();
-    for attribute in ["src", "href", "background", "poster", "data"] {
-        for quote in ['\"', '\''] {
-            let needle = format!("{attribute}={quote}{reference}{quote}");
-            if lower.contains(&needle.to_ascii_lowercase()) {
-                let replacement = replacement
-                    .map(|value| format!("{attribute}={quote}{value}{quote}"))
-                    .unwrap_or_default();
-                output = replace_ascii_case_insensitive_bounded(&output, &needle, &replacement)?;
-                if replacement.is_empty() {
-                    return Ok(String::new());
-                }
-            }
+    let mut ranges = Vec::new();
+    collect_html_tag_resource_ranges(tag, |range, value| {
+        if let Some(replacement) = replacements.get(&value.to_ascii_lowercase()) {
+            ranges.push((range, replacement.as_str()));
         }
+    });
+    if ranges.is_empty() {
+        return Ok(tag.to_owned());
     }
-    let url = format!("url({reference})");
-    if lower.contains(&url.to_ascii_lowercase()) {
-        let replacement = replacement
-            .map(|value| format!("url({value})"))
-            .unwrap_or_default();
-        output = replace_ascii_case_insensitive_bounded(&output, &url, &replacement)?;
-        if replacement.is_empty() {
-            return Ok(String::new());
-        }
-    }
-    Ok(output)
-}
-
-fn replace_ascii_case_insensitive_bounded(
-    input: &str,
-    needle: &str,
-    replacement: &str,
-) -> Result<String> {
-    if needle.is_empty() {
-        return Ok(input.to_owned());
-    }
-    let lower_input = input.to_ascii_lowercase();
-    let lower_needle = needle.to_ascii_lowercase();
-    let occurrences = lower_input.match_indices(&lower_needle).count();
-    let projected_len = input
-        .len()
-        .checked_add(
-            replacement
-                .len()
-                .saturating_sub(needle.len())
-                .checked_mul(occurrences)
-                .context("mime_resolved_html_too_large")?,
-        )
-        .context("mime_resolved_html_too_large")?;
+    let projected_len = ranges
+        .iter()
+        .try_fold(tag.len(), |length, (range, replacement)| {
+            length
+                .checked_add(replacement.len())
+                .and_then(|value| value.checked_sub(range.len()))
+                .context("mime_resolved_html_too_large")
+        })?;
     if projected_len > MAX_RAW_MESSAGE_BYTES {
         bail!("mime_resolved_html_too_large");
     }
     let mut output = String::with_capacity(projected_len);
     let mut cursor = 0;
-    while let Some(offset) = lower_input[cursor..].find(&lower_needle) {
-        let start = cursor + offset;
-        output.push_str(&input[cursor..start]);
+    for (range, replacement) in ranges {
+        output.push_str(&tag[cursor..range.start]);
         output.push_str(replacement);
-        cursor = start + needle.len();
+        cursor = range.end;
     }
-    output.push_str(&input[cursor..]);
+    output.push_str(&tag[cursor..]);
     Ok(output)
+}
+
+fn collect_html_tag_resource_references(tag: &str, references: &mut BTreeSet<String>) {
+    collect_html_tag_resource_ranges(tag, |_, value| {
+        references.insert(value.to_ascii_lowercase());
+    });
+}
+
+fn collect_html_tag_resource_ranges<'a>(
+    tag: &'a str,
+    mut found: impl FnMut(Range<usize>, &'a str),
+) {
+    let bytes = tag.as_bytes();
+    let mut index = 1usize;
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    if index >= bytes.len() || matches!(bytes[index], b'/' | b'!' | b'?') {
+        return;
+    }
+    while index < bytes.len() && !bytes[index].is_ascii_whitespace() && bytes[index] != b'>' {
+        index += 1;
+    }
+    while index < bytes.len() {
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= bytes.len() || matches!(bytes[index], b'/' | b'>') {
+            break;
+        }
+        let name_start = index;
+        while index < bytes.len()
+            && !bytes[index].is_ascii_whitespace()
+            && !matches!(bytes[index], b'=' | b'/' | b'>')
+        {
+            index += 1;
+        }
+        let attribute_name = tag[name_start..index].to_ascii_lowercase();
+        let relevant = matches!(
+            attribute_name.as_str(),
+            "src" | "href" | "background" | "poster" | "data"
+        );
+        let is_style = attribute_name == "style";
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= bytes.len() || bytes[index] != b'=' {
+            continue;
+        }
+        index += 1;
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= bytes.len() {
+            break;
+        }
+        let (start, end) = if matches!(bytes[index], b'\'' | b'"') {
+            let quote = bytes[index];
+            index += 1;
+            let start = index;
+            while index < bytes.len() && bytes[index] != quote {
+                index += 1;
+            }
+            (start, index)
+        } else {
+            let start = index;
+            while index < bytes.len() && !bytes[index].is_ascii_whitespace() && bytes[index] != b'>'
+            {
+                index += 1;
+            }
+            (start, index)
+        };
+        if relevant && start < end {
+            found(start..end, &tag[start..end]);
+        }
+        if is_style && start < end {
+            collect_css_url_resource_ranges(&tag[start..end], |range, value| {
+                found(start + range.start..start + range.end, value);
+            });
+        }
+        if index < bytes.len() && matches!(bytes[index], b'\'' | b'"') {
+            index += 1;
+        }
+    }
+}
+
+fn collect_css_url_resource_ranges<'a>(tag: &'a str, mut found: impl FnMut(Range<usize>, &'a str)) {
+    let bytes = tag.as_bytes();
+    let mut index = 0usize;
+    while index + 4 <= bytes.len() {
+        if !bytes[index..index + 4].eq_ignore_ascii_case(b"url(") {
+            index += 1;
+            continue;
+        }
+        index += 4;
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        let quote = matches!(bytes.get(index), Some(b'\'' | b'\"')).then(|| bytes[index]);
+        if quote.is_some() {
+            index += 1;
+        }
+        let start = index;
+        while index < bytes.len()
+            && quote.map_or(bytes[index] != b')', |value| bytes[index] != value)
+        {
+            index += 1;
+        }
+        let end = index;
+        if let Some(quote) = quote {
+            if index >= bytes.len() || bytes[index] != quote {
+                break;
+            }
+            index += 1;
+            while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+                index += 1;
+            }
+        }
+        if index >= bytes.len() || bytes[index] != b')' {
+            break;
+        }
+        if start < end {
+            found(start..end, &tag[start..end]);
+        }
+        index += 1;
+    }
 }
 
 fn supplied_attachment_name(mail: &ParsedMessage<'_>, part: &MessagePart<'_>) -> Option<String> {
@@ -5326,6 +5607,9 @@ mod tests {
 
     fn mime_corpus(name: &str) -> &'static [u8] {
         match name {
+            "alternative-mixed-asic-footer" => {
+                include_bytes!("../testdata/mime/alternative-mixed-asic-footer.eml")
+            }
             "attached-message-rfc822" => {
                 include_bytes!("../testdata/mime/attached-message-rfc822.eml")
             }
@@ -5384,10 +5668,39 @@ mod tests {
         );
         assert!(linked_in.attachments.is_empty());
 
-        let nested = parse_message(
+        let alternative_mixed = parse_message(
             &account,
             "INBOX",
             2,
+            &[],
+            mime_corpus("alternative-mixed-asic-footer"),
+            None,
+        )
+        .await
+        .unwrap();
+        let alternative_html = alternative_mixed.body_html.as_deref().unwrap();
+        assert!(alternative_html.contains("Redacted secure delivery."));
+        assert_eq!(
+            alternative_html
+                .matches("Manage delivery preferences")
+                .count(),
+            2
+        );
+        assert!(alternative_mixed.body_text.contains("Plain fallback"));
+        assert_eq!(alternative_mixed.attachments.len(), 1);
+        assert_eq!(
+            alternative_mixed.attachments[0].attachment.filename,
+            "redacted-delivery.asice"
+        );
+        assert_eq!(
+            alternative_mixed.attachments[0].attachment.mime_type,
+            "application/vnd.etsi.asic-e+zip"
+        );
+
+        let nested = parse_message(
+            &account,
+            "INBOX",
+            3,
             &[],
             mime_corpus("competing-nested-alternatives"),
             None,
@@ -5409,7 +5722,7 @@ mod tests {
         let attached = parse_message(
             &account,
             "INBOX",
-            3,
+            4,
             &[],
             mime_corpus("attached-message-rfc822"),
             None,
@@ -5437,7 +5750,7 @@ mod tests {
         let flowed = parse_message(
             &account,
             "INBOX",
-            4,
+            5,
             &[],
             mime_corpus("format-flowed-delsp"),
             None,
@@ -5452,7 +5765,7 @@ mod tests {
         let filenames = parse_message(
             &account,
             "INBOX",
-            5,
+            6,
             &[],
             mime_corpus("filename-parameters-and-encodings"),
             None,
@@ -5474,7 +5787,7 @@ mod tests {
         let invalid = parse_message(
             &account,
             "INBOX",
-            6,
+            7,
             &[],
             mime_corpus("invalid-transfer-encodings"),
             None,
@@ -5486,7 +5799,7 @@ mod tests {
         let charset = parse_message(
             &account,
             "INBOX",
-            7,
+            8,
             &[],
             mime_corpus("charset-matrix"),
             None,
@@ -5514,7 +5827,7 @@ mod tests {
         let disposition = parse_message(
             &account,
             "INBOX",
-            8,
+            9,
             &[],
             mime_corpus("disposition-type-name-matrix"),
             None,
@@ -5535,7 +5848,7 @@ mod tests {
         let cr_only = parse_message(
             &account,
             "INBOX",
-            9,
+            10,
             &[],
             mime_corpus("line-endings-cr-only"),
             None,
@@ -5547,7 +5860,7 @@ mod tests {
         let multipart_attachment = parse_message(
             &account,
             "INBOX",
-            10,
+            11,
             &[],
             mime_corpus("multipart-attachment-container"),
             None,
@@ -5584,6 +5897,7 @@ mod tests {
     async fn every_mime_corpus_fixture_uses_all_publication_parse_paths() {
         let account = test_account();
         let cases = [
+            ("alternative-mixed-asic-footer", true),
             ("attached-message-rfc822", true),
             ("charset-matrix", true),
             ("competing-nested-alternatives", true),
@@ -5814,6 +6128,76 @@ mod tests {
             replace_resource_reference(html, "cid:logo", "data:image/png;base64,AA").unwrap();
         assert!(resolved.contains("<p>\"cid:logo\" remains visible</p>"));
         assert!(resolved.contains("src=\"data:image/png;base64,AA\""));
+    }
+
+    #[test]
+    fn inline_resource_rewriting_accepts_spaced_unquoted_and_quote_aware_attributes() {
+        let html = concat!(
+            "<p>cid:logo remains visible text</p>",
+            "<img alt=\"comparison: 2 > 1; url(cid:style)\" SRC = cid:logo>",
+            "<a href = 'cid:other'>link</a><table style=\"background: url( 'cid:style' )\">"
+        );
+        assert!(html_contains_reference(html, "CID:LOGO"));
+        assert!(html_contains_reference(html, "cid:other"));
+        assert!(html_contains_reference(html, "cid:style"));
+        assert!(!html_contains_reference(html, "cid:visible"));
+        let resolved = rewrite_html_resource_references(
+            html,
+            &BTreeMap::from([
+                ("cid:logo".into(), "data:image/png;base64,AA".into()),
+                ("cid:other".into(), "data:image/png;base64,BB".into()),
+                ("cid:style".into(), "data:image/png;base64,CC".into()),
+            ]),
+        )
+        .unwrap();
+        assert!(resolved.contains("cid:logo remains visible text"));
+        assert!(resolved.contains("comparison: 2 > 1; url(cid:style)"));
+        assert!(resolved.contains("SRC = data:image/png;base64,AA"));
+        assert!(resolved.contains("href = 'data:image/png;base64,BB'"));
+        assert!(resolved.contains("url( 'data:image/png;base64,CC' )"));
+    }
+
+    #[test]
+    fn html_joining_never_discards_actionable_sibling_markup() {
+        let merged = join_visible_html_segments(vec![
+            "<p>Primary delivery</p><p>Manage preferences</p>".into(),
+            "<a href=\"https://example.test/manage\">Manage preferences</a><img src=\"cid:seal\">"
+                .into(),
+        ])
+        .unwrap();
+        assert_eq!(merged.matches("Manage preferences").count(), 2);
+        assert!(merged.contains("https://example.test/manage"));
+        assert!(merged.contains("cid:seal"));
+    }
+
+    #[test]
+    fn inline_resource_detection_and_rewriting_ignore_html_comments() {
+        let html = concat!(
+            "<!--[if mso]><img src=\"cid:comment-only\"><![endif]-->",
+            "<script>const template = '</scripture><img src=\"cid:script-only\">';</script>",
+            "<iframe><img src=\"cid:iframe-only\"></iframe>",
+            "<img src=\"cid:live\">"
+        );
+        let references = html_resource_references(html);
+        assert!(!references.contains("cid:comment-only"));
+        assert!(!references.contains("cid:script-only"));
+        assert!(!references.contains("cid:iframe-only"));
+        assert!(references.contains("cid:live"));
+
+        let resolved = rewrite_html_resource_references(
+            html,
+            &BTreeMap::from([
+                ("cid:comment-only".into(), "data:image/png;base64,AA".into()),
+                ("cid:script-only".into(), "data:image/png;base64,CC".into()),
+                ("cid:iframe-only".into(), "data:image/png;base64,DD".into()),
+                ("cid:live".into(), "data:image/png;base64,BB".into()),
+            ]),
+        )
+        .unwrap();
+        assert!(resolved.contains("src=\"cid:comment-only\""));
+        assert!(resolved.contains("src=\"cid:script-only\""));
+        assert!(resolved.contains("src=\"cid:iframe-only\""));
+        assert!(resolved.contains("src=\"data:image/png;base64,BB\""));
     }
 
     #[tokio::test]
@@ -6527,7 +6911,11 @@ mod tests {
         let references = vec!["cid:duplicate@example".to_owned()];
         let counts = BTreeMap::from([("cid:duplicate@example".to_owned(), 2usize)]);
 
-        assert!(!has_unambiguous_html_reference(html, &references, &counts));
+        assert!(!has_unambiguous_html_reference(
+            &html_resource_references(html),
+            &references,
+            &counts
+        ));
     }
 
     #[test]
@@ -6597,17 +6985,134 @@ mod tests {
                 .map(|part| (part.part.mime_type.as_str(), part.part.path.as_slice()))
                 .collect::<Vec<_>>(),
             vec![
-                ("text/plain", [1].as_slice()),
                 // The last alternative is attempted first, but a broken
                 // transfer encoding falls back to the previous HTML body.
                 ("text/html", [3].as_slice()),
-                ("text/html", [2].as_slice())
+                ("text/html", [2].as_slice()),
+                ("text/plain", [1].as_slice()),
             ]
         );
+        let mut successful = BTreeMap::new();
+        assert!(alternative_branch_is_eligible(
+            &plan.text_parts[0],
+            &successful
+        ));
+        // The newest HTML branch is broken, so it cannot claim the group.
+        assert!(alternative_branch_is_eligible(
+            &plan.text_parts[1],
+            &successful
+        ));
+        record_successful_alternative_branches(&plan.text_parts[1], &mut successful);
+        // HTML and plain representations are selected independently, so a
+        // valid HTML branch does not erase the useful plain fallback.
+        assert!(alternative_branch_is_eligible(
+            &plan.text_parts[2],
+            &successful
+        ));
+    }
+
+    #[test]
+    fn selective_alternative_keeps_all_mixed_html_siblings_in_its_selected_branch() {
+        let structure = parse_bodystructure(&[concat!(
+            "* 1 FETCH (BODYSTRUCTURE ((\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 5 1) ",
+            "((\"TEXT\" \"HTML\" NIL NIL NIL \"7BIT\" 30 1) ",
+            "(\"APPLICATION\" \"VND.ETSI.ASIC-E+ZIP\" (\"NAME\" \"redacted-delivery.asice\") NIL NIL \"BASE64\" 40 NIL ",
+            "(\"ATTACHMENT\" (\"FILENAME\" \"redacted-delivery.asice\"))) ",
+            "(\"TEXT\" \"HTML\" NIL NIL NIL \"7BIT\" 20 1) \"MIXED\") \"ALTERNATIVE\"))"
+        )
+        .into()])
+        .unwrap();
+        let plan = selective_plan(&structure).unwrap();
+
         assert_eq!(
-            plan.text_parts[1].fallback_group,
-            plan.text_parts[2].fallback_group
+            plan.text_parts
+                .iter()
+                .map(|part| part.part.path.as_slice())
+                .collect::<Vec<_>>(),
+            vec![[2, 1].as_slice(), [2, 3].as_slice(), [1].as_slice()]
         );
+        assert_eq!(plan.attachments.len(), 1);
+        assert_eq!(plan.attachments[0].part.path, vec![2, 2]);
+
+        let mut successful = BTreeMap::new();
+        assert!(alternative_branch_is_eligible(
+            &plan.text_parts[0],
+            &successful
+        ));
+        record_successful_alternative_branches(&plan.text_parts[0], &mut successful);
+        // 2.3 is a sibling in the successful mixed branch, not a fallback.
+        assert!(alternative_branch_is_eligible(
+            &plan.text_parts[1],
+            &successful
+        ));
+        record_successful_alternative_branches(&plan.text_parts[1], &mut successful);
+        assert!(alternative_branch_is_eligible(
+            &plan.text_parts[2],
+            &successful
+        ));
+    }
+
+    #[test]
+    fn selective_composite_footer_cannot_claim_branch_after_primary_html_failure() {
+        let structure = parse_bodystructure(&[concat!(
+            "* 1 FETCH (BODYSTRUCTURE ((\"TEXT\" \"HTML\" NIL NIL NIL \"7BIT\" 25 1) ",
+            "((\"TEXT\" \"HTML\" NIL NIL NIL \"X-BROKEN\" 30 1) ",
+            "(\"TEXT\" \"HTML\" NIL NIL NIL \"7BIT\" 20 1) \"MIXED\") \"ALTERNATIVE\"))"
+        )
+        .into()])
+        .unwrap();
+        let plan = selective_plan(&structure).unwrap();
+        let mut successful = BTreeMap::new();
+
+        // 2.1 fails and therefore does not select the preferred composite.
+        assert!(plan.text_parts[0].alternative_branches[0].decisive);
+        // A decoded footer is retained provisionally, but cannot select it.
+        assert!(!plan.text_parts[1].alternative_branches[0].decisive);
+        record_successful_alternative_branches(&plan.text_parts[1], &mut successful);
+        assert!(alternative_branch_is_eligible(
+            &plan.text_parts[2],
+            &successful
+        ));
+
+        record_successful_alternative_branches(&plan.text_parts[2], &mut successful);
+        assert!(!alternative_branch_is_selected(
+            &plan.text_parts[1],
+            &successful
+        ));
+        assert!(alternative_branch_is_selected(
+            &plan.text_parts[2],
+            &successful
+        ));
+    }
+
+    #[test]
+    fn selective_nested_alternative_fallback_can_select_its_enclosing_branch() {
+        let structure = parse_bodystructure(&[concat!(
+            "* 1 FETCH (BODYSTRUCTURE ((\"TEXT\" \"HTML\" NIL NIL NIL \"7BIT\" 25 1) ",
+            "((\"TEXT\" \"HTML\" NIL NIL NIL \"7BIT\" 30 1) ",
+            "(\"TEXT\" \"HTML\" NIL NIL NIL \"X-BROKEN\" 20 1) \"ALTERNATIVE\") ",
+            "\"ALTERNATIVE\"))"
+        )
+        .into()])
+        .unwrap();
+        let plan = selective_plan(&structure).unwrap();
+        let mut successful = BTreeMap::new();
+
+        assert_eq!(plan.text_parts[0].part.path, vec![2, 2]);
+        assert_eq!(plan.text_parts[1].part.path, vec![2, 1]);
+        assert!(plan.text_parts[1]
+            .alternative_branches
+            .iter()
+            .all(|branch| branch.decisive));
+        record_successful_alternative_branches(&plan.text_parts[1], &mut successful);
+        assert!(alternative_branch_is_selected(
+            &plan.text_parts[1],
+            &successful
+        ));
+        assert!(!alternative_branch_is_selected(
+            &plan.text_parts[2],
+            &successful
+        ));
     }
 
     #[test]
@@ -6631,7 +7136,7 @@ mod tests {
         let structure = parse_bodystructure(&[concat!(
             "* 1 FETCH (BODYSTRUCTURE ((\"TEXT\" \"PLAIN\" NIL \"<first>\" NIL \"7BIT\" 5 1) ",
             "(\"TEXT\" \"HTML\" NIL \"<second>\" NIL \"7BIT\" 5 1) ",
-            "\"RELATED\" (\"START\" \"<missing>\")))"
+            "\"RELATED\" (\"START\" \" <missing> \")))"
         )
         .into()])
         .unwrap();
@@ -6639,6 +7144,22 @@ mod tests {
         assert_eq!(plan.text_parts.len(), 1);
         assert_eq!(plan.text_parts[0].part.path, vec![1]);
         assert_eq!(plan.text_parts[0].part.mime_type, "text/plain");
+    }
+
+    #[test]
+    fn malformed_related_start_matches_full_parse_first_child_fallback() {
+        let raw = concat!(
+            "Content-Type: multipart/related; start=\" <missing@example.test> \"; boundary=rel\r\n\r\n",
+            "--rel\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>First related root</p>\r\n",
+            "--rel\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nSecond related sibling\r\n--rel--\r\n"
+        );
+        let parsed = parse_complete_message(raw.as_bytes()).unwrap();
+        let selected = select_bodies(&parsed).unwrap();
+        assert!(selected
+            .html
+            .as_deref()
+            .is_some_and(|html| html.contains("First related root")));
+        assert!(selected.text.is_empty());
     }
 
     #[test]

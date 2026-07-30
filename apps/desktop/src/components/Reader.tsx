@@ -38,14 +38,19 @@ import {
   useState,
 } from "react";
 import { useTranslation } from "react-i18next";
-import { api } from "../api";
+import { api, messageContentErrorFromUnknown } from "../api";
 import { confirmNativeAction } from "../nativeFeedback";
 import {
   detectTranslationLanguage,
   translateOffline,
 } from "../offlineTranslation";
 import { translateConversation } from "../translationWorkflow";
-import type { Attachment, MailSummary, MessageContent } from "../types";
+import type {
+  Attachment,
+  MailSummary,
+  MessageContent,
+  MessageContentErrorKind,
+} from "../types";
 import { formatAddress, messageRecipients } from "../recipients";
 import { splitQuotedText } from "../quotedHistory";
 import { EmptyState } from "./EmptyState";
@@ -529,7 +534,7 @@ function ThreadMessage({
     useState(false);
   const [content, setContent] = useState<MessageContent>();
   const [loadingContent, setLoadingContent] = useState(false);
-  const [contentError, setContentError] = useState(false);
+  const [contentError, setContentError] = useState<MessageContentErrorKind>();
   const [contentAttempt, setContentAttempt] = useState(0);
   const [loadingAttachments, setLoadingAttachments] = useState(false);
   const [saving, setSaving] = useState<string>();
@@ -557,7 +562,7 @@ function ThreadMessage({
   useEffect(() => {
     if (!isExpanded) return;
     let current = true;
-    setContentError(false);
+    setContentError(undefined);
     setLoadingContent(true);
     setLoadingAttachments(true);
     void loadContent(message.id)
@@ -568,7 +573,11 @@ function ThreadMessage({
           setAttachmentsAuthoritative(true);
         }
       })
-      .catch(() => current && setContentError(true))
+      .catch(
+        (error: unknown) =>
+          current &&
+          setContentError(messageContentErrorFromUnknown(error).kind),
+      )
       .finally(() => {
         if (current) {
           setLoadingContent(false);
@@ -869,14 +878,16 @@ function ThreadMessage({
         </div>
       ) : contentError ? (
         <div className="message-body">
-          <p>{t("reader.loadContentError")}</p>
-          <Button
-            size="xs"
-            variant="light"
-            onClick={() => setContentAttempt((value) => value + 1)}
-          >
-            {t("actions.retry")}
-          </Button>
+          <p>{t(`reader.contentError.${contentError}`)}</p>
+          {contentError === "transient" ? (
+            <Button
+              size="xs"
+              variant="light"
+              onClick={() => setContentAttempt((value) => value + 1)}
+            >
+              {t("actions.retry")}
+            </Button>
+          ) : null}
         </div>
       ) : displayContent?.body_html ? (
         <HtmlMessage

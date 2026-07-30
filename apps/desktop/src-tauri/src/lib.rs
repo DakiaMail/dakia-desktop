@@ -924,6 +924,68 @@ struct MessageContent {
     attachments: Vec<Attachment>,
 }
 
+/// The reader must distinguish content that cannot change on another fetch
+/// from a transient provider failure. Keep the IPC payload deliberately small:
+/// parser and provider diagnostics are useful locally, but are not safe UI
+/// text.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum MessageContentErrorKind {
+    ResourceLimit,
+    Malformed,
+    Undecodable,
+    Unsupported,
+    Transient,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct MessageContentCommandError {
+    kind: MessageContentErrorKind,
+}
+
+impl MessageContentCommandError {
+    fn from_failure(failure: &str) -> Self {
+        let failure = failure.to_ascii_lowercase();
+        let resource_limit = [
+            "mime_raw_message_too_large",
+            "mime_headers_too_large",
+            "mime_too_many_parts",
+            "mime_multipart_nesting_too_deep",
+            "mime_resolved_html_too_large",
+            "mime safety limit",
+            "safety limit",
+            "message has too many attachments",
+            "message has more than",
+            "message display body exceeds",
+            "message display body size overflow",
+            "attachment bytes overflowed",
+            "mime part count overflow",
+        ]
+        .iter()
+        .any(|marker| failure.contains(marker));
+        let malformed = [
+            "bodystructure",
+            "mime part headers are malformed",
+            "mime part parser omitted",
+            "message parser could not find",
+        ]
+        .iter()
+        .any(|marker| failure.contains(marker));
+        let kind = if resource_limit {
+            MessageContentErrorKind::ResourceLimit
+        } else if failure.contains("mime_content_undecodable") {
+            MessageContentErrorKind::Undecodable
+        } else if failure.contains("unsupported transfer encoding") {
+            MessageContentErrorKind::Unsupported
+        } else if malformed {
+            MessageContentErrorKind::Malformed
+        } else {
+            MessageContentErrorKind::Transient
+        };
+        Self { kind }
+    }
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DesktopNotification {
@@ -1080,8 +1142,10 @@ async fn message_attachments(
 async fn message_content(
     state: State<'_, Arc<AppState>>,
     message_id: String,
-) -> Result<MessageContent, String> {
-    load_message_content(state.inner(), &message_id).await
+) -> Result<MessageContent, MessageContentCommandError> {
+    load_message_content(state.inner(), &message_id)
+        .await
+        .map_err(|failure| MessageContentCommandError::from_failure(&failure))
 }
 
 async fn cached_message_content(
@@ -1320,6 +1384,40 @@ mod message_content_repair_tests {
         .expect("a deleted message must not wait for the claim timeout");
 
         assert!(matches!(result, Err(error) if error == "Message not found"));
+    }
+
+    #[test]
+    fn message_content_error_envelope_classifies_mime_failures_without_details() {
+        let cases = [
+            ("mime_raw_message_too_large", "resource_limit"),
+            ("mime_content_undecodable", "undecodable"),
+            (
+                "MIME part uses an unsupported transfer encoding",
+                "unsupported",
+            ),
+            ("BODYSTRUCTURE part is not a list", "malformed"),
+            (
+                "message display body exceeds the 50 MiB safety limit",
+                "resource_limit",
+            ),
+            (
+                "message display part exceeds the 25 MiB safety limit",
+                "resource_limit",
+            ),
+            (
+                "message parser could not find RFC 5322 headers",
+                "malformed",
+            ),
+            ("IMAP connection reset by peer", "transient"),
+        ];
+
+        for (failure, kind) in cases {
+            let serialized =
+                serde_json::to_value(MessageContentCommandError::from_failure(failure))
+                    .expect("message-content error must serialize for Tauri IPC");
+            assert_eq!(serialized, serde_json::json!({ "kind": kind }));
+            assert!(!serialized.to_string().contains(failure));
+        }
     }
 }
 

@@ -113,6 +113,8 @@ export type MessageContent = {
   unsubscribe_kind?: "one_click" | "web" | "mailto";
   attachments: Attachment[];
 };
+export type MessageContentErrorKind =
+  "resource_limit" | "malformed" | "undecodable" | "unsupported" | "transient";
 export type ComposeAttachment = {
   filename: string;
   mime_type: string;

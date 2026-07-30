@@ -1,0 +1,97 @@
+From: Redacted Sender <sender@redacted.example>
+Content-Type: multipart/alternative;
+	boundary="Apple-Mail=_REDACTED-OUTER"
+Mime-Version: 1.0 (Mac OS X Mail 16.0 \(3864.600.51.1.1\))
+Subject: Redacted secure delivery
+Message-Id: <redacted-message@redacted.example>
+Date: Thu, 30 Jul 2026 15:08:12 +0300
+To: Redacted Group <group@redacted.example>
+X-Mailer: Apple Mail (2.3864.600.51.1.1)
+
+
+--Apple-Mail=_REDACTED-OUTER
+Content-Transfer-Encoding: quoted-printable
+Content-Type: text/plain; charset="UTF-8"
+
+Plain fallback must not replace the HTML delivery.
+
+--=20
+Manage delivery preferences
+
+--Apple-Mail=_REDACTED-OUTER
+Content-Type: multipart/mixed;
+	boundary="Apple-Mail=_REDACTED-INNER"
+
+
+--Apple-Mail=_REDACTED-INNER
+Content-Transfer-Encoding: quoted-printable
+Content-Type: text/html; charset="UTF-8"
+
+<html aria-label=3D"message body"><head><meta http-equiv=3D"content-type" c=
+ontent=3D"text/html; charset=3Dutf-8"></head><body style=3D"overflow-wrap: =
+break-word; -webkit-nbsp-mode: space; line-break: after-white-space;">Redac=
+ted secure delivery.<div><br></div><div>
+
+
+<meta http-equiv=3D"Content-Type" content=3D"text/html; charset=3Dutf-8">
+
+<!-- Dark mode support (Apple Mail only) -->
+<style>
+@media (prefers-color-scheme: dark) {
+  .logo-light { display: none !important; }
+  .logo-dark { display: block !important; }
+}
+</style>
+
+  <div style=3D"font-family:'Inter', -apple-system, BlinkMacSystemFont, 'Se=
+goe UI', Arial, sans-serif;">
+    <div style=3D"font-size:14px; font-weight:700;">Redacted Sender</div>
+    <a href=3D"https://www.redacted.example" class=3D"logo-light" style=3D"di=
+splay:inline-block; text-decoration:none;">
+      <img src=3D"https://media.redacted.example/logo-light.png" alt=3D"Red=
+acted" width=3D"250" style=3D"display:block; border:0; width:250px;">
+    </a>
+  </div>
+
+</div>
+
+
+</div></body></html>
+
+<p></p>
+
+-- <br />
+Manage delivery preferences<br />
+View the discussion at <a href=3D"https://groups.redacted.example/message?u=
+tm_medium=3Demail&utm_source=3Dfooter">https://groups.redacted.example/mess=
+age</a>.<br />
+
+--Apple-Mail=_REDACTED-INNER
+Content-Disposition: attachment;
+	filename=redacted-delivery.asice
+Content-Type: application/vnd.etsi.asic-e+zip;
+	x-unix-mode=0644;
+	name="redacted-delivery.asice"
+Content-Transfer-Encoding: base64
+
+ZmljdGlvbmFsLUFTaUMtRS1hdHRhY2htZW50
+--Apple-Mail=_REDACTED-INNER
+Content-Transfer-Encoding: quoted-printable
+Content-Type: text/html; charset="UTF-8"
+
+<html aria-label=3D"message body"><head><meta http-equiv=3D"content-type" c=
+ontent=3D"text/html; charset=3Dus-ascii"></head><body style=3D"overflow-wra=
+p: break-word; -webkit-nbsp-mode: space; line-break: after-white-space;"><d=
+iv></div></body></html>
+
+<p></p>
+
+-- <br />
+Manage delivery preferences<br />
+View the discussion at <a href=3D"https://groups.redacted.example/message?u=
+tm_medium=3Demail&utm_source=3Dfooter">https://groups.redacted.example/mess=
+age</a>.<br />
+
+--Apple-Mail=_REDACTED-INNER--
+
+--Apple-Mail=_REDACTED-OUTER--
