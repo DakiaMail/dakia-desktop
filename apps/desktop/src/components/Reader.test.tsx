@@ -933,6 +933,92 @@ describe("Reader unsubscribe action", () => {
     expect(api.content).not.toHaveBeenCalledWith("message-older");
   });
 
+  it("keeps a CID-resolved image in the message body while listing named attachments separately", async () => {
+    vi.mocked(api.content).mockResolvedValueOnce({
+      body_text: "Your July statement is ready.",
+      body_html:
+        '<p>Your July statement is ready.</p><img src="data:image/png;base64,iVBORw0KGgo=" alt="Statement logo">',
+      attachments: [
+        {
+          id: "cid-logo",
+          message_id: message.id,
+          filename: "statement-logo.png",
+          mime_type: "image/png",
+          size_bytes: 42,
+          is_inline: true,
+          presentation: "both",
+          is_potentially_unsafe: false,
+        },
+        {
+          id: "statement-pdf",
+          message_id: message.id,
+          filename: "July-statement.pdf",
+          mime_type: "application/pdf",
+          size_bytes: 1_024,
+          is_inline: false,
+          presentation: "downloadable",
+          is_potentially_unsafe: false,
+        },
+      ],
+    });
+    render(
+      <MantineProvider>
+        <Reader {...props} message={{ ...message, has_attachments: true }} />
+      </MantineProvider>,
+    );
+
+    const renderedMessage = await screen.findByRole("document", {
+      name: "Weekly notes",
+    });
+    const emailSurface = renderedMessage.shadowRoot
+      ?.firstElementChild as HTMLElement | null;
+    const emailRoot = emailSurface?.shadowRoot;
+    expect(emailRoot?.textContent).toContain("Your July statement is ready.");
+    expect(emailRoot?.querySelector("img")?.getAttribute("src")).toBe(
+      "data:image/png;base64,iVBORw0KGgo=",
+    );
+    expect(emailRoot?.querySelector("img")?.getAttribute("alt")).toBe(
+      "Statement logo",
+    );
+
+    const attachmentPanel = screen.getByRole("region", {
+      name: "Attachments",
+    });
+    expect(attachmentPanel).toHaveTextContent("statement-logo.png");
+    expect(attachmentPanel).toHaveTextContent("July-statement.pdf");
+    expect(
+      screen.getByRole("button", {
+        name: "Save July-statement.pdf to Downloads",
+      }),
+    ).toBeEnabled();
+  });
+
+  it("shows the existing retry state when malformed message content cannot be loaded", async () => {
+    vi.mocked(api.content)
+      .mockRejectedValueOnce(new Error("Malformed message content"))
+      .mockResolvedValueOnce({
+        body_text: "Recovered message body",
+        attachments: [],
+      });
+    render(
+      <MantineProvider>
+        <Reader {...props} message={message} />
+      </MantineProvider>,
+    );
+
+    expect(
+      await screen.findByText(
+        "This message could not be fetched from the mail server.",
+      ),
+    ).toBeVisible();
+    expect(screen.queryByText("Malformed message content")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Recovered message body")).toBeVisible();
+    expect(api.content).toHaveBeenCalledTimes(2);
+    expect(api.content).toHaveBeenLastCalledWith(message.id);
+  });
+
   it("runs delete from the reader toolbar", () => {
     render(
       <MantineProvider>

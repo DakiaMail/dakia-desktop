@@ -1,0 +1,25 @@
+X-Dakia-Corpus-Case: linkedin-inline-content-id
+X-Dakia-Corpus-Status: provider-shaped, fully redacted fixture
+Date: Tue, 28 Jul 2026 10:08:00 +0000
+From: LinkedIn <redacted@linkedin.example.test>
+To: redacted@example.test
+Message-ID: <redacted-linkedin-message@example.test>
+Subject: Redacted LinkedIn notification
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="----=_Part_0000000_000000000.0000000000000"
+
+------=_Part_0000000_000000000.0000000000000
+Content-Type: text/plain;charset=UTF-8
+Content-Transfer-Encoding: quoted-printable
+Content-ID: text-body
+
+Redacted plain text=3Dcontent with a folded=
+line.
+------=_Part_0000000_000000000.0000000000000
+Content-Type: text/html;charset=UTF-8
+Content-Transfer-Encoding: quoted-printable
+Content-ID: html-body
+
+<html><body><p>Redacted HTML=3Dcontent with a folded=
+line.</p></body></html>
+------=_Part_0000000_000000000.0000000000000--

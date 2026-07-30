@@ -21,8 +21,7 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 directories = "6"
 lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "pool", "smtp-transport", "tokio1-rustls-tls"] }
-mail-parser = "0.11"
-mailparse = "0.16"
+mail-parser = { version = "0.11", features = ["full_encoding"] }
 percent-encoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["gzip", "json", "rustls-tls", "stream"] }
 ring = "0.17"

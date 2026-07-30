@@ -1,0 +1,43 @@
+X-Dakia-Corpus-Case: filename-parameters-and-encodings
+Date: Tue, 28 Jul 2026 10:02:00 +0000
+From: sender@example.test
+To: recipient@example.test
+Subject: Synthetic filename parameters
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="files"
+
+--files
+Content-Type: text/plain; charset=utf-8
+
+Synthetic filename coverage.
+--files
+Content-Type: application/pdf; name="fallback.pdf"
+Content-Disposition: attachment; filename*0*=utf-8''quarterly%20report%20; filename*1*=final.pdf
+Content-Transfer-Encoding: base64
+
+JVBERi0=
+--files
+Content-Type: application/octet-stream; name="=?UTF-8?B?cmVwb3J0LXRlc3QudHh0?="
+Content-Disposition: attachment; filename="=?UTF-8?B?cmVwb3J0LXRlc3QudHh0?="
+Content-Transfer-Encoding: base64
+
+cmVkYWN0ZWQ=
+--files
+Content-Type: application/octet-stream; name="safe-name.txt"
+Content-Disposition: attachment; filename="../../invoice;final.pdf"
+Content-Transfer-Encoding: base64
+
+cmVkYWN0ZWQ=
+--files
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename="invoice‮gpj.exe"
+Content-Transfer-Encoding: base64
+
+cmVkYWN0ZWQ=
+--files
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename*=utf-8''broken%ZZname.pdf
+Content-Transfer-Encoding: base64
+
+cmVkYWN0ZWQ=
+--files--
