@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -100,6 +101,9 @@ function createCliContractFixture({
 set -eu
 test "\${DAKIA_RELEASE_SMOKE_TEST:-}" = 1
 test -n "\${DAKIA_RELEASE_SMOKE_DATA_DIR:-}"
+if [ -n "\${DAKIA_TEST_LAUNCH_PATH_FILE:-}" ]; then
+  printf '%s' "$0" > "\$DAKIA_TEST_LAUNCH_PATH_FILE"
+fi
 printf '%s\\n' DAKIA_RELEASE_SMOKE_TEST_OK
 `,
   );
@@ -361,6 +365,35 @@ test(
         /cannot resolve the bundled ONNX Runtime framework/,
       );
     } finally {
+      rmSync(fixture.fixtureRoot, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "packaged-app verification canonicalizes symlinked temporary launch paths",
+  { skip: process.platform !== "darwin" },
+  () => {
+    const fixture = createCliContractFixture();
+    const aliasRoot = mkdtempSync(join(tmpdir(), "dakia-release-alias-"));
+    const alias = join(aliasRoot, "bundle");
+    const launchPath = join(aliasRoot, "launch-path.txt");
+    symlinkSync(fixture.fixtureRoot, alias);
+    try {
+      const result = spawnSync(appVerifier, [join(alias, "Dakia.app")], {
+        encoding: "utf8",
+        env: {
+          PATH: `${fixture.mockBin}:${process.env.PATH}`,
+          DAKIA_TEST_LAUNCH_PATH_FILE: launchPath,
+        },
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(
+        readFileSync(launchPath, "utf8"),
+        join(realpathSync(fixture.app), "Contents", "MacOS", "dakia-desktop"),
+      );
+    } finally {
+      rmSync(aliasRoot, { recursive: true, force: true });
       rmSync(fixture.fixtureRoot, { recursive: true, force: true });
     }
   },

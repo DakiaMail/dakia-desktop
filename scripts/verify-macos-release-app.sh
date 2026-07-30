@@ -12,6 +12,15 @@ if [ -z "$app" ]; then
   echo "Usage: $0 [--static-only] /path/to/Dakia.app" >&2
   exit 2
 fi
+if [ ! -d "$app" ] || [ -L "$app" ]; then
+  echo "Missing or unsafe packaged Dakia app bundle: $app" >&2
+  exit 1
+fi
+# Tauri rejects a macOS executable path with any symlinked ancestor. Common
+# temporary roots such as /var and /tmp are symlinks to /private/...; launch
+# the verifier smoke through the physical bundle path so resource resolution
+# exercises the extracted app instead of falling back to Contents/MacOS.
+app=$(CDPATH= cd -- "$app" && pwd -P)
 
 executable="$app/Contents/MacOS/dakia-desktop"
 cli="$app/Contents/MacOS/dakia"
