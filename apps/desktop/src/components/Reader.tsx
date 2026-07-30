@@ -62,9 +62,9 @@ type Props = {
   onArchive: () => void;
   onSpam: () => void;
   onTrash: () => void;
-  onReply: () => void;
-  onReplyAll: () => void;
-  onForward: () => void;
+  onReply: (message: MailSummary) => void;
+  onReplyAll: (message: MailSummary) => void;
+  onForward: (message: MailSummary) => void;
   onToggleRead: (read: boolean) => void;
   onSummarize: () => void;
   onCopyAi: () => void;
@@ -109,6 +109,9 @@ export function Reader({
   }>();
   const [translationError, setTranslationError] = useState<string>();
   const translationRequest = useRef(0);
+  const readerScrollRef = useRef<HTMLElement>(null);
+  const subjectSentinelRef = useRef<HTMLDivElement>(null);
+  const [subjectCompact, setSubjectCompact] = useState(false);
   const threadMessages = useMemo(
     () => (messages?.length ? messages : message ? [message] : []),
     [message, messages],
@@ -136,6 +139,19 @@ export function Reader({
         ? current
         : { threadKey, id: latestMessage?.id },
     );
+  }, [threadKey]);
+  useEffect(() => {
+    setSubjectCompact(false);
+    const root = readerScrollRef.current;
+    const sentinel = subjectSentinelRef.current;
+    if (!root || !sentinel || typeof IntersectionObserver === "undefined")
+      return;
+    const observer = new IntersectionObserver(
+      ([entry]) => setSubjectCompact(!entry.isIntersecting),
+      { root, threshold: 0 },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
   }, [threadKey]);
   const contentRequests = useMemo(
     () => new Map<string, Promise<MessageContent>>(),
@@ -359,10 +375,27 @@ export function Reader({
           {translation ? t("translation.showOriginal") : t("actions.translate")}
         </Button>
       </div>
-      <article className="reader-content" key={message.thread_id || message.id}>
-        <h1 className="reader-subject">
-          {translation?.subject || message.subject || t("inbox.noSubject")}
-        </h1>
+      <article
+        className="reader-content"
+        key={message.thread_id || message.id}
+        ref={readerScrollRef}
+      >
+        <div className="reader-subject-sentinel" ref={subjectSentinelRef} />
+        <div className="reader-subject-surface">
+          <h1
+            className="reader-subject"
+            data-compact={subjectCompact || undefined}
+            title={
+              subjectCompact
+                ? translation?.subject ||
+                  message.subject ||
+                  t("inbox.noSubject")
+                : undefined
+            }
+          >
+            {translation?.subject || message.subject || t("inbox.noSubject")}
+          </h1>
+        </div>
         {aiLoading ? (
           <div className="ai-result">
             <Loader size="xs" />{" "}
@@ -435,9 +468,9 @@ export function Reader({
             onArchive={onArchive}
             onSpam={onSpam}
             onTrash={onTrash}
-            onReply={onReply}
-            onReplyAll={onReplyAll}
-            onForward={onForward}
+            onReply={() => onReply(threadMessage)}
+            onReplyAll={() => onReplyAll(threadMessage)}
+            onForward={() => onForward(threadMessage)}
             threadUnread={threadUnread}
             onToggleRead={onToggleRead}
             unsubscribeLoading={unsubscribeLoading}
@@ -492,6 +525,8 @@ function ThreadMessage({
 }) {
   const { t } = useTranslation();
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [attachmentsAuthoritative, setAttachmentsAuthoritative] =
+    useState(false);
   const [content, setContent] = useState<MessageContent>();
   const [loadingContent, setLoadingContent] = useState(false);
   const [contentError, setContentError] = useState(false);
@@ -507,6 +542,18 @@ function ThreadMessage({
   const summaryDescriptionId = useId();
   const displayContent = translatedContent ?? content;
   const recipients = useMemo(() => messageRecipients(message), [message]);
+  const downloadableAttachments = useMemo(
+    () => attachments.filter(isDownloadableAttachment),
+    [attachments],
+  );
+  const hasDownloadableAttachments = attachmentsAuthoritative
+    ? downloadableAttachments.length > 0
+    : message.has_attachments;
+
+  useEffect(() => {
+    setAttachments([]);
+    setAttachmentsAuthoritative(false);
+  }, [message.id]);
 
   useEffect(() => {
     if (
@@ -532,6 +579,7 @@ function ThreadMessage({
         if (current) {
           setContent(next);
           setAttachments(next.attachments);
+          setAttachmentsAuthoritative(true);
         }
       })
       .catch(() => current && setContentError(true))
@@ -559,7 +607,7 @@ function ThreadMessage({
     }
   };
   const saveAll = async () => {
-    if (saving || !attachments.length) return;
+    if (saving || downloadableAttachments.length < 2) return;
     setSaving("all");
     try {
       const saved = await api.saveAllAttachments(message.id);
@@ -625,10 +673,10 @@ function ThreadMessage({
             <span className="reader-visually-hidden" id={summaryDescriptionId}>
               {message.snippet}.{" "}
               {format(new Date(message.received_at), "EEEE d MMM 'at' HH:mm")}
-              {message.has_attachments ? `. ${t("inbox.attachment")}` : ""}
+              {hasDownloadableAttachments ? `. ${t("inbox.attachment")}` : ""}
             </span>
           </span>
-          {message.has_attachments ? (
+          {hasDownloadableAttachments ? (
             <span
               className="thread-message-summary-attachment"
               role="img"
@@ -726,19 +774,17 @@ function ThreadMessage({
         <time className="reader-date">
           {format(new Date(message.received_at), "EEEE d MMM 'at' HH:mm")}
         </time>
-        {isLatest ? (
-          <Tooltip label={t("actions.reply")}>
-            <ActionIcon
-              className="reader-header-action"
-              variant="subtle"
-              color="gray"
-              onClick={() => onReply()}
-              aria-label={t("reader.quickReply")}
-            >
-              <IconArrowBackUp size={19} stroke={1.7} />
-            </ActionIcon>
-          </Tooltip>
-        ) : null}
+        <Tooltip label={t("actions.reply")}>
+          <ActionIcon
+            className="reader-header-action"
+            variant="subtle"
+            color="gray"
+            onClick={onReply}
+            aria-label={t("reader.quickReply")}
+          >
+            <IconArrowBackUp size={19} stroke={1.7} />
+          </ActionIcon>
+        </Tooltip>
         <Menu position="bottom-end" shadow="md" width={180}>
           <Menu.Target>
             <Tooltip label={t("actions.more")}>
@@ -753,17 +799,15 @@ function ThreadMessage({
             </Tooltip>
           </Menu.Target>
           <Menu.Dropdown>
-            {isLatest ? (
-              <Menu.Item
-                leftSection={<IconUsers size={16} />}
-                onClick={() => onReplyAll()}
-              >
-                {t("actions.replyAll")}
-              </Menu.Item>
-            ) : null}
+            <Menu.Item
+              leftSection={<IconUsers size={16} />}
+              onClick={onReplyAll}
+            >
+              {t("actions.replyAll")}
+            </Menu.Item>
             <Menu.Item
               leftSection={<IconMailForward size={16} />}
-              onClick={() => onForward()}
+              onClick={onForward}
             >
               {t("actions.forward")}
             </Menu.Item>
@@ -858,7 +902,30 @@ function ThreadMessage({
       ) : (
         <PlainTextMessage text={displayContent?.body_text ?? ""} />
       )}
-      {message.has_attachments || attachments.length ? (
+      <div className="reader-reply-actions" aria-label={t("actions.reply")}>
+        <Button
+          variant="default"
+          leftSection={<IconArrowBackUp size={17} />}
+          onClick={onReply}
+        >
+          {t("actions.reply")}
+        </Button>
+        <Button
+          variant="default"
+          leftSection={<IconUsers size={17} />}
+          onClick={onReplyAll}
+        >
+          {t("actions.replyAll")}
+        </Button>
+        <Button
+          variant="default"
+          leftSection={<IconMailForward size={17} />}
+          onClick={onForward}
+        >
+          {t("actions.forward")}
+        </Button>
+      </div>
+      {!loadingAttachments && downloadableAttachments.length ? (
         <section
           className="attachment-panel"
           aria-label={t("attachments.title")}
@@ -872,26 +939,25 @@ function ThreadMessage({
                 {t("attachments.downloadHint")}
               </span>
             </div>
-            <Button
-              variant="light"
-              size="xs"
-              leftSection={
-                saving === "all" ? (
-                  <Loader size={13} />
-                ) : (
-                  <IconFiles size={15} />
-                )
-              }
-              onClick={() => void saveAll()}
-              disabled={
-                loadingAttachments || !attachments.length || Boolean(saving)
-              }
-            >
-              {t("attachments.saveAll")}
-            </Button>
+            {downloadableAttachments.length > 1 ? (
+              <Button
+                variant="light"
+                size="xs"
+                leftSection={
+                  saving === "all" ? (
+                    <Loader size={13} />
+                  ) : (
+                    <IconFiles size={15} />
+                  )
+                }
+                onClick={() => void saveAll()}
+                disabled={Boolean(saving)}
+              >
+                {t("attachments.saveAll")}
+              </Button>
+            ) : null}
           </div>
-          {loadingAttachments ? <Loader size="xs" /> : null}
-          {attachments.map((attachment) => (
+          {downloadableAttachments.map((attachment) => (
             <div className="attachment-row" key={attachment.id}>
               <span className="attachment-icon" aria-hidden="true">
                 <IconFile size={18} />
@@ -936,24 +1002,6 @@ function ThreadMessage({
           ) : null}
         </section>
       ) : null}
-      {isLatest ? (
-        <div className="reader-reply-actions">
-          <Button
-            variant="default"
-            leftSection={<IconArrowBackUp size={17} />}
-            onClick={() => onReply()}
-          >
-            {t("actions.reply")}
-          </Button>
-          <Button
-            variant="default"
-            leftSection={<IconUsers size={17} />}
-            onClick={() => onReplyAll()}
-          >
-            {t("actions.replyAll")}
-          </Button>
-        </div>
-      ) : null}
     </section>
   );
 }
@@ -997,4 +1045,8 @@ function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(bytes >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
+}
+
+function isDownloadableAttachment(attachment: Attachment) {
+  return attachment.presentation !== "embedded";
 }
