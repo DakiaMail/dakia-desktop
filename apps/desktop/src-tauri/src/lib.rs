@@ -62,13 +62,29 @@ const MAX_DOWNLOAD_COLLISION_SUFFIX_BYTES: usize = " (9999)".len();
 struct AppState {
     store: Store,
     data_dir: PathBuf,
-    classifier: Mutex<LocalEmailClassifier>,
+    classifier: Mutex<Box<dyn EmailClassifier>>,
     classification: Arc<ClassificationScheduler>,
     realtime: RealtimeSyncManager,
     remote_operation_slots: Arc<Semaphore>,
     mail_rebuilds: Mutex<HashMap<Uuid, MailRebuildProgress>>,
     account_operations: AccountOperationLocks,
     translation_downloads: Mutex<HashMap<String, Arc<AtomicBool>>>,
+}
+
+trait EmailClassifier: Send {
+    fn classify(
+        &mut self,
+        emails: &[String],
+    ) -> anyhow::Result<Vec<dakia_core::classification::ModelClassification>>;
+}
+
+impl EmailClassifier for LocalEmailClassifier {
+    fn classify(
+        &mut self,
+        emails: &[String],
+    ) -> anyhow::Result<Vec<dakia_core::classification::ModelClassification>> {
+        LocalEmailClassifier::classify(self, emails)
+    }
 }
 
 /// Serializes destructive and provider-backed work for one account without
@@ -1313,16 +1329,23 @@ mod message_content_repair_tests {
     use super::*;
     use dakia_core::AttachmentPresentation;
 
+    struct UnexpectedClassifier;
+
+    impl EmailClassifier for UnexpectedClassifier {
+        fn classify(
+            &mut self,
+            _emails: &[String],
+        ) -> anyhow::Result<Vec<dakia_core::classification::ModelClassification>> {
+            panic!("message-content loading must not invoke email classification")
+        }
+    }
+
     fn message_content_test_state(store: Store) -> Arc<AppState> {
-        let resources =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/email-classifier-v2");
         Arc::new(AppState {
             realtime: RealtimeSyncManager::new(store.clone()),
             store,
             data_dir: PathBuf::new(),
-            classifier: Mutex::new(
-                LocalEmailClassifier::from_dir(resources).expect("bundled test classifier"),
-            ),
+            classifier: Mutex::new(Box::new(UnexpectedClassifier)),
             classification: Arc::new(ClassificationScheduler::default()),
             mail_rebuilds: Mutex::new(HashMap::new()),
             account_operations: AccountOperationLocks::default(),
@@ -4025,7 +4048,7 @@ pub fn run() {
                     realtime: RealtimeSyncManager::new(store.clone()),
                     store,
                     data_dir,
-                    classifier: Mutex::new(classifier),
+                    classifier: Mutex::new(Box::new(classifier)),
                     classification: Arc::new(ClassificationScheduler::default()),
                     mail_rebuilds: Mutex::new(mail_rebuilds),
                     account_operations: AccountOperationLocks::default(),
