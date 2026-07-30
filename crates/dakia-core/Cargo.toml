@@ -16,7 +16,6 @@ fastembed = { version = "=5.13.1", default-features = false, features = ["ort-do
 lettre.workspace = true
 mail-auth = { version = "0.10", default-features = false, features = ["ring"] }
 mail-parser.workspace = true
-mailparse.workspace = true
 percent-encoding.workspace = true
 reqwest.workspace = true
 ring.workspace = true

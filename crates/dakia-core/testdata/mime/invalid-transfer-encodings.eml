@@ -1,0 +1,24 @@
+X-Dakia-Corpus-Case: invalid-transfer-encodings
+Date: Tue, 28 Jul 2026 10:04:00 +0000
+From: sender@example.test
+To: recipient@example.test
+Subject: Synthetic invalid transfer encodings
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="encoding"
+
+--encoding
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: base64
+
+not valid base64 !!!
+--encoding
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+Broken quoted-printable =QZ and trailing equals =
+--encoding
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: x-redacted-encoding
+
+Unknown content-transfer-encoding.
+--encoding--
