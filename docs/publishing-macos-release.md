@@ -1,8 +1,9 @@
 # Publishing a macOS Release
 
 Dakia releases are built, signed, notarized, and published locally from the
-primary Apple Silicon Mac. R2 is the public artifact host. The release path is
-Apple Silicon only; GitHub Actions and GitHub Releases are not used.
+primary Apple Silicon Mac. R2 remains the production updater host. A GitHub
+Release mirrors the locally built assets for public downloads; GitHub Actions
+does not build or publish them. The release path is Apple Silicon only.
 
 Before a release, ensure the intended code is present and the version matches
 `package.json`, the Cargo workspace, and `apps/desktop/src-tauri/tauri.conf.json`.
@@ -34,6 +35,92 @@ The builder:
 The publisher uses immutable versioned R2 paths, anonymously verifies the
 published bytes, validates the updater manifest, and publishes `latest.json`
 only after all artifact checks pass.
+
+After R2 publication is proven, create the signed source tag and a draft GitHub
+Release. Use `release-assets/vX.Y.Z/release-notes.md` as the release body and
+upload the DMG, updater archive, detached signature, and `SHA256SUMS.txt` from
+that same local directory. Verify the uploaded assets against the local
+checksums before publishing the draft. GitHub is a download mirror; the Tauri
+manifest continues to reference immutable R2 URLs.
+
+Use an explicit repository and refuse an unexpected existing Release:
+
+```bash
+release_repo="DakiaMail/dakia-desktop"
+release_tag="vX.Y.Z"
+release_dir="$PWD/release-assets/$release_tag"
+
+test "$(git rev-parse "$release_tag^{commit}")" = "$(git rev-parse HEAD)"
+if gh release view "$release_tag" --repo "$release_repo" >/dev/null 2>&1; then
+  echo "Refusing to replace an existing GitHub Release: $release_tag" >&2
+  exit 1
+fi
+
+gh release create "$release_tag" \
+  --repo "$release_repo" \
+  --verify-tag \
+  --draft \
+  --latest \
+  --title "Dakia $release_tag" \
+  --notes-file "$release_dir/release-notes.md" \
+  "$release_dir/Dakia_${release_tag#v}_aarch64.dmg" \
+  "$release_dir/Dakia-aarch64.app.tar.gz" \
+  "$release_dir/Dakia-aarch64.app.tar.gz.sig" \
+  "$release_dir/SHA256SUMS.txt"
+```
+
+Before publishing the draft, require the exact four-file allowlist, compare the
+release body, download the draft assets through GitHub, and verify their bytes:
+
+```bash
+expected_assets="$(
+  printf '%s\n' \
+    "Dakia_${release_tag#v}_aarch64.dmg" \
+    "Dakia-aarch64.app.tar.gz" \
+    "Dakia-aarch64.app.tar.gz.sig" \
+    "SHA256SUMS.txt" |
+    sort
+)"
+actual_assets="$(
+  gh release view "$release_tag" \
+    --repo "$release_repo" \
+    --json assets \
+    --jq '.assets[].name' |
+    sort
+)"
+test "$actual_assets" = "$expected_assets"
+gh release view "$release_tag" \
+  --repo "$release_repo" \
+  --json body \
+  --jq .body |
+  cmp - "$release_dir/release-notes.md"
+
+github_verify_dir="$(mktemp -d)"
+gh release download "$release_tag" \
+  --repo "$release_repo" \
+  --dir "$github_verify_dir"
+cmp "$release_dir/SHA256SUMS.txt" "$github_verify_dir/SHA256SUMS.txt"
+(
+  cd "$github_verify_dir"
+  shasum -a 256 -c SHA256SUMS.txt
+)
+```
+
+Only then publish the GitHub Release:
+
+```bash
+gh release edit "$release_tag" \
+  --repo "$release_repo" \
+  --draft=false \
+  --latest
+```
+
+Finally, anonymously download each public asset from
+`https://github.com/DakiaMail/dakia-desktop/releases/download/vX.Y.Z/` and
+compare it byte-for-byte with the corresponding local file. If an earlier
+attempt left a draft, do not use `--clobber`: download and compare its body and
+exact asset allowlist. Continue only if everything matches; otherwise stop and
+remove or replace the draft only with separate approval.
 
 For updater key custody and artifact details, see
 [Signed Desktop Updates](updater-release.md).

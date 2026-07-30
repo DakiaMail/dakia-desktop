@@ -17,6 +17,7 @@ const root = new URL("..", import.meta.url).pathname;
 const publisher = join(root, "scripts/publish-release-to-r2.sh");
 const releaseEnvironment = join(root, "scripts/local-release-env.sh");
 const appVerifier = join(root, "scripts/verify-macos-release-app.sh");
+const releaseBuilder = join(root, "scripts/build-local-macos-release.sh");
 function createStaticAppFixture() {
   const fixtureRoot = mkdtempSync(join(tmpdir(), "dakia-release-app-test-"));
   const app = join(fixtureRoot, "Dakia.app");
@@ -87,6 +88,18 @@ test("local installer builds only an app without updater artifacts", () => {
   assert.match(packageJson.scripts["build:install:bundle"], /--bundles app/);
   assert.equal(installConfig.bundle.createUpdaterArtifacts, false);
   assert.match(installer, /npm run build:install:bundle/);
+});
+
+test("release builder requires tracked human-readable release notes", () => {
+  const script = readFileSync(releaseBuilder, "utf8");
+  assert.match(script, /docs\/releases\/\$tag\.md/);
+  assert.match(script, /git -C "\$root_dir" ls-files --error-unmatch/);
+  assert.match(script, /Missing tracked release notes/);
+  assert.match(
+    script,
+    /cp "\$release_notes_source" "\$output_dir\/release-notes\.md"/,
+  );
+  assert.doesNotMatch(script, /printf 'Dakia %s\\n'/);
 });
 
 test("publisher rejects incomplete release assets before requiring publication credentials", () => {
