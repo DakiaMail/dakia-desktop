@@ -136,8 +136,14 @@ export const en = {
       replyErrorTitle: "Could not reply to message",
       forwardErrorTitle: "Could not forward message",
       loadingContent: "Fetching message…",
-      loadContentError:
-        "This message could not be fetched from the mail server.",
+      contentError: {
+        resource_limit:
+          "This message is too large or complex for Dakia to open.",
+        malformed: "This message is malformed and cannot be opened.",
+        undecodable: "The contents of this message cannot be decoded.",
+        unsupported: "This message uses an unsupported format.",
+        transient: "This message could not be fetched from the mail server.",
+      },
       exportSuccess: "Message exported to {{path}}",
       exportError: "Could not export this message.",
     },
