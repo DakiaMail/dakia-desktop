@@ -1,0 +1,162 @@
+{
+  "realisticFixtureIds": {
+    "providerSignature": "provider-signature-inline"
+  },
+  "messageContent": {
+    "success": {
+      "body_text": "Quarterly update is ready.",
+      "body_html": null,
+      "unsubscribe_kind": "web",
+      "attachments": [
+        {
+          "id": "attachment-01",
+          "message_id": "message-01",
+          "filename": "update.pdf",
+          "mime_type": "application/pdf",
+          "size_bytes": 4096,
+          "is_inline": false,
+          "presentation": "downloadable",
+          "is_potentially_unsafe": false
+        }
+      ]
+    },
+    "providerSignature": {
+      "body_text": "Redacted message content for a fictional insurance case.\n \n \nProvider Agent\nInsurance specialist\n\nExample Insurance AS\nExample Street 1\n \n \nFictional confidential-message notice.",
+      "body_html": "<html><body style=\"font-family:Arial,sans-serif\">\n<p>Redacted message content for a fictional insurance case.</p>\n<p>&nbsp;</p><p>&nbsp;</p>\n<table role=\"presentation\"><tr><td><strong>Provider Agent</strong><br>\nInsurance specialist<br><br>\nExample Insurance AS<br>Example Street 1<br>\n<img src=\"data:image/png;base64,iVBORw0KGgo=\" alt=\"Example Insurance\"></td></tr></table>\n<p>&nbsp;</p><p>&nbsp;</p>\n<small>Fictional confidential-message notice.</small>\n</body></html>",
+      "unsubscribe_kind": null,
+      "attachments": [
+        {
+          "id": "provider-signature-pdf",
+          "message_id": "message-provider-signature",
+          "filename": "claim-documents.pdf",
+          "mime_type": "application/pdf",
+          "size_bytes": 3,
+          "is_inline": false,
+          "presentation": "downloadable",
+          "is_potentially_unsafe": false
+        }
+      ]
+    },
+    "error": {
+      "kind": "resource_limit"
+    },
+    "errorVariants": [
+      { "kind": "resource_limit" },
+      { "kind": "malformed" },
+      { "kind": "undecodable" },
+      { "kind": "unsupported" },
+      { "kind": "transient" }
+    ]
+  },
+  "events": {
+    "mailArrived": {
+      "eventId": "6e84311f-ff3a-4cbd-a037-a5bedc79f2f2",
+      "accountId": "0f452e8d-8d11-4643-944c-0e9f8f243311",
+      "messages": [
+        {
+          "id": "message-01",
+          "account_id": "0f452e8d-8d11-4643-944c-0e9f8f243311",
+          "mailbox": "INBOX",
+          "uid": 42,
+          "message_id": null,
+          "in_reply_to": null,
+          "reference_ids": null,
+          "thread_id": "thread-01",
+          "subject": "Quarterly update",
+          "from_name": "Mara Example",
+          "from_address": "mara@example.test",
+          "to_addresses": "alex@example.test",
+          "cc_addresses": "",
+          "bcc_addresses": "",
+          "reply_to_addresses": "",
+          "received_at": "2026-07-30T09:15:00Z",
+          "snippet": "Quarterly update is ready.",
+          "body_text": "Quarterly update is ready.",
+          "body_html": null,
+          "content_state": "headers_only",
+          "unsubscribe_kind": null,
+          "is_read": false,
+          "is_flagged": false,
+          "has_attachments": false,
+          "category": null,
+          "classification_confidence": null,
+          "classification_source": null,
+          "classification_signals": ""
+        }
+      ],
+      "detectedAt": "2026-07-30T09:15:03Z"
+    },
+    "mailHydrated": {
+      "accountId": "0f452e8d-8d11-4643-944c-0e9f8f243311",
+      "messageId": "message-01"
+    },
+    "mailChanged": {
+      "accountId": "0f452e8d-8d11-4643-944c-0e9f8f243311"
+    },
+    "mailSyncStateWithNulls": {
+      "accountId": "0f452e8d-8d11-4643-944c-0e9f8f243311",
+      "state": "idle",
+      "retryAt": null,
+      "errorKind": null
+    },
+    "mailSyncStateRetrying": {
+      "accountId": "0f452e8d-8d11-4643-944c-0e9f8f243311",
+      "state": "retrying",
+      "retryAt": "2026-07-30T09:20:00Z",
+      "errorKind": "connection"
+    }
+  },
+  "commands": {
+    "messageContent": {
+      "command": "message_content",
+      "arguments": {
+        "messageId": "message-01"
+      }
+    },
+    "hydrateMessage": {
+      "command": "hydrate_message",
+      "arguments": {
+        "messageId": "message-01"
+      }
+    },
+    "setMessageCategory": {
+      "command": "set_message_category",
+      "arguments": {
+        "messageId": "message-01",
+        "category": "newsletters"
+      }
+    },
+    "setMessageStarred": {
+      "command": "set_message_starred",
+      "arguments": {
+        "messageId": "message-01",
+        "starred": true
+      }
+    },
+    "setMessageRead": {
+      "command": "set_message_read",
+      "arguments": {
+        "messageId": "message-01",
+        "read": false
+      }
+    },
+    "applyMailboxAction": {
+      "command": "apply_mailbox_action",
+      "arguments": {
+        "accountId": "0f452e8d-8d11-4643-944c-0e9f8f243311",
+        "mailbox": "INBOX",
+        "uid": 42,
+        "action": "archive"
+      }
+    },
+    "syncAccount": {
+      "command": "sync_account",
+      "arguments": {
+        "accountId": "0f452e8d-8d11-4643-944c-0e9f8f243311",
+        "limit": 50,
+        "full": false,
+        "onProgress": "__TAURI_CHANNEL__"
+      }
+    }
+  }
+}

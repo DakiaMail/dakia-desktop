@@ -245,7 +245,8 @@ export async function notifyAccountUpdated(account: Account) {
 }
 
 export async function notifySettingsChanged(settings: AiSettings) {
-  if (isTauri()) await emitTo("main", "settings-changed", settings);
+  if (isTauri())
+    await emitTo("main", "settings-changed", { ...settings, apiKey: "" });
 }
 
 export async function notifyNotificationSettingsChanged(

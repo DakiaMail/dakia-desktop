@@ -39,18 +39,18 @@ pub struct RealtimeSyncStatus {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct MailArrival {
-    event_id: Uuid,
-    account_id: Uuid,
-    messages: Vec<MailSummary>,
-    detected_at: String,
+pub(crate) struct MailArrival {
+    pub(crate) event_id: Uuid,
+    pub(crate) account_id: Uuid,
+    pub(crate) messages: Vec<MailSummary>,
+    pub(crate) detected_at: String,
 }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct MailHydrated {
-    account_id: Uuid,
-    message_id: String,
+pub(crate) struct MailHydrated {
+    pub(crate) account_id: Uuid,
+    pub(crate) message_id: String,
 }
 
 #[derive(Clone)]
@@ -406,6 +406,25 @@ struct HydrationResult {
     cancelled: bool,
 }
 
+async fn pending_hydration_event(
+    store: &Store,
+    account_id: Uuid,
+    outcome: &HydrationResult,
+) -> Option<MailHydrated> {
+    if outcome.cancelled || outcome.target.kind != HydrationKind::Pending {
+        return None;
+    }
+    let hydrated = outcome.result.as_ref().ok()?.as_ref()?;
+    let durable = store.message(&hydrated.id).await.ok().flatten()?;
+    if durable.account_id != account_id.to_string() {
+        return None;
+    }
+    Some(MailHydrated {
+        account_id,
+        message_id: hydrated.id.clone(),
+    })
+}
+
 #[derive(Clone)]
 struct HydrationContext {
     app: AppHandle,
@@ -685,23 +704,20 @@ async fn hydrate_after_sync(
         if outcome.cancelled {
             continue;
         }
+        if let Some(event) =
+            pending_hydration_event(&context.store, context.account.id, &outcome).await
+        {
+            tracing::info!(
+                account_id = %context.account.id,
+                message_id = %event.message_id,
+                hydration_ms = outcome.started.elapsed().as_millis(),
+                "new mail hydration complete"
+            );
+            let _ = context.app.emit("mail-hydrated", event);
+            notify_hydration_complete(&context.complete);
+            continue;
+        }
         match outcome.result {
-            Ok(Some(hydrated)) if outcome.target.kind == HydrationKind::Pending => {
-                tracing::info!(
-                    account_id = %context.account.id,
-                    message_id = %hydrated.id,
-                    hydration_ms = outcome.started.elapsed().as_millis(),
-                    "new mail hydration complete"
-                );
-                let _ = context.app.emit(
-                    "mail-hydrated",
-                    MailHydrated {
-                        account_id: context.account.id,
-                        message_id: hydrated.id,
-                    },
-                );
-                notify_hydration_complete(&context.complete);
-            }
             Ok(_) => {
                 context
                     .recent_failures
@@ -876,6 +892,13 @@ async fn fetch_and_cache_target(
     let message = service
         .fetch_message(account, &target.message.mailbox, target.message.uid as u32)
         .await?;
+    cache_hydrated_message(store, message).await
+}
+
+async fn cache_hydrated_message(
+    store: &Store,
+    message: MailSummary,
+) -> anyhow::Result<Option<MailSummary>> {
     if persist_display_cache(store, &message).await? {
         // Cache readiness is local state. Do not upsert the provider snapshot
         // here: a star/read operation may have finished while this body fetch
@@ -883,7 +906,10 @@ async fn fetch_and_cache_target(
         store
             .set_message_content_state(&message.id, "complete")
             .await?;
-        Ok(Some(message))
+        // Account removal can complete after the cache write but before event
+        // publication. Re-read the durable row so a late worker neither
+        // revives storage nor reports a hydration for a removed account.
+        Ok(store.message(&message.id).await?.map(|_| message))
     } else {
         Ok(None)
     }
@@ -990,6 +1016,10 @@ where
             break;
         }
         tokio::select! {
+            // Cancellation and a worker observing that cancellation can become
+            // ready together. Prefer the coordinator signal so the next loop
+            // cannot refill a newly vacant slot before recording the stop.
+            biased;
             changed = cancel.changed(), if !cancelled => {
                 cancelled = changed.is_err() || *cancel.borrow();
             }
@@ -1095,8 +1125,8 @@ mod tests {
 
     fn tracked_watcher(running: Arc<AtomicUsize>) -> WatcherTask {
         let (cancel, mut receiver) = watch::channel(false);
+        running.fetch_add(1, Ordering::SeqCst);
         let handle = tauri::async_runtime::spawn(async move {
-            running.fetch_add(1, Ordering::SeqCst);
             wait_for_cancellation(&mut receiver).await;
             running.fetch_sub(1, Ordering::SeqCst);
         });
@@ -1313,6 +1343,69 @@ mod tests {
             .unwrap());
         assert!(store.message(&local.id).await.unwrap().unwrap().is_flagged);
         assert!(store.starred_body(&local.id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn late_pending_hydration_after_account_removal_caches_nothing_and_emits_nothing() {
+        let store = Store::in_memory().await.unwrap();
+        let account = dakia_core::AccountDraft {
+            email: "late-hydration@example.test".into(),
+            display_name: "Late hydration".into(),
+            provider_id: Some("fastmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(dakia_core::provider::by_id("fastmail").unwrap());
+        store.save_account(&account).await.unwrap();
+
+        let mut fetched = message("removed-while-fetching");
+        fetched.account_id = account.id.to_string();
+        fetched.body_text = "late body".into();
+        let target = HydrationTarget {
+            kind: HydrationKind::Pending,
+            message: fetched.clone(),
+        };
+        store
+            .upsert_messages(std::slice::from_ref(&fetched))
+            .await
+            .unwrap();
+
+        let cached = cache_hydrated_message(&store, fetched).await.unwrap();
+        assert!(
+            cached.is_some(),
+            "the race must reach event publication with a completed cache"
+        );
+        store.delete_account(account.id).await.unwrap();
+        assert!(store.account(account.id).await.unwrap().is_none());
+        assert!(store
+            .message("removed-while-fetching")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .cached_message_content("removed-while-fetching")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(pending_hydration_event(
+            &store,
+            account.id,
+            &HydrationResult {
+                target,
+                started: Instant::now(),
+                result: Ok(cached),
+                cancelled: false,
+            },
+        )
+        .await
+        .is_none());
     }
 
     #[test]
@@ -1568,13 +1661,7 @@ mod tests {
         first.await.unwrap();
         second.await.unwrap();
 
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while running.load(Ordering::SeqCst) != 1 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("exactly one replacement watcher should remain live");
+        assert_eq!(running.load(Ordering::SeqCst), 1);
         assert_eq!(tasks.lock().await.len(), 1);
 
         stop_watcher_task(tasks.lock().await.remove(&account_id)).await;
