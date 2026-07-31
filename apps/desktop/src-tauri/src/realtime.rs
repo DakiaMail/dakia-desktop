@@ -1016,6 +1016,10 @@ where
             break;
         }
         tokio::select! {
+            // Cancellation and a worker observing that cancellation can become
+            // ready together. Prefer the coordinator signal so the next loop
+            // cannot refill a newly vacant slot before recording the stop.
+            biased;
             changed = cancel.changed(), if !cancelled => {
                 cancelled = changed.is_err() || *cancel.borrow();
             }
