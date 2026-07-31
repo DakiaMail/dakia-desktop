@@ -27,7 +27,7 @@ import {
 } from "./mailActions";
 import { replyRecipients } from "./recipients";
 import { confirmNativeAction, showNativeMessage } from "./nativeFeedback";
-import { groupMessages } from "./threads";
+import { concreteThreadMessages, groupMessages } from "./threads";
 import { forwardBody, forwardSubject } from "./forward";
 import { formatReplyHistory } from "./replyHistory";
 import {
@@ -727,6 +727,7 @@ export default function App() {
     [smartSections],
   );
   useEffect(() => {
+    let disposed = false;
     let disposeAccount: () => void = () => undefined;
     let disposeSettings: () => void = () => undefined;
     let disposeNotifications: () => void = () => undefined;
@@ -758,14 +759,22 @@ export default function App() {
         })
         .catch(showError)
         .finally(() => setSyncStatus(undefined));
-    }).then((unlisten) => (disposeAccount = unlisten));
-    void onSettingsChanged(setAiSettings).then(
-      (unlisten) => (disposeSettings = unlisten),
-    );
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else disposeAccount = unlisten;
+    });
+    void onSettingsChanged(setAiSettings).then((unlisten) => {
+      if (disposed) unlisten();
+      else disposeSettings = unlisten;
+    });
     void onNotificationSettingsChanged(setNotificationSettings).then(
-      (unlisten) => (disposeNotifications = unlisten),
+      (unlisten) => {
+        if (disposed) unlisten();
+        else disposeNotifications = unlisten;
+      },
     );
     return () => {
+      disposed = true;
       disposeAccount();
       disposeSettings();
       disposeNotifications();
@@ -816,6 +825,7 @@ export default function App() {
     };
   }, [removeAccountFromMain]);
   useEffect(() => {
+    let disposed = false;
     let dispose: () => void = () => undefined;
     void onMailIndexRebuilt(() => {
       setActive(undefined);
@@ -825,10 +835,17 @@ export default function App() {
         markSynced();
         setSyncStatus(undefined);
       });
-    }).then((unlisten) => (dispose = unlisten));
-    return () => dispose();
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else dispose = unlisten;
+    });
+    return () => {
+      disposed = true;
+      dispose();
+    };
   }, [loadMessages]);
   useEffect(() => {
+    let disposed = false;
     let dispose: () => void = () => undefined;
     const showRebuildProgress = (progress: MailRebuildProgress) => {
       const account = accounts.find((item) => item.id === progress.accountId);
@@ -863,22 +880,32 @@ export default function App() {
       .mailRebuildStatus()
       .then(([progress]) => progress && showRebuildProgress(progress))
       .catch(showError);
-    void onMailRebuildProgress(showRebuildProgress).then(
-      (unlisten) => (dispose = unlisten),
-    );
-    return () => dispose();
+    void onMailRebuildProgress(showRebuildProgress).then((unlisten) => {
+      if (disposed) unlisten();
+      else dispose = unlisten;
+    });
+    return () => {
+      disposed = true;
+      dispose();
+    };
   }, [accounts, loadMessages]);
   useEffect(() => {
+    let disposed = false;
     let unlisten: () => void = () => undefined;
     void onComposeSent(() => {
       showStatus(t("feedback.sent"));
       void loadMessages();
     }).then((dispose) => {
-      unlisten = dispose;
+      if (disposed) dispose();
+      else unlisten = dispose;
     });
-    return () => unlisten();
+    return () => {
+      disposed = true;
+      unlisten();
+    };
   }, [loadMessages, showStatus, t]);
   useEffect(() => {
+    let disposed = false;
     let unlisten: () => void = () => undefined;
     void onOutboxChanged((event) => {
       setOutbox((current) =>
@@ -890,9 +917,13 @@ export default function App() {
           : current.filter((message) => message.id !== event.id),
       );
     }).then((dispose) => {
-      unlisten = dispose;
+      if (disposed) dispose();
+      else unlisten = dispose;
     });
-    return () => unlisten();
+    return () => {
+      disposed = true;
+      unlisten();
+    };
   }, []);
   useEffect(() => {
     if (!activeAccounts.length) return;
@@ -973,22 +1004,38 @@ export default function App() {
 
   useEffect(() => {
     const matchingThread = active
-      ? displayedThreads.find((thread) =>
-          thread.messages.some((message) => message.id === active.id),
+      ? displayedThreads.find(
+          (thread) =>
+            thread.messages.some((message) => message.id === active.id) ||
+            thread.id ===
+              `${active.account_id}:${active.thread_id || active.id}`,
         )
       : undefined;
     if (matchingThread) setActiveThreadSnapshot(matchingThread);
     setActive((current) => {
       if (!current) return current;
+      const thread = displayedThreads.find(
+        (item) =>
+          item.messages.some((message) => message.id === current.id) ||
+          item.id ===
+            `${current.account_id}:${current.thread_id || current.id}`,
+      );
+      if (!thread) return current;
       return (
-        displayedThreads
-          .flatMap((thread) => thread.messages)
-          .find((message) => message.id === current.id) ?? current
+        thread.messages.find((message) => message.id === current.id) ??
+        thread.messages.find(
+          (message) =>
+            current.message_id &&
+            message.message_id?.toLowerCase() ===
+              current.message_id.toLowerCase(),
+        ) ??
+        thread.latest
       );
     });
   }, [displayedThreads]);
 
   useEffect(() => {
+    let disposed = false;
     let dispose: () => void = () => undefined;
     const openNotification = async (extra: Record<string, unknown>) => {
       const currentWindow = getCurrentWindow();
@@ -1028,16 +1075,24 @@ export default function App() {
       ),
       onDesktopNotificationAction(openNotification),
     ]).then((listeners) => {
-      dispose = () => listeners.forEach((unlisten) => unlisten());
+      const unlistenAll = () => listeners.forEach((unlisten) => unlisten());
+      if (disposed) unlistenAll();
+      else dispose = unlistenAll;
     });
-    return () => dispose();
+    return () => {
+      disposed = true;
+      dispose();
+    };
   }, [accounts]);
 
   const activeThread = useMemo(
     () =>
       active
-        ? (displayedThreads.find((thread) =>
-            thread.messages.some((message) => message.id === active.id),
+        ? (displayedThreads.find(
+            (thread) =>
+              thread.messages.some((message) => message.id === active.id) ||
+              thread.id ===
+                `${active.account_id}:${active.thread_id || active.id}`,
           ) ??
           (activeThreadSnapshot?.messages.some(
             (message) => message.id === active.id,
@@ -1330,7 +1385,7 @@ export default function App() {
           : `${prefix} ${replyMessage.subject}`,
         body: replyHistory.body,
         bodyHtml: replyHistory.bodyHtml,
-        inReplyTo: replyMessage.message_id,
+        inReplyTo: replyMessage.message_id ?? undefined,
         references: [replyMessage.reference_ids, replyMessage.message_id]
           .filter(Boolean)
           .join(" "),
@@ -1400,7 +1455,8 @@ export default function App() {
   const toggleThreadStar = async (thread: MailThread, flagged: boolean) => {
     if (actionBusyRef.current) return;
     actionBusyRef.current = true;
-    const previous = thread.messages.map((message) => ({
+    const sourceMessages = concreteThreadMessages(thread);
+    const previous = sourceMessages.map((message) => ({
       id: message.id,
       is_flagged: message.is_flagged,
     }));
@@ -1411,6 +1467,9 @@ export default function App() {
       current.map((item) => ({
         ...item,
         messages: item.messages.map((message) => updateFlag(message, flagged)),
+        sourceMessages: item.sourceMessages?.map((message) =>
+          updateFlag(message, flagged),
+        ),
         latest: updateFlag(item.latest, flagged),
       })),
     );
@@ -1421,6 +1480,9 @@ export default function App() {
             const sectionThreads = current[id].threads.map((item) => ({
               ...item,
               messages: item.messages.map((message) =>
+                updateFlag(message, flagged),
+              ),
+              sourceMessages: item.sourceMessages?.map((message) =>
                 updateFlag(message, flagged),
               ),
               latest: updateFlag(item.latest, flagged),
@@ -1434,7 +1496,9 @@ export default function App() {
                     ? sectionThreads
                     : sectionThreads.filter(
                         (item) =>
-                          !item.messages.some((message) => message.is_flagged),
+                          !concreteThreadMessages(item).some(
+                            (message) => message.is_flagged,
+                          ),
                       ),
               },
             ];
@@ -1449,12 +1513,15 @@ export default function App() {
             messages: current.messages.map((message) =>
               updateFlag(message, flagged),
             ),
+            sourceMessages: current.sourceMessages?.map((message) =>
+              updateFlag(message, flagged),
+            ),
             latest: updateFlag(current.latest, flagged),
           }
         : current,
     );
     const results = await Promise.allSettled(
-      thread.messages.map((message) => api.setStarred(message.id, flagged)),
+      sourceMessages.map((message) => api.setStarred(message.id, flagged)),
     );
     const failed = new Set(
       results.flatMap((result, index) =>
@@ -1471,6 +1538,7 @@ export default function App() {
         current.map((item) => ({
           ...item,
           messages: item.messages.map(restoreFlag),
+          sourceMessages: item.sourceMessages?.map(restoreFlag),
           latest: restoreFlag(item.latest),
         })),
       );
@@ -1480,6 +1548,7 @@ export default function App() {
           ? {
               ...current,
               messages: current.messages.map(restoreFlag),
+              sourceMessages: current.sourceMessages?.map(restoreFlag),
               latest: restoreFlag(current.latest),
             }
           : current,
@@ -1499,7 +1568,7 @@ export default function App() {
     read: boolean,
     options?: { silent?: boolean },
   ) => {
-    const targets = thread.messages.filter(
+    const targets = concreteThreadMessages(thread).filter(
       (message) => message.is_read !== read,
     );
     if (!targets.length) return;
@@ -2140,14 +2209,18 @@ function updateThreadReadState(
   const messages = thread.messages.map((message) =>
     updateMessageReadState(message, ids, read),
   );
+  const sourceMessages = thread.sourceMessages?.map((message) =>
+    updateMessageReadState(message, ids, read),
+  );
   const latest =
     messages.find((message) => message.id === thread.latest.id) ??
     thread.latest;
   return {
     ...thread,
     messages,
+    sourceMessages,
     latest,
-    unread: messages.some((message) => !message.is_read),
+    unread: (sourceMessages ?? messages).some((message) => !message.is_read),
   };
 }
 
@@ -2169,14 +2242,18 @@ function restoreThreadReadState(
   const messages = thread.messages.map((message) =>
     restoreMessageReadState(message, failed, previous),
   );
+  const sourceMessages = thread.sourceMessages?.map((message) =>
+    restoreMessageReadState(message, failed, previous),
+  );
   const latest =
     messages.find((message) => message.id === thread.latest.id) ??
     thread.latest;
   return {
     ...thread,
     messages,
+    sourceMessages,
     latest,
-    unread: messages.some((message) => !message.is_read),
+    unread: (sourceMessages ?? messages).some((message) => !message.is_read),
   };
 }
 

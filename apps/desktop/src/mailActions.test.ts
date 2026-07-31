@@ -71,6 +71,33 @@ describe("mail action state", () => {
     ).toEqual(["INBOX"]);
   });
 
+  it("preserves hidden duplicate locators as action targets", () => {
+    const visibleArchive = {
+      ...message("visible"),
+      mailbox: "Archive",
+      message_id: "<same@example.test>",
+    };
+    const hiddenInbox = {
+      ...message("hidden"),
+      mailbox: "INBOX",
+      message_id: "<same@example.test>",
+    };
+    const thread: MailThread = {
+      id: "account:thread",
+      messages: [visibleArchive],
+      sourceMessages: [hiddenInbox, visibleArchive],
+      latest: visibleArchive,
+      unread: false,
+      hasAttachments: false,
+      participants: [],
+    };
+    expect(
+      conversationActionMessages(thread, "INBOX", "archive").map(
+        (item) => item.id,
+      ),
+    ).toEqual(["hidden"]);
+  });
+
   it("treats discovered Sent folders as Sent without acting on them", () => {
     const inbox = message("1");
     const sent = { ...message("2"), mailbox: "Sent::Sent Messages" };
