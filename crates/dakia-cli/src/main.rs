@@ -203,14 +203,21 @@ async fn main() -> Result<()> {
         },
         Command::Sync(args) => {
             let mail = MailService::new(store.clone());
-            for account in store
+            let accounts = store
                 .accounts()
                 .await?
                 .into_iter()
                 .filter(|item| args.account.map(|id| id == item.id).unwrap_or(true))
-            {
+                .collect::<Vec<_>>();
+            if args.account.is_some() && accounts.is_empty() {
+                bail!("account not found");
+            }
+            for account in accounts {
                 let count = if args.refresh_gmail_categories {
                     if account.provider_id != "gmail" {
+                        if args.account.is_some() {
+                            bail!("Gmail category refresh requires a Gmail account");
+                        }
                         continue;
                     }
                     mail.refresh_gmail_category_metadata(&account)
@@ -224,14 +231,14 @@ async fn main() -> Result<()> {
                         .with_context(|| format!("sync failed for {}", account.email))?
                 };
                 if cli.json {
-                    println!(
-                        "{}",
-                        serde_json::json!(if args.refresh_gmail_categories {
+                    print_value(
+                        &if args.refresh_gmail_categories {
                             serde_json::json!({"account_id":account.id,"refreshed_category_labels":count})
                         } else {
                             serde_json::json!({"account_id":account.id,"synced":count})
-                        })
-                    );
+                        },
+                        true,
+                    )?;
                 } else {
                     let action = if args.refresh_gmail_categories {
                         "refreshed Gmail category labels for"

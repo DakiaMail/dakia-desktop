@@ -1,0 +1,142 @@
+name: Pull request validation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: pull-request-validation-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  classify:
+    name: Classify changed paths
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+      frontend: ${{ steps.classify.outputs.frontend }}
+      rust_core: ${{ steps.classify.outputs.rust_core }}
+      mail_boundary: ${{ steps.classify.outputs.mail_boundary }}
+      tauri_boundary: ${{ steps.classify.outputs.tauri_boundary }}
+      release_only: ${{ steps.classify.outputs.release_only }}
+      requires_lfs: ${{ steps.classify.outputs.requires_lfs }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 2
+          lfs: false
+      - name: Fetch PR base revision
+        run: git fetch --no-tags --depth=1 origin ${{ github.event.pull_request.base.sha }}
+      - id: classify
+        name: Derive scopes from merge-base diff
+        run: node scripts/change-classifier.mjs --base ${{ github.event.pull_request.base.sha }} --head HEAD --github-output
+      - name: Test classifier
+        run: node --test scripts/change-classifier.node-test.mjs
+
+  validate:
+    name: Validate applicable scopes
+    needs: classify
+    runs-on: ubuntu-24.04
+    # The first run for a new lockfile/toolchain must be able to populate the
+    # shared Cargo cache. Steady-state duration is measured separately against
+    # the strategy's warm-cache target.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 2
+          lfs: false
+      - name: Fetch PR base revision
+        run: git fetch --no-tags --depth=1 origin ${{ github.event.pull_request.base.sha }}
+      - id: docs_only
+        name: Validate documentation-only diff
+        if: needs.classify.outputs.docs_only == 'true'
+        run: git diff --check ${{ github.event.pull_request.base.sha }}...HEAD
+      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4
+        if: needs.classify.outputs.frontend == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.tauri_boundary == 'true' || needs.classify.outputs.release_only == 'true'
+        with:
+          node-version: 20.19.0
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        if: needs.classify.outputs.frontend == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.release_only == 'true'
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ runner.arch }}-node-20.19.0-${{ hashFiles('package-lock.json') }}
+      - name: Install JavaScript dependencies without lifecycle preparation
+        if: needs.classify.outputs.frontend == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.release_only == 'true'
+        run: npm ci --ignore-scripts
+      - id: frontend
+        name: Validate frontend scope
+        if: needs.classify.outputs.frontend == 'true'
+        run: |
+          npm run format:check
+          npm run typecheck
+          npm run test -- --maxWorkers=1
+          node --test scripts/tauri-contract-inventory.node-test.mjs
+          node scripts/tauri-contract-inventory.mjs
+      - name: Install pinned Rust toolchain
+        if: needs.classify.outputs.rust_core == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.tauri_boundary == 'true'
+        run: |
+          rustup toolchain install 1.89.0 --profile minimal --component rustfmt --component clippy
+          echo 'RUSTUP_TOOLCHAIN=1.89.0' >> "$GITHUB_ENV"
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        if: needs.classify.outputs.rust_core == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.tauri_boundary == 'true'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-${{ hashFiles('Cargo.lock') }}
+      - id: rust_core
+        name: Validate Rust core scope
+        if: needs.classify.outputs.rust_core == 'true'
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy -p dakia-core --all-targets -- -D warnings
+          cargo test -p dakia-core -- \
+            --skip classification::tests::local_model_classifies_representative_email_types \
+            --skip classification::tests::does_not_treat_a_branded_monthly_update_as_personal_correspondence \
+            --skip classification::tests::does_not_treat_brand_marketing_as_personal_correspondence \
+            --skip classification::tests::bulk_insurance_price_promotion_is_not_a_transaction
+          cargo clippy -p dakia-cli --all-targets -- -D warnings
+          cargo test -p dakia-cli
+      - id: mail_boundary
+        name: Validate mail boundary suites
+        if: needs.classify.outputs.mail_boundary == 'true'
+        run: |
+          node --test scripts/validate-realistic-fixtures.node-test.mjs
+          node scripts/validate-realistic-fixtures.mjs
+          if [ "${{ needs.classify.outputs.frontend }}" != "true" ]; then
+            npx vitest run apps/desktop/src/apiMessageContent.test.ts apps/desktop/src/components/HtmlMessage.test.tsx apps/desktop/src/components/Reader.test.tsx --maxWorkers=1
+          fi
+      - name: Install Linux dependencies for Tauri command tests
+        if: needs.classify.outputs.tauri_boundary == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+      - id: tauri_boundary
+        name: Validate Linux-compilable Tauri boundary
+        if: needs.classify.outputs.tauri_boundary == 'true'
+        run: |
+          npm run bundle:cli:dev
+          cargo clippy -p dakia-desktop --all-targets -- -D warnings
+          cargo test -p dakia-desktop
+      - id: release_only
+        name: Validate release scripts without packaging
+        if: needs.classify.outputs.release_only == 'true'
+        run: npm run test:release-scripts
+      - name: Report selected scopes
+        if: always()
+        run: |
+          {
+            echo '### Pull request validation scopes'
+            echo '- docs-only: ${{ steps.docs_only.outcome }}'
+            echo '- frontend: ${{ steps.frontend.outcome }}'
+            echo '- rust-core: ${{ steps.rust_core.outcome }}'
+            echo '- mail-boundary: ${{ steps.mail_boundary.outcome }}'
+            echo '- tauri-boundary: ${{ steps.tauri_boundary.outcome }}'
+            echo '- release-only: ${{ steps.release_only.outcome }}'
+          } | tee -a "$GITHUB_STEP_SUMMARY"

@@ -14,12 +14,12 @@ use sqlx::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    fs::OpenOptions,
-    io::{ErrorKind, Write},
-    path::Path,
+    fs::{File, FileTimes, OpenOptions},
+    io::{ErrorKind, Read, Write},
+    path::{Path, PathBuf},
     str::FromStr,
-    sync::Arc,
-    time::Duration,
+    sync::{Arc, OnceLock},
+    time::{Duration, Instant, SystemTime},
 };
 
 #[cfg(unix)]
@@ -39,6 +39,20 @@ const MESSAGE_CONTENT_CACHE_RECENT_WINDOW_DAYS: i64 = 30;
 /// part when interpreted by the sectioned MIME planner.
 const ATTACHMENT_PRESENTATION_CACHE_VERSION: &str = "2";
 const ATTACHMENT_PRESENTATION_VERSION: i64 = 2;
+/// Foreground readers wait at most 60 seconds for another body fetch. Keep a
+/// short grace period beyond that before a crashed process's lease may be
+/// replaced, while preserving fresh claims across concurrently open processes.
+const MESSAGE_CONTENT_FETCH_LEASE_SECONDS: i64 = 90;
+/// All stores opened by this process share a fetch-claim owner. This lets a
+/// second connection respect work already in flight, while a new process can
+/// discard claims left by the previous process during migration.
+static MESSAGE_CONTENT_FETCH_OWNER: OnceLock<String> = OnceLock::new();
+
+fn message_content_fetch_owner() -> &'static str {
+    MESSAGE_CONTENT_FETCH_OWNER
+        .get_or_init(|| uuid::Uuid::new_v4().to_string())
+        .as_str()
+}
 
 #[derive(Clone)]
 pub struct Store {
@@ -52,6 +66,8 @@ pub struct Store {
 pub struct MessageContentFetchClaim {
     store: Store,
     message_id: String,
+    owner: String,
+    renewal: tokio::task::JoinHandle<()>,
     released: bool,
 }
 
@@ -68,8 +84,9 @@ pub enum MessageContentFetchAcquire {
 
 impl MessageContentFetchClaim {
     pub async fn release(mut self) -> Result<()> {
+        self.renewal.abort();
         self.store
-            .release_message_content_fetch(&self.message_id)
+            .release_message_content_fetch_for_owner(&self.message_id, &self.owner)
             .await?;
         self.released = true;
         Ok(())
@@ -81,11 +98,15 @@ impl Drop for MessageContentFetchClaim {
         if self.released {
             return;
         }
+        self.renewal.abort();
         let store = self.store.clone();
         let message_id = self.message_id.clone();
+        let owner = self.owner.clone();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
-                let _ = store.release_message_content_fetch(&message_id).await;
+                let _ = store
+                    .release_message_content_fetch_for_owner(&message_id, &owner)
+                    .await;
             });
         }
     }
@@ -168,6 +189,9 @@ pub struct MailConversation {
     pub account_id: String,
     pub thread_id: String,
     pub messages: Vec<MailSummary>,
+    /// Every concrete mailbox/UID locator, including logical Message-ID
+    /// copies that are collapsed in `messages` for display.
+    pub source_messages: Vec<MailSummary>,
     pub latest: MailSummary,
     pub message_count: usize,
     pub unread: bool,
@@ -392,12 +416,25 @@ impl Store {
         // write transactions can otherwise race while upgrading their SQLite
         // locks. A single local connection queues those short DB sections and
         // prevents an account watcher from losing an arrival to SQLITE_BUSY.
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await?;
+        let connect_deadline = Instant::now() + Duration::from_secs(10);
+        let pool = loop {
+            match SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(options.clone())
+                .await
+            {
+                Ok(pool) => break pool,
+                Err(error)
+                    if is_sqlite_busy_message(&error.to_string())
+                        && Instant::now() < connect_deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
         let store = Self { pool, vault_key };
-        store.migrate().await?;
+        store.migrate_with_busy_retry().await?;
         Ok(store)
     }
 
@@ -407,8 +444,24 @@ impl Store {
             pool,
             vault_key: Arc::new(random_bytes()?),
         };
-        store.migrate().await?;
+        store.migrate_with_busy_retry().await?;
         Ok(store)
+    }
+
+    async fn migrate_with_busy_retry(&self) -> Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match self.migrate().await {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if (is_sqlite_busy(&error) || is_sqlite_migration_race(&error))
+                        && Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     async fn migrate(&self) -> Result<()> {
@@ -435,7 +488,7 @@ impl Store {
             "CREATE TABLE IF NOT EXISTS starred_attachment_metadata (id TEXT PRIMARY KEY, message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, filename TEXT NOT NULL, mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, is_inline INTEGER NOT NULL DEFAULT 0, presentation TEXT NOT NULL DEFAULT 'unknown', is_potentially_unsafe INTEGER NOT NULL DEFAULT 0)",
             "CREATE TABLE IF NOT EXISTS message_content_cache (message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, content_state TEXT NOT NULL CHECK(content_state = 'complete'), body_text TEXT NOT NULL, body_html TEXT, unsubscribe_kind TEXT, attachments_json TEXT NOT NULL, byte_size INTEGER NOT NULL CHECK(byte_size >= 0), last_accessed INTEGER NOT NULL)",
             "CREATE INDEX IF NOT EXISTS message_content_cache_lru ON message_content_cache(last_accessed, message_id)",
-            "CREATE TABLE IF NOT EXISTS message_content_fetches (message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, claimed_at TEXT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS message_content_fetches (message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, claimed_at TEXT NOT NULL, claim_owner TEXT NOT NULL DEFAULT '')",
             "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
             "CREATE TABLE IF NOT EXISTS mailbox_catalog_state (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, remote_name TEXT NOT NULL, uid_validity INTEGER NOT NULL, remote_total INTEGER NOT NULL DEFAULT 0, historical_complete INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox))",
             "CREATE TABLE IF NOT EXISTS mail_rebuild_jobs (account_id TEXT PRIMARY KEY, phase TEXT NOT NULL, completed INTEGER NOT NULL DEFAULT 0, total INTEGER, updated_at TEXT NOT NULL)",
@@ -446,10 +499,25 @@ impl Store {
                 .await
                 .with_context(|| format!("storage migration statement failed: {statement}"))?;
         }
-        // Fetch claims coordinate only concurrent work in this process. A
-        // previous process cannot still be downloading, so never let its
-        // transient rows block a fresh store after restart.
-        sqlx::query("DELETE FROM message_content_fetches")
+        let fetch_claim_columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
+            sqlx::query_as("PRAGMA table_info(message_content_fetches)")
+                .fetch_all(&self.pool)
+                .await?;
+        if !fetch_claim_columns
+            .iter()
+            .any(|column| column.1 == "claim_owner")
+        {
+            sqlx::query(
+                "ALTER TABLE message_content_fetches ADD COLUMN claim_owner TEXT NOT NULL DEFAULT ''",
+            )
+            .execute(&self.pool)
+            .await?;
+        }
+        // A CLI and the desktop can open this database concurrently. Preserve
+        // every fresh lease regardless of process owner; only work old enough
+        // to have outlived the foreground wait window is safe to discard.
+        sqlx::query("DELETE FROM message_content_fetches WHERE claimed_at <= ?")
+            .bind(Utc::now() - chrono::Duration::seconds(MESSAGE_CONTENT_FETCH_LEASE_SECONDS))
             .execute(&self.pool)
             .await?;
         // Provider work can outlive a UI action (for example, a hydration
@@ -1234,11 +1302,23 @@ impl Store {
         messages: &[MailSummary],
     ) -> Result<Vec<MailSummary>> {
         let account_id = account_id.to_string();
+        if messages
+            .iter()
+            .any(|message| message.account_id != account_id || message.mailbox != mailbox)
+        {
+            return Err(anyhow!(
+                "sync batch message does not match the requested account or mailbox"
+            ));
+        }
         // Keep the existence check and all provider-derived writes in one
         // transaction.  This prevents a late realtime cycle from reporting
         // arrivals for an account removed between its IMAP fetch and local
         // publication.
-        let mut tx = self.pool.begin().await?;
+        // Two independent Store connections can both begin a deferred read
+        // transaction before either publishes. Acquire the SQLite write lease
+        // first so the loser waits rather than failing while upgrading its
+        // read lock to a write lock.
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let account_removed: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM deleted_account_tombstones WHERE account_id = ?)",
         )
@@ -1248,6 +1328,15 @@ impl Store {
         if account_removed {
             tx.rollback().await?;
             return Err(anyhow!("account was removed"));
+        }
+        let account_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM accounts WHERE id = ?)")
+                .bind(&account_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if !account_exists {
+            tx.rollback().await?;
+            return Err(anyhow!("account does not exist"));
         }
         let initialized: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM mailbox_sync_state WHERE account_id = ? AND mailbox = ?)",
@@ -1931,14 +2020,27 @@ impl Store {
     }
 
     /// Claims a local message for an in-flight body fetch. Claims are
-    /// intentionally transient and are cleared when the store starts.
+    /// transient leases shared by every process using the profile. A stale
+    /// lease may be replaced after the bounded foreground wait window, while
+    /// the owner token prevents an old guard from releasing its replacement.
     pub async fn claim_message_content_fetch(&self, message_id: &str) -> Result<bool> {
+        self.claim_message_content_fetch_for_owner(message_id, message_content_fetch_owner())
+            .await
+    }
+
+    async fn claim_message_content_fetch_for_owner(
+        &self,
+        message_id: &str,
+        owner: &str,
+    ) -> Result<bool> {
         Ok(sqlx::query(
-            "INSERT OR IGNORE INTO message_content_fetches(message_id, claimed_at) SELECT ?, ? WHERE EXISTS (SELECT 1 FROM messages WHERE id = ?)",
+            "INSERT INTO message_content_fetches(message_id, claimed_at, claim_owner) SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM messages WHERE id = ?) ON CONFLICT(message_id) DO UPDATE SET claimed_at = excluded.claimed_at, claim_owner = excluded.claim_owner WHERE message_content_fetches.claimed_at <= ?",
         )
         .bind(message_id)
         .bind(Utc::now())
+        .bind(owner)
         .bind(message_id)
+        .bind(Utc::now() - chrono::Duration::seconds(MESSAGE_CONTENT_FETCH_LEASE_SECONDS))
         .execute(&self.pool)
         .await?
         .rows_affected()
@@ -1949,14 +2051,42 @@ impl Store {
         &self,
         message_id: &str,
     ) -> Result<Option<MessageContentFetchClaim>> {
-        Ok(self
-            .claim_message_content_fetch(message_id)
+        let owner = uuid::Uuid::new_v4().to_string();
+        if !self
+            .claim_message_content_fetch_for_owner(message_id, &owner)
             .await?
-            .then(|| MessageContentFetchClaim {
-                store: self.clone(),
-                message_id: message_id.to_owned(),
-                released: false,
-            }))
+        {
+            return Ok(None);
+        }
+        let renewal_store = self.clone();
+        let renewal_message_id = message_id.to_owned();
+        let renewal_owner = owner.clone();
+        let renewal = tokio::spawn(async move {
+            let interval = Duration::from_secs(
+                u64::try_from(MESSAGE_CONTENT_FETCH_LEASE_SECONDS / 3).unwrap_or(30),
+            );
+            loop {
+                tokio::time::sleep(interval).await;
+                let renewed = sqlx::query(
+                    "UPDATE message_content_fetches SET claimed_at = ? WHERE message_id = ? AND claim_owner = ?",
+                )
+                .bind(Utc::now())
+                .bind(&renewal_message_id)
+                .bind(&renewal_owner)
+                .execute(&renewal_store.pool)
+                .await;
+                if !matches!(renewed, Ok(result) if result.rows_affected() == 1) {
+                    break;
+                }
+            }
+        });
+        Ok(Some(MessageContentFetchClaim {
+            store: self.clone(),
+            message_id: message_id.to_owned(),
+            owner,
+            renewal,
+            released: false,
+        }))
     }
 
     /// Acquires a fetch claim while preserving why it was unavailable.
@@ -1984,8 +2114,18 @@ impl Store {
     }
 
     pub async fn release_message_content_fetch(&self, message_id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM message_content_fetches WHERE message_id = ?")
+        self.release_message_content_fetch_for_owner(message_id, message_content_fetch_owner())
+            .await
+    }
+
+    async fn release_message_content_fetch_for_owner(
+        &self,
+        message_id: &str,
+        owner: &str,
+    ) -> Result<()> {
+        sqlx::query("DELETE FROM message_content_fetches WHERE message_id = ? AND claim_owner = ?")
             .bind(message_id)
+            .bind(owner)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -2474,10 +2614,14 @@ impl Store {
         }
         let conversations = grouped
             .into_iter()
-            .filter_map(|((account_id, thread_id), messages)| {
-                let messages = deduplicate_message_copies(messages, query.mailbox.as_deref());
+            .filter_map(|((account_id, thread_id), source_messages)| {
+                // Keep every durable locator for mutation fan-out. `messages`
+                // below is only the mailbox-preferred reader/list projection,
+                // so it may intentionally collapse logical Message-ID copies.
+                let messages =
+                    deduplicate_message_copies(source_messages.clone(), query.mailbox.as_deref());
                 let latest = messages.last()?.clone();
-                let mut participants = messages
+                let mut participants = source_messages
                     .iter()
                     .map(|message| {
                         message
@@ -2494,11 +2638,14 @@ impl Store {
                     account_id,
                     thread_id,
                     message_count: messages.len(),
-                    unread: messages.iter().any(|message| !message.is_read),
-                    has_attachments: messages.iter().any(|message| message.has_attachments),
+                    unread: source_messages.iter().any(|message| !message.is_read),
+                    has_attachments: source_messages
+                        .iter()
+                        .any(|message| message.has_attachments),
                     participants,
                     latest,
                     messages,
+                    source_messages,
                 })
             })
             .collect::<Vec<_>>();
@@ -3169,15 +3316,38 @@ fn load_or_create_vault_key(path: &Path) -> Result<[u8; VAULT_KEY_LEN]> {
         Ok(bytes) => parse_vault_key(path, &bytes),
         Err(error) if error.kind() == ErrorKind::NotFound => {
             let key = random_bytes()?;
+            let temporary_path = path.with_file_name(format!(
+                ".{}.{}.tmp",
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("vault"),
+                uuid::Uuid::new_v4()
+            ));
             let mut options = OpenOptions::new();
             options.write(true).create_new(true);
             #[cfg(unix)]
             options.mode(0o600);
-            match options.open(path) {
+            match options.open(&temporary_path) {
                 Ok(mut file) => {
                     file.write_all(&key)?;
                     file.sync_all()?;
-                    Ok(key)
+                    drop(file);
+                    match publish_vault_key(&temporary_path, path, true) {
+                        Ok(()) => {
+                            if temporary_path.exists() {
+                                std::fs::remove_file(&temporary_path)?;
+                            }
+                            Ok(key)
+                        }
+                        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                            std::fs::remove_file(&temporary_path)?;
+                            parse_vault_key(path, &std::fs::read(path)?)
+                        }
+                        Err(error) => {
+                            let _ = std::fs::remove_file(&temporary_path);
+                            Err(error.into())
+                        }
+                    }
                 }
                 Err(error) if error.kind() == ErrorKind::AlreadyExists => {
                     parse_vault_key(path, &std::fs::read(path)?)
@@ -3186,6 +3356,264 @@ fn load_or_create_vault_key(path: &Path) -> Result<[u8; VAULT_KEY_LEN]> {
             }
         }
         Err(error) => Err(error.into()),
+    }
+}
+
+fn publish_vault_key(
+    temporary_path: &Path,
+    path: &Path,
+    try_hard_link: bool,
+) -> std::io::Result<()> {
+    publish_vault_key_with_stale_after(temporary_path, path, try_hard_link, Duration::from_secs(10))
+}
+
+fn publish_vault_key_with_stale_after(
+    temporary_path: &Path,
+    path: &Path,
+    try_hard_link: bool,
+    stale_after: Duration,
+) -> std::io::Result<()> {
+    publish_vault_key_with_stale_after_and_hook(
+        temporary_path,
+        path,
+        try_hard_link,
+        stale_after,
+        || {},
+    )
+}
+
+fn publish_vault_key_with_stale_after_and_hook<F>(
+    temporary_path: &Path,
+    path: &Path,
+    try_hard_link: bool,
+    stale_after: Duration,
+    after_lock_acquired: F,
+) -> std::io::Result<()>
+where
+    F: FnOnce(),
+{
+    let hard_link_result = if try_hard_link {
+        std::fs::hard_link(temporary_path, path)
+    } else {
+        Err(std::io::Error::new(
+            ErrorKind::Unsupported,
+            "hard links disabled for test",
+        ))
+    };
+    match hard_link_result {
+        Ok(()) => return Ok(()),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => return Err(error),
+        Err(error)
+            if !matches!(
+                error.kind(),
+                ErrorKind::Unsupported | ErrorKind::PermissionDenied | ErrorKind::Other
+            ) =>
+        {
+            return Err(error);
+        }
+        Err(_) => {}
+    }
+
+    // Some valid profile locations (for example exFAT and network mounts) do
+    // not support hard links. Serialize the fallback with a create-new lock,
+    // then atomically rename the already-fsynced temporary file. Contenders
+    // never observe partial key bytes and the winner never overwrites an
+    // existing canonical key.
+    let mut lock = VaultPublishLock::acquire(path, stale_after)?;
+    after_lock_acquired();
+    // Stop before checking ownership so the final token check observes stable
+    // lock contents. A stale-lock taker moves the lock aside before acquiring
+    // its own create-new lock, so a slow old publisher can never publish over
+    // or clean up the replacement owner's work.
+    lock.stop_heartbeat();
+    let result = if !lock.is_owned()? {
+        Err(std::io::Error::new(
+            ErrorKind::PermissionDenied,
+            "lost ownership of vault key publication lock",
+        ))
+    } else if path.exists() {
+        Err(std::io::Error::new(
+            ErrorKind::AlreadyExists,
+            "vault key already published",
+        ))
+    } else if !lock.is_owned()? {
+        // Keep this second check directly adjacent to the rename. The lock
+        // serializes all Dakia publishers and this prevents a reclaimed old
+        // owner from replacing a newer canonical key in the fallback path.
+        Err(std::io::Error::new(
+            ErrorKind::PermissionDenied,
+            "lost ownership of vault key publication lock",
+        ))
+    } else {
+        // `temporary_path` was fsynced before acquiring the lock. The lock is
+        // create-new and checked immediately above, so fallback publishers
+        // retain the same no-replace canonical semantics as the hard-link
+        // path while still supporting filesystems without hard links.
+        std::fs::rename(temporary_path, path)
+    };
+    let _ = lock.release_if_owned();
+    result
+}
+
+struct VaultPublishLock {
+    path: PathBuf,
+    token: String,
+    heartbeat: Option<VaultPublishHeartbeat>,
+}
+
+struct VaultPublishHeartbeat {
+    stop: std::sync::mpsc::Sender<()>,
+    worker: std::thread::JoinHandle<()>,
+}
+
+impl VaultPublishLock {
+    fn acquire(canonical_path: &Path, stale_after: Duration) -> std::io::Result<Self> {
+        let path = vault_publish_lock_path(canonical_path);
+        let deadline = Instant::now() + stale_after;
+        let token = uuid::Uuid::new_v4().to_string();
+        loop {
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut file) => {
+                    file.write_all(token.as_bytes())?;
+                    file.sync_all()?;
+                    drop(file);
+                    return Ok(Self {
+                        path: path.clone(),
+                        token: token.clone(),
+                        heartbeat: VaultPublishHeartbeat::start(&path, &token, stale_after),
+                    });
+                }
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                    if canonical_path.exists() {
+                        return Err(std::io::Error::new(
+                            ErrorKind::AlreadyExists,
+                            "vault key already published",
+                        ));
+                    }
+                    if vault_publish_lock_is_stale(&path, stale_after) {
+                        // Move, rather than unlink, a stale lock. A live
+                        // holder that was paused can then detect that its
+                        // token no longer owns `path` before final publish or
+                        // cleanup; it cannot delete the contender's lock.
+                        match move_stale_vault_publish_lock(&path) {
+                            Ok(()) => continue,
+                            Err(ref error) if error.kind() == ErrorKind::NotFound => continue,
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(std::io::Error::new(
+                            ErrorKind::TimedOut,
+                            "timed out waiting for vault key publication",
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn is_owned(&self) -> std::io::Result<bool> {
+        match std::fs::read_to_string(&self.path) {
+            Ok(contents) => Ok(contents == self.token),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn stop_heartbeat(&mut self) {
+        if let Some(heartbeat) = self.heartbeat.take() {
+            let _ = heartbeat.stop.send(());
+            let _ = heartbeat.worker.join();
+        }
+    }
+
+    fn release_if_owned(&mut self) -> std::io::Result<()> {
+        self.stop_heartbeat();
+        if self.is_owned()? {
+            match std::fs::remove_file(&self.path) {
+                Ok(()) => Ok(()),
+                Err(ref error) if error.kind() == ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+            }
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for VaultPublishLock {
+    fn drop(&mut self) {
+        self.stop_heartbeat();
+    }
+}
+
+impl VaultPublishHeartbeat {
+    fn start(path: &Path, token: &str, stale_after: Duration) -> Option<Self> {
+        if stale_after.is_zero() {
+            return None;
+        }
+        let interval = stale_after
+            .checked_div(3)
+            .unwrap_or(stale_after)
+            .max(Duration::from_millis(1))
+            .min(Duration::from_secs(1));
+        let path = path.to_owned();
+        let token = token.to_owned();
+        let (stop, worker_stop) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || loop {
+            match worker_stop.recv_timeout(interval) {
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    refresh_vault_publish_lock(&path, &token);
+                }
+            }
+        });
+        Some(Self { stop, worker })
+    }
+}
+
+fn vault_publish_lock_path(path: &Path) -> PathBuf {
+    path.with_file_name(format!(
+        ".{}.publish.lock",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("vault")
+    ))
+}
+
+fn vault_publish_lock_is_stale(path: &Path, stale_after: Duration) -> bool {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age >= stale_after)
+}
+
+fn move_stale_vault_publish_lock(path: &Path) -> std::io::Result<()> {
+    let stale_path = path.with_file_name(format!(
+        ".{}.stale.{}",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("vault"),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::rename(path, &stale_path)?;
+    match std::fs::remove_file(&stale_path) {
+        Ok(()) => Ok(()),
+        Err(ref error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn refresh_vault_publish_lock(path: &Path, token: &str) {
+    let Ok(mut file) = File::open(path) else {
+        return;
+    };
+    let mut contents = String::new();
+    if file.read_to_string(&mut contents).is_ok() && contents == token {
+        let _ = file.set_times(FileTimes::new().set_modified(SystemTime::now()));
     }
 }
 
@@ -3252,6 +3680,22 @@ fn fts_query(input: &str) -> String {
         .join(" AND ")
 }
 
+fn is_sqlite_busy(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| is_sqlite_busy_message(&cause.to_string()))
+}
+
+fn is_sqlite_busy_message(message: &str) -> bool {
+    message.contains("database is locked") || message.contains("database is busy")
+}
+
+fn is_sqlite_migration_race(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.to_string().contains("duplicate column name"))
+}
+
 pub fn stable_message_id(account_id: AccountId, mailbox: &str, uid: u32) -> String {
     // UUID v4 is used for accounts; deriving a stable ID avoids duplicates during resync.
     format!("{}:{}:{}", account_id, mailbox.replace(':', "_"), uid)
@@ -3260,6 +3704,23 @@ pub fn stable_message_id(account_id: AccountId, mailbox: &str, uid: u32) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sqlite_contention_helpers_classify_synthetic_error_chains() {
+        assert!(is_sqlite_busy_message("database is locked"));
+        assert!(is_sqlite_busy_message("database is busy"));
+        assert!(!is_sqlite_busy_message("disk I/O error"));
+
+        let locked = anyhow!("database is locked").context("opening the store");
+        assert!(is_sqlite_busy(&locked));
+        assert!(!is_sqlite_busy(&anyhow!("disk I/O error")));
+
+        let migration_race = anyhow!("duplicate column name: indexed_at").context("migrating");
+        assert!(is_sqlite_migration_race(&migration_race));
+        assert!(!is_sqlite_migration_race(&anyhow!(
+            "no such column: indexed_at"
+        )));
+    }
 
     #[test]
     fn parses_only_complete_canonical_message_id_lists() {
@@ -3412,6 +3873,42 @@ mod tests {
         message.mailbox = mailbox.into();
         message.received_at = received_at;
         message
+    }
+
+    fn account_with_id(id: uuid::Uuid, email: &str) -> Account {
+        let mut account = AccountDraft {
+            email: email.into(),
+            display_name: "Storage test".into(),
+            provider_id: Some("fastmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("fastmail").unwrap());
+        account.id = id;
+        account
+    }
+
+    async fn save_test_account(store: &Store, id: uuid::Uuid) {
+        store
+            .save_account(&account_with_id(id, &format!("{id}@example.test")))
+            .await
+            .unwrap();
+    }
+
+    fn fixed_seed_order(len: usize, mut seed: u64) -> Vec<usize> {
+        let mut order = (0..len).collect::<Vec<_>>();
+        for index in (1..len).rev() {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            order.swap(index, (seed as usize) % (index + 1));
+        }
+        order
     }
 
     #[tokio::test]
@@ -4273,7 +4770,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn message_content_fetch_claims_cascade_and_clear_on_restart() {
+    async fn message_content_fetch_claims_cascade_and_preserve_fresh_cross_process_leases() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("dakia.db");
         let store = Store::open(&path).await.unwrap();
@@ -4319,10 +4816,82 @@ mod tests {
             .await
             .unwrap();
         assert!(store.claim_message_content_fetch(&fresh.id).await.unwrap());
+        sqlx::query("UPDATE message_content_fetches SET claim_owner = 'other-live-process' WHERE message_id = ?")
+            .bind(&fresh.id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
         drop(store);
 
         let store = Store::open(&path).await.unwrap();
+        assert!(
+            !store.claim_message_content_fetch(&fresh.id).await.unwrap(),
+            "opening another process must preserve a fresh foreign claim"
+        );
+        store
+            .release_message_content_fetch(&fresh.id)
+            .await
+            .unwrap();
+        assert!(
+            !store.claim_message_content_fetch(&fresh.id).await.unwrap(),
+            "a guard from another owner must not release the foreign claim"
+        );
+        sqlx::query("UPDATE message_content_fetches SET claimed_at = ? WHERE message_id = ?")
+            .bind(Utc::now() - chrono::Duration::seconds(MESSAGE_CONTENT_FETCH_LEASE_SECONDS + 1))
+            .bind(&fresh.id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        assert!(
+            store.claim_message_content_fetch(&fresh.id).await.unwrap(),
+            "a claim older than the bounded lease must be replaceable"
+        );
+        store
+            .release_message_content_fetch(&fresh.id)
+            .await
+            .unwrap();
         assert!(store.claim_message_content_fetch(&fresh.id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn expired_fetch_takeover_cannot_be_released_by_the_old_guard() {
+        let store = Store::in_memory().await.unwrap();
+        let message = message("Lease owner", "preview");
+        let message_id = message.id.clone();
+        store.upsert_messages(&[message]).await.unwrap();
+
+        let first = store
+            .acquire_message_content_fetch(&message_id)
+            .await
+            .unwrap()
+            .unwrap();
+        sqlx::query("UPDATE message_content_fetches SET claimed_at = ? WHERE message_id = ?")
+            .bind(Utc::now() - chrono::Duration::seconds(MESSAGE_CONTENT_FETCH_LEASE_SECONDS + 1))
+            .bind(&message_id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let replacement = store
+            .acquire_message_content_fetch(&message_id)
+            .await
+            .unwrap()
+            .expect("an expired claim should be replaceable");
+
+        first.release().await.unwrap();
+        assert!(
+            store
+                .acquire_message_content_fetch(&message_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "an old guard must not release a newer owner's claim"
+        );
+        replacement.release().await.unwrap();
+        assert!(store
+            .acquire_message_content_fetch(&message_id)
+            .await
+            .unwrap()
+            .is_some());
     }
 
     #[tokio::test]
@@ -4350,6 +4919,7 @@ mod tests {
             .await
             .unwrap();
         let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
         let mut source = message("Source", "preview");
         source.id = stable_message_id(account_id, "INBOX", 1);
         source.account_id = account_id.to_string();
@@ -5394,6 +5964,7 @@ mod tests {
     async fn completed_mailbox_action_rejects_a_late_realtime_write() {
         let store = Store::in_memory().await.unwrap();
         let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
         let mut stale_realtime_header = message("Archive me", "Stale header");
         stale_realtime_header.id = stable_message_id(account_id, "INBOX", 41);
         stale_realtime_header.account_id = account_id.to_string();
@@ -5615,6 +6186,21 @@ mod tests {
             .unwrap();
         assert_eq!(conversations[0].message_count, 1);
         assert_eq!(conversations[0].messages[0].mailbox, "INBOX");
+        assert_eq!(conversations[0].source_messages.len(), 2);
+        assert_eq!(
+            conversations[0]
+                .source_messages
+                .iter()
+                .map(|message| (message.id.as_str(), message.mailbox.as_str(), message.uid))
+                .collect::<HashSet<_>>(),
+            HashSet::from([("inbox-copy", "INBOX", 1), ("archive-copy", "Archive", 2)])
+        );
+        // The UI shows the selected mailbox representative, while mutation
+        // callers receive both concrete account/mailbox/UID locators.
+        assert_eq!(conversations[0].messages.len(), 1);
+        assert_eq!(conversations[0].messages[0].id, "inbox-copy");
+        let serialized = serde_json::to_value(&conversations[0]).unwrap();
+        assert_eq!(serialized["sourceMessages"].as_array().unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -5835,6 +6421,89 @@ mod tests {
         assert!(conversations
             .iter()
             .all(|conversation| conversation.message_count == 1));
+    }
+
+    #[tokio::test]
+    async fn fixed_seed_thread_graphs_are_invariant_to_insert_and_chunk_order_across_accounts() {
+        let first_account = uuid::Uuid::from_u128(0x4f40_2cf7_237a_4c70_8d52_6af4_6fd1_0101);
+        let second_account = uuid::Uuid::from_u128(0x4f40_2cf7_237a_4c70_8d52_6af4_6fd1_0102);
+        let base_time = DateTime::<Utc>::UNIX_EPOCH;
+        let mut graph = Vec::new();
+        for (account_id, prefix) in [(first_account, "first"), (second_account, "second")] {
+            let mut root = message("Quarterly plan", "root");
+            root.id = format!("{prefix}-root");
+            root.account_id = account_id.to_string();
+            root.uid = 1;
+            root.message_id = Some("<shared-root@example.test>".into());
+            root.received_at = base_time;
+
+            let mut reply = message("Re: Quarterly plan", "reply");
+            reply.id = format!("{prefix}-reply");
+            reply.account_id = account_id.to_string();
+            reply.uid = 2;
+            reply.message_id = Some("<shared-reply@example.test>".into());
+            reply.in_reply_to = Some("<shared-root@example.test>".into());
+            reply.reference_ids = Some("<shared-root@example.test>".into());
+            reply.received_at = base_time + chrono::Duration::seconds(1);
+
+            let mut deep_reply = message("Re: Quarterly plan", "deep reply");
+            deep_reply.id = format!("{prefix}-deep-reply");
+            deep_reply.account_id = account_id.to_string();
+            deep_reply.uid = 3;
+            deep_reply.message_id = Some("<shared-deep-reply@example.test>".into());
+            deep_reply.in_reply_to = Some("<shared-reply@example.test>".into());
+            deep_reply.reference_ids =
+                Some("<shared-root@example.test> <shared-reply@example.test>".into());
+            deep_reply.received_at = base_time + chrono::Duration::seconds(2);
+            graph.extend([root, reply, deep_reply]);
+        }
+
+        let first = Store::in_memory().await.unwrap();
+        for chunk in fixed_seed_order(graph.len(), 0x7e57_1e55).chunks(2) {
+            let messages = chunk
+                .iter()
+                .map(|index| graph[*index].clone())
+                .collect::<Vec<_>>();
+            first.upsert_messages(&messages).await.unwrap();
+        }
+        let second = Store::in_memory().await.unwrap();
+        for chunk in fixed_seed_order(graph.len(), 0x9b5d_cafe).chunks(3) {
+            let messages = chunk
+                .iter()
+                .map(|index| graph[*index].clone())
+                .collect::<Vec<_>>();
+            second.upsert_messages(&messages).await.unwrap();
+        }
+
+        let mut first_threads = first
+            .search(&SearchQuery::default())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|message| (message.id, message.thread_id))
+            .collect::<Vec<_>>();
+        let mut second_threads = second
+            .search(&SearchQuery::default())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|message| (message.id, message.thread_id))
+            .collect::<Vec<_>>();
+        first_threads.sort();
+        second_threads.sort();
+        assert_eq!(first_threads, second_threads);
+        assert!(first_threads
+            .iter()
+            .all(|(_, thread_id)| thread_id == "shared-root@example.test"));
+        assert_eq!(
+            first
+                .search_conversations(&SearchQuery::default())
+                .await
+                .unwrap()
+                .len(),
+            2,
+            "same RFC message ids must remain isolated by account"
+        );
     }
 
     #[tokio::test]
@@ -6069,6 +6738,7 @@ mod tests {
     async fn synced_messages_establish_a_silent_baseline_then_report_new_unread_mail() {
         let store = Store::in_memory().await.unwrap();
         let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
         let mut baseline = message("Earlier mail", "Already in the inbox");
         baseline.account_id = account_id.to_string();
 
@@ -6117,6 +6787,7 @@ mod tests {
         let mut writes = tokio::task::JoinSet::new();
         for index in 0..20 {
             let account_id = uuid::Uuid::new_v4();
+            save_test_account(&store, account_id).await;
             let waiting_store = store.clone();
             let waiting_barrier = barrier.clone();
             let mut incoming = message(&format!("Concurrent arrival {index}"), "Notify me");
@@ -6142,9 +6813,216 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn independent_stores_preserve_live_claims_and_finish_contended_sync_durably() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("independent-stores.db");
+        let account_id = uuid::Uuid::from_u128(0x4f40_2cf7_237a_4c70_8d52_6af4_6fd1_0001);
+        let first = Store::open(&path).await.unwrap();
+        let account = account_with_id(account_id, "independent-store@example.test");
+        first.save_account(&account).await.unwrap();
+
+        let mut first_message = message("Contended 01", "durable payload");
+        first_message.id = stable_message_id(account_id, "INBOX", 1);
+        first_message.account_id = account_id.to_string();
+        first_message.uid = 1;
+        first_message.received_at = DateTime::<Utc>::UNIX_EPOCH;
+        first
+            .save_synced_messages(account_id, "INBOX", &[first_message.clone()])
+            .await
+            .unwrap();
+        let claim = first
+            .acquire_message_content_fetch(&first_message.id)
+            .await
+            .unwrap()
+            .expect("first connection owns the fetch");
+
+        let second = Store::open(&path).await.unwrap();
+        assert!(matches!(
+            second
+                .acquire_message_content_fetch_outcome(&first_message.id)
+                .await
+                .unwrap(),
+            MessageContentFetchAcquire::Busy
+        ));
+        claim.release().await.unwrap();
+
+        let mut batch = vec![first_message];
+        for uid in 2..=12 {
+            let mut incoming = message(&format!("Contended {uid:02}"), "durable payload");
+            incoming.id = stable_message_id(account_id, "INBOX", uid);
+            incoming.account_id = account_id.to_string();
+            incoming.uid = i64::from(uid);
+            incoming.received_at =
+                DateTime::<Utc>::UNIX_EPOCH + chrono::Duration::seconds(i64::from(uid));
+            batch.push(incoming);
+        }
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let first_barrier = barrier.clone();
+        let first_store = first.clone();
+        let first_batch = batch.clone();
+        let first_write = tokio::spawn(async move {
+            first_barrier.wait().await;
+            first_store
+                .save_synced_messages(account_id, "INBOX", &first_batch)
+                .await
+        });
+        let second_barrier = barrier.clone();
+        let second_store = second.clone();
+        let mut second_batch = batch;
+        second_batch.reverse();
+        let second_write = tokio::spawn(async move {
+            second_barrier.wait().await;
+            second_store
+                .save_synced_messages(account_id, "INBOX", &second_batch)
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            barrier.wait().await;
+            first_write.await.unwrap().unwrap();
+            second_write.await.unwrap().unwrap();
+        })
+        .await
+        .expect("two independently opened stores must complete their contended writes");
+
+        assert_eq!(
+            second
+                .search(&SearchQuery {
+                    account_ids: vec![account_id],
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .len(),
+            12
+        );
+        assert_eq!(
+            second
+                .highest_mailbox_uid(account_id, "INBOX")
+                .await
+                .unwrap(),
+            Some(12)
+        );
+
+        drop(second);
+        drop(first);
+        let reopened = Store::open(&path).await.unwrap();
+        assert_eq!(
+            reopened
+                .message_by_locator(account_id, "INBOX", 1)
+                .await
+                .unwrap()
+                .expect("committed message survives reopening")
+                .subject,
+            "Contended 01"
+        );
+        assert_eq!(
+            reopened
+                .highest_mailbox_uid(account_id, "INBOX")
+                .await
+                .unwrap(),
+            Some(12)
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_fresh_store_opens_retry_migration_locking_within_the_busy_window() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("simultaneous-open.db");
+        let barrier = Arc::new(tokio::sync::Barrier::new(5));
+        let mut opens = tokio::task::JoinSet::new();
+        for _ in 0..4 {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            opens.spawn(async move {
+                barrier.wait().await;
+                Store::open(path).await
+            });
+        }
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            barrier.wait().await;
+            while let Some(opened) = opens.join_next().await {
+                opened.unwrap().unwrap();
+            }
+        })
+        .await
+        .expect("fresh Store::open calls must resolve migration contention within 10 seconds");
+    }
+
+    #[tokio::test]
+    async fn synced_message_batch_rejects_mixed_scope_without_durable_changes() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::from_u128(0x4f40_2cf7_237a_4c70_8d52_6af4_6fd1_0002);
+        let other_account_id = uuid::Uuid::from_u128(0x4f40_2cf7_237a_4c70_8d52_6af4_6fd1_0003);
+        let mut valid = message("Valid input", "must not be partially stored");
+        valid.id = stable_message_id(account_id, "INBOX", 1);
+        valid.account_id = account_id.to_string();
+        valid.uid = 1;
+        let mut wrong_account = valid.clone();
+        wrong_account.id = stable_message_id(other_account_id, "INBOX", 2);
+        wrong_account.account_id = other_account_id.to_string();
+        wrong_account.uid = 2;
+
+        let error = store
+            .save_synced_messages(account_id, "INBOX", &[valid.clone(), wrong_account])
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("does not match the requested account or mailbox"));
+        assert!(store
+            .message_by_locator(account_id, "INBOX", 1)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            store
+                .highest_mailbox_uid(account_id, "INBOX")
+                .await
+                .unwrap(),
+            None
+        );
+
+        let mut wrong_mailbox = valid;
+        wrong_mailbox.id = stable_message_id(account_id, "Archive", 3);
+        wrong_mailbox.mailbox = "Archive".into();
+        wrong_mailbox.uid = 3;
+        assert!(store
+            .save_synced_messages(account_id, "INBOX", &[wrong_mailbox])
+            .await
+            .is_err());
+        assert!(store
+            .message_by_locator(account_id, "Archive", 3)
+            .await
+            .unwrap()
+            .is_none());
+
+        let missing_account_id = uuid::Uuid::from_u128(0x4f40_2cf7_237a_4c70_8d52_6af4_6fd1_0004);
+        let mut missing_account = message("Missing account", "must not be stored");
+        missing_account.id = stable_message_id(missing_account_id, "INBOX", 4);
+        missing_account.account_id = missing_account_id.to_string();
+        missing_account.uid = 4;
+        assert!(store
+            .save_synced_messages(missing_account_id, "INBOX", &[missing_account])
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("account does not exist"));
+        assert_eq!(
+            store
+                .highest_mailbox_uid(missing_account_id, "INBOX")
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
     async fn notification_baseline_never_reports_non_inbox_mail() {
         let store = Store::in_memory().await.unwrap();
         let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
         store
             .save_synced_messages(account_id, "Archive", &[])
             .await
@@ -6164,6 +7042,7 @@ mod tests {
     async fn complete_hydration_marks_transient_content_without_duplicate_rows() {
         let store = Store::in_memory().await.unwrap();
         let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
         let mut headers = message("Fast arrival", "");
         headers.account_id = account_id.to_string();
         headers.id = stable_message_id(account_id, "INBOX", 1);
@@ -6190,6 +7069,7 @@ mod tests {
     async fn uidvalidity_change_resets_mailbox_and_notification_baseline() {
         let store = Store::in_memory().await.unwrap();
         let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
         let mut old = message("Old UID namespace", "old");
         old.account_id = account_id.to_string();
         store
@@ -6477,6 +7357,114 @@ mod tests {
         }
     }
 
+    #[test]
+    fn vault_key_publication_falls_back_without_hard_links() {
+        let directory = tempfile::tempdir().unwrap();
+        let temporary = directory.path().join(".vault.key.test.tmp");
+        let canonical = directory.path().join(VAULT_KEY_FILE);
+        let key = [7_u8; VAULT_KEY_LEN];
+        std::fs::write(&temporary, key).unwrap();
+
+        publish_vault_key(&temporary, &canonical, false).unwrap();
+        assert_eq!(std::fs::read(&canonical).unwrap(), key);
+        assert!(!temporary.exists());
+
+        let contender = directory.path().join(".vault.key.contender.tmp");
+        std::fs::write(&contender, [9_u8; VAULT_KEY_LEN]).unwrap();
+        assert_eq!(
+            publish_vault_key(&contender, &canonical, false)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::AlreadyExists
+        );
+        assert_eq!(std::fs::read(&canonical).unwrap(), key);
+
+        std::fs::remove_file(&canonical).unwrap();
+        let abandoned_lock = vault_publish_lock_path(&canonical);
+        std::fs::write(&abandoned_lock, "crashed-publisher").unwrap();
+        let recovered = directory.path().join(".vault.key.recovered.tmp");
+        std::fs::write(&recovered, [8_u8; VAULT_KEY_LEN]).unwrap();
+        publish_vault_key_with_stale_after(&recovered, &canonical, false, Duration::ZERO).unwrap();
+        assert_eq!(std::fs::read(&canonical).unwrap(), [8_u8; VAULT_KEY_LEN]);
+        assert!(!abandoned_lock.exists());
+    }
+
+    #[test]
+    fn slow_vault_publisher_heartbeats_while_a_contender_waits() {
+        let directory = tempfile::tempdir().unwrap();
+        let canonical = directory.path().join(VAULT_KEY_FILE);
+        let holder_temporary = directory.path().join(".vault.key.holder.tmp");
+        let contender_temporary = directory.path().join(".vault.key.contender.tmp");
+        std::fs::write(&holder_temporary, [3_u8; VAULT_KEY_LEN]).unwrap();
+        std::fs::write(&contender_temporary, [4_u8; VAULT_KEY_LEN]).unwrap();
+        let (holder_ready_tx, holder_ready_rx) = std::sync::mpsc::channel();
+        let (finish_holder_tx, finish_holder_rx) = std::sync::mpsc::channel();
+        let holder_path = holder_temporary.clone();
+        let canonical_path = canonical.clone();
+
+        let holder = std::thread::spawn(move || {
+            publish_vault_key_with_stale_after_and_hook(
+                &holder_path,
+                &canonical_path,
+                false,
+                Duration::from_millis(40),
+                || {
+                    holder_ready_tx.send(()).unwrap();
+                    finish_holder_rx.recv().unwrap();
+                },
+            )
+        });
+        holder_ready_rx.recv().unwrap();
+        // Wait beyond the stale budget: without the heartbeat, the contender
+        // would remove the live holder's lock and publish its own key.
+        std::thread::sleep(Duration::from_millis(120));
+        assert_eq!(
+            publish_vault_key_with_stale_after(
+                &contender_temporary,
+                &canonical,
+                false,
+                Duration::from_millis(40),
+            )
+            .unwrap_err()
+            .kind(),
+            ErrorKind::TimedOut
+        );
+        assert!(!canonical.exists());
+        finish_holder_tx.send(()).unwrap();
+        holder.join().unwrap().unwrap();
+        assert_eq!(std::fs::read(&canonical).unwrap(), [3_u8; VAULT_KEY_LEN]);
+        assert!(contender_temporary.exists());
+        assert!(!vault_publish_lock_path(&canonical).exists());
+    }
+
+    #[test]
+    fn vault_publisher_that_loses_its_lock_cannot_publish_or_remove_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let canonical = directory.path().join(VAULT_KEY_FILE);
+        let temporary = directory.path().join(".vault.key.displaced.tmp");
+        std::fs::write(&temporary, [5_u8; VAULT_KEY_LEN]).unwrap();
+        let replacement_lock = vault_publish_lock_path(&canonical);
+
+        let error = publish_vault_key_with_stale_after_and_hook(
+            &temporary,
+            &canonical,
+            false,
+            Duration::from_secs(1),
+            || {
+                std::fs::remove_file(&replacement_lock).unwrap();
+                std::fs::write(&replacement_lock, "new-owner-token").unwrap();
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        assert!(!canonical.exists());
+        assert!(temporary.exists());
+        assert_eq!(
+            std::fs::read_to_string(&replacement_lock).unwrap(),
+            "new-owner-token"
+        );
+    }
+
     #[tokio::test]
     async fn encrypted_secrets_detect_tampering_and_can_be_deleted() {
         let store = Store::in_memory().await.unwrap();
@@ -6658,8 +7646,13 @@ mod tests {
             .upsert_messages(std::slice::from_ref(&orphan))
             .await
             .unwrap();
-        initial
-            .save_synced_messages(orphan_id, "INBOX", &[orphan.clone()])
+        // Simulate state created by a pre-guard build. The public sync path
+        // now rejects a missing account, so legacy-orphan repair is exercised
+        // by inserting the old durable row directly.
+        sqlx::query("INSERT INTO mailbox_sync_state(account_id, mailbox, initialized_at, highest_uid) VALUES (?, 'INBOX', ?, 41)")
+            .bind(orphan_id.to_string())
+            .bind(Utc::now())
+            .execute(&initial.pool)
             .await
             .unwrap();
         initial

@@ -68,7 +68,10 @@ npm run release:publish -- vX.Y.Z "$PWD/release-assets/vX.Y.Z"
 `verify:local` runs the repository's Rust and frontend checks without producing
 a redundant packaged app. `release:build` builds the Apple Silicon app, signs
 and verifies it, notarizes and staples it, rebuilds and verifies the DMG, then
-creates and Tauri-signs the final updater archive.
+creates the final updater archive. The extracted archive must pass the same
+Apple-Silicon app and isolated bundled-CLI artifact checks before the archive is
+Tauri-signed. This is artifact acceptance, not an installed-client
+update/relaunch test.
 
 `release:publish` verifies the final DMG, refuses to overwrite versioned R2
 objects, uploads the immutable DMG/archive/signature, and anonymously downloads

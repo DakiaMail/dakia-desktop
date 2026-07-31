@@ -362,6 +362,16 @@ mod tests {
     }
 
     #[test]
+    fn classifier_category_mapping_covers_every_model_output() {
+        assert_eq!(map_category(0), "notifications");
+        assert_eq!(map_category(1), "newsletters");
+        assert_eq!(map_category(2), "people");
+        assert_eq!(map_category(3), "newsletters");
+        assert_eq!(map_category(4), "notifications");
+        assert_eq!(map_category(5), "transactions");
+    }
+
+    #[test]
     fn email_text_preserves_the_sender_display_name() {
         let text = email_text(
             Some("Example App Store"),
@@ -500,6 +510,10 @@ mod tests {
 
         assert_eq!(
             apply_high_precision_signals("newsletters", &decision),
+            "notifications"
+        );
+        assert_eq!(
+            apply_high_precision_signals("people", "Automatically generated message header",),
             "notifications"
         );
     }
