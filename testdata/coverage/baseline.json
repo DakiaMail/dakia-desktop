@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "components": {
+    "rust": {
+      "lines": {
+        "found": 22295,
+        "hit": 17813
+      },
+      "branches": {
+        "found": 0,
+        "hit": 0
+      },
+      "functions": {
+        "found": 4677,
+        "hit": 2006
+      }
+    },
+    "frontend": {
+      "lines": {
+        "found": 2696,
+        "hit": 1964
+      },
+      "branches": {
+        "found": 2078,
+        "hit": 1352
+      },
+      "functions": {
+        "found": 969,
+        "hit": 581
+      }
+    }
+  }
+}

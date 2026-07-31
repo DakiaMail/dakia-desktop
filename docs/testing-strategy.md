@@ -1,9 +1,10 @@
 # Testing and Fixture Strategy
 
-Status: activated deterministic source lanes implemented; connector/event-path
-gaps, external activation, and measured evidence pending
+Status: deterministic source lanes and required scoped pull-request validation
+activated; three-run coverage baseline approved; credentialed provider and
+release evidence pending
 
-Baseline reviewed: `origin/main` at `0a3182e` on 2026-07-30
+Baseline reviewed: `origin/main` at `fdb4d29` on 2026-07-31
 
 This document defines how Dakia prevents repeats of production issues without
 returning to slow, expensive GitHub Actions. The activated source-controlled
@@ -11,12 +12,12 @@ harnesses, workflows, fixture governance, and gates in the delivery state are
 implemented; the explicitly named integration gaps remain work rather than
 completed coverage.
 
-The following acceptance evidence deliberately remains external to this source
-change:
+Hosted pull-request validation is required on `main`. The reviewed coverage
+baseline was reproduced byte-for-byte by three sequential green manual runs
+(`30608458117`, `30608993770`, and `30609479746`) on `fdb4d29`.
 
-- making the pull-request validation status required and measuring three
-  representative hosted runs;
-- reviewing and committing a coverage baseline after three repeat green runs;
+The following acceptance evidence deliberately remains external:
+
 - enabling credentials for a live-provider smoke test;
 - Apple-Silicon WebKit acceptance when a change affects native layout or
   interaction; and
