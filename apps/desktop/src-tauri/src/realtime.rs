@@ -1125,8 +1125,8 @@ mod tests {
 
     fn tracked_watcher(running: Arc<AtomicUsize>) -> WatcherTask {
         let (cancel, mut receiver) = watch::channel(false);
+        running.fetch_add(1, Ordering::SeqCst);
         let handle = tauri::async_runtime::spawn(async move {
-            running.fetch_add(1, Ordering::SeqCst);
             wait_for_cancellation(&mut receiver).await;
             running.fetch_sub(1, Ordering::SeqCst);
         });
@@ -1661,13 +1661,7 @@ mod tests {
         first.await.unwrap();
         second.await.unwrap();
 
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while running.load(Ordering::SeqCst) != 1 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("exactly one replacement watcher should remain live");
+        assert_eq!(running.load(Ordering::SeqCst), 1);
         assert_eq!(tasks.lock().await.len(), 1);
 
         stop_watcher_task(tasks.lock().await.remove(&account_id)).await;
