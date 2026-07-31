@@ -1,12 +1,4 @@
-<p align="center">
-  <img src="apps/desktop/src-tauri/icons/icon.svg" width="144" height="144" alt="Dakia logo">
-</p>
-
-<h1 align="center">Dakia</h1>
-
-<p align="center">
-  Private email, beautifully simple.
-</p>
+# Dakia
 
 Dakia is a privacy-minded desktop mail application for macOS. It combines multiple IMAP/SMTP accounts, local full-text search, downloadable offline email translation, and a scriptable CLI.
 
