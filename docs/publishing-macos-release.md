@@ -26,11 +26,14 @@ signed final artifact instead.
 The builder:
 
 1. assembles, Developer ID signs, and verifies the Apple Silicon app;
-2. verifies packaged executable, classifier resources, and legal notices;
-3. runs the packaged-app startup check on the release Mac;
+2. verifies the packaged app and CLI executables, Apple-Silicon architecture,
+   matching Developer ID ownership/version, classifier resources, and legal
+   notices;
+3. runs isolated packaged CLI and app startup checks on the release Mac;
 4. notarizes and staples the app;
 5. rebuilds, notarizes, staples, mounts, and verifies the DMG;
-6. archives that same final app and signs the exact archive bytes for Tauri.
+6. archives that same final app, extracts and repeats the app/CLI acceptance
+   checks on the archive contents, then signs the exact archive bytes for Tauri.
 
 The publisher uses immutable versioned R2 paths, anonymously verifies the
 published bytes, validates the updater manifest, and publishes `latest.json`

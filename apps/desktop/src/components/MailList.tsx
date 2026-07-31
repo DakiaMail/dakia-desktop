@@ -45,6 +45,7 @@ import type {
   MailThread,
   SyncStatus,
 } from "../types";
+import { concreteThreadMessages } from "../threads";
 import { EmptyState } from "./EmptyState";
 
 type Props = {
@@ -413,7 +414,6 @@ function ThreadRows({
   onOpen,
   onSelect,
   onCategorize,
-  onToggleStar,
   onReplyThread,
   onForwardThread,
   onActionThread,
@@ -428,12 +428,14 @@ function ThreadRows({
     y: number;
   }>();
   const contextThread = context?.thread;
-  const isSpam = contextThread?.messages.some(
-    (message) => message.mailbox.split("::", 1)[0] === "Spam",
-  );
-  const isStarred = contextThread?.messages.some(
-    (message) => message.is_flagged,
-  );
+  const isSpam =
+    contextThread &&
+    concreteThreadMessages(contextThread).some(
+      (message) => message.mailbox.split("::", 1)[0] === "Spam",
+    );
+  const isStarred =
+    contextThread &&
+    concreteThreadMessages(contextThread).some((message) => message.is_flagged);
   const isUnread = contextThread?.unread ?? false;
   useEffect(() => {
     if (!context) return;
@@ -565,16 +567,8 @@ function ThreadRows({
       </Menu>
       {threads.map((thread) => {
         const message = thread.latest;
-        const starredMessage = [...thread.messages]
-          .reverse()
-          .find((item) => item.is_flagged);
-        const starTarget =
-          starredMessage ??
-          [...thread.messages]
-            .reverse()
-            .find((item) => item.mailbox === "INBOX") ??
-          message;
-        const pending = thread.messages
+        const sourceMessages = concreteThreadMessages(thread);
+        const pending = sourceMessages
           .map((item) => pendingActions[item.id])
           .find(Boolean);
         return (
@@ -643,25 +637,25 @@ function ThreadRows({
                 role="button"
                 tabIndex={0}
                 aria-label={t(
-                  thread.messages.some((item) => item.is_flagged)
+                  sourceMessages.some((item) => item.is_flagged)
                     ? "actions.unstar"
                     : "actions.star",
                 )}
-                data-active={thread.messages.some((item) => item.is_flagged)}
+                data-active={sourceMessages.some((item) => item.is_flagged)}
                 onClick={(event) => {
                   event.stopPropagation();
-                  onToggleStar(
-                    starTarget,
-                    !thread.messages.some((item) => item.is_flagged),
+                  onToggleStarThread(
+                    thread,
+                    !sourceMessages.some((item) => item.is_flagged),
                   );
                 }}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault();
                     event.stopPropagation();
-                    onToggleStar(
-                      starTarget,
-                      !thread.messages.some((item) => item.is_flagged),
+                    onToggleStarThread(
+                      thread,
+                      !sourceMessages.some((item) => item.is_flagged),
                     );
                   }
                 }}
@@ -669,7 +663,7 @@ function ThreadRows({
                 <IconStar
                   size={15}
                   fill={
-                    thread.messages.some((item) => item.is_flagged)
+                    sourceMessages.some((item) => item.is_flagged)
                       ? "currentColor"
                       : "none"
                   }

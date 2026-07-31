@@ -104,6 +104,7 @@ tar -xzf "$archive" -C "$verify_dir"
 codesign --verify --deep --strict --verbose=2 "$verify_dir/Dakia.app"
 spctl --assess --type execute --verbose=2 "$verify_dir/Dakia.app"
 xcrun stapler validate "$verify_dir/Dakia.app"
+"$root_dir/scripts/verify-macos-release-app.sh" "$verify_dir/Dakia.app"
 
 (cd "$root_dir" && npm run tauri signer sign -- "$archive")
 
