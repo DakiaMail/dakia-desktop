@@ -960,15 +960,23 @@ describe("Reader unsubscribe action", () => {
     const latestMessage = await screen.findByRole("document", {
       name: "Latest Freshdesk reply",
     });
-    const currentSurface = latestMessage.shadowRoot
-      ?.firstElementChild as HTMLElement | null;
-    const currentDocument = currentSurface?.shadowRoot;
     const historyHost = latestMessage.querySelector<HTMLElement>(
       '[data-dakia-email-surface="history"]',
     );
-    const historySurface = historyHost?.shadowRoot
-      ?.firstElementChild as HTMLElement | null;
-    const historyDocument = historySurface?.shadowRoot;
+    const currentDocument = await waitFor(() => {
+      const currentSurface = latestMessage.shadowRoot
+        ?.firstElementChild as HTMLElement | null;
+      const document = currentSurface?.shadowRoot;
+      expect(document).toBeInstanceOf(ShadowRoot);
+      return document as ShadowRoot;
+    });
+    const historyDocument = await waitFor(() => {
+      const historySurface = historyHost?.shadowRoot
+        ?.firstElementChild as HTMLElement | null;
+      const document = historySurface?.shadowRoot;
+      expect(document).toBeInstanceOf(ShadowRoot);
+      return document as ShadowRoot;
+    });
     const historyButton = screen.getByRole("button", { name: "Show history" });
 
     expect(
