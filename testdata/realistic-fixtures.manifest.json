@@ -1,0 +1,692 @@
+{
+  "schemaVersion": 1,
+  "fixtureRoots": [
+    { "path": "crates/dakia-core/testdata/mime", "extension": ".eml" },
+    { "path": "crates/dakia-core/tests/fixtures", "extension": ".eml" },
+    { "path": "apps/desktop/src/test/fixtures", "extension": ".html" }
+  ],
+  "fixtures": [
+    {
+      "id": "mime.alternative-mixed-asic-footer",
+      "path": "crates/dakia-core/testdata/mime/alternative-mixed-asic-footer.eml",
+      "sha256": "401b67ace5dc503443b661edd0eff361a6ca2afec684045e76d387dace18bfaf",
+      "provenance": {
+        "kind": "faithfully-redacted",
+        "detail": "Apple Mail-shaped multipart message with fictional names, addresses, and hosts."
+      },
+      "issue": "MIME corpus: retain selected HTML from an alternative/mixed Apple Mail message and its ASiC attachment.",
+      "provider": {
+        "shape": "Apple Mail multipart/alternative containing multipart/mixed",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Keep the plain fallback alongside the selected body.",
+        "html": "Select the inner HTML delivery and retain its footer markup.",
+        "snippet": "Derive a normal message snippet without treating the attachment as body content.",
+        "attachments": "Expose redacted-delivery.asice as one downloadable ASiC attachment.",
+        "error": "No complete-parse error is expected.",
+        "resourceLimit": "No resource-limit error is expected for this bounded fixture."
+      },
+      "applicablePaths": ["complete-rfc822", "catalogue", "header"],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-07-30",
+        "permittedDomains": ["redacted.example"]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail.rs",
+          "id": "every_mime_corpus_fixture_uses_all_publication_parse_paths"
+        }
+      ]
+    },
+    {
+      "id": "mime.attached-message-rfc822",
+      "path": "crates/dakia-core/testdata/mime/attached-message-rfc822.eml",
+      "sha256": "a6d8cf9ff97a4612f3cacfb420c1efe00c9441721779d2fe5c09f6613c216304",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Synthetic nested message/rfc822 attachment."
+      },
+      "issue": "MIME corpus: keep an attached RFC822 message out of the outer message body.",
+      "provider": {
+        "shape": "multipart/mixed with message/rfc822 attachment",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Retain only the outer synthetic body.",
+        "html": "Do not promote the attached message HTML to outer HTML.",
+        "snippet": "Use outer-message content for preview semantics.",
+        "attachments": "Expose forwarded-message.eml as one message/rfc822 attachment with its nested bytes.",
+        "error": "No complete-parse error is expected.",
+        "resourceLimit": "No resource-limit error is expected for this bounded fixture."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header",
+        "storage-round-trip",
+        "selective-bodystructure"
+      ],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-07-30",
+        "permittedDomains": ["example.test"]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail.rs",
+          "id": "every_mime_corpus_fixture_uses_all_publication_parse_paths"
+        },
+        {
+          "domain": "rust.mail.selective-bodystructure",
+          "source": "crates/dakia-core/src/mail.rs",
+          "id": "realistic_selective_bodystructure_fixtures_match_complete_parser_and_starred_storage"
+        }
+      ]
+    },
+    {
+      "id": "mime.charset-matrix",
+      "path": "crates/dakia-core/testdata/mime/charset-matrix.eml",
+      "sha256": "3a254be99ee64bd5263d2feb90c96907a5f647ccc1b215a68dc50aaa6ae29414",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Synthetic alternatives covering supported and unsupported charsets."
+      },
+      "issue": "MIME corpus: decode supported text charsets without inventing unsupported text.",
+      "provider": {
+        "shape": "multipart/alternative charset matrix",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Decode supported alternatives, including the selected ISO-8859-2 text.",
+        "html": "No HTML body is expected.",
+        "snippet": "Use normal decoded-text preview semantics.",
+        "attachments": "No attachments are expected.",
+        "error": "Unsupported charset leaves that cannot be decoded stay errors rather than invented text.",
+        "resourceLimit": "No resource-limit error is expected for this bounded fixture."
+      },
+      "applicablePaths": ["complete-rfc822", "catalogue", "header"],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-07-30",
+        "permittedDomains": ["example.test"]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail.rs",
+          "id": "every_mime_corpus_fixture_uses_all_publication_parse_paths"
+        }
+      ]
+    },
+    {
+      "id": "mime.competing-nested-alternatives",
+      "path": "crates/dakia-core/testdata/mime/competing-nested-alternatives.eml",
+      "sha256": "9ff77dfb2ed340808df5d023a7154b7f58b8e2d6c2220c1208337c03dfce8596",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Synthetic nested alternatives with a CID image and named text attachment."
+      },
+      "issue": "MIME corpus: select nested alternative bodies without leaking attachment text.",
+      "provider": {
+        "shape": "multipart/mixed with alternative and related branches",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Keep Visible plain body and exclude redacted-notes attachment text.",
+        "html": "Select Visible HTML body with its CID reference.",
+        "snippet": "Use selected message-body content only.",
+        "attachments": "Expose redacted-notes.txt separately; retain the referenced inline image as inline content.",
+        "error": "No complete-parse error is expected.",
+        "resourceLimit": "No resource-limit error is expected for this bounded fixture."
+      },
+      "applicablePaths": ["complete-rfc822", "catalogue", "header"],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-07-30",
+        "permittedDomains": ["example.test"]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail.rs",
+          "id": "every_mime_corpus_fixture_uses_all_publication_parse_paths"
+        }
+      ]
+    },
+    {
+      "id": "mime.disposition-type-name-matrix",
+      "path": "crates/dakia-core/testdata/mime/disposition-type-name-matrix.eml",
+      "sha256": "7543224472beabf8db55b40c183fcc33da21bf81e5eb8c7ab0a1a79b65087926",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Synthetic disposition, media-type, name, and Content-ID matrix."
+      },
+      "issue": "MIME corpus: distinguish unnamed inline text bodies from named and explicit attachments.",
+      "provider": {
+        "shape": "multipart/mixed disposition and filename matrix",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Use unnamed inline plain text as body content.",
+        "html": "Use unnamed inline HTML as body content.",
+        "snippet": "Use selected body content for preview semantics.",
+        "attachments": "Keep named inline text, unnamed PDF, inline image, and explicit unnamed attachment as attachments.",
+        "error": "No complete-parse error is expected.",
+        "resourceLimit": "No resource-limit error is expected for this bounded fixture."
+      },
+      "applicablePaths": ["complete-rfc822", "catalogue", "header"],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-07-30",
+        "permittedDomains": ["example.test"]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail.rs",
+          "id": "every_mime_corpus_fixture_uses_all_publication_parse_paths"
+        }
+      ]
+    },
+    {
+      "id": "mime.filename-parameters-and-encodings",
+      "path": "crates/dakia-core/testdata/mime/filename-parameters-and-encodings.eml",
+      "sha256": "e0e71d12dbeec09ec8c833d7b98f363366963edf5d00641b893249fba97b7a0e",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Synthetic RFC 2231, RFC 2047, malformed, and hostile filename parameters."
+      },
+      "issue": "MIME corpus: normalize attachment filenames without path or bidi-control leakage.",
+      "provider": {
+        "shape": "multipart/mixed attachment filename matrix",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Keep the synthetic message body.",
+        "html": "No HTML body is expected.",
+        "snippet": "Use normal decoded-text preview semantics.",
+        "attachments": "Decode valid continued and encoded filenames, sanitize path separators and bidi controls, and preserve safe fallbacks.",
+        "error": "Malformed filename parameters must not cause a message parse failure.",
+        "resourceLimit": "No resource-limit error is expected for this bounded fixture."
+      },
+      "applicablePaths": ["complete-rfc822", "catalogue", "header"],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-07-30",
+        "permittedDomains": ["example.test"]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail.rs",
+          "id": "every_mime_corpus_fixture_uses_all_publication_parse_paths"
+        }
+      ]
+    },
+    {
+      "id": "mime.format-flowed-delsp",
+      "path": "crates/dakia-core/testdata/mime/format-flowed-delsp.eml",
+      "sha256": "4a82e24f2495f9fdf226c12136e02ed73aec6b90d7bb4312bed60874d95701a8",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Synthetic format=flowed text with delsp=yes and an HTML alternative."
+      },
+      "issue": "MIME corpus: honor format=flowed delsp semantics in message text.",
+      "provider": {
+        "shape": "multipart/alternative with flowed text",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Join flowed lines without adding the deleted soft space, including quoted lines.",
+        "html": "Retain the HTML alternative.",
+        "snippet": "Use selected decoded text for preview semantics.",
+        "attachments": "No attachments are expected.",
+        "error": "No complete-parse error is expected.",
+        "resourceLimit": "No resource-limit error is expected for this bounded fixture."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header",
+        "selective-bodystructure"
+      ],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-07-30",
+        "permittedDomains": ["example.test"]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail.rs",
+          "id": "every_mime_corpus_fixture_uses_all_publication_parse_paths"
+        },
+        {
+          "domain": "rust.mail.selective-bodystructure",
+          "source": "crates/dakia-core/src/mail.rs",
+          "id": "realistic_selective_bodystructure_fixtures_match_complete_parser_and_starred_storage"
+        }
+      ]
+    },
+    {
+      "id": "mime.invalid-transfer-encodings",
+      "path": "crates/dakia-core/testdata/mime/invalid-transfer-encodings.eml",
+      "sha256": "75d91f062a84cc04963c039f207e0b66850fb52a36b719ab65b7392a978853ec",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Synthetic invalid base64, quoted-printable, and transfer-encoding labels."
+      },
+      "issue": "MIME corpus: report undecodable transfer encodings deterministically.",
+      "provider": {
+        "shape": "multipart/mixed with invalid transfer encodings",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Do not invent a complete decoded body.",
+        "html": "No HTML body is expected.",
+        "snippet": "Catalogue preview remains caller-provided and header parsing remains available.",
+        "attachments": "No attachments are expected.",
+        "error": "Complete parsing must return the stable MIME content undecodable error.",
+        "resourceLimit": "No resource-limit error is expected; this is an encoding failure."
+      },
+      "applicablePaths": ["complete-rfc822", "catalogue", "header"],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-07-30",
+        "permittedDomains": ["example.test"]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail.rs",
+          "id": "every_mime_corpus_fixture_uses_all_publication_parse_paths"
+        }
+      ]
+    },
+    {
+      "id": "mime.line-endings-cr-only",
+      "path": "crates/dakia-core/testdata/mime/line-endings-cr-only.eml",
+      "sha256": "cae08220ad6beeeaf3bf4de7f9284f6ec9b8fb9789da6016f6669510d96f3c0e",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Synthetic CR-only RFC822 input."
+      },
+      "issue": "MIME corpus: normalize CR-only line endings without changing parse semantics.",
+      "provider": {
+        "shape": "multipart/alternative with CR-only lines",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Decode the CR-only plain text body.",
+        "html": "Decode the CR-only HTML alternative.",
+        "snippet": "Use normal decoded-text preview semantics.",
+        "attachments": "No attachments are expected.",
+        "error": "No complete-parse error is expected.",
+        "resourceLimit": "No resource-limit error is expected for this bounded fixture."
+      },
+      "applicablePaths": ["complete-rfc822", "catalogue", "header"],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-07-30",
+        "permittedDomains": ["example.test"]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail.rs",
+          "id": "every_mime_corpus_fixture_uses_all_publication_parse_paths"
+        }
+      ]
+    },
+    {
+      "id": "mime.linkedin-inline-content-id",
+      "path": "crates/dakia-core/testdata/mime/linkedin-inline-content-id.eml",
+      "sha256": "d302e38e64c864df1a91fc72d60c54945ff81cf93a8158f88d167bdc927c4437",
+      "provenance": {
+        "kind": "faithfully-redacted",
+        "detail": "Provider-shaped LinkedIn notification with fictional addresses and content."
+      },
+      "issue": "MIME corpus: Content-ID-bearing unnamed text alternatives remain message bodies.",
+      "provider": {
+        "shape": "LinkedIn-shaped multipart/alternative with text Content-ID headers",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Decode the folded redacted plain text as body content.",
+        "html": "Decode the folded redacted HTML as body content.",
+        "snippet": "Derive the snippet from the selected plain text.",
+        "attachments": "Do not create attachments for text-body and html-body Content-ID headers.",
+        "error": "No complete-parse error is expected.",
+        "resourceLimit": "No resource-limit error is expected for this bounded fixture."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header",
+        "selective-bodystructure"
+      ],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-07-30",
+        "permittedDomains": ["example.test"]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail.rs",
+          "id": "every_mime_corpus_fixture_uses_all_publication_parse_paths"
+        },
+        {
+          "domain": "rust.mail.selective-bodystructure",
+          "source": "crates/dakia-core/src/mail.rs",
+          "id": "realistic_selective_bodystructure_fixtures_match_complete_parser_and_starred_storage"
+        }
+      ]
+    },
+    {
+      "id": "mime.multipart-attachment-container",
+      "path": "crates/dakia-core/testdata/mime/multipart-attachment-container.eml",
+      "sha256": "01246fb8935fabc95c63339eb328e5762ceff9df7b1d3ff50f93986bec6d5b53",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Synthetic multipart attachment containing child text and a PDF."
+      },
+      "issue": "MIME corpus: keep children of a multipart attachment out of parent content.",
+      "provider": {
+        "shape": "multipart/mixed with attached multipart/mixed branch",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Keep Visible parent body and exclude Secret child text.",
+        "html": "No HTML body is expected.",
+        "snippet": "Use parent body preview semantics.",
+        "attachments": "Expose bundle.mime as one multipart/mixed attachment containing its child bytes.",
+        "error": "No complete-parse error is expected.",
+        "resourceLimit": "No resource-limit error is expected for this bounded fixture."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header",
+        "selective-bodystructure"
+      ],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-07-30",
+        "permittedDomains": ["example.test"]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail.rs",
+          "id": "every_mime_corpus_fixture_uses_all_publication_parse_paths"
+        },
+        {
+          "domain": "rust.mail.selective-bodystructure",
+          "source": "crates/dakia-core/src/mail.rs",
+          "id": "realistic_selective_bodystructure_fixtures_match_complete_parser_and_starred_storage"
+        }
+      ]
+    },
+    {
+      "id": "mime.truncated-multipart-lf",
+      "path": "crates/dakia-core/testdata/mime/truncated-multipart-lf.eml",
+      "sha256": "e9644bc93393af94322680b3751032350daf5bcdbb5d479ee574ebb0c9006094",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Synthetic LF-only multipart input with deliberately missing closing bytes."
+      },
+      "issue": "MIME corpus: use a safe partial preview from a truncated multipart message.",
+      "provider": {
+        "shape": "truncated multipart/alternative with LF-only lines",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Accept the first complete text leaf without leaking transport syntax.",
+        "html": "The incomplete HTML leaf is not a complete HTML-body guarantee.",
+        "snippet": "Use the first decodable text leaf for a safe partial preview.",
+        "attachments": "No attachments are expected.",
+        "error": "No complete-parse error is expected for the current tolerant parser behavior.",
+        "resourceLimit": "No resource-limit error is expected for this bounded fixture."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header",
+        "partial-preview"
+      ],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-07-30",
+        "permittedDomains": ["example.test"]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail.rs",
+          "id": "every_mime_corpus_fixture_uses_all_publication_parse_paths"
+        },
+        {
+          "domain": "rust.mail.partial-preview",
+          "source": "crates/dakia-core/src/mail.rs",
+          "id": "parses_the_checked_in_mime_regression_corpus"
+        }
+      ]
+    },
+    {
+      "id": "mime.provider-signature-inline",
+      "path": "crates/dakia-core/tests/fixtures/provider-signature-inline.eml",
+      "sha256": "2bf3c6cf6c1aefcf5103697405a6592df8760786e45e7b0d2ff3c9692055e4ce",
+      "provenance": {
+        "kind": "faithfully-redacted",
+        "detail": "Fictional provider-signature shape; no raw production RFC822 source or production identities remain."
+      },
+      "issue": "MIME corpus: resolve a referenced signature logo inline while preserving a PDF attachment.",
+      "provider": {
+        "shape": "provider-shaped multipart/mixed -> multipart/related HTML, CID image, and PDF",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Use the redacted HTML message body.",
+        "html": "Resolve the referenced CID logo to embedded content while retaining remote URLs when present.",
+        "snippet": "Use normal parsed-body preview semantics.",
+        "attachments": "Keep claim-documents.pdf downloadable and do not count the referenced signature logo as a user-facing attachment.",
+        "error": "No complete-parse error is expected.",
+        "resourceLimit": "No resource-limit error is expected for this bounded fixture."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "inline-image-resolution",
+        "selective-bodystructure",
+        "reader-render",
+        "tauri-message-content",
+        "typescript-decoding"
+      ],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-07-30",
+        "permittedDomains": ["example.test"]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.inline-images",
+          "source": "crates/dakia-core/src/mail.rs",
+          "id": "redacted_provider_signature_logo_stays_embedded_while_pdf_is_downloadable"
+        },
+        {
+          "domain": "rust.mail.selective-bodystructure",
+          "source": "crates/dakia-core/src/mail.rs",
+          "id": "realistic_selective_bodystructure_fixtures_match_complete_parser_and_starred_storage"
+        },
+        {
+          "domain": "rust.tauri.message-content",
+          "source": "apps/desktop/src-tauri/src/tauri_contracts_tests.rs",
+          "id": "provider_signature_inline_message_content_matches_the_shared_fixture"
+        },
+        {
+          "domain": "typescript.tauri-decoding",
+          "source": "apps/desktop/src/tauriContracts.test.ts",
+          "id": "decodes provider-signature-inline through the native MessageContent boundary"
+        },
+        {
+          "domain": "frontend.reader",
+          "source": "apps/desktop/src/components/Reader.test.tsx",
+          "id": "renders provider-signature-inline shared message content"
+        }
+      ]
+    },
+    {
+      "id": "html.apple-mail-reply-section",
+      "path": "apps/desktop/src/test/fixtures/apple-mail-reply-section.html",
+      "sha256": "215ceecc55f0c2bbefe182e3c9bbbafa20d051eeb193d43927cb98bc100e045d",
+      "provenance": {
+        "kind": "faithfully-redacted",
+        "detail": "Apple Mail-shaped reply section with fictional recipient data."
+      },
+      "issue": "HTML corpus: move Apple Mail quoted reply sections behind a native history disclosure.",
+      "provider": {
+        "shape": "Apple Mail messageReplySection and messageBodySection markup",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Keep the current reply visible.",
+        "html": "Sanitize current and quoted content into separate documents.",
+        "snippet": "Not applicable to standalone HTML rendering fixtures.",
+        "attachments": "Not applicable to standalone HTML rendering fixtures.",
+        "error": "No rendering error is expected.",
+        "resourceLimit": "No MIME resource-limit semantics apply to standalone HTML."
+      },
+      "applicablePaths": ["html-document", "reader-disclosure"],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-07-30",
+        "permittedDomains": ["example.test"]
+      },
+      "exercisedBy": [
+        {
+          "domain": "frontend.html-message",
+          "source": "apps/desktop/src/components/HtmlMessage.test.tsx",
+          "id": "repeatedly toggles Apple Mail and Outlook history through the native control"
+        }
+      ]
+    },
+    {
+      "id": "html.freshdesk-reply-section",
+      "path": "apps/desktop/src/test/fixtures/freshdesk-reply-section.html",
+      "sha256": "6582749e9527dfe4856f00affd6d8b40a23b270913e2bf8bcd343e14cad4b497",
+      "provenance": {
+        "kind": "faithfully-redacted",
+        "detail": "Freshdesk-shaped nested quote chain with fictional customer and support addresses."
+      },
+      "issue": "HTML corpus: retain current Freshdesk content while isolating nested provider history.",
+      "provider": {
+        "shape": "Freshdesk quote and Gmail quote-container markup",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Keep the current support reply visible and quoted requests hidden initially.",
+        "html": "Sanitize current and nested quoted content into separate documents.",
+        "snippet": "Not applicable to standalone HTML rendering fixtures.",
+        "attachments": "Not applicable to standalone HTML rendering fixtures.",
+        "error": "No rendering error is expected.",
+        "resourceLimit": "No MIME resource-limit semantics apply to standalone HTML."
+      },
+      "applicablePaths": ["html-document", "reader-disclosure"],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-07-30",
+        "permittedDomains": ["example.test"]
+      },
+      "exercisedBy": [
+        {
+          "domain": "frontend.html-message",
+          "source": "apps/desktop/src/components/HtmlMessage.test.tsx",
+          "id": "uses one native accessible disclosure and preserves isolated history through repeated toggles"
+        },
+        {
+          "domain": "frontend.reader",
+          "source": "apps/desktop/src/components/Reader.test.tsx",
+          "id": "collapses Freshdesk history in the latest message of a thread"
+        }
+      ]
+    },
+    {
+      "id": "html.outlook-word-reply-section",
+      "path": "apps/desktop/src/test/fixtures/outlook-word-reply-section.html",
+      "sha256": "e054a8896185cad31a9914e137863ca324a78ea5837ba41221da903322c2edd5",
+      "provenance": {
+        "kind": "faithfully-redacted",
+        "detail": "Outlook Word-generated reply markup using reserved example.com addresses."
+      },
+      "issue": "HTML corpus: identify Outlook Word reply history without moving authored current content.",
+      "provider": {
+        "shape": "Outlook Word HTML with MsoNormal and stacked reply headers",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Keep the current Estonian reply and authored footer visible.",
+        "html": "Move the quoted reply chain into a separately sanitized history document.",
+        "snippet": "Not applicable to standalone HTML rendering fixtures.",
+        "attachments": "Not applicable to standalone HTML rendering fixtures.",
+        "error": "No rendering error is expected.",
+        "resourceLimit": "No MIME resource-limit semantics apply to standalone HTML."
+      },
+      "applicablePaths": ["html-document", "reader-disclosure"],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-07-30",
+        "permittedDomains": [
+          "example.com",
+          "schemas.microsoft.com",
+          "www.w3.org"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "frontend.html-message",
+          "source": "apps/desktop/src/components/HtmlMessage.test.tsx",
+          "id": "repeatedly toggles Apple Mail and Outlook history through the native control"
+        }
+      ]
+    },
+    {
+      "id": "html.swedbank-signature-layout",
+      "path": "apps/desktop/src/test/fixtures/swedbank-signature-layout.html",
+      "sha256": "f07b63e4e460e260ca819f4fd6e0913a5183c2fc57b564719ff990de85c9d2ad",
+      "provenance": {
+        "kind": "faithfully-redacted",
+        "detail": "Swedbank-shaped presentation table with fictional message copy and a reserved test asset host."
+      },
+      "issue": "HTML corpus: preserve branded signature structure while removing structurally empty spacer rows.",
+      "provider": {
+        "shape": "branded presentation-table signature layout",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Keep the visible branded copy and signature text.",
+        "html": "Preserve authored brand colors and the logo while removing empty spacer rows.",
+        "snippet": "Not applicable to standalone HTML rendering fixtures.",
+        "attachments": "Not applicable to standalone HTML rendering fixtures.",
+        "error": "No rendering error is expected.",
+        "resourceLimit": "No MIME resource-limit semantics apply to standalone HTML."
+      },
+      "applicablePaths": ["html-document"],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-07-30",
+        "permittedDomains": ["example.test"]
+      },
+      "exercisedBy": [
+        {
+          "domain": "frontend.html-message",
+          "source": "apps/desktop/src/components/HtmlMessage.test.tsx",
+          "id": "collapses the fixture's empty spacer rows without changing signature structure"
+        }
+      ]
+    }
+  ]
+}

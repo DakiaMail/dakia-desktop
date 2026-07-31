@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "demoOnlyInvokes": [],
+  "eventOrigins": {
+    "account-connected": "frontend",
+    "account-removed": "native",
+    "account-updated": "frontend",
+    "compose-sent": "frontend",
+    "dakia://dropped-file-error": "native",
+    "dakia://dropped-file-receipt": "native",
+    "mail-arrived": "native",
+    "mail-changed": "native",
+    "mail-hydrated": "native",
+    "mail-index-rebuilt": "native",
+    "mail-rebuild-progress": "native",
+    "mail-sync-state": "native",
+    "menu-action": "native",
+    "notification-action": "native",
+    "notification-settings-changed": "frontend",
+    "outbox-changed": "frontend",
+    "select-account": "frontend",
+    "settings-changed": "frontend"
+  }
+}

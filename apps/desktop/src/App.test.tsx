@@ -335,6 +335,56 @@ describe("App read state", () => {
     );
   });
 
+  it("updates every concrete duplicate copy instead of synthetic winner state", async () => {
+    const hiddenInbox = {
+      ...mocks.message,
+      id: "duplicate-inbox",
+      uid: 10,
+      message_id: "<duplicate@example.test>",
+      received_at: "2026-07-19T09:00:00Z",
+      is_read: false,
+      is_flagged: true,
+      has_attachments: true,
+    };
+    const visibleArchive = {
+      ...mocks.message,
+      id: "duplicate-archive",
+      uid: 11,
+      mailbox: "Archive",
+      message_id: "<duplicate@example.test>",
+      received_at: "2026-07-19T10:00:00Z",
+      is_read: true,
+      is_flagged: false,
+      has_attachments: false,
+    };
+    mocks.api.search.mockResolvedValue({
+      conversations: groupMessages([visibleArchive, hiddenInbox]),
+      nextCursor: null,
+    });
+
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const row = await screen.findByText("Unread thread");
+    fireEvent.click(row.closest("button")!);
+    await waitFor(() =>
+      expect(mocks.api.setRead).toHaveBeenCalledWith(hiddenInbox.id, true),
+    );
+    expect(mocks.api.setRead).not.toHaveBeenCalledWith(visibleArchive.id, true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove star" }));
+    await waitFor(() => {
+      expect(mocks.api.setStarred).toHaveBeenCalledWith(hiddenInbox.id, false);
+      expect(mocks.api.setStarred).toHaveBeenCalledWith(
+        visibleArchive.id,
+        false,
+      );
+    });
+  });
+
   it("opens a conversation with its newest message focused", async () => {
     const older = {
       ...mocks.message,

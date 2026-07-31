@@ -1,4 +1,5 @@
 import type { MailSummary, MailThread } from "./types";
+import { concreteThreadMessages } from "./threads";
 
 export type MailAction = "archive" | "spam" | "not_spam" | "trash";
 export type MailActionPhase = "exiting" | "restoring";
@@ -20,37 +21,38 @@ export function conversationActionMessages(
   view: string,
   action: MailAction,
 ) {
+  const messages = concreteThreadMessages(thread);
   if (action === "archive") {
     // Archiving removes only the Inbox label/copy. Sent history and already
     // archived members are reader context, not action targets.
-    return thread.messages.filter(
+    return messages.filter(
       (message) => mailboxFamily(message.mailbox) === "INBOX",
     );
   }
   if (action === "not_spam") {
-    return thread.messages.filter(
+    return messages.filter(
       (message) => mailboxFamily(message.mailbox) === "Spam",
     );
   }
   if (action === "trash") {
-    return thread.messages.filter(
+    return messages.filter(
       (message) =>
         !["Drafts", "Trash"].includes(mailboxFamily(message.mailbox)),
     );
   }
   if (view === "INBOX") {
-    return thread.messages.filter(
+    return messages.filter(
       (message) => mailboxFamily(message.mailbox) === "INBOX",
     );
   }
   if (view && !["unread", "starred"].includes(view)) {
-    return thread.messages.filter(
+    return messages.filter(
       (message) =>
         mailboxFamily(message.mailbox) === view &&
         !["Sent", "Drafts"].includes(mailboxFamily(message.mailbox)),
     );
   }
-  return thread.messages.filter(
+  return messages.filter(
     (message) =>
       !["Sent", "Drafts", "Spam", "Trash"].includes(
         mailboxFamily(message.mailbox),
