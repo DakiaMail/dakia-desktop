@@ -335,6 +335,56 @@ describe("App read state", () => {
     );
   });
 
+  it("updates every concrete duplicate copy instead of synthetic winner state", async () => {
+    const hiddenInbox = {
+      ...mocks.message,
+      id: "duplicate-inbox",
+      uid: 10,
+      message_id: "<duplicate@example.test>",
+      received_at: "2026-07-19T09:00:00Z",
+      is_read: false,
+      is_flagged: true,
+      has_attachments: true,
+    };
+    const visibleArchive = {
+      ...mocks.message,
+      id: "duplicate-archive",
+      uid: 11,
+      mailbox: "Archive",
+      message_id: "<duplicate@example.test>",
+      received_at: "2026-07-19T10:00:00Z",
+      is_read: true,
+      is_flagged: false,
+      has_attachments: false,
+    };
+    mocks.api.search.mockResolvedValue({
+      conversations: groupMessages([visibleArchive, hiddenInbox]),
+      nextCursor: null,
+    });
+
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const row = await screen.findByText("Unread thread");
+    fireEvent.click(row.closest("button")!);
+    await waitFor(() =>
+      expect(mocks.api.setRead).toHaveBeenCalledWith(hiddenInbox.id, true),
+    );
+    expect(mocks.api.setRead).not.toHaveBeenCalledWith(visibleArchive.id, true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove star" }));
+    await waitFor(() => {
+      expect(mocks.api.setStarred).toHaveBeenCalledWith(hiddenInbox.id, false);
+      expect(mocks.api.setStarred).toHaveBeenCalledWith(
+        visibleArchive.id,
+        false,
+      );
+    });
+  });
+
   it("opens a conversation with its newest message focused", async () => {
     const older = {
       ...mocks.message,
@@ -934,6 +984,12 @@ describe("App read state", () => {
       () => new Promise(() => undefined),
     );
     let peopleSearches = 0;
+    let resolveRefreshedPeople:
+      | ((page: {
+          conversations: ReturnType<typeof groupMessages>;
+          nextCursor: null;
+        }) => void)
+      | undefined;
     const nextMessage = {
       ...mocks.message,
       id: "message-2",
@@ -952,6 +1008,11 @@ describe("App read state", () => {
       }
       if (args[7] !== "people") return { conversations: [], nextCursor: null };
       peopleSearches += 1;
+      if (peopleSearches === 2) {
+        return new Promise((resolve) => {
+          resolveRefreshedPeople = resolve;
+        });
+      }
       return {
         conversations:
           peopleSearches === 1 ? groupMessages([mocks.message]) : [],
@@ -971,6 +1032,14 @@ describe("App read state", () => {
     await waitFor(() =>
       expect(mocks.api.setRead).toHaveBeenCalledWith("message-1", true),
     );
+    await waitFor(() => expect(resolveRefreshedPeople).toBeTypeOf("function"));
+    await act(async () =>
+      resolveRefreshedPeople!({ conversations: [], nextCursor: null }),
+    );
+    expect(
+      screen.getByRole("heading", { name: "Unread thread" }),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Quick reply" })).toBeEnabled();
     expect(
       within(document.querySelector(".mail-list-panel")!).getByText(
         "Unread thread",
