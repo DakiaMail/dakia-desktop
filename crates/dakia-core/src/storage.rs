@@ -3706,6 +3706,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sqlite_contention_helpers_classify_synthetic_error_chains() {
+        assert!(is_sqlite_busy_message("database is locked"));
+        assert!(is_sqlite_busy_message("database is busy"));
+        assert!(!is_sqlite_busy_message("disk I/O error"));
+
+        let locked = anyhow!("database is locked").context("opening the store");
+        assert!(is_sqlite_busy(&locked));
+        assert!(!is_sqlite_busy(&anyhow!("disk I/O error")));
+
+        let migration_race = anyhow!("duplicate column name: indexed_at").context("migrating");
+        assert!(is_sqlite_migration_race(&migration_race));
+        assert!(!is_sqlite_migration_race(&anyhow!(
+            "no such column: indexed_at"
+        )));
+    }
+
+    #[test]
     fn parses_only_complete_canonical_message_id_lists() {
         assert_eq!(
             parse_message_ids(" <Root@Example.Test>\t<Reply@example.test> "),

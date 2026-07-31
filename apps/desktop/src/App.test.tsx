@@ -984,6 +984,12 @@ describe("App read state", () => {
       () => new Promise(() => undefined),
     );
     let peopleSearches = 0;
+    let resolveRefreshedPeople:
+      | ((page: {
+          conversations: ReturnType<typeof groupMessages>;
+          nextCursor: null;
+        }) => void)
+      | undefined;
     const nextMessage = {
       ...mocks.message,
       id: "message-2",
@@ -1002,6 +1008,11 @@ describe("App read state", () => {
       }
       if (args[7] !== "people") return { conversations: [], nextCursor: null };
       peopleSearches += 1;
+      if (peopleSearches === 2) {
+        return new Promise((resolve) => {
+          resolveRefreshedPeople = resolve;
+        });
+      }
       return {
         conversations:
           peopleSearches === 1 ? groupMessages([mocks.message]) : [],
@@ -1021,6 +1032,14 @@ describe("App read state", () => {
     await waitFor(() =>
       expect(mocks.api.setRead).toHaveBeenCalledWith("message-1", true),
     );
+    await waitFor(() => expect(resolveRefreshedPeople).toBeTypeOf("function"));
+    await act(async () =>
+      resolveRefreshedPeople!({ conversations: [], nextCursor: null }),
+    );
+    expect(
+      screen.getByRole("heading", { name: "Unread thread" }),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Quick reply" })).toBeEnabled();
     expect(
       within(document.querySelector(".mail-list-panel")!).getByText(
         "Unread thread",
