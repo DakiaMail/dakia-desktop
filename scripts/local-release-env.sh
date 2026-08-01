@@ -144,7 +144,7 @@ dakia_prepare_google_oauth_compiler_environment() {
     '    break' \
     '  fi' \
     'done' \
-    'if [[ "$crate_name" == "dakia_desktop" ]]; then' \
+    'if [[ "$crate_name" == "dakia_desktop_lib" ]]; then' \
     '  client_id="$(<"$DAKIA_RELEASE_GOOGLE_CLIENT_ID_FILE")"' \
     '  client_secret="$(<"$DAKIA_RELEASE_GOOGLE_CLIENT_SECRET_FILE")"' \
     '  if [[ -n "${DAKIA_RELEASE_GOOGLE_ORIGINAL_RUSTC_WRAPPER:-}" ]]; then' \

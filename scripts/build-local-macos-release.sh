@@ -85,6 +85,11 @@ TAURI_ENV_ARCH=aarch64 \
 TAURI_ENV_PLATFORM=macos \
   npm run bundle:cli
 
+# Cargo cannot observe changes to the release-only secret file consumed by the
+# compiler wrapper. Rebuild the desktop package so the current credential is
+# always compiled into the artifact that the release verifier exercises.
+cargo clean -p dakia-desktop --target aarch64-apple-darwin
+
 ORT_LIB_LOCATION="$root_dir/apps/desktop/src-tauri/frameworks" \
 ORT_PREFER_DYNAMIC_LINK=1 \
   "$root_dir/node_modules/.bin/tauri" build \
