@@ -41,6 +41,25 @@ for artifact in \
 done
 
 "$root_dir/scripts/verify-macos-release-dmg.sh" "$apple_dmg"
+node "$root_dir/scripts/verify-updater-signature.mjs" \
+  "$apple_update" "$apple_signature" \
+  "$root_dir/apps/desktop/src-tauri/tauri.conf.json"
+
+updater_verify_dir="$work_dir/updater-archive"
+mkdir -p "$updater_verify_dir"
+tar -xzf "$apple_update" -C "$updater_verify_dir"
+updater_app="$updater_verify_dir/Dakia.app"
+if [[ ! -d "$updater_app" ]]; then
+  echo "Updater archive is missing Dakia.app." >&2
+  exit 1
+fi
+"$root_dir/scripts/verify-macos-release-app.sh" "$updater_app"
+updater_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+  "$updater_app/Contents/Info.plist")"
+if [[ "$updater_version" != "$version" ]]; then
+  echo "Updater app version '$updater_version' does not match '$version'." >&2
+  exit 1
+fi
 
 release_prefix="macos/$tag"
 manifest_key="macos/latest/latest.json"
