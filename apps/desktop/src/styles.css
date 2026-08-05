@@ -1799,6 +1799,14 @@ textarea {
   margin: 0 auto;
   padding: 22px 28px 30px;
 }
+.gmail-verification-notice {
+  padding: 8px 10px;
+  border: 1px solid var(--dakia-divider);
+  border-radius: 7px;
+  color: light-dark(#5f625f, #b8bfbb);
+  line-height: 1.45;
+  background: light-dark(#f5f1ea, #282c29);
+}
 .settings-tabs {
   min-height: 0;
   flex: 1;

@@ -4167,6 +4167,9 @@ pub fn run() {
                     }
                 }));
             if release_smoke_test {
+                oauth_client_id("gmail")?;
+                oauth_client_secret("gmail")?;
+                eprintln!("DAKIA_RELEASE_GOOGLE_OAUTH_CONFIG_OK");
                 eprintln!("DAKIA_RELEASE_SMOKE_TEST_OK");
                 app.handle().exit(0);
                 return Ok(());

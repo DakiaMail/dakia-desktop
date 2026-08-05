@@ -216,6 +216,8 @@ export const en = {
       appPasswordHelp: "How to create an app password for {{provider}}",
       browserHint:
         "Your provider will open in the browser. Dakia never sees your provider password.",
+      gmailVerificationNotice:
+        "Dakia’s app is awaiting Google verification, so you may see an “unverified app” warning during sign-in. This should be resolved soon; use an app password in the meantime.",
     },
     composer: {
       title: "New message",
