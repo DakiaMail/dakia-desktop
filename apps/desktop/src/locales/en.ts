@@ -36,6 +36,7 @@ export const en = {
       markRead: "Mark as read",
       markUnread: "Mark as unread",
       delete: "Delete",
+      permanentlyDelete: "Permanently delete",
       categorize: "Categorize",
       unsubscribe: "Unsubscribe",
       reply: "Reply",
@@ -135,6 +136,9 @@ export const en = {
       date: "Date",
       replyErrorTitle: "Could not reply to message",
       forwardErrorTitle: "Could not forward message",
+      permanentDeleteTitle: "Permanently delete this message?",
+      permanentDeleteBody:
+        "Dakia will request deletion of this message without moving it to Trash. It cannot be undone in Dakia; your email provider controls the final IMAP disposition.",
       loadingContent: "Fetching message…",
       contentError: {
         resource_limit:
@@ -277,6 +281,8 @@ export const en = {
       trashFailed_other: "Could not move {{count}} conversations to Trash",
       trashPartial:
         "Moved {{succeeded}} to Trash; {{failed}} could not be moved",
+      permanentDeleteSuccess: "Message deletion request completed",
+      permanentDeleteFailed: "Could not permanently delete this message",
       readSuccess: "Conversation marked as read",
       unreadSuccess: "Conversation marked as unread",
       readFailed_one: "Could not mark 1 message as read",
@@ -428,6 +434,7 @@ export const en = {
       compose: "Compose",
       archive: "Archive selected",
       spam: "Mark selected as spam",
+      permanentlyDelete: "Permanently delete opened message",
     },
     terminalCommand: {
       installTitle: "Use Dakia from Terminal",

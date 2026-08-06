@@ -6006,6 +6006,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn permanent_delete_tombstones_only_the_exact_locator_and_preserves_other_rows() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+
+        let mut deleted = message("Delete me", "target");
+        deleted.id = stable_message_id(account_id, "INBOX", 41);
+        deleted.account_id = account_id.to_string();
+        deleted.uid = 41;
+        let deleted_id = deleted.id.clone();
+
+        let mut inbox_sibling = deleted.clone();
+        inbox_sibling.id = stable_message_id(account_id, "INBOX", 42);
+        inbox_sibling.subject = "Keep inbox sibling".into();
+        inbox_sibling.uid = 42;
+        let inbox_sibling_id = inbox_sibling.id.clone();
+
+        let mut same_uid_other_mailbox = deleted.clone();
+        same_uid_other_mailbox.id = stable_message_id(account_id, "Archive", 41);
+        same_uid_other_mailbox.mailbox = "Archive".into();
+        same_uid_other_mailbox.subject = "Keep archive copy".into();
+        let same_uid_other_mailbox_id = same_uid_other_mailbox.id.clone();
+
+        store
+            .upsert_messages(&[
+                deleted.clone(),
+                inbox_sibling.clone(),
+                same_uid_other_mailbox.clone(),
+            ])
+            .await
+            .unwrap();
+        for (id, body) in [
+            (&deleted_id, "deleted cache"),
+            (&inbox_sibling_id, "inbox cache"),
+            (&same_uid_other_mailbox_id, "archive cache"),
+        ] {
+            store
+                .cache_message_content(id, false, cached_content(body))
+                .await
+                .unwrap();
+        }
+
+        store
+            .move_message(account_id, "INBOX", 41, "", None)
+            .await
+            .unwrap();
+
+        assert!(store
+            .message_by_locator(account_id, "INBOX", 41)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .message_by_locator(account_id, "INBOX", 42)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(store
+            .message_by_locator(account_id, "Archive", 41)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(store
+            .cached_message_content(&deleted_id)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .cached_message_content(&inbox_sibling_id)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(store
+            .cached_message_content(&same_uid_other_mailbox_id)
+            .await
+            .unwrap()
+            .is_some());
+
+        let tombstones: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT mailbox, uid FROM mailbox_action_tombstones WHERE account_id = ? ORDER BY mailbox, uid",
+        )
+        .bind(account_id.to_string())
+        .fetch_all(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(tombstones, vec![("INBOX".into(), 41)]);
+
+        store
+            .save_synced_messages(account_id, "INBOX", &[deleted])
+            .await
+            .unwrap();
+        assert!(store
+            .message_by_locator(account_id, "INBOX", 41)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn recent_catalogue_refresh_preserves_completed_local_flags_on_conflict() {
         let store = Store::in_memory().await.unwrap();
         let account_id = uuid::Uuid::new_v4();

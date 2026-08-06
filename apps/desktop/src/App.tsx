@@ -21,7 +21,11 @@ import {
 } from "./components/UpdateBanner";
 import {
   conversationActionMessages,
+  nextMessageAfterAction,
+  removeConcreteMessage,
+  removeConcreteMessageFromThreads,
   restoreThreads,
+  sameMessageLocator,
   type MailAction,
   type PendingMailActions,
 } from "./mailActions";
@@ -160,6 +164,7 @@ export default function App() {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiConnected, setAiConnected] = useState(false);
   const [unsubscribeLoading, setUnsubscribeLoading] = useState(false);
+  const [permanentDeleteLoading, setPermanentDeleteLoading] = useState(false);
   const [pendingActions, setPendingActions] = useState<PendingMailActions>({});
   const [outbox, setOutbox] = useState<MailSummary[]>([]);
   const [starredCount, setStarredCount] = useState(0);
@@ -1321,6 +1326,109 @@ export default function App() {
     actionBusyRef.current = false;
     await loadMessages();
   };
+  const permanentlyDeleteMessage = async (message: MailSummary) => {
+    if (actionBusyRef.current) return;
+    actionBusyRef.current = true;
+    setPermanentDeleteLoading(true);
+    const remainingActiveThread = activeThread
+      ? removeConcreteMessage(activeThread, message)
+      : undefined;
+    const replacementThread =
+      activeThread && !remainingActiveThread
+        ? (displayedThreads
+            .slice(
+              displayedThreads.findIndex(
+                (thread) => thread.id === activeThread.id,
+              ) + 1,
+            )
+            .find((thread) => thread.id !== activeThread.id) ??
+          displayedThreads
+            .slice(
+              0,
+              displayedThreads.findIndex(
+                (thread) => thread.id === activeThread.id,
+              ),
+            )
+            .reverse()
+            .find((thread) => thread.id !== activeThread.id))
+        : undefined;
+    try {
+      await api.action(
+        message.account_id,
+        message.mailbox,
+        message.uid,
+        "delete",
+      );
+      // Prevent an in-flight fetch that still contains this locator from
+      // restoring the message after the server has deleted it. Do this only
+      // after success so a failed delete cannot strand an invalidated load in
+      // its loading state.
+      loadRequestIdRef.current += 1;
+      smartLoadRequestIdRef.current += 1;
+      loadingMoreRef.current = false;
+      setLoadingMore(false);
+      smartLoadingMoreRef.current.clear();
+      setThreads((current) =>
+        removeConcreteMessageFromThreads(current, message),
+      );
+      setSmartSections(
+        (current) =>
+          Object.fromEntries(
+            smartSectionIds.map((id) => [
+              id,
+              {
+                ...current[id],
+                loadingMore: false,
+                threads: removeConcreteMessageFromThreads(
+                  current[id].threads,
+                  message,
+                ),
+              },
+            ]),
+          ) as Record<SmartSectionId, SmartSection>,
+      );
+      setRetainedSmartThreads((current) => {
+        const next = new Map(current);
+        for (const [id, retained] of next) {
+          const thread = removeConcreteMessage(retained.thread, message);
+          if (thread) next.set(id, { ...retained, thread });
+          else next.delete(id);
+        }
+        return next;
+      });
+      setActive((current) => {
+        if (!current || !sameMessageLocator(current, message)) return current;
+        if (!remainingActiveThread) return replacementThread?.latest;
+        return (
+          nextMessageAfterAction(
+            activeThread?.messages ?? [],
+            current,
+            new Set([message.id]),
+          ) ?? remainingActiveThread.latest
+        );
+      });
+      setActiveThreadSnapshot((current) => {
+        if (!current) return current;
+        const thread = removeConcreteMessage(current, message);
+        return thread ?? replacementThread;
+      });
+      if (!remainingActiveThread && activeThread) {
+        setSelected((current) => {
+          const next = new Set(current);
+          next.delete(activeThread.id);
+          return next;
+        });
+      }
+      setAiResult(undefined);
+      showStatus(t("feedback.permanentDeleteSuccess"));
+      await loadMessages();
+    } catch {
+      showStatus(t("feedback.permanentDeleteFailed"), "error");
+    } finally {
+      actionBusyRef.current = false;
+      setPermanentDeleteLoading(false);
+    }
+  };
   const runSummary = async () => {
     if (!targets.length) return;
     setAiLoading(true);
@@ -1796,6 +1904,7 @@ export default function App() {
               `⇧⌘F  ${t("actions.forward")}`,
               `⇧⌘A  ${t("shortcuts.archive")}`,
               `⇧⌘J  ${t("shortcuts.spam")}`,
+              `⇧⌫  ${t("shortcuts.permanentlyDelete")}`,
               `⌘,  ${t("settings.title")}`,
             ].join("\n"),
           );
@@ -2100,7 +2209,7 @@ export default function App() {
         onLoadMore={() => void loadMoreMessages()}
         onLoadMoreSmart={(id) => void loadMoreSmartSection(id)}
         pendingActions={pendingActions}
-        actionsDisabled={actionBusy}
+        actionsDisabled={actionBusy || permanentDeleteLoading}
         searchRef={searchRef}
       />
       <Reader
@@ -2112,7 +2221,7 @@ export default function App() {
         aiResult={aiResult}
         aiLoading={aiLoading}
         aiConnected={aiConnected}
-        actionsDisabled={actionBusy}
+        actionsDisabled={actionBusy || permanentDeleteLoading}
         onArchive={() => void applyAction("archive")}
         onSpam={() =>
           void applyAction(
@@ -2120,6 +2229,7 @@ export default function App() {
           )
         }
         onTrash={() => void applyAction("trash")}
+        onPermanentDelete={permanentlyDeleteMessage}
         onReply={(message) => void openReplyForMessage(message)}
         onReplyAll={(message) => void openReplyForMessage(message, true)}
         onForward={(message) => void openForwardForMessage(message)}

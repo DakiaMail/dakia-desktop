@@ -18,6 +18,7 @@ const translationMocks = vi.hoisted(() => ({
   detect: vi.fn(),
   translate: vi.fn(),
   confirm: vi.fn(),
+  show: vi.fn(),
 }));
 
 vi.mock("../offlineTranslation", async (importOriginal) => ({
@@ -29,6 +30,7 @@ vi.mock("../offlineTranslation", async (importOriginal) => ({
 vi.mock("../nativeFeedback", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../nativeFeedback")>()),
   confirmNativeAction: translationMocks.confirm,
+  showNativeMessage: translationMocks.show,
 }));
 
 const message: MailSummary = {
@@ -55,6 +57,7 @@ const props = {
   onArchive: vi.fn(),
   onSpam: vi.fn(),
   onTrash: vi.fn(),
+  onPermanentDelete: vi.fn(async (): Promise<void> => undefined),
   onReply: vi.fn(),
   onReplyAll: vi.fn(),
   onForward: vi.fn(),
@@ -78,6 +81,7 @@ describe("Reader unsubscribe action", () => {
       async (_source: string, text: string) => `EN: ${text}`,
     );
     translationMocks.confirm.mockResolvedValue(true);
+    translationMocks.show.mockResolvedValue(undefined);
     vi.spyOn(api, "content").mockResolvedValue({
       body_text: "Tere maailm",
       attachments: [],
@@ -1137,6 +1141,297 @@ describe("Reader unsubscribe action", () => {
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
     expect(props.onTrash).toHaveBeenCalledOnce();
+  });
+
+  it("offers permanent deletion only in a message menu and confirms the exact message once", async () => {
+    render(
+      <MantineProvider>
+        <Reader {...props} message={message} />
+      </MantineProvider>,
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "Permanently delete" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Permanently delete" }),
+    );
+
+    await waitFor(() =>
+      expect(translationMocks.confirm).toHaveBeenCalledWith(
+        "Permanently delete this message?",
+        "Dakia will request deletion of this message without moving it to Trash. It cannot be undone in Dakia; your email provider controls the final IMAP disposition.",
+        "Permanently delete",
+      ),
+    );
+    expect(translationMocks.confirm).toHaveBeenCalledOnce();
+    expect(props.onPermanentDelete).toHaveBeenCalledWith(message);
+  });
+
+  it("does not delete when the permanent-delete confirmation is cancelled", async () => {
+    translationMocks.confirm.mockResolvedValueOnce(false);
+    render(
+      <MantineProvider>
+        <Reader {...props} message={message} />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Permanently delete" }),
+    );
+
+    await waitFor(() =>
+      expect(translationMocks.confirm).toHaveBeenCalledOnce(),
+    );
+    expect(props.onPermanentDelete).not.toHaveBeenCalled();
+  });
+
+  it("reports a failed permanent-delete confirmation without mutating", async () => {
+    translationMocks.confirm.mockRejectedValueOnce(new Error("dialog closed"));
+    render(
+      <MantineProvider>
+        <Reader {...props} message={message} />
+      </MantineProvider>,
+    );
+
+    fireEvent.keyDown(document.documentElement, {
+      key: "Delete",
+      shiftKey: true,
+    });
+
+    await waitFor(() =>
+      expect(translationMocks.show).toHaveBeenCalledWith(
+        "Could not permanently delete this message",
+        "Error: dialog closed",
+        "error",
+      ),
+    );
+    expect(props.onPermanentDelete).not.toHaveBeenCalled();
+  });
+
+  it("permanently deletes the expanded older message instead of the latest message", async () => {
+    const older = {
+      ...message,
+      id: "permanent-delete-older",
+      uid: 40,
+      from_name: "Older sender",
+    };
+    const latest = {
+      ...message,
+      id: "permanent-delete-latest",
+      uid: 41,
+      from_name: "Latest sender",
+    };
+    vi.mocked(api.content).mockResolvedValue({
+      body_text: "Expanded older body",
+      attachments: [],
+    });
+    render(
+      <MantineProvider>
+        <Reader {...props} message={latest} messages={[older, latest]} />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Expand message from Older sender" }),
+    );
+    await screen.findByText("Expanded older body");
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Permanently delete" }),
+    );
+
+    await waitFor(() =>
+      expect(props.onPermanentDelete).toHaveBeenCalledWith(older),
+    );
+    expect(props.onPermanentDelete).not.toHaveBeenCalledWith(latest);
+  });
+
+  it("uses Shift+Delete for the exact expanded message", async () => {
+    const older = {
+      ...message,
+      id: "shortcut-older",
+      uid: 40,
+      from_name: "Older sender",
+    };
+    const latest = {
+      ...message,
+      id: "shortcut-latest",
+      uid: 41,
+      from_name: "Latest sender",
+    };
+    render(
+      <MantineProvider>
+        <Reader {...props} message={latest} messages={[older, latest]} />
+      </MantineProvider>,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Expand message from Older sender" }),
+    );
+
+    fireEvent.keyDown(document.documentElement, {
+      key: "Delete",
+      shiftKey: true,
+    });
+
+    await waitFor(() =>
+      expect(props.onPermanentDelete).toHaveBeenCalledWith(older),
+    );
+    expect(props.onPermanentDelete).not.toHaveBeenCalledWith(latest);
+    expect(props.onTrash).not.toHaveBeenCalled();
+  });
+
+  it("does not treat Delete or Backspace without Shift as permanent deletion", () => {
+    render(
+      <MantineProvider>
+        <Reader {...props} message={message} />
+      </MantineProvider>,
+    );
+
+    fireEvent.keyDown(document.documentElement, { key: "Delete" });
+    fireEvent.keyDown(document.documentElement, { key: "Backspace" });
+
+    expect(translationMocks.confirm).not.toHaveBeenCalled();
+    expect(props.onPermanentDelete).not.toHaveBeenCalled();
+  });
+
+  it("accepts macOS Shift+Backspace as Shift+Delete", async () => {
+    const platform = vi
+      .spyOn(window.navigator, "platform", "get")
+      .mockReturnValue("MacIntel");
+    render(
+      <MantineProvider>
+        <Reader {...props} message={message} />
+      </MantineProvider>,
+    );
+
+    fireEvent.keyDown(document.documentElement, {
+      key: "Backspace",
+      shiftKey: true,
+    });
+
+    await waitFor(() =>
+      expect(props.onPermanentDelete).toHaveBeenCalledWith(message),
+    );
+    platform.mockRestore();
+  });
+
+  it("does not use Shift+Backspace as permanent delete off macOS", () => {
+    const platform = vi
+      .spyOn(window.navigator, "platform", "get")
+      .mockReturnValue("Win32");
+    render(
+      <MantineProvider>
+        <Reader {...props} message={message} />
+      </MantineProvider>,
+    );
+
+    const event = new KeyboardEvent("keydown", {
+      key: "Backspace",
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    document.documentElement.dispatchEvent(event);
+
+    expect(translationMocks.confirm).not.toHaveBeenCalled();
+    expect(props.onPermanentDelete).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+    platform.mockRestore();
+  });
+
+  it("ignores Shift+Delete in editable controls and while actions are disabled", () => {
+    const { rerender } = render(
+      <MantineProvider>
+        <Reader {...props} message={message} />
+      </MantineProvider>,
+    );
+    const input = document.createElement("input");
+    document.body.append(input);
+    fireEvent.keyDown(input, { key: "Delete", shiftKey: true });
+    const editor = document.createElement("div");
+    Object.defineProperty(editor, "isContentEditable", { value: true });
+    document.body.append(editor);
+    fireEvent.keyDown(editor, { key: "Delete", shiftKey: true });
+
+    rerender(
+      <MantineProvider>
+        <Reader {...props} message={message} actionsDisabled />
+      </MantineProvider>,
+    );
+    fireEvent.keyDown(document.documentElement, {
+      key: "Delete",
+      shiftKey: true,
+    });
+    input.remove();
+    editor.remove();
+
+    expect(translationMocks.confirm).not.toHaveBeenCalled();
+    expect(props.onPermanentDelete).not.toHaveBeenCalled();
+  });
+
+  it("coalesces repeated Shift+Delete events into one confirmation", async () => {
+    let resolveConfirmation: ((confirmed: boolean) => void) | undefined;
+    translationMocks.confirm.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveConfirmation = resolve;
+        }),
+    );
+    render(
+      <MantineProvider>
+        <Reader {...props} message={message} />
+      </MantineProvider>,
+    );
+
+    fireEvent.keyDown(document.documentElement, {
+      key: "Delete",
+      shiftKey: true,
+    });
+    fireEvent.keyDown(document.documentElement, {
+      key: "Delete",
+      shiftKey: true,
+      repeat: true,
+    });
+    fireEvent.keyDown(document.documentElement, {
+      key: "Delete",
+      shiftKey: true,
+    });
+
+    expect(translationMocks.confirm).toHaveBeenCalledOnce();
+    await act(async () => resolveConfirmation!(false));
+    expect(props.onPermanentDelete).not.toHaveBeenCalled();
+  });
+
+  it("keeps Shift+Delete locked until the deletion operation finishes", async () => {
+    let finishDeletion: (() => void) | undefined;
+    props.onPermanentDelete.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishDeletion = resolve;
+        }),
+    );
+    render(
+      <MantineProvider>
+        <Reader {...props} message={message} />
+      </MantineProvider>,
+    );
+
+    fireEvent.keyDown(document.documentElement, {
+      key: "Delete",
+      shiftKey: true,
+    });
+    await waitFor(() => expect(props.onPermanentDelete).toHaveBeenCalledOnce());
+    fireEvent.keyDown(document.documentElement, {
+      key: "Delete",
+      shiftKey: true,
+    });
+
+    expect(translationMocks.confirm).toHaveBeenCalledOnce();
+    expect(props.onPermanentDelete).toHaveBeenCalledOnce();
+    await act(async () => finishDeletion!());
   });
 
   it("switches the toolbar action to Not spam for spam messages", () => {

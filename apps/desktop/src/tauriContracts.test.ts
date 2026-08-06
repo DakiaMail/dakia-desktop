@@ -170,6 +170,20 @@ describe("Tauri payload contracts", () => {
     });
   });
 
+  it("uses the mailbox action command with the exact permanent-delete locator", async () => {
+    apiMocks.invoke.mockResolvedValue(undefined);
+    const { api } = await import("./api");
+
+    await api.action("account-1", "Archive::All Mail", 42, "delete");
+
+    expect(apiMocks.invoke).toHaveBeenCalledWith("apply_mailbox_action", {
+      accountId: "account-1",
+      mailbox: "Archive::All Mail",
+      uid: 42,
+      action: "delete",
+    });
+  });
+
   it("delivers camelCase event envelopes while preserving native null fields", async () => {
     const handlers = new Map<string, ListenHandler>();
     eventMocks.listen.mockImplementation(

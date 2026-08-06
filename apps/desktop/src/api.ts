@@ -198,7 +198,7 @@ const desktopApi = {
     accountId: string,
     mailbox: string,
     uid: number,
-    action: "archive" | "spam" | "not_spam" | "trash",
+    action: "archive" | "spam" | "not_spam" | "trash" | "delete",
   ) =>
     invoke<void>("apply_mailbox_action", { accountId, mailbox, uid, action }),
   openExternal: (url: string) => invoke<void>("open_external_url", { url }),
