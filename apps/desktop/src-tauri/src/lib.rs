@@ -8,8 +8,8 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use dakia_core::storage::MessageContentFetchAcquire;
 use dakia_core::{
     ai::{AiConfig, AiProvider, AiService},
-    mailbox_action_destination, provider, remote_mailbox, Account, AccountAuth, AccountDraft,
-    Attachment, CachedMessageContent, ComposeMessage, LocalEmailClassifier, MailConversationPage,
+    mailbox_action_destination, provider, Account, AccountAuth, AccountDraft, Attachment,
+    CachedMessageContent, ComposeMessage, LocalEmailClassifier, MailConversationPage,
     MailRebuildJob, MailService, MailSummary, MailboxAction, OAuthFlow, OAuthProviderConfig,
     ProviderPreset, SearchQuery, Store, SyncProgress, SyncResult, UnsubscribeOutcome,
 };
@@ -3655,9 +3655,9 @@ async fn apply_mailbox_action(
 ) -> Result<(), String> {
     let _operation = state.account_operations.acquire(account_id).await;
     let account = enabled_account_for_operation(state.inner(), account_id).await?;
-    let source_mailbox = remote_mailbox(&account, &mailbox);
+    require_permanent_delete_locator(&state.store, account_id, &mailbox, uid, action).await?;
     let destination_uid = MailService::new(state.store.clone())
-        .apply_action(&account, &source_mailbox, uid, action)
+        .apply_action(&account, &mailbox, uid, action)
         .await
         .map_err(error)?;
     state
@@ -3671,6 +3671,107 @@ async fn apply_mailbox_action(
         )
         .await
         .map_err(error)
+}
+
+async fn require_permanent_delete_locator(
+    store: &Store,
+    account_id: Uuid,
+    mailbox: &str,
+    uid: u32,
+    action: MailboxAction,
+) -> Result<(), String> {
+    if !matches!(action, MailboxAction::Delete) {
+        return Ok(());
+    }
+    store
+        .message_by_locator(account_id, mailbox, uid)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Message is no longer available in this mailbox".to_owned())?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod permanent_delete_command_tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn message(account_id: Uuid, mailbox: &str, uid: u32) -> MailSummary {
+        MailSummary {
+            id: format!("{account_id}:{mailbox}:{uid}"),
+            account_id: account_id.to_string(),
+            mailbox: mailbox.into(),
+            uid: i64::from(uid),
+            message_id: Some(format!("<{uid}@example.test>")),
+            in_reply_to: None,
+            reference_ids: None,
+            thread_id: format!("thread-{uid}"),
+            subject: "Permanent delete locator".into(),
+            from_name: None,
+            from_address: "sender@example.test".into(),
+            to_addresses: "reader@example.test".into(),
+            cc_addresses: String::new(),
+            bcc_addresses: String::new(),
+            reply_to_addresses: String::new(),
+            received_at: Utc::now(),
+            snippet: String::new(),
+            body_text: String::new(),
+            body_html: None,
+            content_state: "headers_only".into(),
+            unsubscribe_kind: None,
+            unsubscribe_url: None,
+            is_read: false,
+            is_flagged: false,
+            has_attachments: false,
+            category: None,
+            classification_confidence: None,
+            classification_source: None,
+            classification_signals: String::new(),
+            attachments: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn permanent_delete_requires_the_exact_local_account_mailbox_and_uid() {
+        let store = Store::in_memory().await.expect("in-memory store");
+        let account_id = Uuid::new_v4();
+        let other_account_id = Uuid::new_v4();
+        store
+            .upsert_messages(&[message(account_id, "INBOX", 42)])
+            .await
+            .expect("save message");
+
+        require_permanent_delete_locator(&store, account_id, "INBOX", 42, MailboxAction::Delete)
+            .await
+            .expect("exact locator is accepted");
+        for (candidate_account, candidate_mailbox, candidate_uid) in [
+            (other_account_id, "INBOX", 42),
+            (account_id, "Archive", 42),
+            (account_id, "INBOX", 41),
+        ] {
+            assert!(
+                require_permanent_delete_locator(
+                    &store,
+                    candidate_account,
+                    candidate_mailbox,
+                    candidate_uid,
+                    MailboxAction::Delete,
+                )
+                .await
+                .is_err(),
+                "a crossed or absent locator must fail before IMAP"
+            );
+        }
+        require_permanent_delete_locator(
+            &store,
+            other_account_id,
+            "INBOX",
+            42,
+            MailboxAction::Trash,
+        )
+        .await
+        .expect("ordinary Trash behavior remains unchanged");
+    }
 }
 
 #[tauri::command]

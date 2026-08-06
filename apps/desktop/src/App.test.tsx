@@ -1128,6 +1128,232 @@ describe("App read state", () => {
     expect(within(list).queryByText("Unread thread")).not.toBeInTheDocument();
   });
 
+  it("permanently deletes only the chosen message copy and focuses its remaining sibling", async () => {
+    const earlier = {
+      ...mocks.message,
+      id: "message-earlier",
+      uid: 40,
+      from_name: "Earlier sender",
+      received_at: "2026-07-19T09:00:00Z",
+    };
+    const latest = {
+      ...mocks.message,
+      id: "message-latest",
+      uid: 41,
+      from_name: "Latest sender",
+      received_at: "2026-07-19T10:00:00Z",
+    };
+    mocks.api.search.mockResolvedValue({
+      conversations: groupMessages([earlier, latest]),
+      nextCursor: null,
+    });
+    mocks.api.content.mockImplementation(async (messageId: string) => ({
+      body_text: messageId === earlier.id ? "Earlier body" : "Latest body",
+      attachments: [],
+    }));
+    mocks.confirmNativeAction.mockResolvedValue(true);
+    mocks.api.action.mockImplementation(async () => {
+      mocks.api.search.mockResolvedValue({
+        conversations: groupMessages([earlier]),
+        nextCursor: null,
+      });
+    });
+
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(
+      (await screen.findByText("Unread thread")).closest("button")!,
+    );
+    expect(await screen.findByText("Latest body")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Permanently delete" }),
+    );
+
+    await waitFor(() =>
+      expect(mocks.api.action).toHaveBeenCalledWith(
+        "account-1",
+        "INBOX",
+        41,
+        "delete",
+      ),
+    );
+    expect(await screen.findByText("Earlier body")).toBeVisible();
+    expect(screen.queryByText("Latest body")).not.toBeInTheDocument();
+    expect(
+      screen.getByText("Message deletion request completed"),
+    ).toBeVisible();
+  });
+
+  it("routes Shift+Delete through confirmation to the exact mailbox locator", async () => {
+    mocks.confirmNativeAction.mockResolvedValue(true);
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(
+      (await screen.findByText("Unread thread")).closest("button")!,
+    );
+    await screen.findByText("Message body");
+    fireEvent.keyDown(document.documentElement, {
+      key: "Delete",
+      shiftKey: true,
+    });
+
+    await waitFor(() =>
+      expect(mocks.api.action).toHaveBeenCalledWith(
+        "account-1",
+        "INBOX",
+        1,
+        "delete",
+      ),
+    );
+    expect(mocks.confirmNativeAction).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a message visible when permanent deletion fails", async () => {
+    mocks.confirmNativeAction.mockResolvedValue(true);
+    mocks.api.action.mockRejectedValueOnce(new Error("offline"));
+
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(
+      (await screen.findByText("Unread thread")).closest("button")!,
+    );
+    expect(await screen.findByText("Message body")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Permanently delete" }),
+    );
+
+    expect(
+      await screen.findByText("Could not permanently delete this message"),
+    ).toBeVisible();
+    expect(screen.getByText("Message body")).toBeVisible();
+    expect(
+      within(document.querySelector(".mail-list-panel")!).getByText(
+        "Unread thread",
+      ),
+    ).toBeVisible();
+  });
+
+  it("clears an invalidated pagination loader after permanent deletion", async () => {
+    const cursor = {
+      received_at: "2026-07-19T09:00:00Z",
+      id: "message-1",
+    };
+    let resolveMore: ((page: MailThreadPage) => void) | undefined;
+    mocks.api.search.mockImplementation(async (...args: unknown[]) => {
+      if (args[6]) {
+        return new Promise<MailThreadPage>((resolve) => {
+          resolveMore = resolve;
+        });
+      }
+      return {
+        conversations: groupMessages([mocks.message]),
+        nextCursor: cursor,
+      };
+    });
+    mocks.confirmNativeAction.mockResolvedValue(true);
+
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const list = document.querySelector<HTMLElement>(".mail-list-panel")!;
+    fireEvent.click(
+      (await within(list).findByText("Unread thread")).closest("button")!,
+    );
+    await screen.findByText("Message body");
+    const scroller = document.querySelector(".mail-scroll") as HTMLDivElement;
+    Object.defineProperties(scroller, {
+      scrollHeight: { configurable: true, value: 2_000 },
+      scrollTop: { configurable: true, value: 1_300 },
+      clientHeight: { configurable: true, value: 500 },
+    });
+    fireEvent.scroll(scroller);
+    await waitFor(() => expect(resolveMore).toBeTypeOf("function"));
+    expect(document.querySelector(".mail-page-loader")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Permanently delete" }),
+    );
+
+    await waitFor(() =>
+      expect(
+        document.querySelector(".mail-page-loader"),
+      ).not.toBeInTheDocument(),
+    );
+    resolveMore!({ conversations: [], nextCursor: null });
+  });
+
+  it("moves to a neighboring conversation after permanently deleting its only message", async () => {
+    const deleted = {
+      ...mocks.message,
+      id: "delete-only-message",
+      uid: 70,
+      thread_id: "delete-only-thread",
+      subject: "Delete this conversation",
+      received_at: "2026-07-19T10:00:00Z",
+    };
+    const neighbor = {
+      ...mocks.message,
+      id: "neighbor-message",
+      uid: 71,
+      thread_id: "neighbor-thread",
+      subject: "Neighbor conversation",
+      received_at: "2026-07-19T09:00:00Z",
+    };
+    mocks.api.search.mockResolvedValue({
+      conversations: groupMessages([deleted, neighbor]),
+      nextCursor: null,
+    });
+    mocks.api.content.mockImplementation(async (messageId: string) => ({
+      body_text: messageId === neighbor.id ? "Neighbor body" : "Deleted body",
+      attachments: [],
+    }));
+    mocks.confirmNativeAction.mockResolvedValue(true);
+    mocks.api.action.mockImplementation(async () => {
+      mocks.api.search.mockResolvedValue({
+        conversations: groupMessages([neighbor]),
+        nextCursor: null,
+      });
+    });
+
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(
+      (await screen.findByText("Delete this conversation")).closest("button")!,
+    );
+    expect(await screen.findByText("Deleted body")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Permanently delete" }),
+    );
+
+    expect(await screen.findByText("Neighbor body")).toBeVisible();
+    expect(
+      screen.getByRole("heading", { name: "Neighbor conversation" }),
+    ).toBeVisible();
+  });
+
   it("ignores an out-of-order Smart result after the view changes", async () => {
     let resolveOldPeople:
       | ((page: {
