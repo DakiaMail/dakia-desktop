@@ -1019,6 +1019,7 @@ struct DesktopNotification {
     sound: Option<String>,
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn notification_has_reader_target(notification: &DesktopNotification) -> bool {
     notification.count == 1
         && notification
