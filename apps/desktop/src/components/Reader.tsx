@@ -64,6 +64,7 @@ function usesMacDeleteKey() {
 type Props = {
   message?: MailSummary;
   messages?: MailSummary[];
+  focusedMessageId?: string;
   accountEmail?: string;
   aiResult?: string;
   aiLoading: boolean;
@@ -87,6 +88,7 @@ type Props = {
 export function Reader({
   message,
   messages,
+  focusedMessageId,
   accountEmail,
   aiResult,
   aiLoading,
@@ -130,6 +132,11 @@ export function Reader({
     [message, messages],
   );
   const latestMessage = threadMessages.at(-1);
+  const requestedMessageId = threadMessages.some(
+    (threadMessage) => threadMessage.id === focusedMessageId,
+  )
+    ? focusedMessageId
+    : latestMessage?.id;
   const threadKey = latestMessage
     ? `${latestMessage.account_id}:${latestMessage.thread_id || latestMessage.id}`
     : message
@@ -138,14 +145,14 @@ export function Reader({
   const [expandedMessage, setExpandedMessage] = useState<{
     threadKey?: string;
     id?: string;
-  }>(() => ({ threadKey, id: latestMessage?.id }));
+  }>(() => ({ threadKey, id: requestedMessageId }));
   // Render the final chronological message immediately when a new conversation
   // arrives. Keeping the chosen ID in state means later mailbox updates do not
   // interrupt someone reading an earlier message.
   const expandedMessageId =
     expandedMessage?.threadKey === threadKey
       ? expandedMessage?.id
-      : latestMessage?.id;
+      : requestedMessageId;
   const expandedMessageSummary = threadMessages.find(
     (threadMessage) => threadMessage.id === expandedMessageId,
   );
@@ -198,12 +205,14 @@ export function Reader({
   }
   useHotkeys(permanentDeleteHotkeys);
   useEffect(() => {
-    setExpandedMessage((current) =>
-      current.threadKey === threadKey
-        ? current
-        : { threadKey, id: latestMessage?.id },
-    );
-  }, [threadKey]);
+    setExpandedMessage((current) => {
+      if (current.threadKey !== threadKey)
+        return { threadKey, id: requestedMessageId };
+      if (focusedMessageId && current.id !== requestedMessageId)
+        return { threadKey, id: requestedMessageId };
+      return current;
+    });
+  }, [focusedMessageId, requestedMessageId, threadKey]);
   const previousThreadMessages = useRef(threadMessages);
   useEffect(() => {
     setExpandedMessage((current) => {

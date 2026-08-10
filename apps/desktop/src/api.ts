@@ -9,6 +9,7 @@ import type {
   MailRebuildProgress,
   MailCursor,
   MailSummary,
+  ConversationTarget,
   MessageContent,
   MailThread,
   MailThreadPage,
@@ -125,6 +126,8 @@ const desktopApi = {
         limit: 500,
       },
     }),
+  conversationForTarget: (target: ConversationTarget) =>
+    invoke<MailThread | null>("conversation_for_target", { target }),
   setCategory: (messageId: string, category: string) =>
     invoke<void>("set_message_category", { messageId, category }),
   setStarred: (messageId: string, starred: boolean) =>
@@ -153,6 +156,8 @@ const desktopApi = {
     body: string;
     accountId?: string;
     messageId?: string;
+    rfcMessageId?: string;
+    threadId?: string;
     count: number;
     sound?: string;
   }) => invoke<void>("send_desktop_notification", { notification }),
@@ -499,6 +504,34 @@ const demoApi: typeof desktopApi = {
           .includes(text.toLowerCase()),
     );
   },
+  conversationForTarget: async (target) => {
+    const exact = target.localMessageId
+      ? demoMessages.find(
+          (message) =>
+            message.account_id === target.accountId &&
+            message.id === target.localMessageId,
+        )
+      : undefined;
+    const rfc = target.rfcMessageId
+      ? demoMessages.find(
+          (message) =>
+            message.account_id === target.accountId &&
+            message.message_id?.toLowerCase() ===
+              target.rfcMessageId?.toLowerCase(),
+        )
+      : undefined;
+    const threadId = exact?.thread_id ?? rfc?.thread_id ?? target.threadId;
+    if (!threadId) return null;
+    return (
+      groupMessages(
+        demoMessages.filter(
+          (message) =>
+            message.account_id === target.accountId &&
+            message.thread_id === threadId,
+        ),
+      )[0] ?? null
+    );
+  },
   setCategory: async (messageId, category) => {
     const message = demoMessages.find((item) => item.id === messageId);
     if (message) {
@@ -629,4 +662,9 @@ const demoApi: typeof desktopApi = {
 
 const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-export const api = isTauri || !import.meta.env.DEV ? desktopApi : demoApi;
+// Native UI verification can use the same fictional mailbox as browser
+// development without opening or mutating a developer's real local store.
+const useNativeDemoApi =
+  import.meta.env.DEV && import.meta.env.VITE_DAKIA_DEMO_API === "1";
+export const api =
+  (isTauri && !useNativeDemoApi) || !import.meta.env.DEV ? desktopApi : demoApi;

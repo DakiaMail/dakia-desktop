@@ -736,6 +736,45 @@ describe("Reader unsubscribe action", () => {
     expect(api.content).toHaveBeenLastCalledWith(nextLatest.id);
   });
 
+  it("opens a dedicated reader on the explicitly focused thread message", async () => {
+    const earlier = {
+      ...message,
+      id: "focused-earlier",
+      from_name: "Earlier Sender",
+      received_at: "2026-07-19T09:00:00Z",
+    };
+    const latest = {
+      ...message,
+      id: "unfocused-latest",
+      uid: 2,
+      from_name: "Latest Sender",
+      received_at: "2026-07-19T11:00:00Z",
+    };
+    vi.mocked(api.content).mockImplementation(async (id) => ({
+      body_text: id === earlier.id ? "Focused body" : "Latest body",
+      attachments: [],
+    }));
+
+    render(
+      <MantineProvider>
+        <Reader
+          {...props}
+          message={earlier}
+          messages={[earlier, latest]}
+          focusedMessageId={earlier.id}
+        />
+      </MantineProvider>,
+    );
+
+    expect(
+      screen.getByRole("button", {
+        name: "Collapse message from Earlier Sender",
+      }),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(await screen.findByText("Focused body")).toBeVisible();
+    expect(api.content).not.toHaveBeenCalledWith(latest.id);
+  });
+
   it("keeps the selected expanded message open when a newer message arrives", async () => {
     const earlier = {
       ...message,
