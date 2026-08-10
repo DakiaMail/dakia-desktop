@@ -2580,7 +2580,7 @@ impl Store {
                     .rfc_message_id
                     .as_deref()
                     .and_then(normalize_message_id)
-                    .map_or(true, |expected| {
+                    .is_none_or(|expected| {
                         message
                             .message_id
                             .as_deref()
@@ -2592,7 +2592,7 @@ impl Store {
                     .thread_id
                     .as_deref()
                     .filter(|thread_id| !thread_id.trim().is_empty())
-                    .map_or(true, |thread_id| message.thread_id == thread_id);
+                    .is_none_or(|thread_id| message.thread_id == thread_id);
                 if rfc_matches && thread_matches {
                     return self
                         .complete_conversation(
@@ -6505,7 +6505,7 @@ mod tests {
                 newer.uid = 100 + index;
                 newer.message_id = Some(format!("<newer-{index}@example.test>"));
                 newer.thread_id = format!("newer-thread-{index}");
-                newer.received_at += chrono::Duration::minutes(i64::from(index + 1));
+                newer.received_at += chrono::Duration::minutes(index + 1);
                 newer
             })
             .collect::<Vec<_>>();
