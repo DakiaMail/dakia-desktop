@@ -801,6 +801,25 @@ textarea {
   display: flex;
   flex-direction: column;
 }
+.reader-window {
+  height: 100dvh;
+  min-height: 0;
+  background: var(--dakia-paper);
+  position: relative;
+}
+.reader-window-titlebar {
+  position: absolute;
+  z-index: 20;
+  inset: 0 0 auto 72px;
+  height: 26px;
+}
+.reader-window .reader {
+  height: 100%;
+}
+.reader-window-loading {
+  display: grid;
+  place-items: center;
+}
 .reader-toolbar {
   min-height: 54px;
   padding: 26px 10px 0;

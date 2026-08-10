@@ -5,13 +5,14 @@ mod translation;
 mod tauri_contracts_tests;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
-use dakia_core::storage::MessageContentFetchAcquire;
+use dakia_core::storage::{ConversationTarget, MessageContentFetchAcquire};
 use dakia_core::{
     ai::{AiConfig, AiProvider, AiService},
     mailbox_action_destination, provider, Account, AccountAuth, AccountDraft, Attachment,
-    CachedMessageContent, ComposeMessage, LocalEmailClassifier, MailConversationPage,
-    MailRebuildJob, MailService, MailSummary, MailboxAction, OAuthFlow, OAuthProviderConfig,
-    ProviderPreset, SearchQuery, Store, SyncProgress, SyncResult, UnsubscribeOutcome,
+    CachedMessageContent, ComposeMessage, LocalEmailClassifier, MailConversation,
+    MailConversationPage, MailRebuildJob, MailService, MailSummary, MailboxAction, OAuthFlow,
+    OAuthProviderConfig, ProviderPreset, SearchQuery, Store, SyncProgress, SyncResult,
+    UnsubscribeOutcome,
 };
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -1012,8 +1013,62 @@ struct DesktopNotification {
     body: String,
     account_id: Option<String>,
     message_id: Option<String>,
+    thread_id: Option<String>,
+    rfc_message_id: Option<String>,
     count: usize,
     sound: Option<String>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn notification_has_reader_target(notification: &DesktopNotification) -> bool {
+    notification.count == 1
+        && notification
+            .account_id
+            .as_deref()
+            .is_some_and(|account_id| !account_id.trim().is_empty())
+        && [
+            notification.message_id.as_deref(),
+            notification.rfc_message_id.as_deref(),
+            notification.thread_id.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| !value.trim().is_empty())
+}
+
+#[cfg(test)]
+mod desktop_notification_tests {
+    use super::*;
+
+    #[test]
+    fn single_message_notifications_preserve_reader_locators_without_focusing_main() {
+        let notification = DesktopNotification {
+            title: "New message".into(),
+            body: "A reply arrived".into(),
+            account_id: Some("account-1".into()),
+            message_id: Some("account-1:INBOX:7".into()),
+            thread_id: Some("root@example.test".into()),
+            rfc_message_id: Some("<reply@example.test>".into()),
+            count: 1,
+            sound: None,
+        };
+        assert!(notification_has_reader_target(&notification));
+        let value = serde_json::to_value(notification).unwrap();
+        assert_eq!(value["threadId"], "root@example.test");
+        assert_eq!(value["rfcMessageId"], "<reply@example.test>");
+
+        let grouped = DesktopNotification {
+            title: "New messages".into(),
+            body: "Several messages arrived".into(),
+            account_id: Some("account-1".into()),
+            message_id: Some("account-1:INBOX:7".into()),
+            thread_id: Some("root@example.test".into()),
+            rfc_message_id: Some("<reply@example.test>".into()),
+            count: 2,
+            sound: None,
+        };
+        assert!(!notification_has_reader_target(&grouped));
+    }
 }
 
 #[derive(Deserialize)]
@@ -3113,6 +3168,18 @@ async fn search(
 }
 
 #[tauri::command]
+async fn conversation_for_target(
+    state: State<'_, Arc<AppState>>,
+    target: ConversationTarget,
+) -> Result<Option<MailConversation>, String> {
+    state
+        .store
+        .conversation_for_target(&target)
+        .await
+        .map_err(error)
+}
+
+#[tauri::command]
 async fn search_remote(
     state: State<'_, Arc<AppState>>,
     query: SearchQuery,
@@ -3890,9 +3957,11 @@ async fn send_desktop_notification(
                 if action == "__closed" {
                     return;
                 }
-                if let Some(window) = action_app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
+                if !notification_has_reader_target(&notification) {
+                    if let Some(window) = action_app.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
                 }
                 let _ = action_app.emit("notification-action", notification);
             });
@@ -4058,7 +4127,18 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .on_menu_event(|app, event| {
-            let _ = app.emit("menu-action", event.id().as_ref());
+            let action = event.id().as_ref();
+            let message_action = matches!(action, "reply" | "forward" | "archive" | "spam");
+            let focused = message_action.then(|| {
+                app.webview_windows()
+                    .into_values()
+                    .find(|window| window.is_focused().unwrap_or(false))
+            });
+            if let Some(Some(window)) = focused {
+                let _ = window.emit("menu-action", action);
+            } else if let Some(main) = app.get_webview_window("main") {
+                let _ = main.emit("menu-action", action);
+            }
         })
         .on_window_event(move |window, event| match event {
             WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. }) => {
@@ -4245,6 +4325,7 @@ pub fn run() {
             add_account,
             add_oauth_account,
             search,
+            conversation_for_target,
             search_remote,
             set_message_category,
             set_message_starred,

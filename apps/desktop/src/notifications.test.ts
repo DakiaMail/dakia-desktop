@@ -29,9 +29,22 @@ const message = (id: string): MailSummary => ({
 
 describe("new-mail notification copy", () => {
   it("shows the sender and subject for one message", () => {
-    expect(buildNewMailNotification([message("1")], true, copy)).toMatchObject({
+    expect(
+      buildNewMailNotification(
+        [{ ...message("1"), message_id: "<message-1@example.com>" }],
+        true,
+        copy,
+      ),
+    ).toMatchObject({
       title: "Mara",
       body: "Subject 1",
+      extra: {
+        accountId: "account",
+        messageId: "1",
+        rfcMessageId: "<message-1@example.com>",
+        threadId: "1",
+        count: 1,
+      },
     });
   });
 
@@ -44,6 +57,10 @@ describe("new-mail notification copy", () => {
   it("batches several messages into one summary", () => {
     expect(
       buildNewMailNotification([message("1"), message("2")], true, copy),
-    ).toMatchObject({ title: "2 new emails", body: "2 messages arrived" });
+    ).toEqual({
+      title: "2 new emails",
+      body: "2 messages arrived",
+      extra: { count: 2 },
+    });
   });
 });

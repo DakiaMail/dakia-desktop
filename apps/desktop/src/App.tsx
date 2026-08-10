@@ -41,6 +41,12 @@ import {
   sendNewMailNotification,
 } from "./notifications";
 import {
+  onReaderWindowFailed,
+  onReaderWindowMutated,
+  openReaderWindow,
+  type ReaderWindowSeed,
+} from "./readerWindow";
+import {
   onAccountConnected,
   onAccountRemoved,
   onAccountUpdated,
@@ -1043,6 +1049,33 @@ export default function App() {
     let disposed = false;
     let dispose: () => void = () => undefined;
     const openNotification = async (extra: Record<string, unknown>) => {
+      const accountId =
+        typeof extra.accountId === "string" ? extra.accountId : undefined;
+      const messageId =
+        typeof extra.messageId === "string" ? extra.messageId : undefined;
+      const rfcMessageId =
+        typeof extra.rfcMessageId === "string" ? extra.rfcMessageId : undefined;
+      const threadId =
+        typeof extra.threadId === "string" ? extra.threadId : undefined;
+      const count = typeof extra.count === "number" ? extra.count : 0;
+      if (count === 1 && accountId && (messageId || rfcMessageId || threadId)) {
+        try {
+          await openReaderWindow({
+            target: {
+              accountId,
+              localMessageId: messageId,
+              rfcMessageId,
+              threadId,
+              mailbox: "INBOX",
+            },
+            focusedMessageId: messageId,
+          });
+          return;
+        } catch (error) {
+          showError(error);
+        }
+      }
+
       const currentWindow = getCurrentWindow();
       await currentWindow.show();
       await currentWindow.setFocus();
@@ -1051,10 +1084,6 @@ export default function App() {
       setSelected(new Set());
       setAiResult(undefined);
 
-      const accountId =
-        typeof extra.accountId === "string" ? extra.accountId : undefined;
-      const messageId =
-        typeof extra.messageId === "string" ? extra.messageId : undefined;
       const accountIds = accountId
         ? [accountId]
         : accounts.map((account) => account.id);
@@ -1065,14 +1094,8 @@ export default function App() {
       nextCursorRef.current = inbox.nextCursor;
       setHasMore(inbox.nextCursor !== null);
       setThreads(inbox.conversations);
-      const clickedThread = inbox.conversations.find((thread) =>
-        thread.messages.some((message) => message.id === messageId),
-      );
-      setActive(clickedThread?.latest);
-      setActiveThreadSnapshot(clickedThread);
-      if (clickedThread) {
-        void setThreadReadState(clickedThread, true, { silent: true });
-      }
+      setActive(undefined);
+      setActiveThreadSnapshot(undefined);
     };
     void Promise.all([
       onNotificationAction(openNotification).then((listener) =>
@@ -1089,6 +1112,44 @@ export default function App() {
       dispose();
     };
   }, [accounts]);
+
+  useEffect(() => {
+    let dispose: () => void = () => undefined;
+    let disposed = false;
+    void Promise.all([
+      onReaderWindowMutated(() => {
+        void loadMessages();
+        void refreshStarredCount(activeAccounts);
+      }),
+      onReaderWindowFailed(async ({ accountId }) => {
+        try {
+          const currentWindow = getCurrentWindow();
+          await currentWindow.show();
+          await currentWindow.setFocus();
+          setMailbox("INBOX");
+          setQuery("");
+          selectedAccountIdRef.current = accountId;
+          setSelectedAccountId(accountId);
+          setActive(undefined);
+          setActiveThreadSnapshot(undefined);
+          const inbox = await api.search("", [accountId], "INBOX");
+          setThreads(inbox.conversations);
+          nextCursorRef.current = inbox.nextCursor;
+          setHasMore(inbox.nextCursor !== null);
+        } catch (error) {
+          showError(error);
+        }
+      }),
+    ]).then((unlisteners) => {
+      const unlistenAll = () => unlisteners.forEach((unlisten) => unlisten());
+      if (disposed) unlistenAll();
+      else dispose = unlistenAll;
+    });
+    return () => {
+      disposed = true;
+      dispose();
+    };
+  }, [activeAccounts, loadMessages, refreshStarredCount]);
 
   const activeThread = useMemo(
     () =>
@@ -2190,6 +2251,20 @@ export default function App() {
           setActiveThreadSnapshot(thread);
           setAiResult(undefined);
           void setThreadReadState(thread, true, { silent: true });
+        }}
+        onDoubleOpen={(thread) => {
+          const focused = thread.latest;
+          const seed: ReaderWindowSeed = {
+            target: {
+              accountId: focused.account_id,
+              localMessageId: focused.id,
+              rfcMessageId: focused.message_id ?? undefined,
+              threadId: thread.threadId ?? focused.thread_id,
+              mailbox,
+            },
+            focusedMessageId: focused.id,
+          };
+          void openReaderWindow(seed).catch(showError);
         }}
         onSelect={select}
         onSync={() => void sync()}
