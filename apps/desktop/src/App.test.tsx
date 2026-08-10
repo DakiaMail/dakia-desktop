@@ -32,6 +32,10 @@ const mocks = vi.hoisted(() => {
   const desktopNotificationActionHandlers: Array<
     (extra: Record<string, unknown>) => void | Promise<void>
   > = [];
+  const readerMutationHandlers: Array<() => void> = [];
+  const readerFailureHandlers: Array<
+    (failure: { accountId: string }) => void | Promise<void>
+  > = [];
   const accountRemovedHandlers: Array<(event: { accountId: string }) => void> =
     [];
   const accountUpdatedHandlers: Array<(account: Account) => void> = [];
@@ -114,6 +118,7 @@ const mocks = vi.hoisted(() => {
     requestInitialNotificationAccess: vi.fn(async () => undefined),
     sendNewMailNotification: vi.fn(async () => false),
     openComposeWindow: vi.fn(),
+    openReaderWindow: vi.fn(async () => undefined),
     noopListener: vi.fn(async () => unlisten),
     onNativeMenuAction: vi.fn(async (handler: (action: string) => void) => {
       nativeMenuHandlers.push(handler);
@@ -137,6 +142,20 @@ const mocks = vi.hoisted(() => {
     nativeMenuHandlers,
     notificationActionHandlers,
     desktopNotificationActionHandlers,
+    readerMutationHandlers,
+    readerFailureHandlers,
+    onReaderWindowMutated: vi.fn(async (handler: () => void) => {
+      readerMutationHandlers.push(handler);
+      return unlisten;
+    }),
+    onReaderWindowFailed: vi.fn(
+      async (
+        handler: (failure: { accountId: string }) => void | Promise<void>,
+      ) => {
+        readerFailureHandlers.push(handler);
+        return unlisten;
+      },
+    ),
     onNotificationAction: vi.fn(
       async (
         handler: (extra: Record<string, unknown>) => void | Promise<void>,
@@ -184,6 +203,12 @@ vi.mock("./composeWindow", () => ({
   onComposeSent: mocks.noopListener,
   onOutboxChanged: mocks.noopListener,
   openComposeWindow: mocks.openComposeWindow,
+}));
+
+vi.mock("./readerWindow", () => ({
+  onReaderWindowFailed: mocks.onReaderWindowFailed,
+  onReaderWindowMutated: mocks.onReaderWindowMutated,
+  openReaderWindow: mocks.openReaderWindow,
 }));
 
 vi.mock("./nativeFeedback", () => ({
@@ -236,6 +261,9 @@ describe("App read state", () => {
     mocks.nativeMenuHandlers.length = 0;
     mocks.notificationActionHandlers.length = 0;
     mocks.desktopNotificationActionHandlers.length = 0;
+    mocks.readerMutationHandlers.length = 0;
+    mocks.readerFailureHandlers.length = 0;
+    mocks.openReaderWindow.mockClear();
     mocks.accountRemovedHandlers.length = 0;
     mocks.accountUpdatedHandlers.length = 0;
     localStorage.clear();
@@ -423,7 +451,29 @@ describe("App read state", () => {
     expect(mocks.api.content).not.toHaveBeenCalledWith(older.id);
   });
 
-  it("focuses the newest thread message when an older notification is opened", async () => {
+  it("opens a main-list thread in a dedicated window on double-click", async () => {
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const row = await screen.findByText("Unread thread");
+    fireEvent.doubleClick(row.closest("button")!);
+
+    expect(mocks.openReaderWindow).toHaveBeenCalledWith({
+      target: {
+        accountId: mocks.account.id,
+        localMessageId: mocks.message.id,
+        rfcMessageId: undefined,
+        threadId: mocks.message.thread_id,
+        mailbox: "INBOX",
+      },
+      focusedMessageId: mocks.message.id,
+    });
+  });
+
+  it("opens a targeted notification in a dedicated conversation window", async () => {
     const older = {
       ...mocks.message,
       id: "message-notified",
@@ -431,23 +481,6 @@ describe("App read state", () => {
       received_at: "2026-07-19T09:00:00Z",
       snippet: "Notified preview",
     };
-    const latest = {
-      ...mocks.message,
-      id: "message-after-notification",
-      uid: 2,
-      received_at: "2026-07-19T10:00:00Z",
-      snippet: "Newest preview",
-      unsubscribe_kind: "one_click" as const,
-    };
-    mocks.api.search.mockResolvedValue({
-      conversations: groupMessages([latest, older]),
-      nextCursor: null,
-    });
-    mocks.api.content.mockImplementation(async (id: string) => ({
-      body_text: id === latest.id ? "Newest notification body" : "Older body",
-      attachments: [],
-    }));
-
     render(
       <MantineProvider>
         <App />
@@ -461,24 +494,119 @@ describe("App read state", () => {
       await mocks.notificationActionHandlers.at(-1)!({
         accountId: mocks.account.id,
         messageId: older.id,
+        rfcMessageId: "<notified@example.com>",
+        threadId: older.thread_id,
+        count: 1,
       });
     });
 
-    expect(await screen.findByText("Newest notification body")).toBeVisible();
-    expect(mocks.api.content).toHaveBeenCalledWith(latest.id);
-    expect(mocks.api.content).not.toHaveBeenCalledWith(older.id);
-    fireEvent.click(
-      screen
-        .getAllByRole("button", { name: "Star conversation" })
-        .find((element) => element.tagName === "BUTTON")!,
+    expect(mocks.openReaderWindow).toHaveBeenCalledWith({
+      target: {
+        accountId: mocks.account.id,
+        localMessageId: older.id,
+        rfcMessageId: "<notified@example.com>",
+        threadId: older.thread_id,
+        mailbox: "INBOX",
+      },
+      focusedMessageId: older.id,
+    });
+    expect(mocks.windowApi.show).not.toHaveBeenCalled();
+    expect(mocks.windowApi.setFocus).not.toHaveBeenCalled();
+  });
+
+  it("keeps grouped notifications in the main Inbox", async () => {
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    await waitFor(() =>
+      expect(mocks.notificationActionHandlers).not.toHaveLength(0),
+    );
+    await act(async () => {
+      await mocks.notificationActionHandlers.at(-1)!({ count: 2 });
+    });
+
+    expect(mocks.openReaderWindow).not.toHaveBeenCalled();
+    expect(mocks.windowApi.show).toHaveBeenCalled();
+    expect(mocks.windowApi.setFocus).toHaveBeenCalled();
+    expect(mocks.api.search.mock.calls).toEqual(
+      expect.arrayContaining([
+        expect.arrayContaining(["", [mocks.account.id], "INBOX"]),
+      ]),
+    );
+  });
+
+  it("falls back to the main Inbox when a notification reader cannot open", async () => {
+    mocks.openReaderWindow.mockRejectedValueOnce(new Error("window failed"));
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    await waitFor(() =>
+      expect(mocks.notificationActionHandlers).not.toHaveLength(0),
+    );
+    await act(async () => {
+      await mocks.notificationActionHandlers.at(-1)!({
+        accountId: mocks.account.id,
+        messageId: mocks.message.id,
+        threadId: mocks.message.thread_id,
+        count: 1,
+      });
+    });
+
+    expect(mocks.showNativeMessage).toHaveBeenCalled();
+    expect(mocks.windowApi.show).toHaveBeenCalled();
+    expect(mocks.windowApi.setFocus).toHaveBeenCalled();
+  });
+
+  it("returns a failed reader target to its account Inbox", async () => {
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
     );
     await waitFor(() =>
-      expect(mocks.api.setStarred).toHaveBeenCalledWith(latest.id, true),
+      expect(mocks.readerFailureHandlers).not.toHaveLength(0),
     );
-    fireEvent.click(screen.getByRole("button", { name: "Unsubscribe" }));
+
+    await act(async () => {
+      await mocks.readerFailureHandlers.at(-1)!({
+        accountId: mocks.account.id,
+      });
+    });
+
+    expect(mocks.windowApi.show).toHaveBeenCalled();
+    expect(mocks.windowApi.setFocus).toHaveBeenCalled();
+    expect(mocks.api.search.mock.calls).toEqual(
+      expect.arrayContaining([
+        expect.arrayContaining(["", [mocks.account.id], "INBOX"]),
+      ]),
+    );
+  });
+
+  it("refreshes the main mailbox after a reader-window mutation", async () => {
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
     await waitFor(() =>
-      expect(mocks.api.unsubscribe).toHaveBeenCalledWith(latest.id),
+      expect(mocks.readerMutationHandlers).not.toHaveLength(0),
     );
+    const searchesBefore = mocks.api.search.mock.calls.length;
+
+    act(() => mocks.readerMutationHandlers.at(-1)!());
+
+    await waitFor(() =>
+      expect(mocks.api.search.mock.calls.length).toBeGreaterThan(
+        searchesBefore,
+      ),
+    );
+    expect(mocks.api.starredCount).toHaveBeenCalled();
   });
 
   it("paints the first 100 conversations before classifying in the background", async () => {
