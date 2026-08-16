@@ -2139,6 +2139,20 @@ export default function App() {
               ),
             )
         }
+        onCopyAddress={(address) =>
+          navigator.clipboard
+            .writeText(address)
+            .catch(() =>
+              showNativeMessage(
+                t("errors.generic"),
+                t("errors.copyFailed"),
+                "error",
+              ),
+            )
+        }
+        onComposeTo={(message, address) =>
+          openComposeWindow({ accountId: message.account_id, to: address })
+        }
         unsubscribeLoading={unsubscribeLoading}
         onUnsubscribe={(message) => void unsubscribe(message)}
         onToggleStar={(message, starred) => void toggleStar(message, starred)}
