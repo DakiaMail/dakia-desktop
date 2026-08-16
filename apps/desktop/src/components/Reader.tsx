@@ -31,6 +31,7 @@ import {
 import { AI_FEATURES_VISIBLE } from "../features";
 import { format } from "date-fns";
 import {
+  Fragment,
   useCallback,
   useEffect,
   useId,
@@ -38,6 +39,7 @@ import {
   useRef,
   useState,
 } from "react";
+import type { MouseEvent as ReactMouseEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { api, messageContentErrorFromUnknown } from "../api";
 import { confirmNativeAction, showNativeMessage } from "../nativeFeedback";
@@ -52,7 +54,7 @@ import type {
   MessageContent,
   MessageContentErrorKind,
 } from "../types";
-import { formatAddress, messageRecipients } from "../recipients";
+import { type MailAddress, messageRecipients } from "../recipients";
 import { splitQuotedText } from "../quotedHistory";
 import { EmptyState } from "./EmptyState";
 import { HtmlMessage } from "./HtmlMessage";
@@ -80,6 +82,8 @@ type Props = {
   onToggleRead: (read: boolean) => void;
   onSummarize: () => void;
   onCopyAi: () => void;
+  onCopyAddress: (address: string) => void;
+  onComposeTo: (message: MailSummary, address: string) => void;
   unsubscribeLoading: boolean;
   onUnsubscribe: (message: MailSummary) => void;
   onToggleStar: (message: MailSummary, starred: boolean) => void;
@@ -104,6 +108,8 @@ export function Reader({
   onToggleRead,
   onSummarize,
   onCopyAi,
+  onCopyAddress,
+  onComposeTo,
   unsubscribeLoading,
   onUnsubscribe,
   onToggleStar,
@@ -563,6 +569,8 @@ export function Reader({
             onReply={() => onReply(threadMessage)}
             onReplyAll={() => onReplyAll(threadMessage)}
             onForward={() => onForward(threadMessage)}
+            onCopyAddress={onCopyAddress}
+            onComposeTo={(address) => onComposeTo(threadMessage, address)}
             threadUnread={threadUnread}
             onToggleRead={onToggleRead}
             unsubscribeLoading={unsubscribeLoading}
@@ -590,6 +598,8 @@ function ThreadMessage({
   onReply,
   onReplyAll,
   onForward,
+  onCopyAddress,
+  onComposeTo,
   threadUnread,
   onToggleRead,
   unsubscribeLoading,
@@ -610,6 +620,8 @@ function ThreadMessage({
   onReply: () => void;
   onReplyAll: () => void;
   onForward: () => void;
+  onCopyAddress: (address: string) => void;
+  onComposeTo: (address: string) => void;
   threadUnread: boolean;
   onToggleRead: (read: boolean) => void;
   unsubscribeLoading: boolean;
@@ -632,6 +644,11 @@ function ThreadMessage({
   const [exportStatus, setExportStatus] = useState<string>();
   const exportInFlight = useRef(false);
   const [recipientsExpanded, setRecipientsExpanded] = useState(false);
+  const [addressContext, setAddressContext] = useState<{
+    address: string;
+    x: number;
+    y: number;
+  }>();
   const summaryDescriptionId = useId();
   const displayContent = translatedContent ?? content;
   const recipients = useMemo(() => messageRecipients(message), [message]);
@@ -642,6 +659,38 @@ function ThreadMessage({
   const hasDownloadableAttachments = attachmentsAuthoritative
     ? downloadableAttachments.length > 0
     : message.has_attachments;
+
+  useEffect(() => {
+    if (!addressContext) return;
+    const closeOutside = (event: MouseEvent) => {
+      if (!(event.target as Element).closest("[data-menu-dropdown]")) {
+        setAddressContext(undefined);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setAddressContext(undefined);
+    };
+    document.addEventListener("mousedown", closeOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("mousedown", closeOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [addressContext]);
+
+  const showAddressContextMenu = (
+    address: string,
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const target = event.currentTarget.getBoundingClientRect();
+    setAddressContext({
+      address,
+      x: event.clientX || target.left + target.width / 2,
+      y: event.clientY || target.top + target.height / 2,
+    });
+  };
 
   useEffect(() => {
     setAttachments([]);
@@ -787,6 +836,7 @@ function ThreadMessage({
         className="sender-card sender-card-collapsible"
         data-sent={isSent}
         onClick={(event) => {
+          if (hasSelectedText(event.currentTarget)) return;
           if (
             event.target instanceof Element &&
             event.target.closest("button, a, [role='menuitem']")
@@ -800,44 +850,78 @@ function ThreadMessage({
         </Avatar>
         <div className="sender-meta">
           <div className="sender-name">
-            {message.from_name || message.from_address}
+            {recipients.from[0]?.name ? (
+              <span>{recipients.from[0].name}</span>
+            ) : null}
+            {recipients.from[0] ? (
+              <EmailAddress
+                address={recipients.from[0].address}
+                onCompose={onComposeTo}
+                onContextMenu={showAddressContextMenu}
+              />
+            ) : (
+              <span>{message.from_name || message.from_address}</span>
+            )}
             {isSent ? (
               <span className="sent-by-you">{t("reader.sentByYou")}</span>
             ) : null}
           </div>
-          <button
-            type="button"
-            className="recipient-summary"
-            aria-expanded={recipientsExpanded}
-            aria-label={t(
-              recipientsExpanded
-                ? "reader.hideRecipientDetails"
-                : "reader.showRecipientDetails",
-            )}
-            onClick={() => setRecipientsExpanded((value) => !value)}
-          >
-            <IconChevronDown
-              size={14}
-              className="recipient-summary-chevron"
-              aria-hidden="true"
+          <div className="recipient-summary">
+            <button
+              type="button"
+              className="recipient-summary-toggle"
+              aria-expanded={recipientsExpanded}
+              aria-label={t(
+                recipientsExpanded
+                  ? "reader.hideRecipientDetails"
+                  : "reader.showRecipientDetails",
+              )}
+              onClick={() => setRecipientsExpanded((value) => !value)}
+            >
+              <IconChevronDown
+                size={14}
+                className="recipient-summary-chevron"
+                aria-hidden="true"
+              />
+              <span>{t("composer.to")}</span>
+            </button>
+            <RecipientAddressList
+              values={recipients.to}
+              onCompose={onComposeTo}
+              onContextMenu={showAddressContextMenu}
             />
-            <span>
-              {message.from_address} ·{" "}
-              {t("reader.to", { recipient: message.to_addresses })}
-            </span>
-          </button>
+          </div>
           {recipientsExpanded ? (
             <dl className="recipient-details">
               <RecipientRow
                 label={t("composer.from")}
                 values={recipients.from}
+                onCompose={onComposeTo}
+                onContextMenu={showAddressContextMenu}
               />
-              <RecipientRow label={t("composer.to")} values={recipients.to} />
-              <RecipientRow label={t("composer.cc")} values={recipients.cc} />
-              <RecipientRow label={t("composer.bcc")} values={recipients.bcc} />
+              <RecipientRow
+                label={t("composer.to")}
+                values={recipients.to}
+                onCompose={onComposeTo}
+                onContextMenu={showAddressContextMenu}
+              />
+              <RecipientRow
+                label={t("composer.cc")}
+                values={recipients.cc}
+                onCompose={onComposeTo}
+                onContextMenu={showAddressContextMenu}
+              />
+              <RecipientRow
+                label={t("composer.bcc")}
+                values={recipients.bcc}
+                onCompose={onComposeTo}
+                onContextMenu={showAddressContextMenu}
+              />
               <RecipientRow
                 label={t("reader.replyTo")}
                 values={recipients.replyTo}
+                onCompose={onComposeTo}
+                onContextMenu={showAddressContextMenu}
               />
             </dl>
           ) : null}
@@ -960,6 +1044,46 @@ function ThreadMessage({
           </ActionIcon>
         </Tooltip>
       </div>
+      <Menu
+        opened={Boolean(addressContext)}
+        withinPortal
+        shadow="md"
+        width={220}
+      >
+        <Menu.Target>
+          <span
+            aria-hidden="true"
+            style={{
+              position: "fixed",
+              left: addressContext?.x ?? 0,
+              top: addressContext?.y ?? 0,
+              width: 1,
+              height: 1,
+              pointerEvents: "none",
+            }}
+          />
+        </Menu.Target>
+        <Menu.Dropdown>
+          <Menu.Item
+            leftSection={<IconCopy size={16} />}
+            onClick={() => {
+              if (addressContext) onCopyAddress(addressContext.address);
+              setAddressContext(undefined);
+            }}
+          >
+            {t("actions.copy")}
+          </Menu.Item>
+          <Menu.Item
+            leftSection={<IconMail size={16} />}
+            onClick={() => {
+              if (addressContext) onComposeTo(addressContext.address);
+              setAddressContext(undefined);
+            }}
+          >
+            {t("reader.newMessageTo", { address: addressContext?.address })}
+          </Menu.Item>
+        </Menu.Dropdown>
+      </Menu>
       {exportStatus ? (
         <p className="attachment-status" role="status">
           {exportStatus}
@@ -1102,17 +1226,102 @@ function ThreadMessage({
 function RecipientRow({
   label,
   values,
+  onCompose,
+  onContextMenu,
 }: {
   label: string;
-  values: ReturnType<typeof messageRecipients>["to"];
+  values: MailAddress[];
+  onCompose: (address: string) => void;
+  onContextMenu: (
+    address: string,
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) => void;
 }) {
   if (!values.length) return null;
   return (
     <div className="recipient-detail-row">
       <dt>{label}</dt>
-      <dd>{values.map(formatAddress).join(", ")}</dd>
+      <dd>
+        <RecipientAddressList
+          values={values}
+          onCompose={onCompose}
+          onContextMenu={onContextMenu}
+        />
+      </dd>
     </div>
   );
+}
+
+function RecipientAddressList({
+  values,
+  onCompose,
+  onContextMenu,
+}: {
+  values: MailAddress[];
+  onCompose: (address: string) => void;
+  onContextMenu: (
+    address: string,
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) => void;
+}) {
+  return (
+    <span className="recipient-address-list">
+      {values.map((value, index) => (
+        <Fragment key={`${value.name ?? ""}:${value.address}:${index}`}>
+          {index ? ", " : null}
+          {value.name ? (
+            <span className="recipient-address-name">{value.name} </span>
+          ) : null}
+          <EmailAddress
+            address={value.address}
+            onCompose={onCompose}
+            onContextMenu={onContextMenu}
+          />
+        </Fragment>
+      ))}
+    </span>
+  );
+}
+
+function EmailAddress({
+  address,
+  onCompose,
+  onContextMenu,
+}: {
+  address: string;
+  onCompose: (address: string) => void;
+  onContextMenu: (
+    address: string,
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <button
+      type="button"
+      className="recipient-address"
+      aria-label={t("reader.emailAddress", { address })}
+      onClick={(event) => {
+        event.stopPropagation();
+        if (hasSelectedText(event.currentTarget)) return;
+        onCompose(address);
+      }}
+      onContextMenu={(event) => onContextMenu(address, event)}
+    >
+      {address}
+    </button>
+  );
+}
+
+function hasSelectedText(target: HTMLElement) {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || !selection.rangeCount)
+    return false;
+  try {
+    return selection.getRangeAt(0).intersectsNode(target);
+  } catch {
+    return false;
+  }
 }
 
 function PlainTextMessage({ text }: { text: string }) {

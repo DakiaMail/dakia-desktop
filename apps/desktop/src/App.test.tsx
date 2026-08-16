@@ -372,6 +372,77 @@ describe("App read state", () => {
     );
   });
 
+  it("opens a new composer for the selected header mailbox", async () => {
+    const selectedAddress = "selected+header@example.com";
+    mocks.api.search.mockResolvedValue({
+      conversations: groupMessages([
+        {
+          ...mocks.message,
+          from_name: "Selected Sender",
+          from_address: selectedAddress,
+        },
+      ]),
+      nextCursor: null,
+    });
+
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(
+      (await screen.findByText("Unread thread")).closest("button")!,
+    );
+    mocks.openComposeWindow.mockClear();
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: `Email ${selectedAddress}`,
+      }),
+    );
+
+    expect(mocks.openComposeWindow).toHaveBeenCalledOnce();
+    expect(mocks.openComposeWindow).toHaveBeenCalledWith({
+      accountId: "account-1",
+      to: selectedAddress,
+    });
+  });
+
+  it("reports a clipboard failure when copying a header mailbox", async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error("Clipboard denied"));
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(
+      (await screen.findByText("Unread thread")).closest("button")!,
+    );
+    const address = await screen.findByRole("button", {
+      name: "Email sender@example.com",
+    });
+    fireEvent.contextMenu(address, { clientX: 140, clientY: 90 });
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Copy", hidden: true }),
+    );
+
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith("sender@example.com"),
+    );
+    await waitFor(() =>
+      expect(mocks.showNativeMessage).toHaveBeenCalledWith(
+        "Something went wrong",
+        "Could not copy text",
+        "error",
+      ),
+    );
+  });
+
   it("updates every concrete duplicate copy instead of synthetic winner state", async () => {
     const hiddenInbox = {
       ...mocks.message,
