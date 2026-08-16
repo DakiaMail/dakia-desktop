@@ -896,17 +896,6 @@ textarea {
   padding: 4px 0;
   border-radius: 10px;
 }
-.sender-card-collapsible {
-  cursor: pointer;
-}
-.sender-card-collapsible:hover {
-  background: color-mix(in srgb, var(--mantine-color-gray-1) 45%, transparent);
-}
-.sender-card-collapsible:focus-within {
-  outline: 2px solid
-    color-mix(in srgb, var(--mantine-color-ember-5) 55%, transparent);
-  outline-offset: 2px;
-}
 .thread-message {
   padding: 20px 0 28px;
   border-top: 1px solid var(--dakia-divider);

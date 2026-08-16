@@ -4,7 +4,10 @@ mod translation;
 #[cfg(test)]
 mod tauri_contracts_tests;
 
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine,
+};
 use dakia_core::storage::{ConversationTarget, MessageContentFetchAcquire};
 use dakia_core::{
     ai::{AiConfig, AiProvider, AiService},
@@ -2858,6 +2861,72 @@ async fn show_account_context_menu(
     window.popup_menu(&menu).map_err(error)
 }
 
+fn validated_context_menu_email_address(value: &str) -> Result<&str, String> {
+    let address = value.trim();
+    if address.is_empty()
+        || address.len() > 320
+        || address.matches('@').count() != 1
+        || address
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err("Invalid email address".into());
+    }
+    Ok(address)
+}
+
+#[tauri::command]
+async fn show_email_address_context_menu(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    account_id: Uuid,
+    address: String,
+    copy_label: String,
+    new_message_label: String,
+) -> Result<(), String> {
+    if state
+        .store
+        .account(account_id)
+        .await
+        .map_err(error)?
+        .is_none()
+    {
+        return Err("Account not found".into());
+    }
+    let address = validated_context_menu_email_address(&address)?;
+    let encoded_address = URL_SAFE_NO_PAD.encode(address.as_bytes());
+    let copy =
+        MenuItemBuilder::with_id(format!("copy-email-address:{encoded_address}"), copy_label)
+            .build(&window)
+            .map_err(error)?;
+    let new_message = MenuItemBuilder::with_id(
+        format!("compose-email-address:{account_id}:{encoded_address}"),
+        new_message_label,
+    )
+    .build(&window)
+    .map_err(error)?;
+    let menu = MenuBuilder::new(&window)
+        .items(&[&copy, &new_message])
+        .build()
+        .map_err(error)?;
+    window.popup_menu(&menu).map_err(error)
+}
+
+#[cfg(test)]
+mod email_address_context_menu_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_a_mailbox_and_rejects_unsafe_menu_payloads() {
+        assert_eq!(
+            validated_context_menu_email_address("person+tag@example.com"),
+            Ok("person+tag@example.com")
+        );
+        assert!(validated_context_menu_email_address("missing-at.example.com").is_err());
+        assert!(validated_context_menu_email_address("person@example.com\nmenu-action").is_err());
+    }
+}
+
 #[tauri::command]
 async fn remove_account(
     app: tauri::AppHandle,
@@ -4328,6 +4397,7 @@ pub fn run() {
             accounts,
             update_account,
             show_account_context_menu,
+            show_email_address_context_menu,
             remove_account,
             open_external_url,
             add_account,

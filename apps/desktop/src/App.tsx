@@ -134,6 +134,22 @@ function emptySmartSections(): Record<SmartSectionId, SmartSection> {
   );
 }
 
+function decodeNativeMenuAddress(value: string) {
+  try {
+    const standardBase64 = value
+      .replaceAll("-", "+")
+      .replaceAll("_", "/")
+      .padEnd(Math.ceil(value.length / 4) * 4, "=");
+    const bytes = Uint8Array.from(atob(standardBase64), (character) =>
+      character.charCodeAt(0),
+    );
+    const address = new TextDecoder().decode(bytes);
+    return address || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export default function App() {
   const { t } = useTranslation();
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -1955,6 +1971,39 @@ export default function App() {
           void configureTerminalCommand();
           break;
         default:
+          if (action.startsWith("copy-email-address:")) {
+            const address = decodeNativeMenuAddress(
+              action.slice("copy-email-address:".length),
+            );
+            if (address) {
+              void navigator.clipboard
+                .writeText(address)
+                .catch(() =>
+                  showNativeMessage(
+                    t("errors.generic"),
+                    t("errors.copyFailed"),
+                    "error",
+                  ),
+                );
+            }
+            break;
+          }
+          if (action.startsWith("compose-email-address:")) {
+            const payload = action.slice("compose-email-address:".length);
+            const separator = payload.indexOf(":");
+            const accountId = payload.slice(0, separator);
+            const address = decodeNativeMenuAddress(
+              payload.slice(separator + 1),
+            );
+            if (
+              separator > 0 &&
+              address &&
+              accounts.some((account) => account.id === accountId)
+            ) {
+              openComposeWindow({ accountId, to: address });
+            }
+            break;
+          }
           if (action.startsWith("rename-account:")) {
             const accountId = action.slice("rename-account:".length);
             if (accounts.some((account) => account.id === accountId)) {
@@ -2305,19 +2354,20 @@ export default function App() {
               ),
             )
         }
-        onCopyAddress={(address) =>
-          navigator.clipboard
-            .writeText(address)
-            .catch(() =>
-              showNativeMessage(
-                t("errors.generic"),
-                t("errors.copyFailed"),
-                "error",
-              ),
-            )
-        }
         onComposeTo={(message, address) =>
           openComposeWindow({ accountId: message.account_id, to: address })
+        }
+        onAddressContextMenu={(message, address) =>
+          void api
+            .showEmailAddressContextMenu(
+              message.account_id,
+              address,
+              t("actions.copy"),
+              t("reader.newMessageTo", { address }),
+            )
+            .catch((error) =>
+              showNativeMessage(t("errors.generic"), String(error), "error"),
+            )
         }
         unsubscribeLoading={unsubscribeLoading}
         onUnsubscribe={(message) => void unsubscribe(message)}
