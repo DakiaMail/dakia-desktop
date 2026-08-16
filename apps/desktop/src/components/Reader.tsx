@@ -75,8 +75,8 @@ type Props = {
   onToggleRead: (read: boolean) => void;
   onSummarize: () => void;
   onCopyAi: () => void;
-  onCopyAddress: (address: string) => void;
   onComposeTo: (message: MailSummary, address: string) => void;
+  onAddressContextMenu: (message: MailSummary, address: string) => void;
   unsubscribeLoading: boolean;
   onUnsubscribe: (message: MailSummary) => void;
   onToggleStar: (message: MailSummary, starred: boolean) => void;
@@ -99,8 +99,8 @@ export function Reader({
   onToggleRead,
   onSummarize,
   onCopyAi,
-  onCopyAddress,
   onComposeTo,
+  onAddressContextMenu,
   unsubscribeLoading,
   onUnsubscribe,
   onToggleStar,
@@ -474,6 +474,7 @@ export function Reader({
             }
             isLatest={threadMessage.id === latestMessage?.id}
             isExpanded={threadMessage.id === expandedMessageId}
+            canCollapse={threadMessages.length > 1}
             onToggleExpanded={() => toggleExpandedMessage(threadMessage.id)}
             actionsDisabled={actionsDisabled}
             onArchive={onArchive}
@@ -482,8 +483,10 @@ export function Reader({
             onReply={() => onReply(threadMessage)}
             onReplyAll={() => onReplyAll(threadMessage)}
             onForward={() => onForward(threadMessage)}
-            onCopyAddress={onCopyAddress}
             onComposeTo={(address) => onComposeTo(threadMessage, address)}
+            onAddressContextMenu={(address) =>
+              onAddressContextMenu(threadMessage, address)
+            }
             threadUnread={threadUnread}
             onToggleRead={onToggleRead}
             unsubscribeLoading={unsubscribeLoading}
@@ -502,6 +505,7 @@ function ThreadMessage({
   isSent,
   isLatest,
   isExpanded,
+  canCollapse,
   onToggleExpanded,
   actionsDisabled,
   onArchive,
@@ -510,8 +514,8 @@ function ThreadMessage({
   onReply,
   onReplyAll,
   onForward,
-  onCopyAddress,
   onComposeTo,
+  onAddressContextMenu,
   threadUnread,
   onToggleRead,
   unsubscribeLoading,
@@ -523,6 +527,7 @@ function ThreadMessage({
   isSent: boolean;
   isLatest: boolean;
   isExpanded: boolean;
+  canCollapse: boolean;
   onToggleExpanded: () => void;
   actionsDisabled: boolean;
   onArchive: () => void;
@@ -531,8 +536,8 @@ function ThreadMessage({
   onReply: () => void;
   onReplyAll: () => void;
   onForward: () => void;
-  onCopyAddress: (address: string) => void;
   onComposeTo: (address: string) => void;
+  onAddressContextMenu: (address: string) => void;
   threadUnread: boolean;
   onToggleRead: (read: boolean) => void;
   unsubscribeLoading: boolean;
@@ -555,11 +560,6 @@ function ThreadMessage({
   const [exportStatus, setExportStatus] = useState<string>();
   const exportInFlight = useRef(false);
   const [recipientsExpanded, setRecipientsExpanded] = useState(false);
-  const [addressContext, setAddressContext] = useState<{
-    address: string;
-    x: number;
-    y: number;
-  }>();
   const summaryDescriptionId = useId();
   const displayContent = translatedContent ?? content;
   const recipients = useMemo(() => messageRecipients(message), [message]);
@@ -571,36 +571,13 @@ function ThreadMessage({
     ? downloadableAttachments.length > 0
     : message.has_attachments;
 
-  useEffect(() => {
-    if (!addressContext) return;
-    const closeOutside = (event: MouseEvent) => {
-      if (!(event.target as Element).closest("[data-menu-dropdown]")) {
-        setAddressContext(undefined);
-      }
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setAddressContext(undefined);
-    };
-    document.addEventListener("mousedown", closeOutside);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("mousedown", closeOutside);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [addressContext]);
-
   const showAddressContextMenu = (
     address: string,
     event: ReactMouseEvent<HTMLButtonElement>,
   ) => {
     event.preventDefault();
     event.stopPropagation();
-    const target = event.currentTarget.getBoundingClientRect();
-    setAddressContext({
-      address,
-      x: event.clientX || target.left + target.width / 2,
-      y: event.clientY || target.top + target.height / 2,
-    });
+    onAddressContextMenu(address);
   };
 
   useEffect(() => {
@@ -744,19 +721,7 @@ function ThreadMessage({
         sender: message.from_name || message.from_address,
       })}
     >
-      <div
-        className="sender-card sender-card-collapsible"
-        data-sent={isSent}
-        onClick={(event) => {
-          if (hasSelectedText(event.currentTarget)) return;
-          if (
-            event.target instanceof Element &&
-            event.target.closest("button, a, [role='menuitem']")
-          )
-            return;
-          onToggleExpanded();
-        }}
-      >
+      <div className="sender-card" data-sent={isSent}>
         <Avatar className="sender-avatar" color="ember" radius="md">
           {(message.from_name || message.from_address)[0]?.toUpperCase()}
         </Avatar>
@@ -929,65 +894,27 @@ function ThreadMessage({
             </Menu.Item>
           </Menu.Dropdown>
         </Menu>
-        <Tooltip
-          label={t("reader.collapseMessage", {
-            sender: message.from_name || message.from_address,
-          })}
-        >
-          <ActionIcon
-            className="reader-header-action"
-            variant="subtle"
-            color="gray"
-            aria-expanded="true"
-            aria-label={t("reader.collapseMessage", {
+        {canCollapse ? (
+          <Tooltip
+            label={t("reader.collapseMessage", {
               sender: message.from_name || message.from_address,
             })}
-            onClick={onToggleExpanded}
           >
-            <IconChevronDown size={19} stroke={1.9} />
-          </ActionIcon>
-        </Tooltip>
+            <ActionIcon
+              className="reader-header-action"
+              variant="subtle"
+              color="gray"
+              aria-expanded="true"
+              aria-label={t("reader.collapseMessage", {
+                sender: message.from_name || message.from_address,
+              })}
+              onClick={onToggleExpanded}
+            >
+              <IconChevronDown size={19} stroke={1.9} />
+            </ActionIcon>
+          </Tooltip>
+        ) : null}
       </div>
-      <Menu
-        opened={Boolean(addressContext)}
-        withinPortal
-        shadow="md"
-        width={220}
-      >
-        <Menu.Target>
-          <span
-            aria-hidden="true"
-            style={{
-              position: "fixed",
-              left: addressContext?.x ?? 0,
-              top: addressContext?.y ?? 0,
-              width: 1,
-              height: 1,
-              pointerEvents: "none",
-            }}
-          />
-        </Menu.Target>
-        <Menu.Dropdown>
-          <Menu.Item
-            leftSection={<IconCopy size={16} />}
-            onClick={() => {
-              if (addressContext) onCopyAddress(addressContext.address);
-              setAddressContext(undefined);
-            }}
-          >
-            {t("actions.copy")}
-          </Menu.Item>
-          <Menu.Item
-            leftSection={<IconMail size={16} />}
-            onClick={() => {
-              if (addressContext) onComposeTo(addressContext.address);
-              setAddressContext(undefined);
-            }}
-          >
-            {t("reader.newMessageTo", { address: addressContext?.address })}
-          </Menu.Item>
-        </Menu.Dropdown>
-      </Menu>
       {exportStatus ? (
         <p className="attachment-status" role="status">
           {exportStatus}

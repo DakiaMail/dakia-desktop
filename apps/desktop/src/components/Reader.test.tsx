@@ -62,8 +62,8 @@ const props = {
   onToggleRead: vi.fn(),
   onSummarize: vi.fn(),
   onCopyAi: vi.fn(),
-  onCopyAddress: vi.fn(),
   onComposeTo: vi.fn(),
+  onAddressContextMenu: vi.fn(),
   unsubscribeLoading: false,
   onUnsubscribe: vi.fn(),
   onToggleStar: vi.fn(),
@@ -468,11 +468,6 @@ describe("Reader unsubscribe action", () => {
       ).not.toBeInTheDocument(),
     );
     expect(screen.queryByRole("button", { name: "Save all" })).toBeNull();
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: `Collapse message from ${message.from_name || message.from_address}`,
-      }),
-    );
     expect(screen.queryByLabelText("Has attachments")).toBeNull();
   });
 
@@ -696,7 +691,11 @@ describe("Reader unsubscribe action", () => {
     fireEvent.click(screen.getByRole("button", { name: "Unsubscribe" }));
     expect(props.onUnsubscribe).toHaveBeenCalledWith(latest);
     expect(api.content).toHaveBeenCalledTimes(2);
-    fireEvent.click(screen.getByText("Latest Sender"));
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Collapse message from Latest Sender",
+      }),
+    );
     expect(screen.queryByText("Latest full body")).not.toBeInTheDocument();
     expect(
       screen.getByRole("button", {
@@ -791,6 +790,68 @@ describe("Reader unsubscribe action", () => {
     ).toHaveAttribute("aria-expanded", "false");
     expect(api.content).toHaveBeenCalledTimes(2);
     expect(api.content).not.toHaveBeenCalledWith(newer.id);
+  });
+
+  it("only collapses threaded messages through their collapse control", async () => {
+    const earlier = {
+      ...message,
+      id: "message-earlier",
+      from_name: "Earlier Sender",
+    };
+    const latest = {
+      ...message,
+      id: "message-latest",
+      from_name: "Latest Sender",
+    };
+    vi.mocked(api.content).mockImplementation(async (id) => ({
+      body_text: id === latest.id ? "Latest full body" : "Earlier full body",
+      attachments: [],
+    }));
+    render(
+      <MantineProvider>
+        <Reader {...props} message={earlier} messages={[earlier, latest]} />
+      </MantineProvider>,
+    );
+
+    expect(await screen.findByText("Latest full body")).toBeVisible();
+    fireEvent.click(screen.getByText("Latest Sender"));
+    expect(screen.getByText("Latest full body")).toBeVisible();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Collapse message from Latest Sender",
+      }),
+    );
+    expect(screen.queryByText("Latest full body")).not.toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Expand message from Latest Sender",
+      }),
+    );
+    expect(await screen.findByText("Latest full body")).toBeVisible();
+  });
+
+  it("does not offer collapse for a single-message conversation", async () => {
+    const namedMessage = { ...message, from_name: "Only Sender" };
+    vi.mocked(api.content).mockResolvedValue({
+      body_text: "Only message body",
+      attachments: [],
+    });
+    render(
+      <MantineProvider>
+        <Reader {...props} message={namedMessage} />
+      </MantineProvider>,
+    );
+
+    expect(await screen.findByText("Only message body")).toBeVisible();
+    expect(
+      screen.queryByRole("button", {
+        name: "Collapse message from Only Sender",
+      }),
+    ).toBeNull();
+    fireEvent.click(screen.getByText("Only Sender"));
+    expect(screen.getByText("Only message body")).toBeVisible();
   });
 
   it("resets expanded state for the same thread ID in another account", async () => {
@@ -918,13 +979,13 @@ describe("Reader unsubscribe action", () => {
 
     expect(props.onComposeTo).toHaveBeenCalledWith(message, "list@example.com");
     expect(
-      screen.getByRole("button", {
+      screen.queryByRole("button", {
         name: "Collapse message from list@example.com",
       }),
-    ).toBeVisible();
+    ).toBeNull();
   });
 
-  it("offers copy and compose actions for the right-clicked address", async () => {
+  it("requests the native context menu for the right-clicked address", () => {
     render(
       <MantineProvider>
         <Reader {...props} message={message} />
@@ -941,24 +1002,16 @@ describe("Reader unsubscribe action", () => {
     fireEvent(address, contextEvent);
 
     expect(contextEvent.defaultPrevented).toBe(true);
-    fireEvent.click(
-      await screen.findByRole("menuitem", { name: "Copy", hidden: true }),
+    expect(props.onAddressContextMenu).toHaveBeenCalledWith(
+      message,
+      "list@example.com",
     );
-    expect(props.onCopyAddress).toHaveBeenCalledWith("list@example.com");
     expect(
-      screen.getByRole("button", {
+      screen.queryByRole("button", {
         name: "Collapse message from list@example.com",
       }),
-    ).toBeVisible();
-
-    fireEvent.contextMenu(address, { clientX: 140, clientY: 90 });
-    fireEvent.click(
-      await screen.findByRole("menuitem", {
-        name: "New message to list@example.com",
-        hidden: true,
-      }),
-    );
-    expect(props.onComposeTo).toHaveBeenCalledWith(message, "list@example.com");
+    ).toBeNull();
+    expect(screen.queryByRole("menuitem")).toBeNull();
   });
 
   it("preserves a drag selection instead of opening a compose window", () => {
@@ -1007,10 +1060,10 @@ describe("Reader unsubscribe action", () => {
 
     expect(selection.toString()).toBe("Mail Senderlist@example.com");
     expect(
-      screen.getByRole("button", {
+      screen.queryByRole("button", {
         name: "Collapse message from Mail Sender",
       }),
-    ).toBeVisible();
+    ).toBeNull();
     selection.removeAllRanges();
   });
 
