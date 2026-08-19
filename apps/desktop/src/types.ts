@@ -94,6 +94,13 @@ export type SmartSection = {
   nextCursor: MailCursor | null;
   loadingMore: boolean;
 };
+export type SmartInboxPage = {
+  sections: Array<{
+    id: SmartSectionId;
+    conversations: MailThread[];
+    nextCursor: MailCursor | null;
+  }>;
+};
 export type Attachment = {
   id: string;
   message_id: string;

@@ -12,6 +12,8 @@ import type {
   MessageContent,
   MailThread,
   MailThreadPage,
+  SmartInboxPage,
+  SmartSectionId,
   MessageContentErrorKind,
   Provider,
   SyncProgress,
@@ -106,6 +108,10 @@ const desktopApi = {
         limit,
         cursor,
       },
+    }),
+  smartInbox: (accountIds: string[], limit = 3) =>
+    invoke<SmartInboxPage>("search_smart_inbox", {
+      query: { account_ids: accountIds, limit },
     }),
   searchRemote: (
     text: string,
@@ -385,6 +391,16 @@ const demoAttachments = (messageId: string): Attachment[] =>
         ]
       : [];
 
+const demoSmartSectionIds: SmartSectionId[] = [
+  "starred",
+  "people",
+  "transactions",
+  "notifications",
+  "newsletters",
+  "other",
+  "seen",
+];
+
 const demoApi: typeof desktopApi = {
   terminalCommandStatus: async () => "notSetUp",
   installTerminalCommand: async () => undefined,
@@ -484,6 +500,37 @@ const demoApi: typeof desktopApi = {
         ),
       ),
       nextCursor: null,
+    };
+  },
+  smartInbox: async (accountIds, limit = 3) => {
+    const allowedAccounts = new Set(accountIds);
+    const inboxThreads = groupMessages(
+      demoMessages.filter(
+        (message) =>
+          (!allowedAccounts.size || allowedAccounts.has(message.account_id)) &&
+          mailboxFamily(message.mailbox) === "INBOX",
+      ),
+    );
+    return {
+      sections: demoSmartSectionIds.map((id) => {
+        const conversations = inboxThreads
+          .filter((thread) => {
+            const messages = thread.sourceMessages ?? thread.messages;
+            if (id === "starred") {
+              return messages.some((message) => message.is_flagged);
+            }
+            if (id === "seen") {
+              return messages.every((message) => message.is_read);
+            }
+            return (
+              thread.latest.category === id &&
+              messages.some((message) => !message.is_read) &&
+              !messages.some((message) => message.is_flagged)
+            );
+          })
+          .slice(0, limit);
+        return { id, conversations, nextCursor: null };
+      }),
     };
   },
   searchRemote: async (text, accountIds, mailbox, unreadOnly, flaggedOnly) => {

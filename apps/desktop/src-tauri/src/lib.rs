@@ -11,7 +11,8 @@ use dakia_core::{
     mailbox_action_destination, provider, remote_mailbox, Account, AccountAuth, AccountDraft,
     Attachment, CachedMessageContent, ComposeMessage, LocalEmailClassifier, MailConversationPage,
     MailRebuildJob, MailService, MailSummary, MailboxAction, OAuthFlow, OAuthProviderConfig,
-    ProviderPreset, SearchQuery, Store, SyncProgress, SyncResult, UnsubscribeOutcome,
+    ProviderPreset, SearchQuery, SmartInboxPage, SmartInboxQuery, Store, SyncProgress, SyncResult,
+    UnsubscribeOutcome,
 };
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -3113,6 +3114,14 @@ async fn search(
 }
 
 #[tauri::command]
+async fn search_smart_inbox(
+    state: State<'_, Arc<AppState>>,
+    query: SmartInboxQuery,
+) -> Result<SmartInboxPage, String> {
+    state.store.search_smart_inbox(&query).await.map_err(error)
+}
+
+#[tauri::command]
 async fn search_remote(
     state: State<'_, Arc<AppState>>,
     query: SearchQuery,
@@ -4141,6 +4150,7 @@ pub fn run() {
             add_account,
             add_oauth_account,
             search,
+            search_smart_inbox,
             search_remote,
             set_message_category,
             set_message_starred,
