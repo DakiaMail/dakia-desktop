@@ -108,6 +108,11 @@ export function AccountSetup({ providers, saving, onSave, onOAuth }: Props) {
             }))}
             required
           />
+          {chosen?.id === "gmail" ? (
+            <Text role="status" size="xs" className="gmail-verification-notice">
+              {t("account.gmailVerificationNotice")}
+            </Text>
+          ) : null}
           {usesOAuth ? (
             <Text size="sm" c="dimmed">
               {t("account.browserHint")}

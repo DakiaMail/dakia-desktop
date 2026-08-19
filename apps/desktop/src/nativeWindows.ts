@@ -11,6 +11,7 @@ import type {
   MailHydrated,
   MailRebuildProgress,
   NotificationSettings,
+  NotificationAction,
   RealtimeSyncStatus,
 } from "./types";
 
@@ -161,21 +162,11 @@ export function onNotificationSettingsChanged(
 }
 
 export function onDesktopNotificationAction(
-  handler: (notification: {
-    accountId?: string;
-    messageId?: string;
-    count: number;
-  }) => void,
+  handler: (notification: NotificationAction) => void,
 ): Promise<UnlistenFn> {
   if (!isTauri()) return Promise.resolve(() => undefined);
   return listen("notification-action", (event) =>
-    handler(
-      event.payload as {
-        accountId?: string;
-        messageId?: string;
-        count: number;
-      },
-    ),
+    handler(event.payload as NotificationAction),
   );
 }
 

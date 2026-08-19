@@ -79,6 +79,8 @@ export function buildNewMailNotification(
       extra: {
         accountId: message.account_id,
         messageId: message.id,
+        rfcMessageId: message.message_id ?? undefined,
+        threadId: message.thread_id,
         count: 1,
       },
     };
@@ -118,6 +120,14 @@ export async function sendNewMailNotification(
       messageId:
         typeof notification.extra.messageId === "string"
           ? notification.extra.messageId
+          : undefined,
+      rfcMessageId:
+        typeof notification.extra.rfcMessageId === "string"
+          ? notification.extra.rfcMessageId
+          : undefined,
+      threadId:
+        typeof notification.extra.threadId === "string"
+          ? notification.extra.threadId
           : undefined,
       count: notification.extra.count,
       sound: settings.soundEnabled ? notificationSound() : undefined,

@@ -87,12 +87,33 @@ export type MailThreadPage = {
   conversations: MailThread[];
   nextCursor: MailCursor | null;
 };
+export type ConversationTarget = {
+  accountId: string;
+  localMessageId?: string;
+  rfcMessageId?: string;
+  threadId?: string;
+  mailbox?: string;
+};
+export type NotificationAction = {
+  accountId?: string;
+  messageId?: string;
+  rfcMessageId?: string;
+  threadId?: string;
+  count: number;
+};
 export type SmartSectionId = "starred" | MailCategory | "seen";
 export type SmartSection = {
   id: SmartSectionId;
   threads: MailThread[];
   nextCursor: MailCursor | null;
   loadingMore: boolean;
+};
+export type SmartInboxPage = {
+  sections: Array<{
+    id: SmartSectionId;
+    conversations: MailThread[];
+    nextCursor: MailCursor | null;
+  }>;
 };
 export type Attachment = {
   id: string;

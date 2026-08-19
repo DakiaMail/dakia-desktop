@@ -5,13 +5,14 @@ mod translation;
 mod tauri_contracts_tests;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
-use dakia_core::storage::MessageContentFetchAcquire;
+use dakia_core::storage::{ConversationTarget, MessageContentFetchAcquire};
 use dakia_core::{
     ai::{AiConfig, AiProvider, AiService},
-    mailbox_action_destination, provider, remote_mailbox, Account, AccountAuth, AccountDraft,
-    Attachment, CachedMessageContent, ComposeMessage, LocalEmailClassifier, MailConversationPage,
-    MailRebuildJob, MailService, MailSummary, MailboxAction, OAuthFlow, OAuthProviderConfig,
-    ProviderPreset, SearchQuery, Store, SyncProgress, SyncResult, UnsubscribeOutcome,
+    mailbox_action_destination, provider, Account, AccountAuth, AccountDraft, Attachment,
+    CachedMessageContent, ComposeMessage, LocalEmailClassifier, MailConversation,
+    MailConversationPage, MailRebuildJob, MailService, MailSummary, MailboxAction, OAuthFlow,
+    OAuthProviderConfig, ProviderPreset, SearchQuery, SmartInboxPage, SmartInboxQuery, Store,
+    SyncProgress, SyncResult, UnsubscribeOutcome,
 };
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -1012,8 +1013,62 @@ struct DesktopNotification {
     body: String,
     account_id: Option<String>,
     message_id: Option<String>,
+    thread_id: Option<String>,
+    rfc_message_id: Option<String>,
     count: usize,
     sound: Option<String>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn notification_has_reader_target(notification: &DesktopNotification) -> bool {
+    notification.count == 1
+        && notification
+            .account_id
+            .as_deref()
+            .is_some_and(|account_id| !account_id.trim().is_empty())
+        && [
+            notification.message_id.as_deref(),
+            notification.rfc_message_id.as_deref(),
+            notification.thread_id.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| !value.trim().is_empty())
+}
+
+#[cfg(test)]
+mod desktop_notification_tests {
+    use super::*;
+
+    #[test]
+    fn single_message_notifications_preserve_reader_locators_without_focusing_main() {
+        let notification = DesktopNotification {
+            title: "New message".into(),
+            body: "A reply arrived".into(),
+            account_id: Some("account-1".into()),
+            message_id: Some("account-1:INBOX:7".into()),
+            thread_id: Some("root@example.test".into()),
+            rfc_message_id: Some("<reply@example.test>".into()),
+            count: 1,
+            sound: None,
+        };
+        assert!(notification_has_reader_target(&notification));
+        let value = serde_json::to_value(notification).unwrap();
+        assert_eq!(value["threadId"], "root@example.test");
+        assert_eq!(value["rfcMessageId"], "<reply@example.test>");
+
+        let grouped = DesktopNotification {
+            title: "New messages".into(),
+            body: "Several messages arrived".into(),
+            account_id: Some("account-1".into()),
+            message_id: Some("account-1:INBOX:7".into()),
+            thread_id: Some("root@example.test".into()),
+            rfc_message_id: Some("<reply@example.test>".into()),
+            count: 2,
+            sound: None,
+        };
+        assert!(!notification_has_reader_target(&grouped));
+    }
 }
 
 #[derive(Deserialize)]
@@ -3113,6 +3168,26 @@ async fn search(
 }
 
 #[tauri::command]
+async fn search_smart_inbox(
+    state: State<'_, Arc<AppState>>,
+    query: SmartInboxQuery,
+) -> Result<SmartInboxPage, String> {
+    state.store.search_smart_inbox(&query).await.map_err(error)
+}
+
+#[tauri::command]
+async fn conversation_for_target(
+    state: State<'_, Arc<AppState>>,
+    target: ConversationTarget,
+) -> Result<Option<MailConversation>, String> {
+    state
+        .store
+        .conversation_for_target(&target)
+        .await
+        .map_err(error)
+}
+
+#[tauri::command]
 async fn search_remote(
     state: State<'_, Arc<AppState>>,
     query: SearchQuery,
@@ -3655,9 +3730,9 @@ async fn apply_mailbox_action(
 ) -> Result<(), String> {
     let _operation = state.account_operations.acquire(account_id).await;
     let account = enabled_account_for_operation(state.inner(), account_id).await?;
-    let source_mailbox = remote_mailbox(&account, &mailbox);
+    require_permanent_delete_locator(&state.store, account_id, &mailbox, uid, action).await?;
     let destination_uid = MailService::new(state.store.clone())
-        .apply_action(&account, &source_mailbox, uid, action)
+        .apply_action(&account, &mailbox, uid, action)
         .await
         .map_err(error)?;
     state
@@ -3671,6 +3746,107 @@ async fn apply_mailbox_action(
         )
         .await
         .map_err(error)
+}
+
+async fn require_permanent_delete_locator(
+    store: &Store,
+    account_id: Uuid,
+    mailbox: &str,
+    uid: u32,
+    action: MailboxAction,
+) -> Result<(), String> {
+    if !matches!(action, MailboxAction::Delete) {
+        return Ok(());
+    }
+    store
+        .message_by_locator(account_id, mailbox, uid)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Message is no longer available in this mailbox".to_owned())?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod permanent_delete_command_tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn message(account_id: Uuid, mailbox: &str, uid: u32) -> MailSummary {
+        MailSummary {
+            id: format!("{account_id}:{mailbox}:{uid}"),
+            account_id: account_id.to_string(),
+            mailbox: mailbox.into(),
+            uid: i64::from(uid),
+            message_id: Some(format!("<{uid}@example.test>")),
+            in_reply_to: None,
+            reference_ids: None,
+            thread_id: format!("thread-{uid}"),
+            subject: "Permanent delete locator".into(),
+            from_name: None,
+            from_address: "sender@example.test".into(),
+            to_addresses: "reader@example.test".into(),
+            cc_addresses: String::new(),
+            bcc_addresses: String::new(),
+            reply_to_addresses: String::new(),
+            received_at: Utc::now(),
+            snippet: String::new(),
+            body_text: String::new(),
+            body_html: None,
+            content_state: "headers_only".into(),
+            unsubscribe_kind: None,
+            unsubscribe_url: None,
+            is_read: false,
+            is_flagged: false,
+            has_attachments: false,
+            category: None,
+            classification_confidence: None,
+            classification_source: None,
+            classification_signals: String::new(),
+            attachments: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn permanent_delete_requires_the_exact_local_account_mailbox_and_uid() {
+        let store = Store::in_memory().await.expect("in-memory store");
+        let account_id = Uuid::new_v4();
+        let other_account_id = Uuid::new_v4();
+        store
+            .upsert_messages(&[message(account_id, "INBOX", 42)])
+            .await
+            .expect("save message");
+
+        require_permanent_delete_locator(&store, account_id, "INBOX", 42, MailboxAction::Delete)
+            .await
+            .expect("exact locator is accepted");
+        for (candidate_account, candidate_mailbox, candidate_uid) in [
+            (other_account_id, "INBOX", 42),
+            (account_id, "Archive", 42),
+            (account_id, "INBOX", 41),
+        ] {
+            assert!(
+                require_permanent_delete_locator(
+                    &store,
+                    candidate_account,
+                    candidate_mailbox,
+                    candidate_uid,
+                    MailboxAction::Delete,
+                )
+                .await
+                .is_err(),
+                "a crossed or absent locator must fail before IMAP"
+            );
+        }
+        require_permanent_delete_locator(
+            &store,
+            other_account_id,
+            "INBOX",
+            42,
+            MailboxAction::Trash,
+        )
+        .await
+        .expect("ordinary Trash behavior remains unchanged");
+    }
 }
 
 #[tauri::command]
@@ -3789,9 +3965,11 @@ async fn send_desktop_notification(
                 if action == "__closed" {
                     return;
                 }
-                if let Some(window) = action_app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
+                if !notification_has_reader_target(&notification) {
+                    if let Some(window) = action_app.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
                 }
                 let _ = action_app.emit("notification-action", notification);
             });
@@ -3957,7 +4135,18 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .on_menu_event(|app, event| {
-            let _ = app.emit("menu-action", event.id().as_ref());
+            let action = event.id().as_ref();
+            let message_action = matches!(action, "reply" | "forward" | "archive" | "spam");
+            let focused = message_action.then(|| {
+                app.webview_windows()
+                    .into_values()
+                    .find(|window| window.is_focused().unwrap_or(false))
+            });
+            if let Some(Some(window)) = focused {
+                let _ = window.emit("menu-action", action);
+            } else if let Some(main) = app.get_webview_window("main") {
+                let _ = main.emit("menu-action", action);
+            }
         })
         .on_window_event(move |window, event| match event {
             WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. }) => {
@@ -4066,6 +4255,9 @@ pub fn run() {
                     }
                 }));
             if release_smoke_test {
+                oauth_client_id("gmail")?;
+                oauth_client_secret("gmail")?;
+                eprintln!("DAKIA_RELEASE_GOOGLE_OAUTH_CONFIG_OK");
                 eprintln!("DAKIA_RELEASE_SMOKE_TEST_OK");
                 app.handle().exit(0);
                 return Ok(());
@@ -4141,6 +4333,8 @@ pub fn run() {
             add_account,
             add_oauth_account,
             search,
+            search_smart_inbox,
+            conversation_for_target,
             search_remote,
             set_message_category,
             set_message_starred,

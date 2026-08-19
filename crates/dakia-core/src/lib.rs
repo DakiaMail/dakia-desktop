@@ -19,5 +19,6 @@ pub use oauth::{OAuthFlow, OAuthProviderConfig, OAuthTokens};
 pub use provider::{ProviderPreset, Security};
 pub use storage::{
     Attachment, AttachmentPresentation, CachedMessageContent, MailConversation,
-    MailConversationPage, MailCursor, MailRebuildJob, MailSummary, SearchQuery, Store,
+    MailConversationPage, MailCursor, MailRebuildJob, MailSummary, SearchQuery, SmartInboxPage,
+    SmartInboxQuery, SmartInboxSectionPage, Store,
 };

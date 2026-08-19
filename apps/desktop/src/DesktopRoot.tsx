@@ -9,6 +9,7 @@ import "./i18n";
 import "./styles.css";
 import App from "./App";
 import { ComposeApp } from "./ComposeApp";
+import { ReaderWindowApp } from "./ReaderWindowApp";
 import { AccountWindowApp, SettingsWindowApp } from "./UtilityApps";
 
 const theme = createTheme({
@@ -45,6 +46,8 @@ export function DesktopRoot() {
   const content =
     view === "compose" ? (
       <ComposeApp />
+    ) : view === "reader" ? (
+      <ReaderWindowApp />
     ) : view === "settings" ? (
       <SettingsWindowApp />
     ) : view === "account" ? (

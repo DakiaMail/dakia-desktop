@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   conversationActionMessages,
   nextMessageAfterAction,
+  removeConcreteMessage,
   restoreMessages,
   restoreThreads,
 } from "./mailActions";
@@ -150,6 +151,44 @@ describe("mail action state", () => {
         (item) => item.id,
       ),
     ).toEqual(["1"]);
+  });
+
+  it("removes only the selected mailbox and UID copy from a conversation", () => {
+    const inboxCopy = {
+      ...message("inbox-copy"),
+      mailbox: "INBOX",
+      uid: 8,
+      thread_id: "thread",
+      message_id: "<duplicate@example.test>",
+    };
+    const archiveCopy = {
+      ...message("archive-copy"),
+      mailbox: "Archive",
+      uid: 12,
+      thread_id: "thread",
+      message_id: "<duplicate@example.test>",
+    };
+    const sibling = {
+      ...message("sibling"),
+      uid: 13,
+      thread_id: "thread",
+      received_at: "2026-07-19T11:00:00Z",
+    };
+    const thread = {
+      id: "account:thread",
+      messages: [inboxCopy, sibling],
+      sourceMessages: [inboxCopy, archiveCopy, sibling],
+      latest: sibling,
+      unread: true,
+      hasAttachments: false,
+      participants: [],
+    } satisfies MailThread;
+
+    const remaining = removeConcreteMessage(thread, inboxCopy)!;
+
+    expect(remaining.sourceMessages).toEqual([archiveCopy, sibling]);
+    expect(remaining.messages).toEqual([archiveCopy, sibling]);
+    expect(remaining.latest).toEqual(sibling);
   });
 
   it("restores a failed conversation once regardless of message count", () => {

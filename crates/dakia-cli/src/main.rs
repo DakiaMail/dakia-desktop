@@ -3,8 +3,8 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use clap::{Args, Parser, Subcommand};
 use dakia_core::{
     ai::{AiConfig, AiProvider, AiService},
-    mailbox_action_destination, remote_mailbox, ComposeMessage, LocalEmailClassifier, MailService,
-    MailboxAction, SearchQuery, Store,
+    mailbox_action_destination, ComposeMessage, LocalEmailClassifier, MailService, MailboxAction,
+    SearchQuery, Store,
 };
 use directories::ProjectDirs;
 use secrecy::SecretString;
@@ -604,7 +604,7 @@ async fn apply_mailbox_action(
         let destination_uid = MailService::new(store.clone())
             .apply_action(
                 &account,
-                &remote_mailbox(&account, &summary.mailbox),
+                &summary.mailbox,
                 u32::try_from(summary.uid).context("stored message has an invalid UID")?,
                 action,
             )
