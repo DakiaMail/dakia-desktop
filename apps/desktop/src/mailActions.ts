@@ -1,6 +1,10 @@
 import type { MailSummary, MailThread } from "./types";
-import { concreteThreadMessages } from "./threads";
+import { concreteThreadMessages, groupMessages } from "./threads";
 
+// Conversation actions deliberately exclude permanent deletion. That operation
+// is only available for one expanded Reader message, never a list, bulk, or
+// native-menu target. Shift+Delete is handled by Reader against that concrete
+// expanded message and therefore does not belong in this conversation union.
 export type MailAction = "archive" | "spam" | "not_spam" | "trash";
 export type MailActionPhase = "exiting" | "restoring";
 
@@ -76,6 +80,49 @@ export function nextMessageAfterAction(
     if (!removedIds.has(messages[index].id)) return messages[index];
   }
   return undefined;
+}
+
+/**
+ * Mailbox and UID identify an IMAP message copy. Message-ID is deliberately
+ * excluded: a conversation can contain copies of the same RFC message in
+ * several mailboxes, and a permanent delete must affect only the selected
+ * copy.
+ */
+export function sameMessageLocator(left: MailSummary, right: MailSummary) {
+  return (
+    left.account_id === right.account_id &&
+    left.mailbox === right.mailbox &&
+    left.uid === right.uid
+  );
+}
+
+/**
+ * Removes one concrete IMAP copy while rebuilding the derived conversation
+ * fields (deduplicated display rows, latest message, unread state, and
+ * participants) from its remaining copies.
+ */
+export function removeConcreteMessage(
+  thread: MailThread,
+  target: MailSummary,
+): MailThread | undefined {
+  const sourceMessages = concreteThreadMessages(thread);
+  const remaining = sourceMessages.filter(
+    (message) => !sameMessageLocator(message, target),
+  );
+  if (remaining.length === sourceMessages.length) return thread;
+  if (!remaining.length) return undefined;
+
+  return { ...thread, ...groupMessages(remaining)[0] };
+}
+
+export function removeConcreteMessageFromThreads(
+  threads: MailThread[],
+  target: MailSummary,
+) {
+  return threads.flatMap((thread) => {
+    const remaining = removeConcreteMessage(thread, target);
+    return remaining ? [remaining] : [];
+  });
 }
 
 export function restoreMessages(

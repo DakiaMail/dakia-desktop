@@ -6,6 +6,7 @@ import {
   Menu,
   Tooltip,
 } from "@mantine/core";
+import { useHotkeys, type HotkeyItem } from "@mantine/hooks";
 import {
   IconArchive,
   IconArrowBackUp,
@@ -39,7 +40,7 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 import { api, messageContentErrorFromUnknown } from "../api";
-import { confirmNativeAction } from "../nativeFeedback";
+import { confirmNativeAction, showNativeMessage } from "../nativeFeedback";
 import {
   detectTranslationLanguage,
   translateOffline,
@@ -56,9 +57,14 @@ import { splitQuotedText } from "../quotedHistory";
 import { EmptyState } from "./EmptyState";
 import { HtmlMessage } from "./HtmlMessage";
 
+function usesMacDeleteKey() {
+  return /^(Mac|iPhone|iPad|iPod)/i.test(navigator.platform);
+}
+
 type Props = {
   message?: MailSummary;
   messages?: MailSummary[];
+  focusedMessageId?: string;
   accountEmail?: string;
   aiResult?: string;
   aiLoading: boolean;
@@ -67,6 +73,7 @@ type Props = {
   onArchive: () => void;
   onSpam: () => void;
   onTrash: () => void;
+  onPermanentDelete: (message: MailSummary) => Promise<void>;
   onReply: (message: MailSummary) => void;
   onReplyAll: (message: MailSummary) => void;
   onForward: (message: MailSummary) => void;
@@ -81,6 +88,7 @@ type Props = {
 export function Reader({
   message,
   messages,
+  focusedMessageId,
   accountEmail,
   aiResult,
   aiLoading,
@@ -89,6 +97,7 @@ export function Reader({
   onArchive,
   onSpam,
   onTrash,
+  onPermanentDelete,
   onReply,
   onReplyAll,
   onForward,
@@ -114,6 +123,7 @@ export function Reader({
   }>();
   const [translationError, setTranslationError] = useState<string>();
   const translationRequest = useRef(0);
+  const permanentDeleteConfirming = useRef(false);
   const readerScrollRef = useRef<HTMLElement>(null);
   const subjectSentinelRef = useRef<HTMLDivElement>(null);
   const [subjectCompact, setSubjectCompact] = useState(false);
@@ -122,6 +132,11 @@ export function Reader({
     [message, messages],
   );
   const latestMessage = threadMessages.at(-1);
+  const requestedMessageId = threadMessages.some(
+    (threadMessage) => threadMessage.id === focusedMessageId,
+  )
+    ? focusedMessageId
+    : latestMessage?.id;
   const threadKey = latestMessage
     ? `${latestMessage.account_id}:${latestMessage.thread_id || latestMessage.id}`
     : message
@@ -130,21 +145,92 @@ export function Reader({
   const [expandedMessage, setExpandedMessage] = useState<{
     threadKey?: string;
     id?: string;
-  }>(() => ({ threadKey, id: latestMessage?.id }));
+  }>(() => ({ threadKey, id: requestedMessageId }));
   // Render the final chronological message immediately when a new conversation
   // arrives. Keeping the chosen ID in state means later mailbox updates do not
   // interrupt someone reading an earlier message.
   const expandedMessageId =
     expandedMessage?.threadKey === threadKey
       ? expandedMessage?.id
-      : latestMessage?.id;
+      : requestedMessageId;
+  const expandedMessageSummary = threadMessages.find(
+    (threadMessage) => threadMessage.id === expandedMessageId,
+  );
+  const requestPermanentDelete = useCallback(
+    async (target: MailSummary) => {
+      if (actionsDisabled || permanentDeleteConfirming.current) return;
+      permanentDeleteConfirming.current = true;
+      try {
+        const confirmed = await confirmNativeAction(
+          t("reader.permanentDeleteTitle"),
+          t("reader.permanentDeleteBody"),
+          t("actions.permanentlyDelete"),
+        );
+        if (confirmed) await onPermanentDelete(target);
+      } catch (error) {
+        try {
+          await showNativeMessage(
+            t("feedback.permanentDeleteFailed"),
+            String(error),
+            "error",
+          );
+        } catch (feedbackError) {
+          console.error(
+            "Could not show permanent-delete failure",
+            feedbackError,
+          );
+        }
+      } finally {
+        permanentDeleteConfirming.current = false;
+      }
+    },
+    [actionsDisabled, onPermanentDelete, t],
+  );
+  const permanentlyDeleteWithShortcut = (event: KeyboardEvent) => {
+    if (!event.repeat && expandedMessageSummary) {
+      void requestPermanentDelete(expandedMessageSummary);
+    }
+  };
+  const permanentDeleteHotkeys: HotkeyItem[] = [
+    ["shift+Delete", permanentlyDeleteWithShortcut],
+  ];
+  // macOS reports the key labelled Delete as Backspace. Thunderbird uses the
+  // same platform-specific pairing for its Shift+Delete command. Do not even
+  // register it elsewhere: Mantine prevents the default before the handler.
+  if (usesMacDeleteKey()) {
+    permanentDeleteHotkeys.push([
+      "shift+Backspace",
+      permanentlyDeleteWithShortcut,
+    ]);
+  }
+  useHotkeys(permanentDeleteHotkeys);
   useEffect(() => {
-    setExpandedMessage((current) =>
-      current.threadKey === threadKey
-        ? current
-        : { threadKey, id: latestMessage?.id },
-    );
-  }, [threadKey]);
+    setExpandedMessage((current) => {
+      if (current.threadKey !== threadKey)
+        return { threadKey, id: requestedMessageId };
+      if (focusedMessageId && current.id !== requestedMessageId)
+        return { threadKey, id: requestedMessageId };
+      return current;
+    });
+  }, [focusedMessageId, requestedMessageId, threadKey]);
+  const previousThreadMessages = useRef(threadMessages);
+  useEffect(() => {
+    setExpandedMessage((current) => {
+      if (
+        current.threadKey !== threadKey ||
+        !current.id ||
+        threadMessages.some((threadMessage) => threadMessage.id === current.id)
+      )
+        return current;
+      const previousIndex = previousThreadMessages.current.findIndex(
+        (threadMessage) => threadMessage.id === current.id,
+      );
+      const nearest =
+        threadMessages[previousIndex] ?? threadMessages[previousIndex - 1];
+      return { threadKey, id: nearest?.id };
+    });
+    previousThreadMessages.current = threadMessages;
+  }, [threadKey, threadMessages]);
   useEffect(() => {
     setSubjectCompact(false);
     const root = readerScrollRef.current;
@@ -473,6 +559,7 @@ export function Reader({
             onArchive={onArchive}
             onSpam={onSpam}
             onTrash={onTrash}
+            onPermanentDelete={requestPermanentDelete}
             onReply={() => onReply(threadMessage)}
             onReplyAll={() => onReplyAll(threadMessage)}
             onForward={() => onForward(threadMessage)}
@@ -499,6 +586,7 @@ function ThreadMessage({
   onArchive,
   onSpam,
   onTrash,
+  onPermanentDelete,
   onReply,
   onReplyAll,
   onForward,
@@ -518,6 +606,7 @@ function ThreadMessage({
   onArchive: () => void;
   onSpam: () => void;
   onTrash: () => void;
+  onPermanentDelete: (message: MailSummary) => Promise<void>;
   onReply: () => void;
   onReplyAll: () => void;
   onForward: () => void;
@@ -628,7 +717,6 @@ function ThreadMessage({
       setExporting(false);
     }
   };
-
   if (!isExpanded) {
     return (
       <section
@@ -842,6 +930,14 @@ function ThreadMessage({
               disabled={actionsDisabled}
             >
               {t("actions.delete")}
+            </Menu.Item>
+            <Menu.Item
+              color="red"
+              leftSection={<IconTrash size={16} />}
+              onClick={() => void onPermanentDelete(message)}
+              disabled={actionsDisabled}
+            >
+              {t("actions.permanentlyDelete")}
             </Menu.Item>
           </Menu.Dropdown>
         </Menu>

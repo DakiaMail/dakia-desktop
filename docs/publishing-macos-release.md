@@ -27,17 +27,19 @@ The builder:
 
 1. assembles, Developer ID signs, and verifies the Apple Silicon app;
 2. verifies the packaged app and CLI executables, Apple-Silicon architecture,
-   matching Developer ID ownership/version, classifier resources, and legal
-   notices;
+   matching Developer ID ownership/version, classifier resources, legal
+   notices, and compiled Google OAuth configuration without runtime overrides;
 3. runs isolated packaged CLI and app startup checks on the release Mac;
 4. notarizes and staples the app;
 5. rebuilds, notarizes, staples, mounts, and verifies the DMG;
 6. archives that same final app, extracts and repeats the app/CLI acceptance
    checks on the archive contents, then signs the exact archive bytes for Tauri.
 
-The publisher uses immutable versioned R2 paths, anonymously verifies the
-published bytes, validates the updater manifest, and publishes `latest.json`
-only after all artifact checks pass.
+The publisher re-verifies the DMG, cryptographically verifies and extracts the
+updater archive, checks the archived app version and packaged-app acceptance,
+uses immutable versioned R2 paths, anonymously verifies the published bytes,
+validates the updater manifest, and publishes `latest.json` only after all
+artifact checks pass.
 
 After R2 publication is proven, create the signed source tag and a draft GitHub
 Release. Use `release-assets/vX.Y.Z/release-notes.md` as the release body and

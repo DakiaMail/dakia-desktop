@@ -71,6 +71,7 @@ type Props = {
   exitingThreadIds?: Set<string>;
   onQuery: (value: string) => void;
   onOpen: (thread: MailThread) => void;
+  onDoubleOpen: (thread: MailThread) => void;
   onSelect: (ids: string[], checked: boolean) => void;
   onSync: () => void;
   onCompose: () => void;
@@ -115,6 +116,7 @@ export function MailList({
   exitingThreadIds = new Set(),
   onQuery,
   onOpen,
+  onDoubleOpen,
   onSelect,
   onSync,
   onCompose,
@@ -305,6 +307,7 @@ export function MailList({
             selected={selected}
             pendingActions={pendingActions}
             onOpen={onOpen}
+            onDoubleOpen={onDoubleOpen}
             onSelect={onSelect}
             onCategorize={onCategorize}
             onToggleStar={onToggleStar}
@@ -323,6 +326,7 @@ export function MailList({
             selected={selected}
             pendingActions={pendingActions}
             onOpen={onOpen}
+            onDoubleOpen={onDoubleOpen}
             onSelect={onSelect}
             onCategorize={onCategorize}
             onToggleStar={onToggleStar}
@@ -357,6 +361,7 @@ type RowsProps = Pick<
   | "selected"
   | "pendingActions"
   | "onOpen"
+  | "onDoubleOpen"
   | "onSelect"
   | "onCategorize"
   | "onToggleStar"
@@ -412,6 +417,7 @@ function ThreadRows({
   selected,
   pendingActions,
   onOpen,
+  onDoubleOpen,
   onSelect,
   onCategorize,
   onReplyThread,
@@ -587,6 +593,7 @@ function ThreadRows({
             }
             disabled={pending?.phase === "exiting"}
             onClick={() => onOpen(thread)}
+            onDoubleClick={() => onDoubleOpen(thread)}
             onContextMenu={(event) => {
               event.preventDefault();
               setContext({ thread, x: event.clientX, y: event.clientY });
@@ -595,6 +602,7 @@ function ThreadRows({
             <span
               className="mail-check"
               onClick={(event) => event.stopPropagation()}
+              onDoubleClick={(event) => event.stopPropagation()}
             >
               <Checkbox
                 size="xs"
@@ -642,6 +650,7 @@ function ThreadRows({
                     : "actions.star",
                 )}
                 data-active={sourceMessages.some((item) => item.is_flagged)}
+                onDoubleClick={(event) => event.stopPropagation()}
                 onClick={(event) => {
                   event.stopPropagation();
                   onToggleStarThread(

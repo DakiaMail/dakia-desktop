@@ -37,6 +37,10 @@ const mocks = vi.hoisted(() => {
   const desktopNotificationActionHandlers: Array<
     (extra: Record<string, unknown>) => void | Promise<void>
   > = [];
+  const readerMutationHandlers: Array<() => void> = [];
+  const readerFailureHandlers: Array<
+    (failure: { accountId: string }) => void | Promise<void>
+  > = [];
   const accountRemovedHandlers: Array<(event: { accountId: string }) => void> =
     [];
   const accountUpdatedHandlers: Array<(account: Account) => void> = [];
@@ -122,6 +126,7 @@ const mocks = vi.hoisted(() => {
     requestInitialNotificationAccess: vi.fn(async () => undefined),
     sendNewMailNotification: vi.fn(async () => false),
     openComposeWindow: vi.fn(),
+    openReaderWindow: vi.fn(async () => undefined),
     noopListener: vi.fn(async () => unlisten),
     onNativeMenuAction: vi.fn(async (handler: (action: string) => void) => {
       nativeMenuHandlers.push(handler);
@@ -145,6 +150,20 @@ const mocks = vi.hoisted(() => {
     nativeMenuHandlers,
     notificationActionHandlers,
     desktopNotificationActionHandlers,
+    readerMutationHandlers,
+    readerFailureHandlers,
+    onReaderWindowMutated: vi.fn(async (handler: () => void) => {
+      readerMutationHandlers.push(handler);
+      return unlisten;
+    }),
+    onReaderWindowFailed: vi.fn(
+      async (
+        handler: (failure: { accountId: string }) => void | Promise<void>,
+      ) => {
+        readerFailureHandlers.push(handler);
+        return unlisten;
+      },
+    ),
     onNotificationAction: vi.fn(
       async (
         handler: (extra: Record<string, unknown>) => void | Promise<void>,
@@ -192,6 +211,12 @@ vi.mock("./composeWindow", () => ({
   onComposeSent: mocks.noopListener,
   onOutboxChanged: mocks.noopListener,
   openComposeWindow: mocks.openComposeWindow,
+}));
+
+vi.mock("./readerWindow", () => ({
+  onReaderWindowFailed: mocks.onReaderWindowFailed,
+  onReaderWindowMutated: mocks.onReaderWindowMutated,
+  openReaderWindow: mocks.openReaderWindow,
 }));
 
 vi.mock("./nativeFeedback", () => ({
@@ -244,6 +269,9 @@ describe("App read state", () => {
     mocks.nativeMenuHandlers.length = 0;
     mocks.notificationActionHandlers.length = 0;
     mocks.desktopNotificationActionHandlers.length = 0;
+    mocks.readerMutationHandlers.length = 0;
+    mocks.readerFailureHandlers.length = 0;
+    mocks.openReaderWindow.mockClear();
     mocks.accountRemovedHandlers.length = 0;
     mocks.accountUpdatedHandlers.length = 0;
     localStorage.clear();
@@ -432,7 +460,29 @@ describe("App read state", () => {
     expect(mocks.api.content).not.toHaveBeenCalledWith(older.id);
   });
 
-  it("focuses the newest thread message when an older notification is opened", async () => {
+  it("opens a main-list thread in a dedicated window on double-click", async () => {
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const row = await screen.findByText("Unread thread");
+    fireEvent.doubleClick(row.closest("button")!);
+
+    expect(mocks.openReaderWindow).toHaveBeenCalledWith({
+      target: {
+        accountId: mocks.account.id,
+        localMessageId: mocks.message.id,
+        rfcMessageId: undefined,
+        threadId: mocks.message.thread_id,
+        mailbox: "INBOX",
+      },
+      focusedMessageId: mocks.message.id,
+    });
+  });
+
+  it("opens a targeted notification in a dedicated conversation window", async () => {
     const older = {
       ...mocks.message,
       id: "message-notified",
@@ -440,23 +490,6 @@ describe("App read state", () => {
       received_at: "2026-07-19T09:00:00Z",
       snippet: "Notified preview",
     };
-    const latest = {
-      ...mocks.message,
-      id: "message-after-notification",
-      uid: 2,
-      received_at: "2026-07-19T10:00:00Z",
-      snippet: "Newest preview",
-      unsubscribe_kind: "one_click" as const,
-    };
-    mocks.api.search.mockResolvedValue({
-      conversations: groupMessages([latest, older]),
-      nextCursor: null,
-    });
-    mocks.api.content.mockImplementation(async (id: string) => ({
-      body_text: id === latest.id ? "Newest notification body" : "Older body",
-      attachments: [],
-    }));
-
     render(
       <MantineProvider>
         <App />
@@ -470,24 +503,119 @@ describe("App read state", () => {
       await mocks.notificationActionHandlers.at(-1)!({
         accountId: mocks.account.id,
         messageId: older.id,
+        rfcMessageId: "<notified@example.com>",
+        threadId: older.thread_id,
+        count: 1,
       });
     });
 
-    expect(await screen.findByText("Newest notification body")).toBeVisible();
-    expect(mocks.api.content).toHaveBeenCalledWith(latest.id);
-    expect(mocks.api.content).not.toHaveBeenCalledWith(older.id);
-    fireEvent.click(
-      screen
-        .getAllByRole("button", { name: "Star conversation" })
-        .find((element) => element.tagName === "BUTTON")!,
+    expect(mocks.openReaderWindow).toHaveBeenCalledWith({
+      target: {
+        accountId: mocks.account.id,
+        localMessageId: older.id,
+        rfcMessageId: "<notified@example.com>",
+        threadId: older.thread_id,
+        mailbox: "INBOX",
+      },
+      focusedMessageId: older.id,
+    });
+    expect(mocks.windowApi.show).not.toHaveBeenCalled();
+    expect(mocks.windowApi.setFocus).not.toHaveBeenCalled();
+  });
+
+  it("keeps grouped notifications in the main Inbox", async () => {
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    await waitFor(() =>
+      expect(mocks.notificationActionHandlers).not.toHaveLength(0),
+    );
+    await act(async () => {
+      await mocks.notificationActionHandlers.at(-1)!({ count: 2 });
+    });
+
+    expect(mocks.openReaderWindow).not.toHaveBeenCalled();
+    expect(mocks.windowApi.show).toHaveBeenCalled();
+    expect(mocks.windowApi.setFocus).toHaveBeenCalled();
+    expect(mocks.api.search.mock.calls).toEqual(
+      expect.arrayContaining([
+        expect.arrayContaining(["", [mocks.account.id], "INBOX"]),
+      ]),
+    );
+  });
+
+  it("falls back to the main Inbox when a notification reader cannot open", async () => {
+    mocks.openReaderWindow.mockRejectedValueOnce(new Error("window failed"));
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    await waitFor(() =>
+      expect(mocks.notificationActionHandlers).not.toHaveLength(0),
+    );
+    await act(async () => {
+      await mocks.notificationActionHandlers.at(-1)!({
+        accountId: mocks.account.id,
+        messageId: mocks.message.id,
+        threadId: mocks.message.thread_id,
+        count: 1,
+      });
+    });
+
+    expect(mocks.showNativeMessage).toHaveBeenCalled();
+    expect(mocks.windowApi.show).toHaveBeenCalled();
+    expect(mocks.windowApi.setFocus).toHaveBeenCalled();
+  });
+
+  it("returns a failed reader target to its account Inbox", async () => {
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
     );
     await waitFor(() =>
-      expect(mocks.api.setStarred).toHaveBeenCalledWith(latest.id, true),
+      expect(mocks.readerFailureHandlers).not.toHaveLength(0),
     );
-    fireEvent.click(screen.getByRole("button", { name: "Unsubscribe" }));
+
+    await act(async () => {
+      await mocks.readerFailureHandlers.at(-1)!({
+        accountId: mocks.account.id,
+      });
+    });
+
+    expect(mocks.windowApi.show).toHaveBeenCalled();
+    expect(mocks.windowApi.setFocus).toHaveBeenCalled();
+    expect(mocks.api.search.mock.calls).toEqual(
+      expect.arrayContaining([
+        expect.arrayContaining(["", [mocks.account.id], "INBOX"]),
+      ]),
+    );
+  });
+
+  it("refreshes the main mailbox after a reader-window mutation", async () => {
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
     await waitFor(() =>
-      expect(mocks.api.unsubscribe).toHaveBeenCalledWith(latest.id),
+      expect(mocks.readerMutationHandlers).not.toHaveLength(0),
     );
+    const searchesBefore = mocks.api.search.mock.calls.length;
+
+    act(() => mocks.readerMutationHandlers.at(-1)!());
+
+    await waitFor(() =>
+      expect(mocks.api.search.mock.calls.length).toBeGreaterThan(
+        searchesBefore,
+      ),
+    );
+    expect(mocks.api.starredCount).toHaveBeenCalled();
   });
 
   it("paints the first 100 conversations before classifying in the background", async () => {
@@ -1131,6 +1259,232 @@ describe("App read state", () => {
       ),
     );
     expect(within(list).queryByText("Unread thread")).not.toBeInTheDocument();
+  });
+
+  it("permanently deletes only the chosen message copy and focuses its remaining sibling", async () => {
+    const earlier = {
+      ...mocks.message,
+      id: "message-earlier",
+      uid: 40,
+      from_name: "Earlier sender",
+      received_at: "2026-07-19T09:00:00Z",
+    };
+    const latest = {
+      ...mocks.message,
+      id: "message-latest",
+      uid: 41,
+      from_name: "Latest sender",
+      received_at: "2026-07-19T10:00:00Z",
+    };
+    mocks.api.search.mockResolvedValue({
+      conversations: groupMessages([earlier, latest]),
+      nextCursor: null,
+    });
+    mocks.api.content.mockImplementation(async (messageId: string) => ({
+      body_text: messageId === earlier.id ? "Earlier body" : "Latest body",
+      attachments: [],
+    }));
+    mocks.confirmNativeAction.mockResolvedValue(true);
+    mocks.api.action.mockImplementation(async () => {
+      mocks.api.search.mockResolvedValue({
+        conversations: groupMessages([earlier]),
+        nextCursor: null,
+      });
+    });
+
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(
+      (await screen.findByText("Unread thread")).closest("button")!,
+    );
+    expect(await screen.findByText("Latest body")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Permanently delete" }),
+    );
+
+    await waitFor(() =>
+      expect(mocks.api.action).toHaveBeenCalledWith(
+        "account-1",
+        "INBOX",
+        41,
+        "delete",
+      ),
+    );
+    expect(await screen.findByText("Earlier body")).toBeVisible();
+    expect(screen.queryByText("Latest body")).not.toBeInTheDocument();
+    expect(
+      screen.getByText("Message deletion request completed"),
+    ).toBeVisible();
+  });
+
+  it("routes Shift+Delete through confirmation to the exact mailbox locator", async () => {
+    mocks.confirmNativeAction.mockResolvedValue(true);
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(
+      (await screen.findByText("Unread thread")).closest("button")!,
+    );
+    await screen.findByText("Message body");
+    fireEvent.keyDown(document.documentElement, {
+      key: "Delete",
+      shiftKey: true,
+    });
+
+    await waitFor(() =>
+      expect(mocks.api.action).toHaveBeenCalledWith(
+        "account-1",
+        "INBOX",
+        1,
+        "delete",
+      ),
+    );
+    expect(mocks.confirmNativeAction).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a message visible when permanent deletion fails", async () => {
+    mocks.confirmNativeAction.mockResolvedValue(true);
+    mocks.api.action.mockRejectedValueOnce(new Error("offline"));
+
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(
+      (await screen.findByText("Unread thread")).closest("button")!,
+    );
+    expect(await screen.findByText("Message body")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Permanently delete" }),
+    );
+
+    expect(
+      await screen.findByText("Could not permanently delete this message"),
+    ).toBeVisible();
+    expect(screen.getByText("Message body")).toBeVisible();
+    expect(
+      within(document.querySelector(".mail-list-panel")!).getByText(
+        "Unread thread",
+      ),
+    ).toBeVisible();
+  });
+
+  it("clears an invalidated pagination loader after permanent deletion", async () => {
+    const cursor = {
+      received_at: "2026-07-19T09:00:00Z",
+      id: "message-1",
+    };
+    let resolveMore: ((page: MailThreadPage) => void) | undefined;
+    mocks.api.search.mockImplementation(async (...args: unknown[]) => {
+      if (args[6]) {
+        return new Promise<MailThreadPage>((resolve) => {
+          resolveMore = resolve;
+        });
+      }
+      return {
+        conversations: groupMessages([mocks.message]),
+        nextCursor: cursor,
+      };
+    });
+    mocks.confirmNativeAction.mockResolvedValue(true);
+
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const list = document.querySelector<HTMLElement>(".mail-list-panel")!;
+    fireEvent.click(
+      (await within(list).findByText("Unread thread")).closest("button")!,
+    );
+    await screen.findByText("Message body");
+    const scroller = document.querySelector(".mail-scroll") as HTMLDivElement;
+    Object.defineProperties(scroller, {
+      scrollHeight: { configurable: true, value: 2_000 },
+      scrollTop: { configurable: true, value: 1_300 },
+      clientHeight: { configurable: true, value: 500 },
+    });
+    fireEvent.scroll(scroller);
+    await waitFor(() => expect(resolveMore).toBeTypeOf("function"));
+    expect(document.querySelector(".mail-page-loader")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Permanently delete" }),
+    );
+
+    await waitFor(() =>
+      expect(
+        document.querySelector(".mail-page-loader"),
+      ).not.toBeInTheDocument(),
+    );
+    resolveMore!({ conversations: [], nextCursor: null });
+  });
+
+  it("moves to a neighboring conversation after permanently deleting its only message", async () => {
+    const deleted = {
+      ...mocks.message,
+      id: "delete-only-message",
+      uid: 70,
+      thread_id: "delete-only-thread",
+      subject: "Delete this conversation",
+      received_at: "2026-07-19T10:00:00Z",
+    };
+    const neighbor = {
+      ...mocks.message,
+      id: "neighbor-message",
+      uid: 71,
+      thread_id: "neighbor-thread",
+      subject: "Neighbor conversation",
+      received_at: "2026-07-19T09:00:00Z",
+    };
+    mocks.api.search.mockResolvedValue({
+      conversations: groupMessages([deleted, neighbor]),
+      nextCursor: null,
+    });
+    mocks.api.content.mockImplementation(async (messageId: string) => ({
+      body_text: messageId === neighbor.id ? "Neighbor body" : "Deleted body",
+      attachments: [],
+    }));
+    mocks.confirmNativeAction.mockResolvedValue(true);
+    mocks.api.action.mockImplementation(async () => {
+      mocks.api.search.mockResolvedValue({
+        conversations: groupMessages([neighbor]),
+        nextCursor: null,
+      });
+    });
+
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(
+      (await screen.findByText("Delete this conversation")).closest("button")!,
+    );
+    expect(await screen.findByText("Deleted body")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Permanently delete" }),
+    );
+
+    expect(await screen.findByText("Neighbor body")).toBeVisible();
+    expect(
+      screen.getByRole("heading", { name: "Neighbor conversation" }),
+    ).toBeVisible();
   });
 
   it("ignores an out-of-order Smart result after the view changes", async () => {

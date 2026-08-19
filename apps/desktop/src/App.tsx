@@ -21,7 +21,11 @@ import {
 } from "./components/UpdateBanner";
 import {
   conversationActionMessages,
+  nextMessageAfterAction,
+  removeConcreteMessage,
+  removeConcreteMessageFromThreads,
   restoreThreads,
+  sameMessageLocator,
   type MailAction,
   type PendingMailActions,
 } from "./mailActions";
@@ -36,6 +40,12 @@ import {
   requestInitialNotificationAccess,
   sendNewMailNotification,
 } from "./notifications";
+import {
+  onReaderWindowFailed,
+  onReaderWindowMutated,
+  openReaderWindow,
+  type ReaderWindowSeed,
+} from "./readerWindow";
 import {
   onAccountConnected,
   onAccountRemoved,
@@ -160,6 +170,7 @@ export default function App() {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiConnected, setAiConnected] = useState(false);
   const [unsubscribeLoading, setUnsubscribeLoading] = useState(false);
+  const [permanentDeleteLoading, setPermanentDeleteLoading] = useState(false);
   const [pendingActions, setPendingActions] = useState<PendingMailActions>({});
   const [outbox, setOutbox] = useState<MailSummary[]>([]);
   const [starredCount, setStarredCount] = useState(0);
@@ -1019,6 +1030,33 @@ export default function App() {
     let disposed = false;
     let dispose: () => void = () => undefined;
     const openNotification = async (extra: Record<string, unknown>) => {
+      const accountId =
+        typeof extra.accountId === "string" ? extra.accountId : undefined;
+      const messageId =
+        typeof extra.messageId === "string" ? extra.messageId : undefined;
+      const rfcMessageId =
+        typeof extra.rfcMessageId === "string" ? extra.rfcMessageId : undefined;
+      const threadId =
+        typeof extra.threadId === "string" ? extra.threadId : undefined;
+      const count = typeof extra.count === "number" ? extra.count : 0;
+      if (count === 1 && accountId && (messageId || rfcMessageId || threadId)) {
+        try {
+          await openReaderWindow({
+            target: {
+              accountId,
+              localMessageId: messageId,
+              rfcMessageId,
+              threadId,
+              mailbox: "INBOX",
+            },
+            focusedMessageId: messageId,
+          });
+          return;
+        } catch (error) {
+          showError(error);
+        }
+      }
+
       const currentWindow = getCurrentWindow();
       await currentWindow.show();
       await currentWindow.setFocus();
@@ -1027,10 +1065,6 @@ export default function App() {
       setSelected(new Set());
       setAiResult(undefined);
 
-      const accountId =
-        typeof extra.accountId === "string" ? extra.accountId : undefined;
-      const messageId =
-        typeof extra.messageId === "string" ? extra.messageId : undefined;
       const accountIds = accountId
         ? [accountId]
         : accounts.map((account) => account.id);
@@ -1041,14 +1075,8 @@ export default function App() {
       nextCursorRef.current = inbox.nextCursor;
       setHasMore(inbox.nextCursor !== null);
       setThreads(inbox.conversations);
-      const clickedThread = inbox.conversations.find((thread) =>
-        thread.messages.some((message) => message.id === messageId),
-      );
-      setActive(clickedThread?.latest);
-      setActiveThreadSnapshot(clickedThread);
-      if (clickedThread) {
-        void setThreadReadState(clickedThread, true, { silent: true });
-      }
+      setActive(undefined);
+      setActiveThreadSnapshot(undefined);
     };
     void Promise.all([
       onNotificationAction(openNotification).then((listener) =>
@@ -1065,6 +1093,44 @@ export default function App() {
       dispose();
     };
   }, [accounts]);
+
+  useEffect(() => {
+    let dispose: () => void = () => undefined;
+    let disposed = false;
+    void Promise.all([
+      onReaderWindowMutated(() => {
+        void loadMessages();
+        void refreshStarredCount(activeAccounts);
+      }),
+      onReaderWindowFailed(async ({ accountId }) => {
+        try {
+          const currentWindow = getCurrentWindow();
+          await currentWindow.show();
+          await currentWindow.setFocus();
+          setMailbox("INBOX");
+          setQuery("");
+          selectedAccountIdRef.current = accountId;
+          setSelectedAccountId(accountId);
+          setActive(undefined);
+          setActiveThreadSnapshot(undefined);
+          const inbox = await api.search("", [accountId], "INBOX");
+          setThreads(inbox.conversations);
+          nextCursorRef.current = inbox.nextCursor;
+          setHasMore(inbox.nextCursor !== null);
+        } catch (error) {
+          showError(error);
+        }
+      }),
+    ]).then((unlisteners) => {
+      const unlistenAll = () => unlisteners.forEach((unlisten) => unlisten());
+      if (disposed) unlistenAll();
+      else dispose = unlistenAll;
+    });
+    return () => {
+      disposed = true;
+      dispose();
+    };
+  }, [activeAccounts, loadMessages, refreshStarredCount]);
 
   const activeThread = useMemo(
     () =>
@@ -1301,6 +1367,109 @@ export default function App() {
     });
     actionBusyRef.current = false;
     await loadMessages();
+  };
+  const permanentlyDeleteMessage = async (message: MailSummary) => {
+    if (actionBusyRef.current) return;
+    actionBusyRef.current = true;
+    setPermanentDeleteLoading(true);
+    const remainingActiveThread = activeThread
+      ? removeConcreteMessage(activeThread, message)
+      : undefined;
+    const replacementThread =
+      activeThread && !remainingActiveThread
+        ? (displayedThreads
+            .slice(
+              displayedThreads.findIndex(
+                (thread) => thread.id === activeThread.id,
+              ) + 1,
+            )
+            .find((thread) => thread.id !== activeThread.id) ??
+          displayedThreads
+            .slice(
+              0,
+              displayedThreads.findIndex(
+                (thread) => thread.id === activeThread.id,
+              ),
+            )
+            .reverse()
+            .find((thread) => thread.id !== activeThread.id))
+        : undefined;
+    try {
+      await api.action(
+        message.account_id,
+        message.mailbox,
+        message.uid,
+        "delete",
+      );
+      // Prevent an in-flight fetch that still contains this locator from
+      // restoring the message after the server has deleted it. Do this only
+      // after success so a failed delete cannot strand an invalidated load in
+      // its loading state.
+      loadRequestIdRef.current += 1;
+      smartLoadRequestIdRef.current += 1;
+      loadingMoreRef.current = false;
+      setLoadingMore(false);
+      smartLoadingMoreRef.current.clear();
+      setThreads((current) =>
+        removeConcreteMessageFromThreads(current, message),
+      );
+      setSmartSections(
+        (current) =>
+          Object.fromEntries(
+            smartSectionIds.map((id) => [
+              id,
+              {
+                ...current[id],
+                loadingMore: false,
+                threads: removeConcreteMessageFromThreads(
+                  current[id].threads,
+                  message,
+                ),
+              },
+            ]),
+          ) as Record<SmartSectionId, SmartSection>,
+      );
+      setRetainedSmartThreads((current) => {
+        const next = new Map(current);
+        for (const [id, retained] of next) {
+          const thread = removeConcreteMessage(retained.thread, message);
+          if (thread) next.set(id, { ...retained, thread });
+          else next.delete(id);
+        }
+        return next;
+      });
+      setActive((current) => {
+        if (!current || !sameMessageLocator(current, message)) return current;
+        if (!remainingActiveThread) return replacementThread?.latest;
+        return (
+          nextMessageAfterAction(
+            activeThread?.messages ?? [],
+            current,
+            new Set([message.id]),
+          ) ?? remainingActiveThread.latest
+        );
+      });
+      setActiveThreadSnapshot((current) => {
+        if (!current) return current;
+        const thread = removeConcreteMessage(current, message);
+        return thread ?? replacementThread;
+      });
+      if (!remainingActiveThread && activeThread) {
+        setSelected((current) => {
+          const next = new Set(current);
+          next.delete(activeThread.id);
+          return next;
+        });
+      }
+      setAiResult(undefined);
+      showStatus(t("feedback.permanentDeleteSuccess"));
+      await loadMessages();
+    } catch {
+      showStatus(t("feedback.permanentDeleteFailed"), "error");
+    } finally {
+      actionBusyRef.current = false;
+      setPermanentDeleteLoading(false);
+    }
   };
   const runSummary = async () => {
     if (!targets.length) return;
@@ -1777,6 +1946,7 @@ export default function App() {
               `⇧⌘F  ${t("actions.forward")}`,
               `⇧⌘A  ${t("shortcuts.archive")}`,
               `⇧⌘J  ${t("shortcuts.spam")}`,
+              `⇧⌫  ${t("shortcuts.permanentlyDelete")}`,
               `⌘,  ${t("settings.title")}`,
             ].join("\n"),
           );
@@ -2063,6 +2233,20 @@ export default function App() {
           setAiResult(undefined);
           void setThreadReadState(thread, true, { silent: true });
         }}
+        onDoubleOpen={(thread) => {
+          const focused = thread.latest;
+          const seed: ReaderWindowSeed = {
+            target: {
+              accountId: focused.account_id,
+              localMessageId: focused.id,
+              rfcMessageId: focused.message_id ?? undefined,
+              threadId: thread.threadId ?? focused.thread_id,
+              mailbox,
+            },
+            focusedMessageId: focused.id,
+          };
+          void openReaderWindow(seed).catch(showError);
+        }}
         onSelect={select}
         onSync={() => void sync()}
         onCompose={openCompose}
@@ -2081,7 +2265,7 @@ export default function App() {
         onLoadMore={() => void loadMoreMessages()}
         onLoadMoreSmart={(id) => void loadMoreSmartSection(id)}
         pendingActions={pendingActions}
-        actionsDisabled={actionBusy}
+        actionsDisabled={actionBusy || permanentDeleteLoading}
         searchRef={searchRef}
       />
       <Reader
@@ -2093,7 +2277,7 @@ export default function App() {
         aiResult={aiResult}
         aiLoading={aiLoading}
         aiConnected={aiConnected}
-        actionsDisabled={actionBusy}
+        actionsDisabled={actionBusy || permanentDeleteLoading}
         onArchive={() => void applyAction("archive")}
         onSpam={() =>
           void applyAction(
@@ -2101,6 +2285,7 @@ export default function App() {
           )
         }
         onTrash={() => void applyAction("trash")}
+        onPermanentDelete={permanentlyDeleteMessage}
         onReply={(message) => void openReplyForMessage(message)}
         onReplyAll={(message) => void openReplyForMessage(message, true)}
         onForward={(message) => void openForwardForMessage(message)}
