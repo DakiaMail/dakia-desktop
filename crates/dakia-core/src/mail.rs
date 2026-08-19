@@ -1460,9 +1460,82 @@ impl MailService {
         uid: u32,
         action: MailboxAction,
     ) -> Result<Option<u32>> {
+        let (remote_name, expected_uid_validity) = if matches!(action, MailboxAction::Delete) {
+            let state = self
+                .store
+                .mailbox_catalog_state(account.id, mailbox)
+                .await?
+                .context("mailbox catalogue is not initialized")?;
+            (state.remote_name, Some(state.uid_validity))
+        } else {
+            (remote_mailbox(account, mailbox), None)
+        };
         let secret = self.credentials.secret(account).await?;
         let mut client = ImapClient::connect(account).await?;
-        client.authenticate(account, &secret).await?;
+        Self::apply_action_with_client(
+            &mut client,
+            account,
+            &secret,
+            &remote_name,
+            uid,
+            action,
+            expected_uid_validity,
+        )
+        .await
+    }
+
+    async fn apply_action_with_client<S>(
+        client: &mut ImapClient<S>,
+        account: &Account,
+        secret: &str,
+        mailbox: &str,
+        uid: u32,
+        action: MailboxAction,
+        expected_uid_validity: Option<i64>,
+    ) -> Result<Option<u32>>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        client.authenticate(account, secret).await?;
+
+        if matches!(action, MailboxAction::Delete) {
+            let capabilities = client.command("CAPABILITY").await?;
+            if !supports_uidplus(&capabilities) {
+                let _ = client.command("LOGOUT").await;
+                bail!("permanent deletion requires IMAP UIDPLUS support");
+            }
+            let selected = client
+                .command(&format!("SELECT {}", quote_imap(mailbox)))
+                .await?;
+            let identity = parse_uid_validity(&selected)
+                .context("IMAP server omitted UIDVALIDITY after SELECT")
+                .and_then(|current| {
+                    verify_mailbox_uid_validity(
+                        current,
+                        expected_uid_validity.context("mailbox catalogue is not initialized")?,
+                        "permanently deleting",
+                    )
+                });
+            if let Err(error) = identity {
+                let _ = client.command("LOGOUT").await;
+                return Err(error);
+            }
+            client
+                .command(&format!("UID STORE {uid} +FLAGS.SILENT (\\Deleted)"))
+                .await?;
+            if let Err(error) = client.command(&format!("UID EXPUNGE {uid}")).await {
+                // UID EXPUNGE can be rejected after STORE succeeded. Avoid
+                // leaving the message armed for a later unrelated expunge.
+                let _ = client
+                    .command(&format!("UID STORE {uid} -FLAGS.SILENT (\\Deleted)"))
+                    .await;
+                let _ = client.command("LOGOUT").await;
+                return Err(error);
+            }
+            let _ = client.command("LOGOUT").await;
+            return Ok(None);
+        }
+
         client
             .command(&format!("SELECT {}", quote_imap(mailbox)))
             .await?;
@@ -1477,14 +1550,7 @@ impl MailService {
                     "Trash"
                 }
             }
-            MailboxAction::Delete => {
-                client
-                    .command(&format!("UID STORE {uid} +FLAGS.SILENT (\\Deleted)"))
-                    .await?;
-                client.command("EXPUNGE").await?;
-                let _ = client.command("LOGOUT").await;
-                return Ok(None);
-            }
+            MailboxAction::Delete => unreachable!("permanent deletion returned above"),
         };
         let response = client
             .command(&format!("UID MOVE {uid} {}", quote_imap(destination)))
@@ -4120,6 +4186,17 @@ fn supports_idle(lines: &[String]) -> bool {
     })
 }
 
+fn supports_uidplus(lines: &[String]) -> bool {
+    lines.iter().any(|line| {
+        let mut tokens = line.split_whitespace();
+        matches!(tokens.next(), Some("*"))
+            && tokens
+                .next()
+                .is_some_and(|response| response.eq_ignore_ascii_case("CAPABILITY"))
+            && tokens.any(|token| token.eq_ignore_ascii_case("UIDPLUS"))
+    })
+}
+
 fn parse_internal_date(lines: &[String]) -> Option<chrono::DateTime<Utc>> {
     lines.iter().find_map(|line| {
         let value = line.split_once("INTERNALDATE \"")?.1.split_once('"')?.0;
@@ -5945,6 +6022,17 @@ mod tests {
         )
     }
 
+    fn duplex_imap_client_and_server() -> (ImapClient<DuplexStream>, DuplexStream) {
+        let (client, server) = duplex(8 * 1024);
+        (
+            ImapClient {
+                reader: BufReader::new(client),
+                tag: 0,
+            },
+            server,
+        )
+    }
+
     async fn scripted_command<R>(reader: &mut BufReader<R>) -> (String, String)
     where
         R: AsyncRead + Unpin,
@@ -6129,6 +6217,105 @@ mod tests {
             )
             .await
             .unwrap();
+
+        let tag = scripted_expect_command(&mut read, &mut transcript, "LOGOUT").await;
+        write
+            .write_all(format!("* BYE done\r\n{tag} OK logout\r\n").as_bytes())
+            .await
+            .unwrap();
+        transcript
+    }
+
+    async fn scripted_permanent_delete_server<S>(
+        server: S,
+        supports_uidplus: bool,
+        uid_validity: u32,
+        expect_mutation: bool,
+        expunge_succeeds: bool,
+    ) -> Vec<String>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let (read, mut write) = split(server);
+        let mut read = BufReader::new(read);
+        let mut transcript = Vec::new();
+
+        let tag = scripted_expect_command(
+            &mut read,
+            &mut transcript,
+            "LOGIN \"reader@example.test\" \"delete secret\"",
+        )
+        .await;
+        write
+            .write_all(format!("{tag} OK authenticated\r\n").as_bytes())
+            .await
+            .unwrap();
+
+        let tag = scripted_expect_command(&mut read, &mut transcript, "CAPABILITY").await;
+        let capability = if supports_uidplus {
+            "IMAP4rev1 UIDPLUS"
+        } else {
+            "IMAP4rev1 XUIDPLUS"
+        };
+        write
+            .write_all(format!("* CAPABILITY {capability}\r\n{tag} OK capability\r\n").as_bytes())
+            .await
+            .unwrap();
+
+        if supports_uidplus {
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+            write
+                .write_all(
+                    format!(
+                        "* 3 EXISTS\r\n* OK [UIDVALIDITY {uid_validity}] mailbox identity\r\n{tag} OK selected\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+
+            if expect_mutation {
+                let tag = scripted_expect_command(
+                    &mut read,
+                    &mut transcript,
+                    "UID STORE 42 +FLAGS.SILENT (\\Deleted)",
+                )
+                .await;
+                write
+                    .write_all(format!("{tag} OK stored\r\n").as_bytes())
+                    .await
+                    .unwrap();
+
+                let tag =
+                    scripted_expect_command(&mut read, &mut transcript, "UID EXPUNGE 42").await;
+                write
+                    .write_all(
+                        format!(
+                            "{tag} {}\r\n",
+                            if expunge_succeeds {
+                                "OK expunged"
+                            } else {
+                                "NO targeted expunge rejected"
+                            }
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                if !expunge_succeeds {
+                    let tag = scripted_expect_command(
+                        &mut read,
+                        &mut transcript,
+                        "UID STORE 42 -FLAGS.SILENT (\\Deleted)",
+                    )
+                    .await;
+                    write
+                        .write_all(format!("{tag} OK restored\r\n").as_bytes())
+                        .await
+                        .unwrap();
+                }
+            }
+        }
 
         let tag = scripted_expect_command(&mut read, &mut transcript, "LOGOUT").await;
         write
@@ -6323,6 +6510,143 @@ mod tests {
                 "LOGOUT",
             ],
             "the probe must not request UID lists, FETCH, flag changes, or any per-message work"
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_permanent_delete_uses_uidplus_and_expunge_for_the_exact_uid() {
+        let account = test_account();
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(scripted_permanent_delete_server(
+            server, true, 77, true, true,
+        ));
+
+        assert_eq!(
+            MailService::apply_action_with_client(
+                &mut client,
+                &account,
+                "delete secret",
+                "INBOX",
+                42,
+                MailboxAction::Delete,
+                Some(77),
+            )
+            .await
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            server.await.unwrap(),
+            vec![
+                "LOGIN \"reader@example.test\" \"delete secret\"",
+                "CAPABILITY",
+                "SELECT \"INBOX\"",
+                "UID STORE 42 +FLAGS.SILENT (\\Deleted)",
+                "UID EXPUNGE 42",
+                "LOGOUT",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_permanent_delete_without_uidplus_makes_no_mutation() {
+        let account = test_account();
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(scripted_permanent_delete_server(
+            server, false, 77, false, true,
+        ));
+
+        let error = MailService::apply_action_with_client(
+            &mut client,
+            &account,
+            "delete secret",
+            "INBOX",
+            42,
+            MailboxAction::Delete,
+            Some(77),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("requires IMAP UIDPLUS support"),
+            "{error:#}"
+        );
+        assert_eq!(
+            server.await.unwrap(),
+            vec![
+                "LOGIN \"reader@example.test\" \"delete secret\"",
+                "CAPABILITY",
+                "LOGOUT",
+            ],
+            "a missing exact UIDPLUS capability must prevent SELECT, STORE, and EXPUNGE"
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_permanent_delete_rejects_a_recycled_uid_before_mutation() {
+        let account = test_account();
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(scripted_permanent_delete_server(
+            server, true, 78, false, true,
+        ));
+
+        let error = MailService::apply_action_with_client(
+            &mut client,
+            &account,
+            "delete secret",
+            "INBOX",
+            42,
+            MailboxAction::Delete,
+            Some(77),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("mailbox identity changed"),
+            "{error:#}"
+        );
+        assert_eq!(
+            server.await.unwrap(),
+            vec![
+                "LOGIN \"reader@example.test\" \"delete secret\"",
+                "CAPABILITY",
+                "SELECT \"INBOX\"",
+                "LOGOUT",
+            ],
+            "a UIDVALIDITY mismatch must prevent STORE and UID EXPUNGE"
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_permanent_delete_restores_deleted_flag_when_uid_expunge_fails() {
+        let account = test_account();
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(scripted_permanent_delete_server(
+            server, true, 77, true, false,
+        ));
+
+        MailService::apply_action_with_client(
+            &mut client,
+            &account,
+            "delete secret",
+            "INBOX",
+            42,
+            MailboxAction::Delete,
+            Some(77),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            server.await.unwrap(),
+            vec![
+                "LOGIN \"reader@example.test\" \"delete secret\"",
+                "CAPABILITY",
+                "SELECT \"INBOX\"",
+                "UID STORE 42 +FLAGS.SILENT (\\Deleted)",
+                "UID EXPUNGE 42",
+                "UID STORE 42 -FLAGS.SILENT (\\Deleted)",
+                "LOGOUT",
+            ]
         );
     }
 
@@ -9911,6 +10235,19 @@ For you, Alex =E2=80=94 related to your saved topic."
         assert!(!supports_idle(
             &["* CAPABILITY IMAP4rev1 X-NOT-IDLE".into()]
         ));
+    }
+
+    #[test]
+    fn detects_uidplus_only_as_an_exact_capability_token() {
+        assert!(supports_uidplus(&[
+            "* capability IMAP4rev1 uidplus MOVE".into()
+        ]));
+        assert!(!supports_uidplus(&[
+            "* CAPABILITY IMAP4rev1 XUIDPLUS".into()
+        ]));
+        assert!(!supports_uidplus(&[
+            "* OK [CAPABILITY IMAP4rev1 UIDPLUS] authenticated".into()
+        ]));
     }
 
     #[test]

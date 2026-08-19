@@ -18,6 +18,9 @@
     "notification-action": "native",
     "notification-settings-changed": "frontend",
     "outbox-changed": "frontend",
+    "reader-target": "frontend",
+    "reader-window-failed": "frontend",
+    "reader-window-mutated": "frontend",
     "select-account": "frontend",
     "settings-changed": "frontend"
   }

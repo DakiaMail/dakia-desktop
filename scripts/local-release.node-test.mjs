@@ -82,6 +82,7 @@ function writeExecutable(path, source) {
 function createCliContractFixture({
   invalidInputSucceeds = false,
   missingFrameworkRpath = false,
+  missingOauthMarker = false,
 } = {}) {
   const fixture = createStaticAppFixture();
   const { app } = fixture;
@@ -101,9 +102,12 @@ function createCliContractFixture({
 set -eu
 test "\${DAKIA_RELEASE_SMOKE_TEST:-}" = 1
 test -n "\${DAKIA_RELEASE_SMOKE_DATA_DIR:-}"
+test -z "\${DAKIA_GOOGLE_CLIENT_ID:-}"
+test -z "\${DAKIA_GOOGLE_CLIENT_SECRET:-}"
 if [ -n "\${DAKIA_TEST_LAUNCH_PATH_FILE:-}" ]; then
   printf '%s' "$0" > "\$DAKIA_TEST_LAUNCH_PATH_FILE"
 fi
+${missingOauthMarker ? "" : "printf '%s\\\\n' DAKIA_RELEASE_GOOGLE_OAUTH_CONFIG_OK"}
 printf '%s\\n' DAKIA_RELEASE_SMOKE_TEST_OK
 `,
   );
@@ -194,6 +198,18 @@ test("release builder requires tracked human-readable release notes", () => {
   assert.doesNotMatch(script, /printf 'Dakia %s\\n'/);
 });
 
+test("release builder invalidates cached desktop credentials before Tauri compilation", () => {
+  const script = readFileSync(releaseBuilder, "utf8");
+  const cliBundle = script.indexOf("npm run bundle:cli");
+  const desktopClean = script.indexOf(
+    "cargo clean -p dakia-desktop --target aarch64-apple-darwin",
+  );
+  const tauriBuild = script.indexOf('"$root_dir/node_modules/.bin/tauri" build');
+  assert.ok(cliBundle >= 0);
+  assert.ok(desktopClean > cliBundle);
+  assert.ok(tauriBuild > desktopClean);
+});
+
 test("publisher rejects incomplete release assets before requiring publication credentials", () => {
   const result = spawnSync(publisher, ["v0.2.8", tmpdir()], {
     encoding: "utf8",
@@ -205,6 +221,13 @@ test("publisher rejects incomplete release assets before requiring publication c
 
 test("publisher resumes only when immutable public bytes match", () => {
   const script = readFileSync(publisher, "utf8");
+  assert.match(script, /verify-updater-signature\.mjs/);
+  assert.match(script, /tar -xzf "\$apple_update"/);
+  assert.match(
+    script,
+    /verify-macos-release-app\.sh" "\$updater_app"/,
+  );
+  assert.match(script, /Updater app version.*does not match/);
   assert.match(script, /aws s3api get-object/);
   assert.match(script, /cmp -s "\$source" "\$existing"/);
   assert.match(script, /aws s3api put-object/);
@@ -324,6 +347,8 @@ test(
     const badFixture = createCliContractFixture({ invalidInputSucceeds: true });
     const environmentFor = (mockBin) => ({
       PATH: `${mockBin}:${process.env.PATH}`,
+      DAKIA_GOOGLE_CLIENT_ID: "runtime-id-must-not-reach-release-smoke",
+      DAKIA_GOOGLE_CLIENT_SECRET: "runtime-secret-must-not-reach-release-smoke",
     });
     try {
       const goodResult = spawnSync(appVerifier, [goodFixture.app], {
@@ -332,6 +357,8 @@ test(
       });
       assert.equal(goodResult.status, 0, goodResult.stderr);
       assert.match(goodResult.stdout, /startup smoke test passed/);
+      assert.doesNotMatch(goodResult.stdout, /runtime-secret-must-not-reach/);
+      assert.doesNotMatch(goodResult.stderr, /runtime-secret-must-not-reach/);
 
       const badResult = spawnSync(appVerifier, [badFixture.app], {
         encoding: "utf8",
@@ -363,6 +390,27 @@ test(
       assert.match(
         result.stderr,
         /cannot resolve the bundled ONNX Runtime framework/,
+      );
+    } finally {
+      rmSync(fixture.fixtureRoot, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "packaged-app verification rejects a missing compiled Google OAuth marker",
+  { skip: process.platform !== "darwin" },
+  () => {
+    const fixture = createCliContractFixture({ missingOauthMarker: true });
+    try {
+      const result = spawnSync(appVerifier, [fixture.app], {
+        encoding: "utf8",
+        env: { PATH: `${fixture.mockBin}:${process.env.PATH}` },
+      });
+      assert.notEqual(result.status, 0);
+      assert.match(
+        result.stderr,
+        /missing its compiled Google OAuth configuration/,
       );
     } finally {
       rmSync(fixture.fixtureRoot, { recursive: true, force: true });
@@ -466,7 +514,7 @@ test("Google OAuth preflight keeps the secret out of curl arguments", () => {
   }
 });
 
-test("Google OAuth secret reaches only the Dakia Rust compiler invocation", () => {
+test("Google OAuth secret reaches the Rust library crate that implements OAuth", () => {
   const tempRoot = mkdtempSync(
     join(tmpdir(), "dakia-google-oauth-rustc-test-"),
   );
@@ -474,7 +522,7 @@ test("Google OAuth secret reaches only the Dakia Rust compiler invocation", () =
   const capturedEnvironment = join(tempRoot, "rustc-environment.txt");
   writeFileSync(
     rustcPath,
-    '#!/bin/sh\nprintf "%s|%s" "${DAKIA_GOOGLE_CLIENT_ID:-}" "${DAKIA_GOOGLE_CLIENT_SECRET:-}" > "$DAKIA_TEST_RUSTC_ENV"\n',
+    '#!/bin/sh\nprintf "%s|%s\\n" "${DAKIA_GOOGLE_CLIENT_ID:-}" "${DAKIA_GOOGLE_CLIENT_SECRET:-}" >> "$DAKIA_TEST_RUSTC_ENV"\n',
   );
   chmodSync(rustcPath, 0o755);
   try {
@@ -482,7 +530,7 @@ test("Google OAuth secret reaches only the Dakia Rust compiler invocation", () =
       "/bin/bash",
       [
         "-c",
-        'source "$1"; dakia_load_google_oauth_environment; dakia_prepare_google_oauth_compiler_environment; test -z "$(env | grep ^DAKIA_GOOGLE_CLIENT_)"; "$RUSTC_WRAPPER" "$2" --crate-type bin --crate-name dakia_desktop; dakia_clear_google_oauth_compiler_environment',
+        'source "$1"; dakia_load_google_oauth_environment; dakia_prepare_google_oauth_compiler_environment; test -z "$(env | grep ^DAKIA_GOOGLE_CLIENT_)"; "$RUSTC_WRAPPER" "$2" --crate-type rlib --crate-name dakia_desktop_lib; "$RUSTC_WRAPPER" "$2" --crate-type bin --crate-name dakia_desktop; "$RUSTC_WRAPPER" "$2" --crate-type rlib --crate-name third_party_dependency; dakia_clear_google_oauth_compiler_environment',
         "bash",
         releaseEnvironment,
         rustcPath,
@@ -500,8 +548,10 @@ test("Google OAuth secret reaches only the Dakia Rust compiler invocation", () =
     assert.equal(result.status, 0, result.stderr);
     assert.equal(
       readFileSync(capturedEnvironment, "utf8"),
-      "test-client|injected-secret",
+      "test-client|injected-secret\n|\n|\n",
     );
+    assert.doesNotMatch(result.stdout, /injected-secret/);
+    assert.doesNotMatch(result.stderr, /injected-secret/);
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }

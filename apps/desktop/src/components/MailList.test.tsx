@@ -47,6 +47,8 @@ function renderList(
       flagged: boolean,
     ) => void;
     onCategorize?: Parameters<typeof MailList>[0]["onCategorize"];
+    onOpen?: Parameters<typeof MailList>[0]["onOpen"];
+    onDoubleOpen?: Parameters<typeof MailList>[0]["onDoubleOpen"];
     aiConnected?: boolean;
   } = {},
 ) {
@@ -82,7 +84,8 @@ function renderList(
         onToggleReadThread={handlers.onToggleReadThread}
         onToggleStarThread={handlers.onToggleStarThread}
         onQuery={vi.fn()}
-        onOpen={vi.fn()}
+        onOpen={overrides.onOpen ?? vi.fn()}
+        onDoubleOpen={overrides.onDoubleOpen ?? vi.fn()}
         onSelect={vi.fn()}
         onSync={vi.fn()}
         onCompose={vi.fn()}
@@ -99,6 +102,39 @@ function renderList(
 }
 
 describe("MailList action feedback", () => {
+  it("keeps single-click selection and opens a dedicated reader on double-click", () => {
+    const onOpen = vi.fn();
+    const onDoubleOpen = vi.fn();
+    renderList({}, false, "Inbox", { onOpen, onDoubleOpen });
+
+    const row = screen.getByText("Subject 1").closest("button")!;
+    fireEvent.click(row);
+    fireEvent.doubleClick(row);
+
+    expect(onOpen).toHaveBeenCalled();
+    expect(onDoubleOpen).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "account:1" }),
+    );
+  });
+
+  it("does not double-open from the row selection control", () => {
+    const onDoubleOpen = vi.fn();
+    renderList({}, false, "Inbox", { onDoubleOpen });
+
+    fireEvent.doubleClick(screen.getAllByLabelText("Select")[0]);
+
+    expect(onDoubleOpen).not.toHaveBeenCalled();
+  });
+
+  it("does not double-open from the row star control", () => {
+    const onDoubleOpen = vi.fn();
+    renderList({}, false, "Inbox", { onDoubleOpen });
+
+    fireEvent.doubleClick(document.querySelector(".mail-star")!);
+
+    expect(onDoubleOpen).not.toHaveBeenCalled();
+  });
+
   it("keeps batch AI actions hidden even when a provider is connected", () => {
     renderList({}, false, "Inbox", { aiConnected: true });
 
@@ -142,6 +178,7 @@ describe("MailList action feedback", () => {
           onToggleStarThread={vi.fn()}
           onQuery={vi.fn()}
           onOpen={vi.fn()}
+          onDoubleOpen={vi.fn()}
           onSelect={vi.fn()}
           onSync={vi.fn()}
           onCompose={vi.fn()}
@@ -230,6 +267,7 @@ describe("MailList action feedback", () => {
           onToggleStarThread={vi.fn()}
           onQuery={vi.fn()}
           onOpen={vi.fn()}
+          onDoubleOpen={vi.fn()}
           onSelect={onSelect}
           onSync={vi.fn()}
           onCompose={vi.fn()}
@@ -328,6 +366,7 @@ describe("MailList action feedback", () => {
           onToggleStarThread={vi.fn()}
           onQuery={vi.fn()}
           onOpen={vi.fn()}
+          onDoubleOpen={vi.fn()}
           onSelect={vi.fn()}
           onSync={vi.fn()}
           onCompose={vi.fn()}
@@ -404,6 +443,7 @@ describe("MailList action feedback", () => {
           onToggleStarThread={vi.fn()}
           onQuery={vi.fn()}
           onOpen={vi.fn()}
+          onDoubleOpen={vi.fn()}
           onSelect={vi.fn()}
           onSync={vi.fn()}
           onCompose={vi.fn()}

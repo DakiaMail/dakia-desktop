@@ -216,6 +216,25 @@ pub struct MailConversationPage {
     pub next_cursor: Option<MailCursor>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartInboxSectionPage {
+    pub id: String,
+    pub conversations: Vec<MailConversation>,
+    pub next_cursor: Option<MailCursor>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SmartInboxPage {
+    pub sections: Vec<SmartInboxSectionPage>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct SmartInboxQuery {
+    pub account_ids: Vec<AccountId>,
+    pub limit: Option<u32>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ThreadingHeaders {
     pub message_id: Option<String>,
@@ -319,6 +338,23 @@ pub struct SearchQuery {
     pub category: Option<String>,
     pub limit: Option<u32>,
     pub cursor: Option<MailCursor>,
+}
+
+/// A durable conversation locator for surfaces that can outlive a concrete
+/// mailbox/UID move. Resolution deliberately remains account-scoped and
+/// fail-closed when a logical RFC Message-ID appears in multiple threads.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationTarget {
+    pub account_id: AccountId,
+    #[serde(default)]
+    pub local_message_id: Option<String>,
+    #[serde(default)]
+    pub rfc_message_id: Option<String>,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub mailbox: Option<String>,
 }
 
 #[derive(FromRow)]
@@ -616,10 +652,13 @@ impl Store {
             sqlx::query("ALTER TABLE messages ADD COLUMN thread_id TEXT")
                 .execute(&self.pool)
                 .await?;
-            sqlx::query("UPDATE messages SET thread_id = id WHERE thread_id IS NULL")
-                .execute(&self.pool)
-                .await?;
         }
+        // An interrupted legacy migration can leave the nullable column in
+        // place before its backfill commits. Repair those rows on every open,
+        // before indexes or thread rebuilding attempt to read the value.
+        sqlx::query("UPDATE messages SET thread_id = id WHERE thread_id IS NULL")
+            .execute(&self.pool)
+            .await?;
         if !columns.iter().any(|column| column.1 == "threading_scanned") {
             // Rows that predate threading support must be header-backfilled.
             // New rows are written with threading_scanned=1 by persist_message.
@@ -632,6 +671,13 @@ impl Store {
         sqlx::query("CREATE INDEX IF NOT EXISTS messages_account_thread ON messages(account_id, thread_id, received_at)")
             .execute(&self.pool)
             .await?;
+        for statement in [
+            "CREATE INDEX IF NOT EXISTS messages_smart_representative ON messages(account_id, mailbox, thread_id, received_at DESC, id DESC)",
+            "CREATE INDEX IF NOT EXISTS messages_thread_flagged ON messages(account_id, thread_id) WHERE is_flagged = 1",
+            "CREATE INDEX IF NOT EXISTS messages_thread_unread ON messages(account_id, thread_id, mailbox) WHERE is_read = 0",
+        ] {
+            sqlx::query(statement).execute(&self.pool).await?;
+        }
         sqlx::query("CREATE INDEX IF NOT EXISTS messages_threading_backfill ON messages(account_id, mailbox, threading_scanned, received_at DESC)")
             .execute(&self.pool)
             .await?;
@@ -2540,6 +2586,140 @@ impl Store {
         Ok(self.search_conversation_page(query).await?.conversations)
     }
 
+    /// Resolves a notification or deep-link target without applying list
+    /// pagination. A concrete local ID wins while it remains valid; a moved
+    /// message can fall back to its RFC Message-ID, then its supplied thread
+    /// ID. A local ID found under another account, or an RFC Message-ID that
+    /// spans multiple threads, is never allowed to select a conversation.
+    pub async fn conversation_for_target(
+        &self,
+        target: &ConversationTarget,
+    ) -> Result<Option<MailConversation>> {
+        let account_id = target.account_id.to_string();
+        if let Some(local_message_id) = target
+            .local_message_id
+            .as_deref()
+            .filter(|message_id| !message_id.trim().is_empty())
+        {
+            if let Some(message) = self.message(local_message_id).await? {
+                if message.account_id != account_id || !target_allows_mailbox(&message, target) {
+                    return Ok(None);
+                }
+                let rfc_matches = target
+                    .rfc_message_id
+                    .as_deref()
+                    .and_then(normalize_message_id)
+                    .is_none_or(|expected| {
+                        message
+                            .message_id
+                            .as_deref()
+                            .and_then(normalize_message_id)
+                            .as_deref()
+                            == Some(expected.as_str())
+                    });
+                let thread_matches = target
+                    .thread_id
+                    .as_deref()
+                    .filter(|thread_id| !thread_id.trim().is_empty())
+                    .is_none_or(|thread_id| message.thread_id == thread_id);
+                if rfc_matches && thread_matches {
+                    return self
+                        .complete_conversation(
+                            &message.account_id,
+                            &message.thread_id,
+                            target.mailbox.as_deref(),
+                        )
+                        .await;
+                }
+            }
+        }
+
+        if let Some(rfc_message_id) = target
+            .rfc_message_id
+            .as_deref()
+            .and_then(normalize_message_id)
+        {
+            let candidates = sqlx::query_as::<_, MailSummary>("SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE account_id = ? AND LOWER(TRIM(message_id)) = ?")
+                .bind(&account_id)
+                .bind(format!("<{rfc_message_id}>"))
+                .fetch_all(&self.pool)
+                .await?;
+            let thread_ids = candidates
+                .into_iter()
+                .filter(|message| target_allows_mailbox(message, target))
+                .filter(|message| {
+                    message
+                        .message_id
+                        .as_deref()
+                        .and_then(normalize_message_id)
+                        .as_deref()
+                        == Some(rfc_message_id.as_str())
+                })
+                .map(|message| message.thread_id)
+                .collect::<HashSet<_>>();
+            match thread_ids.len() {
+                0 => {}
+                1 => {
+                    let thread_id = thread_ids
+                        .into_iter()
+                        .next()
+                        .expect("one RFC Message-ID match has one thread");
+                    return self
+                        .complete_conversation(&account_id, &thread_id, target.mailbox.as_deref())
+                        .await;
+                }
+                _ => return Ok(None),
+            }
+        }
+
+        if let Some(thread_id) = target
+            .thread_id
+            .as_deref()
+            .filter(|thread_id| !thread_id.trim().is_empty())
+        {
+            let exists = sqlx::query_as::<_, MailSummary>("SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE account_id = ? AND thread_id = ? ORDER BY received_at, id")
+                .bind(&account_id)
+                .bind(thread_id)
+                .fetch_all(&self.pool)
+                .await?
+                .into_iter()
+                .any(|message| target_allows_mailbox(&message, target));
+            if exists {
+                return self
+                    .complete_conversation(&account_id, thread_id, target.mailbox.as_deref())
+                    .await;
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn complete_conversation(
+        &self,
+        account_id: &str,
+        thread_id: &str,
+        mailbox: Option<&str>,
+    ) -> Result<Option<MailConversation>> {
+        let mut source_messages = sqlx::query_as::<_, MailSummary>("SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, '' AS body_text, NULL AS body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, '' AS classification_signals FROM messages WHERE account_id = ? AND thread_id = ? ORDER BY received_at, id")
+            .bind(account_id)
+            .bind(thread_id)
+            .fetch_all(&self.pool)
+            .await?;
+        if mailbox.is_some_and(|mailbox| matches!(mailbox_family(mailbox), "Spam" | "Trash")) {
+            let mailbox = mailbox_family(mailbox.unwrap_or_default());
+            source_messages.retain(|message| mailbox_family(&message.mailbox) == mailbox);
+        } else {
+            source_messages
+                .retain(|message| !matches!(mailbox_family(&message.mailbox), "Spam" | "Trash"));
+        }
+        Ok(mail_conversation_from_sources(
+            account_id.to_owned(),
+            thread_id.to_owned(),
+            source_messages,
+            mailbox,
+        ))
+    }
+
     /// Returns a page of matching conversations. The cursor addresses the
     /// newest matching message for each conversation, not its hydrated
     /// account-wide members, so a thread can never reappear on a later page.
@@ -2615,38 +2795,12 @@ impl Store {
         let conversations = grouped
             .into_iter()
             .filter_map(|((account_id, thread_id), source_messages)| {
-                // Keep every durable locator for mutation fan-out. `messages`
-                // below is only the mailbox-preferred reader/list projection,
-                // so it may intentionally collapse logical Message-ID copies.
-                let messages =
-                    deduplicate_message_copies(source_messages.clone(), query.mailbox.as_deref());
-                let latest = messages.last()?.clone();
-                let mut participants = source_messages
-                    .iter()
-                    .map(|message| {
-                        message
-                            .from_name
-                            .clone()
-                            .unwrap_or_else(|| message.from_address.clone())
-                    })
-                    .collect::<HashSet<_>>()
-                    .into_iter()
-                    .collect::<Vec<_>>();
-                participants.sort();
-                Some(MailConversation {
-                    id: format!("{account_id}:{thread_id}"),
+                mail_conversation_from_sources(
                     account_id,
                     thread_id,
-                    message_count: messages.len(),
-                    unread: source_messages.iter().any(|message| !message.is_read),
-                    has_attachments: source_messages
-                        .iter()
-                        .any(|message| message.has_attachments),
-                    participants,
-                    latest,
-                    messages,
                     source_messages,
-                })
+                    query.mailbox.as_deref(),
+                )
             })
             .collect::<Vec<_>>();
         let conversations = conversations
@@ -2668,6 +2822,201 @@ impl Store {
                 .collect(),
             next_cursor,
         })
+    }
+
+    /// Loads the initial Smart Inbox sections in one SQLite statement and
+    /// hydrates the union of their selected conversations once. Section
+    /// pagination continues through `search_conversation_page` so cursors keep
+    /// the same public meaning after the initial page.
+    pub async fn search_smart_inbox(&self, query: &SmartInboxQuery) -> Result<SmartInboxPage> {
+        const SECTION_IDS: [&str; 7] = [
+            "starred",
+            "people",
+            "transactions",
+            "notifications",
+            "newsletters",
+            "other",
+            "seen",
+        ];
+        let limit = query.limit.unwrap_or(3).clamp(1, 100) as usize;
+        if query.account_ids.is_empty() {
+            return Ok(SmartInboxPage {
+                sections: SECTION_IDS
+                    .into_iter()
+                    .map(|id| SmartInboxSectionPage {
+                        id: id.to_owned(),
+                        conversations: Vec::new(),
+                        next_cursor: None,
+                    })
+                    .collect(),
+            });
+        }
+
+        let account_placeholders = vec!["?"; query.account_ids.len()].join(",");
+        let sql = format!(
+            r#"WITH scoped AS (
+                SELECT m.id, m.account_id, m.thread_id, m.received_at, m.category,
+                    ROW_NUMBER() OVER (PARTITION BY m.account_id, m.thread_id ORDER BY m.received_at DESC, m.id DESC) AS thread_rank,
+                    MAX(CASE WHEN m.is_read = 0 THEN 1 ELSE 0 END) OVER (PARTITION BY m.account_id, m.thread_id) AS any_unread
+                FROM messages m
+                WHERE m.account_id IN ({account_placeholders}) AND m.mailbox = 'INBOX'
+            ), thread_flags AS (
+                SELECT account_id, thread_id, 1 AS any_flagged
+                FROM messages
+                WHERE account_id IN ({account_placeholders}) AND is_flagged = 1
+                GROUP BY account_id, thread_id
+            ), representatives AS (
+                SELECT scoped.id, scoped.account_id, scoped.thread_id, scoped.received_at, scoped.category, scoped.any_unread,
+                    COALESCE(thread_flags.any_flagged, 0) AS any_flagged
+                FROM scoped
+                LEFT JOIN thread_flags USING (account_id, thread_id)
+                WHERE scoped.thread_rank = 1
+            ), sectioned AS (
+                SELECT 'starred' AS section_id, id, account_id, thread_id, received_at FROM representatives WHERE any_flagged = 1
+                UNION ALL
+                SELECT category AS section_id, id, account_id, thread_id, received_at FROM representatives
+                    WHERE any_flagged = 0 AND any_unread = 1 AND category IN ('people', 'transactions', 'notifications', 'newsletters', 'other')
+                UNION ALL
+                SELECT 'seen' AS section_id, id, account_id, thread_id, received_at FROM representatives WHERE any_unread = 0
+            ), ranked AS (
+                SELECT section_id, id, account_id, thread_id, received_at,
+                    ROW_NUMBER() OVER (PARTITION BY section_id ORDER BY received_at DESC, id DESC) AS section_rank
+                FROM sectioned
+            )
+            SELECT section_id, id, account_id, thread_id, received_at
+            FROM ranked WHERE section_rank <= ?
+            ORDER BY section_id, section_rank"#
+        );
+        let mut statement = sqlx::query_as::<_, SmartConversationMatch>(&sql);
+        for account_id in &query.account_ids {
+            statement = statement.bind(account_id.to_string());
+        }
+        for account_id in &query.account_ids {
+            statement = statement.bind(account_id.to_string());
+        }
+        let matches = statement
+            .bind((limit + 1) as i64)
+            .fetch_all(&self.pool)
+            .await?;
+
+        let mut by_section: HashMap<String, Vec<SmartConversationMatch>> = HashMap::new();
+        for candidate in matches {
+            by_section
+                .entry(candidate.section_id.clone())
+                .or_default()
+                .push(candidate);
+        }
+        let mut selected = HashMap::new();
+        let mut next_cursors = HashMap::new();
+        let mut keys = Vec::new();
+        for section_id in SECTION_IDS {
+            let mut candidates = by_section.remove(section_id).unwrap_or_default();
+            let has_more = candidates.len() > limit;
+            candidates.truncate(limit);
+            let next_cursor = has_more.then(|| {
+                let last = candidates
+                    .last()
+                    .expect("a Smart section with more results has a cursor source");
+                MailCursor {
+                    received_at: last.received_at,
+                    id: last.id.clone(),
+                }
+            });
+            keys.extend(
+                candidates
+                    .iter()
+                    .map(|candidate| (candidate.account_id.clone(), candidate.thread_id.clone())),
+            );
+            next_cursors.insert(section_id.to_owned(), next_cursor);
+            selected.insert(section_id.to_owned(), candidates);
+        }
+        keys.sort();
+        keys.dedup();
+        let conversations = self
+            .hydrate_conversations_by_keys(&keys, Some("INBOX"))
+            .await?;
+
+        Ok(SmartInboxPage {
+            sections: SECTION_IDS
+                .into_iter()
+                .map(|section_id| SmartInboxSectionPage {
+                    id: section_id.to_owned(),
+                    conversations: selected
+                        .remove(section_id)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter_map(|candidate| {
+                            conversations
+                                .get(&(candidate.account_id, candidate.thread_id))
+                                .cloned()
+                        })
+                        .collect(),
+                    next_cursor: next_cursors.remove(section_id).flatten(),
+                })
+                .collect(),
+        })
+    }
+
+    async fn hydrate_conversations_by_keys(
+        &self,
+        keys: &[(String, String)],
+        preferred_mailbox: Option<&str>,
+    ) -> Result<HashMap<(String, String), MailConversation>> {
+        let mut hydrated = Vec::new();
+        for chunk in keys.chunks(300) {
+            let predicates = vec!["(account_id = ? AND thread_id = ?)"; chunk.len()].join(" OR ");
+            let sql = format!("SELECT m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, '' AS body_text, NULL AS body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, '' AS classification_signals FROM messages m WHERE ({predicates}) ORDER BY m.received_at, m.id");
+            let mut statement = sqlx::query_as::<_, MailSummary>(&sql);
+            for (account_id, thread_id) in chunk {
+                statement = statement.bind(account_id).bind(thread_id);
+            }
+            hydrated.extend(statement.fetch_all(&self.pool).await?);
+        }
+        hydrated.retain(|message| !matches!(mailbox_family(&message.mailbox), "Spam" | "Trash"));
+        let mut grouped: HashMap<(String, String), Vec<MailSummary>> = HashMap::new();
+        for message in hydrated {
+            grouped
+                .entry((message.account_id.clone(), message.thread_id.clone()))
+                .or_default()
+                .push(message);
+        }
+        Ok(grouped
+            .into_iter()
+            .filter_map(|((account_id, thread_id), source_messages)| {
+                let messages =
+                    deduplicate_message_copies(source_messages.clone(), preferred_mailbox);
+                let latest = messages.last()?.clone();
+                let mut participants = source_messages
+                    .iter()
+                    .map(|message| {
+                        message
+                            .from_name
+                            .clone()
+                            .unwrap_or_else(|| message.from_address.clone())
+                    })
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                participants.sort();
+                Some((
+                    (account_id.clone(), thread_id.clone()),
+                    MailConversation {
+                        id: format!("{account_id}:{thread_id}"),
+                        account_id,
+                        thread_id,
+                        message_count: messages.len(),
+                        unread: source_messages.iter().any(|message| !message.is_read),
+                        has_attachments: source_messages
+                            .iter()
+                            .any(|message| message.has_attachments),
+                        participants,
+                        latest,
+                        messages,
+                        source_messages,
+                    },
+                ))
+            })
+            .collect())
     }
 
     async fn search_conversation_matches(&self, query: &SearchQuery) -> Result<Vec<MailSummary>> {
@@ -2952,7 +3301,7 @@ impl Store {
     }
 
     async fn rebuild_threads_for_account(&self, account_id: &str) -> Result<()> {
-        let rows = sqlx::query_as::<_, ThreadRow>("SELECT id, message_id, in_reply_to, reference_ids, subject, from_address, to_addresses, received_at FROM messages WHERE account_id = ? ORDER BY received_at, id")
+        let rows = sqlx::query_as::<_, ThreadRow>("SELECT id, thread_id, message_id, in_reply_to, reference_ids, subject, from_address, to_addresses, received_at FROM messages WHERE account_id = ? ORDER BY received_at, id")
             .bind(account_id)
             .fetch_all(&self.pool)
             .await?;
@@ -3022,18 +3371,75 @@ impl Store {
                     .unwrap_or_else(|| row.id.clone())
             });
         }
-        let mut tx = self.pool.begin().await?;
+        let mut updates = Vec::new();
         for (index, row) in rows.iter().enumerate() {
             let thread_id = &roots[&groups.find(index)];
+            if row.thread_id.as_deref() != Some(thread_id.as_str()) {
+                updates.push((row.id.as_str(), thread_id.as_str()));
+            }
+        }
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.pool.begin().await?;
+        for (id, thread_id) in updates {
             sqlx::query("UPDATE messages SET thread_id = ? WHERE id = ?")
                 .bind(thread_id)
-                .bind(&row.id)
+                .bind(id)
                 .execute(&mut *tx)
                 .await?;
         }
         tx.commit().await?;
         Ok(())
     }
+}
+
+fn target_allows_mailbox(message: &MailSummary, target: &ConversationTarget) -> bool {
+    match target.mailbox.as_deref() {
+        Some(mailbox) if matches!(mailbox_family(mailbox), "Spam" | "Trash") => {
+            mailbox_family(&message.mailbox) == mailbox_family(mailbox)
+        }
+        Some(_) | None => !matches!(mailbox_family(&message.mailbox), "Spam" | "Trash"),
+    }
+}
+
+fn mail_conversation_from_sources(
+    account_id: String,
+    thread_id: String,
+    source_messages: Vec<MailSummary>,
+    preferred_mailbox: Option<&str>,
+) -> Option<MailConversation> {
+    // Keep every durable locator for mutation fan-out. `messages` below is
+    // only the mailbox-preferred reader/list projection, so it may
+    // intentionally collapse logical Message-ID copies.
+    let messages = deduplicate_message_copies(source_messages.clone(), preferred_mailbox);
+    let latest = messages.last()?.clone();
+    let mut participants = source_messages
+        .iter()
+        .map(|message| {
+            message
+                .from_name
+                .clone()
+                .unwrap_or_else(|| message.from_address.clone())
+        })
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    participants.sort();
+    Some(MailConversation {
+        id: format!("{account_id}:{thread_id}"),
+        account_id,
+        thread_id,
+        message_count: messages.len(),
+        unread: source_messages.iter().any(|message| !message.is_read),
+        has_attachments: source_messages
+            .iter()
+            .any(|message| message.has_attachments),
+        participants,
+        latest,
+        messages,
+        source_messages,
+    })
 }
 
 fn deduplicate_message_copies(
@@ -3077,12 +3483,22 @@ fn is_special_mailbox_family(mailbox: &str) -> bool {
 #[derive(FromRow)]
 struct ThreadRow {
     id: String,
+    thread_id: Option<String>,
     message_id: Option<String>,
     in_reply_to: Option<String>,
     reference_ids: Option<String>,
     subject: String,
     from_address: String,
     to_addresses: String,
+    received_at: DateTime<Utc>,
+}
+
+#[derive(FromRow)]
+struct SmartConversationMatch {
+    section_id: String,
+    id: String,
+    account_id: String,
+    thread_id: String,
     received_at: DateTime<Utc>,
 }
 
@@ -5440,6 +5856,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn smart_inbox_batches_all_initial_sections_with_existing_membership_semantics() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let timestamp = Utc::now();
+        let mut messages = Vec::new();
+        for (id, category, is_read, is_flagged, offset) in [
+            ("people-new", "people", false, false, 0),
+            ("people-old", "people", false, false, 1),
+            ("starred", "people", false, true, 2),
+            ("newsletter", "newsletters", false, false, 3),
+            ("seen", "notifications", true, false, 4),
+        ] {
+            let mut item = message(id, "Body");
+            item.id = id.into();
+            item.thread_id = id.into();
+            item.message_id = Some(format!("<{id}@example.com>"));
+            item.account_id = account_id.to_string();
+            item.uid = offset + 1;
+            item.received_at = timestamp - chrono::Duration::minutes(offset);
+            item.category = Some(category.into());
+            item.is_read = is_read;
+            item.is_flagged = is_flagged;
+            messages.push(item);
+        }
+        store.upsert_messages(&messages).await.unwrap();
+
+        let page = store
+            .search_smart_inbox(&SmartInboxQuery {
+                account_ids: vec![account_id],
+                limit: Some(1),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            page.sections
+                .iter()
+                .map(|section| section.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "starred",
+                "people",
+                "transactions",
+                "notifications",
+                "newsletters",
+                "other",
+                "seen",
+            ]
+        );
+        let sections = page
+            .sections
+            .iter()
+            .map(|section| (section.id.as_str(), section))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(sections["starred"].conversations[0].latest.id, "starred");
+        assert_eq!(sections["people"].conversations[0].latest.id, "people-new");
+        assert!(sections["people"].next_cursor.is_some());
+        assert_eq!(
+            sections["newsletters"].conversations[0].latest.id,
+            "newsletter"
+        );
+        assert_eq!(sections["seen"].conversations[0].latest.id, "seen");
+        assert!(sections["transactions"].conversations.is_empty());
+        assert!(sections["notifications"].conversations.is_empty());
+        assert!(sections["other"].conversations.is_empty());
+        assert!(sections["starred"]
+            .conversations
+            .iter()
+            .all(|conversation| conversation.latest.id != "people-new"));
+    }
+
+    #[tokio::test]
     async fn smart_category_pagination_has_no_cursor_at_the_exact_third_page_boundary() {
         let store = Store::in_memory().await.unwrap();
         let account_id = uuid::Uuid::new_v4();
@@ -6006,6 +6493,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn permanent_delete_tombstones_only_the_exact_locator_and_preserves_other_rows() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+
+        let mut deleted = message("Delete me", "target");
+        deleted.id = stable_message_id(account_id, "INBOX", 41);
+        deleted.account_id = account_id.to_string();
+        deleted.uid = 41;
+        let deleted_id = deleted.id.clone();
+
+        let mut inbox_sibling = deleted.clone();
+        inbox_sibling.id = stable_message_id(account_id, "INBOX", 42);
+        inbox_sibling.subject = "Keep inbox sibling".into();
+        inbox_sibling.uid = 42;
+        let inbox_sibling_id = inbox_sibling.id.clone();
+
+        let mut same_uid_other_mailbox = deleted.clone();
+        same_uid_other_mailbox.id = stable_message_id(account_id, "Archive", 41);
+        same_uid_other_mailbox.mailbox = "Archive".into();
+        same_uid_other_mailbox.subject = "Keep archive copy".into();
+        let same_uid_other_mailbox_id = same_uid_other_mailbox.id.clone();
+
+        store
+            .upsert_messages(&[
+                deleted.clone(),
+                inbox_sibling.clone(),
+                same_uid_other_mailbox.clone(),
+            ])
+            .await
+            .unwrap();
+        for (id, body) in [
+            (&deleted_id, "deleted cache"),
+            (&inbox_sibling_id, "inbox cache"),
+            (&same_uid_other_mailbox_id, "archive cache"),
+        ] {
+            store
+                .cache_message_content(id, false, cached_content(body))
+                .await
+                .unwrap();
+        }
+
+        store
+            .move_message(account_id, "INBOX", 41, "", None)
+            .await
+            .unwrap();
+
+        assert!(store
+            .message_by_locator(account_id, "INBOX", 41)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .message_by_locator(account_id, "INBOX", 42)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(store
+            .message_by_locator(account_id, "Archive", 41)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(store
+            .cached_message_content(&deleted_id)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .cached_message_content(&inbox_sibling_id)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(store
+            .cached_message_content(&same_uid_other_mailbox_id)
+            .await
+            .unwrap()
+            .is_some());
+
+        let tombstones: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT mailbox, uid FROM mailbox_action_tombstones WHERE account_id = ? ORDER BY mailbox, uid",
+        )
+        .bind(account_id.to_string())
+        .fetch_all(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(tombstones, vec![("INBOX".into(), 41)]);
+
+        store
+            .save_synced_messages(account_id, "INBOX", &[deleted])
+            .await
+            .unwrap();
+        assert!(store
+            .message_by_locator(account_id, "INBOX", 41)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn recent_catalogue_refresh_preserves_completed_local_flags_on_conflict() {
         let store = Store::in_memory().await.unwrap();
         let account_id = uuid::Uuid::new_v4();
@@ -6204,6 +6790,233 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn conversation_target_falls_back_after_a_move_and_keeps_copy_locators() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let mut inbox = message("Topic", "Inbox copy");
+        inbox.id = "inbox-copy".into();
+        inbox.account_id = account_id.to_string();
+        inbox.message_id = Some("<root@example.test>".into());
+        let mut archive = inbox.clone();
+        archive.id = "archive-copy".into();
+        archive.mailbox = "Archive".into();
+        archive.uid = 2;
+        let mut reply = message("Re: Topic", "Reply");
+        reply.id = "reply".into();
+        reply.account_id = account_id.to_string();
+        reply.uid = 3;
+        reply.message_id = Some("<reply@example.test>".into());
+        reply.in_reply_to = Some("<root@example.test>".into());
+        store
+            .upsert_messages(&[inbox, archive, reply])
+            .await
+            .unwrap();
+        let newer_threads = (0..120)
+            .map(|index| {
+                let mut newer = message("Newer", "Unrelated conversation");
+                newer.id = format!("newer-{index}");
+                newer.account_id = account_id.to_string();
+                newer.uid = 100 + index;
+                newer.message_id = Some(format!("<newer-{index}@example.test>"));
+                newer.thread_id = format!("newer-thread-{index}");
+                newer.received_at += chrono::Duration::minutes(index + 1);
+                newer
+            })
+            .collect::<Vec<_>>();
+        store.upsert_messages(&newer_threads).await.unwrap();
+
+        let by_local = store
+            .conversation_for_target(&ConversationTarget {
+                account_id,
+                local_message_id: Some("inbox-copy".into()),
+                rfc_message_id: None,
+                thread_id: None,
+                mailbox: Some("INBOX".into()),
+            })
+            .await
+            .unwrap()
+            .expect("local target resolves");
+        assert_eq!(by_local.messages.len(), 2);
+        assert_eq!(by_local.source_messages.len(), 3);
+        assert!(by_local
+            .source_messages
+            .iter()
+            .any(|message| message.id == "archive-copy"));
+
+        sqlx::query("DELETE FROM messages WHERE id = 'inbox-copy'")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        let by_rfc = store
+            .conversation_for_target(&ConversationTarget {
+                account_id,
+                local_message_id: Some("stale-local-id-after-move".into()),
+                rfc_message_id: Some(" <ROOT@EXAMPLE.TEST> ".into()),
+                thread_id: None,
+                mailbox: Some("INBOX".into()),
+            })
+            .await
+            .unwrap()
+            .expect("RFC Message-ID fallback resolves");
+        assert_eq!(by_rfc.id, by_local.id);
+        assert_eq!(by_rfc.source_messages.len(), 2);
+
+        let by_thread = store
+            .conversation_for_target(&ConversationTarget {
+                account_id,
+                local_message_id: None,
+                rfc_message_id: None,
+                thread_id: Some(by_local.thread_id.clone()),
+                mailbox: Some("INBOX".into()),
+            })
+            .await
+            .unwrap()
+            .expect("thread fallback resolves");
+        assert_eq!(by_thread.id, by_local.id);
+    }
+
+    #[tokio::test]
+    async fn conversation_target_rejects_mismatches_and_ambiguous_rfc_ids() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let other_account_id = uuid::Uuid::new_v4();
+        let mut account_message = message("Account target", "Owned by account");
+        account_message.id = "account-message".into();
+        account_message.account_id = account_id.to_string();
+        account_message.message_id = Some("<account@example.test>".into());
+        let mut other_message = account_message.clone();
+        other_message.id = "other-account-message".into();
+        other_message.account_id = other_account_id.to_string();
+        other_message.uid = 2;
+        store
+            .upsert_messages(&[account_message.clone(), other_message])
+            .await
+            .unwrap();
+        assert!(store
+            .conversation_for_target(&ConversationTarget {
+                account_id,
+                local_message_id: Some("other-account-message".into()),
+                rfc_message_id: Some("<account@example.test>".into()),
+                thread_id: Some(account_message.thread_id.clone()),
+                mailbox: None,
+            })
+            .await
+            .unwrap()
+            .is_none());
+
+        let mut recycled = account_message.clone();
+        recycled.id = "recycled-local-id".into();
+        recycled.uid = 9;
+        recycled.message_id = Some("<replacement@example.test>".into());
+        recycled.thread_id = "replacement-thread".into();
+        store.upsert_messages(&[recycled]).await.unwrap();
+        let original = store
+            .conversation_for_target(&ConversationTarget {
+                account_id,
+                local_message_id: Some("recycled-local-id".into()),
+                rfc_message_id: Some("<account@example.test>".into()),
+                thread_id: Some(account_message.thread_id.clone()),
+                mailbox: None,
+            })
+            .await
+            .unwrap()
+            .expect("recycled local IDs fall back to the durable target");
+        assert!(original
+            .source_messages
+            .iter()
+            .any(|message| message.id == "account-message"));
+        assert!(!original
+            .source_messages
+            .iter()
+            .any(|message| message.id == "recycled-local-id"));
+
+        let mut first = message("First", "First duplicate");
+        first.id = "first-duplicate".into();
+        first.account_id = account_id.to_string();
+        first.uid = 3;
+        first.message_id = Some("<duplicated@example.test>".into());
+        let mut second = first.clone();
+        second.id = "second-duplicate".into();
+        second.uid = 4;
+        store.upsert_messages(&[first, second]).await.unwrap();
+        // A stale or repaired index can retain duplicate RFC IDs in separate
+        // threads. The resolver must not choose either one by an arbitrary
+        // query order, even when the caller also supplies a thread fallback.
+        sqlx::query("UPDATE messages SET thread_id = 'other-thread' WHERE id = 'second-duplicate'")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        assert!(store
+            .conversation_for_target(&ConversationTarget {
+                account_id,
+                local_message_id: None,
+                rfc_message_id: Some("<DUPLICATED@example.test>".into()),
+                thread_id: Some("other-thread".into()),
+                mailbox: None,
+            })
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn conversation_target_keeps_spam_family_isolated() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let mut inbox = message("Topic", "Inbox");
+        inbox.id = "inbox".into();
+        inbox.account_id = account_id.to_string();
+        inbox.message_id = Some("<inbox@example.test>".into());
+        let mut spam = message("Re: Topic", "Spam reply");
+        spam.id = "spam".into();
+        spam.account_id = account_id.to_string();
+        spam.mailbox = "Spam::Bulk".into();
+        spam.uid = 2;
+        spam.message_id = Some("<spam@example.test>".into());
+        spam.in_reply_to = Some("<inbox@example.test>".into());
+        store.upsert_messages(&[inbox, spam]).await.unwrap();
+
+        assert!(store
+            .conversation_for_target(&ConversationTarget {
+                account_id,
+                local_message_id: None,
+                rfc_message_id: Some("<spam@example.test>".into()),
+                thread_id: None,
+                mailbox: None,
+            })
+            .await
+            .unwrap()
+            .is_none());
+        let spam_only = store
+            .conversation_for_target(&ConversationTarget {
+                account_id,
+                local_message_id: None,
+                rfc_message_id: Some("<spam@example.test>".into()),
+                thread_id: None,
+                mailbox: Some("Spam".into()),
+            })
+            .await
+            .unwrap()
+            .expect("explicit Spam target resolves");
+        assert_eq!(spam_only.messages.len(), 1);
+        assert_eq!(spam_only.source_messages.len(), 1);
+        let nested_spam = store
+            .conversation_for_target(&ConversationTarget {
+                account_id,
+                local_message_id: Some("spam".into()),
+                rfc_message_id: None,
+                thread_id: None,
+                mailbox: Some("Spam::Bulk".into()),
+            })
+            .await
+            .unwrap()
+            .expect("nested Spam target resolves within its family");
+        assert_eq!(nested_spam.messages.len(), 1);
+        assert_eq!(spam_only.messages[0].mailbox, "Spam::Bulk");
+    }
+
+    #[tokio::test]
     async fn threading_header_backfill_is_resumable_and_rebuilds_groups() {
         let store = Store::in_memory().await.unwrap();
         let account_id = uuid::Uuid::new_v4();
@@ -6256,6 +7069,26 @@ mod tests {
             store.search(&SearchQuery::default()).await.unwrap().len(),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn unchanged_thread_rebuild_skips_database_updates() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let mut item = message("Already grouped", "Body");
+        item.id = "stable-thread".into();
+        item.thread_id = "<stable-thread@example.com>".into();
+        item.message_id = Some("<stable-thread@example.com>".into());
+        item.account_id = account_id.to_string();
+        store.upsert_messages(&[item]).await.unwrap();
+        sqlx::query(
+            "CREATE TRIGGER reject_redundant_thread_update BEFORE UPDATE OF thread_id ON messages BEGIN SELECT RAISE(ABORT, 'thread id update was unnecessary'); END",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+
+        store.finish_threading_backfill(account_id).await.unwrap();
     }
 
     #[tokio::test]
