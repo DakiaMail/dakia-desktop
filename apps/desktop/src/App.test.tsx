@@ -15,8 +15,13 @@ import type {
   Account,
   MailRebuildProgress,
   MailSummary,
+  SmartInboxPage,
   MailThreadPage,
 } from "./types";
+
+const smartInboxPage = (
+  sections: SmartInboxPage["sections"],
+): SmartInboxPage => ({ sections });
 
 const mocks = vi.hoisted(() => {
   const unlisten = () => undefined;
@@ -94,6 +99,9 @@ const mocks = vi.hoisted(() => {
       search: vi.fn(async () => ({
         conversations: groupMessages([message]),
         nextCursor: null as import("./types").MailCursor | null,
+      })),
+      smartInbox: vi.fn(async (): Promise<SmartInboxPage> => ({
+        sections: [],
       })),
       searchRemote: vi.fn(async () => []),
       setRead: vi.fn(async () => undefined),
@@ -275,6 +283,7 @@ describe("App read state", () => {
       conversations: groupMessages([mocks.message]),
       nextCursor: null,
     });
+    mocks.api.smartInbox.mockResolvedValue(smartInboxPage([]));
     mocks.api.starredCount.mockResolvedValue(0);
     mocks.api.content.mockResolvedValue({
       body_text: "Message body",
@@ -788,7 +797,7 @@ describe("App read state", () => {
     expect(await screen.findByText("Older thread")).toBeVisible();
   });
 
-  it("uses every account for independently unread Smart sections", async () => {
+  it("loads every account through one Smart Inbox batch", async () => {
     const secondAccount = {
       ...mocks.account,
       id: "account-2",
@@ -799,7 +808,7 @@ describe("App read state", () => {
       () => new Promise(() => undefined),
     );
     mocks.api.accounts.mockResolvedValueOnce([mocks.account, secondAccount]);
-    mocks.api.search.mockResolvedValue({ conversations: [], nextCursor: null });
+    mocks.api.smartInbox.mockResolvedValue(smartInboxPage([]));
 
     render(
       <MantineProvider>
@@ -807,31 +816,13 @@ describe("App read state", () => {
       </MantineProvider>,
     );
 
-    await waitFor(() => expect(mocks.api.search).toHaveBeenCalledTimes(7));
-    expect(mocks.api.search).toHaveBeenCalledWith(
-      "",
-      ["account-1", "account-2"],
-      "INBOX",
-      true,
-      false,
-      3,
-      null,
-      "people",
-      true,
-      false,
+    await waitFor(() =>
+      expect(mocks.api.smartInbox).toHaveBeenCalledWith(
+        ["account-1", "account-2"],
+        3,
+      ),
     );
-    expect(mocks.api.search).toHaveBeenCalledWith(
-      "",
-      ["account-1", "account-2"],
-      "INBOX",
-      false,
-      true,
-      3,
-      null,
-      undefined,
-      false,
-      false,
-    );
+    expect(mocks.api.search).not.toHaveBeenCalled();
   });
 
   it("ignores an older all-account starred count after selecting one account", async () => {
@@ -884,38 +875,37 @@ describe("App read state", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("keeps successful Smart sections visible when one category fails", async () => {
+  it("clears the previous account scope when a Smart Inbox batch fails", async () => {
+    const secondAccount = {
+      ...mocks.account,
+      id: "account-2",
+      email: "other@example.com",
+      account_name: "Other",
+    };
     const people = {
       ...mocks.message,
       id: "people-message",
       thread_id: "people-thread",
-      subject: "People survives",
+      subject: "People from the previous scope",
       category: "people" as const,
-    };
-    const notifications = {
-      ...mocks.message,
-      id: "notification-message",
-      thread_id: "notification-thread",
-      subject: "Notifications survive",
-      category: "notifications" as const,
     };
     localStorage.setItem("dakia.mail-list-view", "smart");
     mocks.api.classifyPending.mockImplementationOnce(
       () => new Promise(() => undefined),
     );
-    mocks.api.search.mockImplementation(async (...args: unknown[]) => {
-      if (args[7] === "transactions")
-        throw new Error("transactions unavailable");
-      if (args[7] === "people") {
-        return { conversations: groupMessages([people]), nextCursor: null };
+    mocks.api.accounts.mockResolvedValueOnce([mocks.account, secondAccount]);
+    mocks.api.smartInbox.mockImplementation(async (...args: unknown[]) => {
+      const accountIds = args[0] as string[];
+      if (accountIds.length === 2) {
+        return smartInboxPage([
+          {
+            id: "people",
+            conversations: groupMessages([people]),
+            nextCursor: null,
+          },
+        ]);
       }
-      if (args[7] === "notifications") {
-        return {
-          conversations: groupMessages([notifications]),
-          nextCursor: null,
-        };
-      }
-      return { conversations: [], nextCursor: null };
+      throw new Error("Smart Inbox unavailable");
     });
 
     render(
@@ -924,18 +914,21 @@ describe("App read state", () => {
       </MantineProvider>,
     );
 
-    expect(await screen.findByText("People survives")).toBeVisible();
-    expect(screen.getByText("Notifications survive")).toBeVisible();
     expect(
-      screen.queryByRole("region", { name: "Transactions" }),
-    ).not.toBeInTheDocument();
+      await screen.findByText("People from the previous scope"),
+    ).toBeVisible();
+    fireEvent.click(await screen.findByTitle("other@example.com"));
     await waitFor(() =>
       expect(mocks.showNativeMessage).toHaveBeenCalledWith(
         "Something went wrong",
-        "transactions unavailable",
+        "Smart Inbox unavailable",
         "error",
       ),
     );
+    expect(
+      screen.queryByText("People from the previous scope"),
+    ).not.toBeInTheDocument();
+    expect(mocks.api.search).not.toHaveBeenCalled();
   });
 
   it("expands only one Smart section by 20 until its cursor is exhausted", async () => {
@@ -957,14 +950,6 @@ describe("App read state", () => {
     );
     mocks.api.search.mockImplementation(async (...args: unknown[]) => {
       if (args[7] !== "people") return { conversations: [], nextCursor: null };
-      if (args[6] === null) {
-        return {
-          conversations: groupMessages([
-            peopleMessage("people-1", "People first"),
-          ]),
-          nextCursor: firstCursor,
-        };
-      }
       if ((args[6] as { id: string }).id === firstCursor.id) {
         return {
           conversations: groupMessages([
@@ -980,6 +965,17 @@ describe("App read state", () => {
         nextCursor: null,
       };
     });
+    mocks.api.smartInbox.mockResolvedValue(
+      smartInboxPage([
+        {
+          id: "people",
+          conversations: groupMessages([
+            peopleMessage("people-1", "People first"),
+          ]),
+          nextCursor: firstCursor,
+        },
+      ]),
+    );
 
     render(
       <MantineProvider>
@@ -1028,18 +1024,21 @@ describe("App read state", () => {
       if (args[7] !== "people") {
         return Promise.resolve({ conversations: [], nextCursor: null });
       }
-      if (args[6] === null) {
-        return Promise.resolve({
-          conversations: groupMessages([
-            { ...mocks.message, category: "people" },
-          ]),
-          nextCursor: cursor,
-        });
-      }
       return new Promise((resolve) => {
         resolveMore = resolve;
       });
     });
+    mocks.api.smartInbox.mockResolvedValue(
+      smartInboxPage([
+        {
+          id: "people",
+          conversations: groupMessages([
+            { ...mocks.message, category: "people" },
+          ]),
+          nextCursor: cursor,
+        },
+      ]),
+    );
 
     render(
       <MantineProvider>
@@ -1074,6 +1073,15 @@ describe("App read state", () => {
         ? { conversations: groupMessages([starred]), nextCursor: null }
         : { conversations: [], nextCursor: null },
     );
+    mocks.api.smartInbox.mockResolvedValue(
+      smartInboxPage([
+        {
+          id: "starred",
+          conversations: groupMessages([starred]),
+          nextCursor: null,
+        },
+      ]),
+    );
 
     render(
       <MantineProvider>
@@ -1082,18 +1090,7 @@ describe("App read state", () => {
     );
 
     const row = await screen.findByText("Unread thread");
-    expect(mocks.api.search).toHaveBeenCalledWith(
-      "",
-      ["account-1"],
-      "INBOX",
-      false,
-      true,
-      3,
-      null,
-      undefined,
-      false,
-      false,
-    );
+    expect(mocks.api.smartInbox).toHaveBeenCalledWith(["account-1"], 3);
 
     fireEvent.click(row.closest("button")!);
     await waitFor(() =>
@@ -1111,13 +1108,9 @@ describe("App read state", () => {
     mocks.api.classifyPending.mockImplementationOnce(
       () => new Promise(() => undefined),
     );
-    let peopleSearches = 0;
-    let resolveRefreshedPeople:
-      | ((page: {
-          conversations: ReturnType<typeof groupMessages>;
-          nextCursor: null;
-        }) => void)
-      | undefined;
+    let smartInboxLoads = 0;
+    let resolveRefreshedSmartInbox:
+      ((page: SmartInboxPage) => void) | undefined;
     const nextMessage = {
       ...mocks.message,
       id: "message-2",
@@ -1127,25 +1120,25 @@ describe("App read state", () => {
       received_at: "2026-07-19T09:00:00Z",
       is_flagged: true,
     };
-    mocks.api.search.mockImplementation(async (...args: unknown[]) => {
-      if (args[4]) {
-        return {
-          conversations: groupMessages([nextMessage]),
-          nextCursor: null,
-        };
-      }
-      if (args[7] !== "people") return { conversations: [], nextCursor: null };
-      peopleSearches += 1;
-      if (peopleSearches === 2) {
+    mocks.api.smartInbox.mockImplementation(async () => {
+      smartInboxLoads += 1;
+      if (smartInboxLoads === 2) {
         return new Promise((resolve) => {
-          resolveRefreshedPeople = resolve;
+          resolveRefreshedSmartInbox = resolve;
         });
       }
-      return {
-        conversations:
-          peopleSearches === 1 ? groupMessages([mocks.message]) : [],
-        nextCursor: null,
-      };
+      return smartInboxPage([
+        {
+          id: "people",
+          conversations: groupMessages([mocks.message]),
+          nextCursor: null,
+        },
+        {
+          id: "starred",
+          conversations: groupMessages([nextMessage]),
+          nextCursor: null,
+        },
+      ]);
     });
 
     render(
@@ -1160,9 +1153,19 @@ describe("App read state", () => {
     await waitFor(() =>
       expect(mocks.api.setRead).toHaveBeenCalledWith("message-1", true),
     );
-    await waitFor(() => expect(resolveRefreshedPeople).toBeTypeOf("function"));
+    await waitFor(() =>
+      expect(resolveRefreshedSmartInbox).toBeTypeOf("function"),
+    );
     await act(async () =>
-      resolveRefreshedPeople!({ conversations: [], nextCursor: null }),
+      resolveRefreshedSmartInbox!(
+        smartInboxPage([
+          {
+            id: "starred",
+            conversations: groupMessages([nextMessage]),
+            nextCursor: null,
+          },
+        ]),
+      ),
     );
     expect(
       screen.getByRole("heading", { name: "Unread thread" }),
@@ -1192,26 +1195,23 @@ describe("App read state", () => {
     mocks.api.classifyPending.mockImplementationOnce(
       () => new Promise(() => undefined),
     );
-    let peopleSearches = 0;
-    let resolveStalePeople:
-      | ((page: {
-          conversations: ReturnType<typeof groupMessages>;
-          nextCursor: null;
-        }) => void)
-      | undefined;
-    mocks.api.search.mockImplementation(async (...args: unknown[]) => {
-      if (args[7] !== "people") return { conversations: [], nextCursor: null };
-      peopleSearches += 1;
-      if (peopleSearches === 2) {
+    let smartInboxLoads = 0;
+    let resolveStaleSmartInbox: ((page: SmartInboxPage) => void) | undefined;
+    mocks.api.smartInbox.mockImplementation(async () => {
+      smartInboxLoads += 1;
+      if (smartInboxLoads === 2) {
         return new Promise((resolve) => {
-          resolveStalePeople = resolve;
+          resolveStaleSmartInbox = resolve;
         });
       }
-      return {
-        conversations:
-          peopleSearches === 1 ? groupMessages([mocks.message]) : [],
-        nextCursor: null,
-      };
+      if (smartInboxLoads > 2) return smartInboxPage([]);
+      return smartInboxPage([
+        {
+          id: "people",
+          conversations: groupMessages([mocks.message]),
+          nextCursor: null,
+        },
+      ]);
     });
 
     render(
@@ -1227,7 +1227,7 @@ describe("App read state", () => {
     await waitFor(() =>
       expect(mocks.api.setRead).toHaveBeenCalledWith("message-1", true),
     );
-    await waitFor(() => expect(resolveStalePeople).toBeTypeOf("function"));
+    await waitFor(() => expect(resolveStaleSmartInbox).toBeTypeOf("function"));
     expect(within(list).getByText("Unread thread")).toBeVisible();
 
     fireEvent.contextMenu(
@@ -1248,10 +1248,15 @@ describe("App read state", () => {
     );
 
     await act(async () =>
-      resolveStalePeople!({
-        conversations: groupMessages([mocks.message]),
-        nextCursor: null,
-      }),
+      resolveStaleSmartInbox!(
+        smartInboxPage([
+          {
+            id: "people",
+            conversations: groupMessages([mocks.message]),
+            nextCursor: null,
+          },
+        ]),
+      ),
     );
     expect(within(list).queryByText("Unread thread")).not.toBeInTheDocument();
   });
@@ -1483,13 +1488,8 @@ describe("App read state", () => {
   });
 
   it("ignores an out-of-order Smart result after the view changes", async () => {
-    let resolveOldPeople:
-      | ((page: {
-          conversations: ReturnType<typeof groupMessages>;
-          nextCursor: null;
-        }) => void)
-      | undefined;
-    let peopleCalls = 0;
+    let resolveOldSmartInbox: ((page: SmartInboxPage) => void) | undefined;
+    let smartInboxCalls = 0;
     const oldPeople = {
       ...mocks.message,
       id: "old",
@@ -1508,19 +1508,24 @@ describe("App read state", () => {
     mocks.api.classifyPending.mockImplementationOnce(
       () => new Promise(() => undefined),
     );
-    mocks.api.search.mockImplementation((...args: unknown[]) => {
-      if (args[7] === "people") {
-        peopleCalls += 1;
-        if (peopleCalls === 1) {
-          return new Promise((resolve) => {
-            resolveOldPeople = resolve;
-          });
-        }
-        return Promise.resolve({
-          conversations: groupMessages([freshPeople]),
-          nextCursor: null,
+    mocks.api.smartInbox.mockImplementation(() => {
+      smartInboxCalls += 1;
+      if (smartInboxCalls === 1) {
+        return new Promise((resolve) => {
+          resolveOldSmartInbox = resolve;
         });
       }
+      return Promise.resolve(
+        smartInboxPage([
+          {
+            id: "people",
+            conversations: groupMessages([freshPeople]),
+            nextCursor: null,
+          },
+        ]),
+      );
+    });
+    mocks.api.search.mockImplementation((...args: unknown[]) => {
       if (args[5] === 100) {
         return Promise.resolve({
           conversations: groupMessages([
@@ -1538,15 +1543,20 @@ describe("App read state", () => {
       </MantineProvider>,
     );
 
-    await waitFor(() => expect(resolveOldPeople).toBeTypeOf("function"));
+    await waitFor(() => expect(resolveOldSmartInbox).toBeTypeOf("function"));
     fireEvent.click(screen.getByRole("button", { name: "List" }));
     expect(await screen.findByText("List row")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Smart" }));
     expect(await screen.findByText("Fresh people")).toBeVisible();
-    resolveOldPeople!({
-      conversations: groupMessages([oldPeople]),
-      nextCursor: null,
-    });
+    resolveOldSmartInbox!(
+      smartInboxPage([
+        {
+          id: "people",
+          conversations: groupMessages([oldPeople]),
+          nextCursor: null,
+        },
+      ]),
+    );
     await Promise.resolve();
     expect(screen.queryByText("Old people")).not.toBeInTheDocument();
   });

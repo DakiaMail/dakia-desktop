@@ -425,24 +425,7 @@ export default function App() {
     setRemoteSearchUnavailable(false);
     try {
       if (smartInbox) {
-        const pageResults = await Promise.allSettled(
-          smartSectionIds.map(async (id) => {
-            const category = !["starred", "seen"].includes(id) ? id : undefined;
-            const page = await api.search(
-              "",
-              accountIds,
-              "INBOX",
-              !["starred", "seen"].includes(id),
-              id === "starred",
-              smartPageSize,
-              null,
-              category,
-              !["starred", "seen"].includes(id),
-              id === "seen",
-            );
-            return [id, page] as const;
-          }),
-        );
+        const page = await api.smartInbox(accountIds, smartPageSize);
         if (
           requestId === loadRequestIdRef.current &&
           smartRequestId === smartLoadRequestIdRef.current &&
@@ -450,24 +433,17 @@ export default function App() {
         ) {
           setSmartSections(() => {
             const next = emptySmartSections();
-            for (const [index, result] of pageResults.entries()) {
-              if (result.status !== "fulfilled") continue;
-              const [id, page] = result.value;
-              next[id] = {
-                id,
-                threads: page.conversations,
-                nextCursor: page.nextCursor,
+            for (const section of page.sections) {
+              next[section.id] = {
+                id: section.id,
+                threads: section.conversations,
+                nextCursor: section.nextCursor,
                 loadingMore: false,
               };
             }
             return next;
           });
           setHasMore(false);
-          const failed = pageResults.find(
-            (result): result is PromiseRejectedResult =>
-              result.status === "rejected",
-          );
-          if (failed) showError(failed.reason);
         }
         return;
       }
@@ -538,8 +514,13 @@ export default function App() {
       if (
         requestId === loadRequestIdRef.current &&
         sameMailView(currentView, currentViewRef.current)
-      )
+      ) {
+        if (smartInbox) {
+          setSmartSections(emptySmartSections());
+          setRetainedSmartThreads(new Map());
+        }
         showError(error);
+      }
     } finally {
       if (
         requestId === loadRequestIdRef.current &&

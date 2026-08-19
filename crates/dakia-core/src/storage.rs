@@ -216,6 +216,25 @@ pub struct MailConversationPage {
     pub next_cursor: Option<MailCursor>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartInboxSectionPage {
+    pub id: String,
+    pub conversations: Vec<MailConversation>,
+    pub next_cursor: Option<MailCursor>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SmartInboxPage {
+    pub sections: Vec<SmartInboxSectionPage>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct SmartInboxQuery {
+    pub account_ids: Vec<AccountId>,
+    pub limit: Option<u32>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ThreadingHeaders {
     pub message_id: Option<String>,
@@ -633,10 +652,13 @@ impl Store {
             sqlx::query("ALTER TABLE messages ADD COLUMN thread_id TEXT")
                 .execute(&self.pool)
                 .await?;
-            sqlx::query("UPDATE messages SET thread_id = id WHERE thread_id IS NULL")
-                .execute(&self.pool)
-                .await?;
         }
+        // An interrupted legacy migration can leave the nullable column in
+        // place before its backfill commits. Repair those rows on every open,
+        // before indexes or thread rebuilding attempt to read the value.
+        sqlx::query("UPDATE messages SET thread_id = id WHERE thread_id IS NULL")
+            .execute(&self.pool)
+            .await?;
         if !columns.iter().any(|column| column.1 == "threading_scanned") {
             // Rows that predate threading support must be header-backfilled.
             // New rows are written with threading_scanned=1 by persist_message.
@@ -649,6 +671,13 @@ impl Store {
         sqlx::query("CREATE INDEX IF NOT EXISTS messages_account_thread ON messages(account_id, thread_id, received_at)")
             .execute(&self.pool)
             .await?;
+        for statement in [
+            "CREATE INDEX IF NOT EXISTS messages_smart_representative ON messages(account_id, mailbox, thread_id, received_at DESC, id DESC)",
+            "CREATE INDEX IF NOT EXISTS messages_thread_flagged ON messages(account_id, thread_id) WHERE is_flagged = 1",
+            "CREATE INDEX IF NOT EXISTS messages_thread_unread ON messages(account_id, thread_id, mailbox) WHERE is_read = 0",
+        ] {
+            sqlx::query(statement).execute(&self.pool).await?;
+        }
         sqlx::query("CREATE INDEX IF NOT EXISTS messages_threading_backfill ON messages(account_id, mailbox, threading_scanned, received_at DESC)")
             .execute(&self.pool)
             .await?;
@@ -2795,6 +2824,201 @@ impl Store {
         })
     }
 
+    /// Loads the initial Smart Inbox sections in one SQLite statement and
+    /// hydrates the union of their selected conversations once. Section
+    /// pagination continues through `search_conversation_page` so cursors keep
+    /// the same public meaning after the initial page.
+    pub async fn search_smart_inbox(&self, query: &SmartInboxQuery) -> Result<SmartInboxPage> {
+        const SECTION_IDS: [&str; 7] = [
+            "starred",
+            "people",
+            "transactions",
+            "notifications",
+            "newsletters",
+            "other",
+            "seen",
+        ];
+        let limit = query.limit.unwrap_or(3).clamp(1, 100) as usize;
+        if query.account_ids.is_empty() {
+            return Ok(SmartInboxPage {
+                sections: SECTION_IDS
+                    .into_iter()
+                    .map(|id| SmartInboxSectionPage {
+                        id: id.to_owned(),
+                        conversations: Vec::new(),
+                        next_cursor: None,
+                    })
+                    .collect(),
+            });
+        }
+
+        let account_placeholders = vec!["?"; query.account_ids.len()].join(",");
+        let sql = format!(
+            r#"WITH scoped AS (
+                SELECT m.id, m.account_id, m.thread_id, m.received_at, m.category,
+                    ROW_NUMBER() OVER (PARTITION BY m.account_id, m.thread_id ORDER BY m.received_at DESC, m.id DESC) AS thread_rank,
+                    MAX(CASE WHEN m.is_read = 0 THEN 1 ELSE 0 END) OVER (PARTITION BY m.account_id, m.thread_id) AS any_unread
+                FROM messages m
+                WHERE m.account_id IN ({account_placeholders}) AND m.mailbox = 'INBOX'
+            ), thread_flags AS (
+                SELECT account_id, thread_id, 1 AS any_flagged
+                FROM messages
+                WHERE account_id IN ({account_placeholders}) AND is_flagged = 1
+                GROUP BY account_id, thread_id
+            ), representatives AS (
+                SELECT scoped.id, scoped.account_id, scoped.thread_id, scoped.received_at, scoped.category, scoped.any_unread,
+                    COALESCE(thread_flags.any_flagged, 0) AS any_flagged
+                FROM scoped
+                LEFT JOIN thread_flags USING (account_id, thread_id)
+                WHERE scoped.thread_rank = 1
+            ), sectioned AS (
+                SELECT 'starred' AS section_id, id, account_id, thread_id, received_at FROM representatives WHERE any_flagged = 1
+                UNION ALL
+                SELECT category AS section_id, id, account_id, thread_id, received_at FROM representatives
+                    WHERE any_flagged = 0 AND any_unread = 1 AND category IN ('people', 'transactions', 'notifications', 'newsletters', 'other')
+                UNION ALL
+                SELECT 'seen' AS section_id, id, account_id, thread_id, received_at FROM representatives WHERE any_unread = 0
+            ), ranked AS (
+                SELECT section_id, id, account_id, thread_id, received_at,
+                    ROW_NUMBER() OVER (PARTITION BY section_id ORDER BY received_at DESC, id DESC) AS section_rank
+                FROM sectioned
+            )
+            SELECT section_id, id, account_id, thread_id, received_at
+            FROM ranked WHERE section_rank <= ?
+            ORDER BY section_id, section_rank"#
+        );
+        let mut statement = sqlx::query_as::<_, SmartConversationMatch>(&sql);
+        for account_id in &query.account_ids {
+            statement = statement.bind(account_id.to_string());
+        }
+        for account_id in &query.account_ids {
+            statement = statement.bind(account_id.to_string());
+        }
+        let matches = statement
+            .bind((limit + 1) as i64)
+            .fetch_all(&self.pool)
+            .await?;
+
+        let mut by_section: HashMap<String, Vec<SmartConversationMatch>> = HashMap::new();
+        for candidate in matches {
+            by_section
+                .entry(candidate.section_id.clone())
+                .or_default()
+                .push(candidate);
+        }
+        let mut selected = HashMap::new();
+        let mut next_cursors = HashMap::new();
+        let mut keys = Vec::new();
+        for section_id in SECTION_IDS {
+            let mut candidates = by_section.remove(section_id).unwrap_or_default();
+            let has_more = candidates.len() > limit;
+            candidates.truncate(limit);
+            let next_cursor = has_more.then(|| {
+                let last = candidates
+                    .last()
+                    .expect("a Smart section with more results has a cursor source");
+                MailCursor {
+                    received_at: last.received_at,
+                    id: last.id.clone(),
+                }
+            });
+            keys.extend(
+                candidates
+                    .iter()
+                    .map(|candidate| (candidate.account_id.clone(), candidate.thread_id.clone())),
+            );
+            next_cursors.insert(section_id.to_owned(), next_cursor);
+            selected.insert(section_id.to_owned(), candidates);
+        }
+        keys.sort();
+        keys.dedup();
+        let conversations = self
+            .hydrate_conversations_by_keys(&keys, Some("INBOX"))
+            .await?;
+
+        Ok(SmartInboxPage {
+            sections: SECTION_IDS
+                .into_iter()
+                .map(|section_id| SmartInboxSectionPage {
+                    id: section_id.to_owned(),
+                    conversations: selected
+                        .remove(section_id)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter_map(|candidate| {
+                            conversations
+                                .get(&(candidate.account_id, candidate.thread_id))
+                                .cloned()
+                        })
+                        .collect(),
+                    next_cursor: next_cursors.remove(section_id).flatten(),
+                })
+                .collect(),
+        })
+    }
+
+    async fn hydrate_conversations_by_keys(
+        &self,
+        keys: &[(String, String)],
+        preferred_mailbox: Option<&str>,
+    ) -> Result<HashMap<(String, String), MailConversation>> {
+        let mut hydrated = Vec::new();
+        for chunk in keys.chunks(300) {
+            let predicates = vec!["(account_id = ? AND thread_id = ?)"; chunk.len()].join(" OR ");
+            let sql = format!("SELECT m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, '' AS body_text, NULL AS body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, '' AS classification_signals FROM messages m WHERE ({predicates}) ORDER BY m.received_at, m.id");
+            let mut statement = sqlx::query_as::<_, MailSummary>(&sql);
+            for (account_id, thread_id) in chunk {
+                statement = statement.bind(account_id).bind(thread_id);
+            }
+            hydrated.extend(statement.fetch_all(&self.pool).await?);
+        }
+        hydrated.retain(|message| !matches!(mailbox_family(&message.mailbox), "Spam" | "Trash"));
+        let mut grouped: HashMap<(String, String), Vec<MailSummary>> = HashMap::new();
+        for message in hydrated {
+            grouped
+                .entry((message.account_id.clone(), message.thread_id.clone()))
+                .or_default()
+                .push(message);
+        }
+        Ok(grouped
+            .into_iter()
+            .filter_map(|((account_id, thread_id), source_messages)| {
+                let messages =
+                    deduplicate_message_copies(source_messages.clone(), preferred_mailbox);
+                let latest = messages.last()?.clone();
+                let mut participants = source_messages
+                    .iter()
+                    .map(|message| {
+                        message
+                            .from_name
+                            .clone()
+                            .unwrap_or_else(|| message.from_address.clone())
+                    })
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                participants.sort();
+                Some((
+                    (account_id.clone(), thread_id.clone()),
+                    MailConversation {
+                        id: format!("{account_id}:{thread_id}"),
+                        account_id,
+                        thread_id,
+                        message_count: messages.len(),
+                        unread: source_messages.iter().any(|message| !message.is_read),
+                        has_attachments: source_messages
+                            .iter()
+                            .any(|message| message.has_attachments),
+                        participants,
+                        latest,
+                        messages,
+                        source_messages,
+                    },
+                ))
+            })
+            .collect())
+    }
+
     async fn search_conversation_matches(&self, query: &SearchQuery) -> Result<Vec<MailSummary>> {
         // Conversation pages request one look-ahead candidate, so this
         // internal query intentionally accepts 501 while the public page size
@@ -3077,7 +3301,7 @@ impl Store {
     }
 
     async fn rebuild_threads_for_account(&self, account_id: &str) -> Result<()> {
-        let rows = sqlx::query_as::<_, ThreadRow>("SELECT id, message_id, in_reply_to, reference_ids, subject, from_address, to_addresses, received_at FROM messages WHERE account_id = ? ORDER BY received_at, id")
+        let rows = sqlx::query_as::<_, ThreadRow>("SELECT id, thread_id, message_id, in_reply_to, reference_ids, subject, from_address, to_addresses, received_at FROM messages WHERE account_id = ? ORDER BY received_at, id")
             .bind(account_id)
             .fetch_all(&self.pool)
             .await?;
@@ -3147,12 +3371,21 @@ impl Store {
                     .unwrap_or_else(|| row.id.clone())
             });
         }
-        let mut tx = self.pool.begin().await?;
+        let mut updates = Vec::new();
         for (index, row) in rows.iter().enumerate() {
             let thread_id = &roots[&groups.find(index)];
+            if row.thread_id.as_deref() != Some(thread_id.as_str()) {
+                updates.push((row.id.as_str(), thread_id.as_str()));
+            }
+        }
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.pool.begin().await?;
+        for (id, thread_id) in updates {
             sqlx::query("UPDATE messages SET thread_id = ? WHERE id = ?")
                 .bind(thread_id)
-                .bind(&row.id)
+                .bind(id)
                 .execute(&mut *tx)
                 .await?;
         }
@@ -3250,12 +3483,22 @@ fn is_special_mailbox_family(mailbox: &str) -> bool {
 #[derive(FromRow)]
 struct ThreadRow {
     id: String,
+    thread_id: Option<String>,
     message_id: Option<String>,
     in_reply_to: Option<String>,
     reference_ids: Option<String>,
     subject: String,
     from_address: String,
     to_addresses: String,
+    received_at: DateTime<Utc>,
+}
+
+#[derive(FromRow)]
+struct SmartConversationMatch {
+    section_id: String,
+    id: String,
+    account_id: String,
+    thread_id: String,
     received_at: DateTime<Utc>,
 }
 
@@ -5613,6 +5856,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn smart_inbox_batches_all_initial_sections_with_existing_membership_semantics() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let timestamp = Utc::now();
+        let mut messages = Vec::new();
+        for (id, category, is_read, is_flagged, offset) in [
+            ("people-new", "people", false, false, 0),
+            ("people-old", "people", false, false, 1),
+            ("starred", "people", false, true, 2),
+            ("newsletter", "newsletters", false, false, 3),
+            ("seen", "notifications", true, false, 4),
+        ] {
+            let mut item = message(id, "Body");
+            item.id = id.into();
+            item.thread_id = id.into();
+            item.message_id = Some(format!("<{id}@example.com>"));
+            item.account_id = account_id.to_string();
+            item.uid = offset + 1;
+            item.received_at = timestamp - chrono::Duration::minutes(offset);
+            item.category = Some(category.into());
+            item.is_read = is_read;
+            item.is_flagged = is_flagged;
+            messages.push(item);
+        }
+        store.upsert_messages(&messages).await.unwrap();
+
+        let page = store
+            .search_smart_inbox(&SmartInboxQuery {
+                account_ids: vec![account_id],
+                limit: Some(1),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            page.sections
+                .iter()
+                .map(|section| section.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "starred",
+                "people",
+                "transactions",
+                "notifications",
+                "newsletters",
+                "other",
+                "seen",
+            ]
+        );
+        let sections = page
+            .sections
+            .iter()
+            .map(|section| (section.id.as_str(), section))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(sections["starred"].conversations[0].latest.id, "starred");
+        assert_eq!(sections["people"].conversations[0].latest.id, "people-new");
+        assert!(sections["people"].next_cursor.is_some());
+        assert_eq!(
+            sections["newsletters"].conversations[0].latest.id,
+            "newsletter"
+        );
+        assert_eq!(sections["seen"].conversations[0].latest.id, "seen");
+        assert!(sections["transactions"].conversations.is_empty());
+        assert!(sections["notifications"].conversations.is_empty());
+        assert!(sections["other"].conversations.is_empty());
+        assert!(sections["starred"]
+            .conversations
+            .iter()
+            .all(|conversation| conversation.latest.id != "people-new"));
+    }
+
+    #[tokio::test]
     async fn smart_category_pagination_has_no_cursor_at_the_exact_third_page_boundary() {
         let store = Store::in_memory().await.unwrap();
         let account_id = uuid::Uuid::new_v4();
@@ -6755,6 +7069,26 @@ mod tests {
             store.search(&SearchQuery::default()).await.unwrap().len(),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn unchanged_thread_rebuild_skips_database_updates() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let mut item = message("Already grouped", "Body");
+        item.id = "stable-thread".into();
+        item.thread_id = "<stable-thread@example.com>".into();
+        item.message_id = Some("<stable-thread@example.com>".into());
+        item.account_id = account_id.to_string();
+        store.upsert_messages(&[item]).await.unwrap();
+        sqlx::query(
+            "CREATE TRIGGER reject_redundant_thread_update BEFORE UPDATE OF thread_id ON messages BEGIN SELECT RAISE(ABORT, 'thread id update was unnecessary'); END",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+
+        store.finish_threading_backfill(account_id).await.unwrap();
     }
 
     #[tokio::test]
