@@ -20,6 +20,7 @@ export const en = {
       spam: "Spam",
       trash: "Trash",
       settings: "Settings",
+      feedback: "Feedback",
     },
     actions: {
       compose: "Compose",

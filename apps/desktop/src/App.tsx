@@ -34,6 +34,7 @@ import { replyRecipients } from "./recipients";
 import { confirmNativeAction, showNativeMessage } from "./nativeFeedback";
 import { concreteThreadMessages, groupMessages } from "./threads";
 import { forwardBody, forwardSubject } from "./forward";
+import { createFeedbackComposeSeed } from "./feedback";
 import { formatReplyHistory } from "./replyHistory";
 import {
   onNotificationAction,
@@ -136,7 +137,7 @@ function emptySmartSections(): Record<SmartSectionId, SmartSection> {
 }
 
 export default function App() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [threads, setThreads] = useState<MailThread[]>([]);
   const [smartSections, setSmartSections] =
@@ -1844,6 +1845,23 @@ export default function App() {
     }
     openComposeWindow({ accountId: activeAccounts[0] ?? accounts[0].id });
   };
+  const openFeedback = async () => {
+    if (!accounts.length) {
+      await showNativeMessage(
+        t("composer.title"),
+        t("composer.noAccount"),
+        "warning",
+      );
+      await openAccountWindow();
+      return;
+    }
+    openComposeWindow(
+      await createFeedbackComposeSeed(
+        activeAccounts[0] ?? accounts[0].id,
+        i18n.resolvedLanguage ?? i18n.language,
+      ),
+    );
+  };
 
   const configureTerminalCommand = async () => {
     try {
@@ -2077,6 +2095,8 @@ export default function App() {
           }
           onAddAccount={() => void openAccountWindow()}
           onMailbox={selectMailbox}
+          onFeedback={() => void openFeedback()}
+          feedbackDisabled={loading}
           outboxCount={outbox.length}
           starredCount={starredCount}
         />
@@ -2117,6 +2137,8 @@ export default function App() {
         }
         onAddAccount={() => void openAccountWindow()}
         onMailbox={selectMailbox}
+        onFeedback={() => void openFeedback()}
+        feedbackDisabled={loading}
         outboxCount={outbox.length}
         starredCount={starredCount}
       />
