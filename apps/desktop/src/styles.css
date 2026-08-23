@@ -923,17 +923,6 @@ textarea {
   padding: 4px 0;
   border-radius: 10px;
 }
-.sender-card-collapsible {
-  cursor: pointer;
-}
-.sender-card-collapsible:hover {
-  background: color-mix(in srgb, var(--mantine-color-gray-1) 45%, transparent);
-}
-.sender-card-collapsible:focus-within {
-  outline: 2px solid
-    color-mix(in srgb, var(--mantine-color-ember-5) 55%, transparent);
-  outline-offset: 2px;
-}
 .thread-message {
   padding: 20px 0 28px;
   border-top: 1px solid var(--dakia-divider);
@@ -1041,20 +1030,30 @@ textarea {
 .recipient-summary {
   max-width: 100%;
   margin: 0;
-  padding: 0;
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 4px;
   overflow: hidden;
-  border: 0;
   color: var(--mantine-color-dimmed);
-  background: transparent;
   font: inherit;
   font-size: 12px;
   text-align: left;
+}
+.recipient-summary-toggle {
+  flex: none;
+  margin: 0;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
   cursor: pointer;
 }
-.recipient-summary span {
+.recipient-address-list {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1063,7 +1062,7 @@ textarea {
   flex: none;
   transition: transform 140ms ease;
 }
-.recipient-summary[aria-expanded="true"] .recipient-summary-chevron {
+.recipient-summary-toggle[aria-expanded="true"] .recipient-summary-chevron {
   transform: rotate(180deg);
 }
 .recipient-details {
@@ -1086,6 +1085,36 @@ textarea {
   margin: 0;
   overflow-wrap: anywhere;
   color: light-dark(#3e4441, #d4d9d6);
+}
+.recipient-detail-row .recipient-address-list {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+.recipient-address {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  color: var(--mantine-color-ember-6);
+  background: transparent;
+  font: inherit;
+  font-weight: inherit;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  user-select: text;
+}
+.recipient-address:hover {
+  color: var(--mantine-color-ember-7);
+}
+.recipient-address:focus-visible {
+  outline: 2px solid var(--mantine-color-ember-5);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+.recipient-address-name {
+  color: inherit;
 }
 .reader-date {
   font-variant-numeric: tabular-nums;
