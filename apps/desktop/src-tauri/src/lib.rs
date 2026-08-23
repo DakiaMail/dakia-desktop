@@ -4,7 +4,10 @@ mod translation;
 #[cfg(test)]
 mod tauri_contracts_tests;
 
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine,
+};
 use dakia_core::storage::{ConversationTarget, MessageContentFetchAcquire};
 use dakia_core::{
     ai::{AiConfig, AiProvider, AiService},
@@ -41,6 +44,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     DragDropEvent, Emitter, Manager, State, WindowEvent,
 };
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_opener::OpenerExt;
 use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard, Semaphore};
 use url::Url;
@@ -2763,6 +2767,12 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+fn menu_action_targets_focused_window(action: &str) -> bool {
+    matches!(action, "reply" | "forward" | "archive" | "spam")
+        || action.starts_with("copy-email-address:")
+        || action.starts_with("compose-email-address:")
+}
+
 #[tauri::command]
 async fn provider_presets() -> Vec<ProviderPreset> {
     provider::all().to_vec()
@@ -2856,6 +2866,127 @@ async fn show_account_context_menu(
         .build()
         .map_err(error)?;
     window.popup_menu(&menu).map_err(error)
+}
+
+fn validated_context_menu_email_address(value: &str) -> Result<&str, String> {
+    let address = value.trim();
+    if address.is_empty()
+        || address.len() > 320
+        || address.matches('@').count() != 1
+        || address
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err("Invalid email address".into());
+    }
+    Ok(address)
+}
+
+fn decode_context_menu_email_address(value: &str) -> Result<String, String> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| "Invalid encoded email address".to_owned())?;
+    let address =
+        String::from_utf8(bytes).map_err(|_| "Invalid encoded email address".to_owned())?;
+    validated_context_menu_email_address(&address)?;
+    Ok(address)
+}
+
+#[tauri::command]
+fn show_email_address_context_menu(
+    window: tauri::Window,
+    account_id: Uuid,
+    address: String,
+    copy_label: String,
+    new_message_label: String,
+) -> Result<(), String> {
+    let address = validated_context_menu_email_address(&address)?;
+    let encoded_address = URL_SAFE_NO_PAD.encode(address.as_bytes());
+    let copy =
+        MenuItemBuilder::with_id(format!("copy-email-address:{encoded_address}"), copy_label)
+            .build(&window)
+            .map_err(error)?;
+    let new_message = MenuItemBuilder::with_id(
+        format!("compose-email-address:{account_id}:{encoded_address}"),
+        new_message_label,
+    )
+    .build(&window)
+    .map_err(error)?;
+    let menu = MenuBuilder::new(&window)
+        .items(&[&copy, &new_message])
+        .build()
+        .map_err(error)?;
+    window.popup_menu(&menu).map_err(error)
+}
+
+#[cfg(test)]
+mod email_address_context_menu_tests {
+    use super::*;
+
+    #[test]
+    fn validates_email_addresses_before_building_menu_ids() {
+        assert_eq!(
+            validated_context_menu_email_address("  person+tag@example.com  "),
+            Ok("person+tag@example.com")
+        );
+        assert_eq!(
+            validated_context_menu_email_address("müller@example.com"),
+            Ok("müller@example.com")
+        );
+        for invalid in [
+            "",
+            "missing-at.example.com",
+            "two@@example.com",
+            "person @example.com",
+            "person@example.com\tmenu-action",
+            "person@example.com\nmenu-action",
+            "person@example.com\u{0000}",
+        ] {
+            assert!(
+                validated_context_menu_email_address(invalid).is_err(),
+                "accepted invalid address {invalid:?}"
+            );
+        }
+
+        let maximum = format!("{}@b", "a".repeat(318));
+        let too_long = format!("{}@b", "a".repeat(319));
+        assert_eq!(maximum.len(), 320);
+        assert!(validated_context_menu_email_address(&maximum).is_ok());
+        assert!(validated_context_menu_email_address(&too_long).is_err());
+    }
+
+    #[test]
+    fn menu_address_encoding_is_url_safe_and_round_trips_utf8() {
+        let address = "müller+news@example.com";
+        let encoded = URL_SAFE_NO_PAD.encode(address.as_bytes());
+        assert!(encoded
+            .chars()
+            .all(|character| !matches!(character, '+' | '/' | '=')));
+        assert_eq!(URL_SAFE_NO_PAD.decode(encoded).unwrap(), address.as_bytes());
+        assert_eq!(
+            decode_context_menu_email_address(&URL_SAFE_NO_PAD.encode(address)),
+            Ok(address.to_owned())
+        );
+        assert!(decode_context_menu_email_address("_w").is_err());
+        assert!(
+            decode_context_menu_email_address(&URL_SAFE_NO_PAD.encode("not@an@address")).is_err()
+        );
+    }
+
+    #[test]
+    fn address_actions_return_to_the_window_that_opened_the_menu() {
+        assert!(menu_action_targets_focused_window(
+            "copy-email-address:cGVyc29uQGV4YW1wbGUuY29t"
+        ));
+        assert!(menu_action_targets_focused_window(
+            "compose-email-address:account:cGVyc29uQGV4YW1wbGUuY29t"
+        ));
+        assert!(menu_action_targets_focused_window("reply"));
+        assert!(!menu_action_targets_focused_window("new-message"));
+        assert!(!menu_action_targets_focused_window(
+            "rename-account:account"
+        ));
+    }
 }
 
 #[tauri::command]
@@ -4129,6 +4260,7 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--background"]),
         ))
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
@@ -4136,8 +4268,26 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .on_menu_event(|app, event| {
             let action = event.id().as_ref();
-            let message_action = matches!(action, "reply" | "forward" | "archive" | "spam");
-            let focused = message_action.then(|| {
+            if let Some(encoded_address) = action.strip_prefix("copy-email-address:") {
+                match decode_context_menu_email_address(encoded_address)
+                    .and_then(|address| app.clipboard().write_text(address).map_err(error))
+                {
+                    Ok(()) => {}
+                    Err(copy_error) => {
+                        tracing::warn!(error = %copy_error, "could not copy email address");
+                        let target = app
+                            .webview_windows()
+                            .into_values()
+                            .find(|window| window.is_focused().unwrap_or(false))
+                            .or_else(|| app.get_webview_window("main"));
+                        if let Some(window) = target {
+                            let _ = window.emit("menu-action", "copy-email-address-failed");
+                        }
+                    }
+                }
+                return;
+            }
+            let focused = menu_action_targets_focused_window(action).then(|| {
                 app.webview_windows()
                     .into_values()
                     .find(|window| window.is_focused().unwrap_or(false))
@@ -4328,6 +4478,7 @@ pub fn run() {
             accounts,
             update_account,
             show_account_context_menu,
+            show_email_address_context_menu,
             remove_account,
             open_external_url,
             add_account,
