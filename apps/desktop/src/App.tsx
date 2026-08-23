@@ -1955,6 +1955,13 @@ export default function App() {
         case "terminal-command":
           void configureTerminalCommand();
           break;
+        case "copy-email-address-failed":
+          void showNativeMessage(
+            t("errors.generic"),
+            t("errors.copyFailed"),
+            "error",
+          );
+          break;
         default:
           {
             const addressAction = parseEmailAddressMenuAction(action);

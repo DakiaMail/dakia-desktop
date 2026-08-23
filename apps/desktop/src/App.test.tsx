@@ -441,6 +441,15 @@ describe("App read state", () => {
     );
 
     expect(writeText).not.toHaveBeenCalled();
+
+    act(() => menuHandler("copy-email-address-failed"));
+    await waitFor(() =>
+      expect(mocks.showNativeMessage).toHaveBeenCalledWith(
+        "Something went wrong",
+        "Could not copy text",
+        "error",
+      ),
+    );
   });
 
   it("opens a composer from the native address context menu", async () => {

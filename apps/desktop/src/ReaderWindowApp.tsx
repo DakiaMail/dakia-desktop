@@ -458,6 +458,13 @@ export function ReaderWindowApp() {
       }
       if (!focusedMessage) return;
       switch (action) {
+        case "copy-email-address-failed":
+          void showNativeMessage(
+            t("errors.generic"),
+            t("errors.copyFailed"),
+            "error",
+          );
+          break;
         case "reply":
           void reply(focusedMessage);
           break;

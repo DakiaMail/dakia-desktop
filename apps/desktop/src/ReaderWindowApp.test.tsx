@@ -319,6 +319,15 @@ describe("ReaderWindowApp", () => {
       accountId: "wrong-account",
       to: "attacker@example.com",
     });
+
+    act(() => mocks.nativeMenuHandlers.at(-1)?.("copy-email-address-failed"));
+    await waitFor(() =>
+      expect(mocks.showNativeMessage).toHaveBeenCalledWith(
+        "errors.generic",
+        "errors.copyFailed",
+        "error",
+      ),
+    );
   });
 
   it("removes only the permanently deleted message and keeps the conversation open", async () => {

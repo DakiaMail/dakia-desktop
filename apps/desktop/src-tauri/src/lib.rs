@@ -4275,6 +4275,14 @@ pub fn run() {
                     Ok(()) => {}
                     Err(copy_error) => {
                         tracing::warn!(error = %copy_error, "could not copy email address");
+                        let target = app
+                            .webview_windows()
+                            .into_values()
+                            .find(|window| window.is_focused().unwrap_or(false))
+                            .or_else(|| app.get_webview_window("main"));
+                        if let Some(window) = target {
+                            let _ = window.emit("menu-action", "copy-email-address-failed");
+                        }
                     }
                 }
                 return;
