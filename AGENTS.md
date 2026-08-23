@@ -69,6 +69,42 @@ Before declaring a regression fixed, explain which test would have failed on
 the broken implementation. Temporarily reverting or otherwise perturbing the
 fix is encouraged when practical to prove the test is sensitive to the defect.
 
+## Native interaction design
+
+When a desktop interaction is expected to behave like a system context menu,
+use Tauri's native menu APIs and the platform menu implementation. Do not
+recreate it with a web popover, an invisible or synthetic anchor element, or
+manually translated browser pointer coordinates merely to approximate native
+behavior. Webview, window, screen, logical, and physical coordinates can diverge
+under display scaling, title bars, portals, and multi-monitor layouts.
+
+Before adding a new interaction, search for an existing native implementation
+in the repository and reuse its command, event-routing, validation, and error
+feedback patterns where appropriate. If the product intentionally needs a web
+menu, document that constraint and test positioning under scaling and near all
+viewport edges.
+
+For native context-menu actions:
+
+- Validate action data in Rust before constructing a menu. Treat menu item IDs
+  as untrusted event input, encode arbitrary values without delimiter
+  collisions, and revalidate referenced accounts or entities before acting.
+- Keep the selected target immutable from menu construction through action
+  dispatch. Do not read whichever row, address, or account happens to be active
+  when the delayed menu event arrives.
+- Avoid asynchronous work before showing a cursor-anchored menu when it could
+  make the menu follow a later pointer position. If work is unavoidable, verify
+  the behavior natively or capture and correctly convert an explicit anchor for
+  the platform API.
+- Do not assume a native menu selection preserves browser transient user
+  activation. Clipboard, focus, drag selection, and similar WebKit-sensitive
+  actions require native verification; use a native clipboard path if the
+  webview clipboard API is rejected.
+- Unit and integration tests must cover command invocation, action routing,
+  exact payload preservation (including non-ASCII values), validation failures,
+  and error feedback. Tests that independently reproduce both sides of an
+  encoding contract do not replace an end-to-end contract test.
+
 ## Native macOS verification
 
 Before you do native macOS app verification, think: have you done all that is possible in verifying the new functionality via unit and integration tests?
@@ -90,6 +126,13 @@ Use an isolated, clearly fictional mailbox fixture whenever possible. If a
 specific real message is required to reproduce a provider structure, keep the
 test read-only, do not send or modify mail, and convert the redacted structure
 into a checked-in regression fixture afterward.
+
+For native context menus specifically, verify that the menu opens beside the
+pointer, dismisses with Escape and click-away, and behaves correctly across
+repeated invocations. Exercise every action through the visible menu. Verify
+clipboard actions by pasting into a trusted field and comparing the exact value,
+and verify compose or mutation actions reach the intended account and immutable
+target without completing an external side effect such as sending mail.
 
 ## macOS release publishing
 

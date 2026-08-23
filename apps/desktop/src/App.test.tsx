@@ -104,6 +104,7 @@ const mocks = vi.hoisted(() => {
         sections: [],
       })),
       searchRemote: vi.fn(async () => []),
+      showEmailAddressContextMenu: vi.fn(async () => undefined),
       setRead: vi.fn(async () => undefined),
       setStarred: vi.fn(async () => undefined),
       starredCount: vi.fn(async () => 0),
@@ -260,6 +261,14 @@ vi.mock("./updater", () => ({
   installUpdateAndRelaunch: mocks.installUpdateAndRelaunch,
 }));
 
+function encodeNativeMenuAddress(address: string) {
+  const bytes = new TextEncoder().encode(address);
+  return btoa(String.fromCharCode(...bytes))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/=+$/, "");
+}
+
 describe("App read state", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -370,6 +379,109 @@ describe("App read state", () => {
     await waitFor(() =>
       expect(mocks.api.setRead).toHaveBeenCalledWith("message-1", true),
     );
+  });
+
+  it("opens a new composer for the selected header mailbox", async () => {
+    const selectedAddress = "selected+header@example.com";
+    mocks.api.search.mockResolvedValue({
+      conversations: groupMessages([
+        {
+          ...mocks.message,
+          from_name: "Selected Sender",
+          from_address: selectedAddress,
+        },
+      ]),
+      nextCursor: null,
+    });
+
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(
+      (await screen.findByText("Unread thread")).closest("button")!,
+    );
+    mocks.openComposeWindow.mockClear();
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: `Email ${selectedAddress}`,
+      }),
+    );
+
+    expect(mocks.openComposeWindow).toHaveBeenCalledOnce();
+    expect(mocks.openComposeWindow).toHaveBeenCalledWith({
+      accountId: "account-1",
+      to: selectedAddress,
+    });
+  });
+
+  it("leaves native Copy actions to the Rust clipboard path", async () => {
+    const writeText = vi.fn();
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(
+      (await screen.findByText("Unread thread")).closest("button")!,
+    );
+    await screen.findByRole("button", { name: "Email sender@example.com" });
+    const menuHandler = mocks.nativeMenuHandlers.at(-1)!;
+    act(() =>
+      menuHandler(
+        `copy-email-address:${encodeNativeMenuAddress("sender@example.com")}`,
+      ),
+    );
+
+    expect(writeText).not.toHaveBeenCalled();
+
+    act(() => menuHandler("copy-email-address-failed"));
+    await waitFor(() =>
+      expect(mocks.showNativeMessage).toHaveBeenCalledWith(
+        "Something went wrong",
+        "Could not copy text",
+        "error",
+      ),
+    );
+  });
+
+  it("opens a composer from the native address context menu", async () => {
+    const selectedAddress = "séndér@example.com";
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(
+      (await screen.findByText("Unread thread")).closest("button")!,
+    );
+    const address = await screen.findByRole("button", {
+      name: "Email sender@example.com",
+    });
+    fireEvent.contextMenu(address, { clientX: 140, clientY: 90 });
+    await waitFor(() =>
+      expect(mocks.api.showEmailAddressContextMenu).toHaveBeenCalledOnce(),
+    );
+    mocks.openComposeWindow.mockClear();
+    const menuHandler = mocks.nativeMenuHandlers.at(-1)!;
+    act(() =>
+      menuHandler(
+        `compose-email-address:account-1:${encodeNativeMenuAddress(selectedAddress)}`,
+      ),
+    );
+
+    expect(mocks.openComposeWindow).toHaveBeenCalledWith({
+      accountId: "account-1",
+      to: selectedAddress,
+    });
   });
 
   it("updates every concrete duplicate copy instead of synthetic winner state", async () => {

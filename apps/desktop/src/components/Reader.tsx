@@ -31,6 +31,7 @@ import {
 import { AI_FEATURES_VISIBLE } from "../features";
 import { format } from "date-fns";
 import {
+  Fragment,
   useCallback,
   useEffect,
   useId,
@@ -38,6 +39,7 @@ import {
   useRef,
   useState,
 } from "react";
+import type { MouseEvent as ReactMouseEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { api, messageContentErrorFromUnknown } from "../api";
 import { confirmNativeAction, showNativeMessage } from "../nativeFeedback";
@@ -52,7 +54,11 @@ import type {
   MessageContent,
   MessageContentErrorKind,
 } from "../types";
-import { formatAddress, messageRecipients } from "../recipients";
+import {
+  type MailAddress,
+  messageRecipients,
+  splitAddressValues,
+} from "../recipients";
 import { splitQuotedText } from "../quotedHistory";
 import { EmptyState } from "./EmptyState";
 import { HtmlMessage } from "./HtmlMessage";
@@ -80,6 +86,8 @@ type Props = {
   onToggleRead: (read: boolean) => void;
   onSummarize: () => void;
   onCopyAi: () => void;
+  onComposeTo: (message: MailSummary, address: string) => void;
+  onAddressContextMenu: (message: MailSummary, address: string) => void;
   unsubscribeLoading: boolean;
   onUnsubscribe: (message: MailSummary) => void;
   onToggleStar: (message: MailSummary, starred: boolean) => void;
@@ -104,6 +112,8 @@ export function Reader({
   onToggleRead,
   onSummarize,
   onCopyAi,
+  onComposeTo,
+  onAddressContextMenu,
   unsubscribeLoading,
   onUnsubscribe,
   onToggleStar,
@@ -554,6 +564,7 @@ export function Reader({
             }
             isLatest={threadMessage.id === latestMessage?.id}
             isExpanded={threadMessage.id === expandedMessageId}
+            canCollapse={threadMessages.length > 1}
             onToggleExpanded={() => toggleExpandedMessage(threadMessage.id)}
             actionsDisabled={actionsDisabled}
             onArchive={onArchive}
@@ -563,6 +574,10 @@ export function Reader({
             onReply={() => onReply(threadMessage)}
             onReplyAll={() => onReplyAll(threadMessage)}
             onForward={() => onForward(threadMessage)}
+            onComposeTo={(address) => onComposeTo(threadMessage, address)}
+            onAddressContextMenu={(address) =>
+              onAddressContextMenu(threadMessage, address)
+            }
             threadUnread={threadUnread}
             onToggleRead={onToggleRead}
             unsubscribeLoading={unsubscribeLoading}
@@ -581,6 +596,7 @@ function ThreadMessage({
   isSent,
   isLatest,
   isExpanded,
+  canCollapse,
   onToggleExpanded,
   actionsDisabled,
   onArchive,
@@ -590,6 +606,8 @@ function ThreadMessage({
   onReply,
   onReplyAll,
   onForward,
+  onComposeTo,
+  onAddressContextMenu,
   threadUnread,
   onToggleRead,
   unsubscribeLoading,
@@ -601,6 +619,7 @@ function ThreadMessage({
   isSent: boolean;
   isLatest: boolean;
   isExpanded: boolean;
+  canCollapse: boolean;
   onToggleExpanded: () => void;
   actionsDisabled: boolean;
   onArchive: () => void;
@@ -610,6 +629,8 @@ function ThreadMessage({
   onReply: () => void;
   onReplyAll: () => void;
   onForward: () => void;
+  onComposeTo: (address: string) => void;
+  onAddressContextMenu: (address: string) => void;
   threadUnread: boolean;
   onToggleRead: (read: boolean) => void;
   unsubscribeLoading: boolean;
@@ -642,6 +663,15 @@ function ThreadMessage({
   const hasDownloadableAttachments = attachmentsAuthoritative
     ? downloadableAttachments.length > 0
     : message.has_attachments;
+
+  const showAddressContextMenu = (
+    address: string,
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    onAddressContextMenu(address);
+  };
 
   useEffect(() => {
     setAttachments([]);
@@ -783,61 +813,93 @@ function ThreadMessage({
         sender: message.from_name || message.from_address,
       })}
     >
-      <div
-        className="sender-card sender-card-collapsible"
-        data-sent={isSent}
-        onClick={(event) => {
-          if (
-            event.target instanceof Element &&
-            event.target.closest("button, a, [role='menuitem']")
-          )
-            return;
-          onToggleExpanded();
-        }}
-      >
+      <div className="sender-card" data-sent={isSent}>
         <Avatar className="sender-avatar" color="ember" radius="md">
           {(message.from_name || message.from_address)[0]?.toUpperCase()}
         </Avatar>
         <div className="sender-meta">
           <div className="sender-name">
-            {message.from_name || message.from_address}
+            {recipients.from[0]?.name ? (
+              <span>{recipients.from[0].name}</span>
+            ) : null}
+            {recipients.from[0] ? (
+              <EmailAddress
+                address={recipients.from[0].address}
+                onCompose={onComposeTo}
+                onContextMenu={showAddressContextMenu}
+              />
+            ) : (
+              <>
+                {message.from_name ? <span>{message.from_name}</span> : null}
+                <span className="sender-address">{message.from_address}</span>
+              </>
+            )}
             {isSent ? (
               <span className="sent-by-you">{t("reader.sentByYou")}</span>
             ) : null}
           </div>
-          <button
-            type="button"
-            className="recipient-summary"
-            aria-expanded={recipientsExpanded}
-            aria-label={t(
-              recipientsExpanded
-                ? "reader.hideRecipientDetails"
-                : "reader.showRecipientDetails",
-            )}
-            onClick={() => setRecipientsExpanded((value) => !value)}
-          >
-            <IconChevronDown
-              size={14}
-              className="recipient-summary-chevron"
-              aria-hidden="true"
+          <div className="recipient-summary">
+            <button
+              type="button"
+              className="recipient-summary-toggle"
+              aria-expanded={recipientsExpanded}
+              aria-label={t(
+                recipientsExpanded
+                  ? "reader.hideRecipientDetails"
+                  : "reader.showRecipientDetails",
+              )}
+              onClick={() => setRecipientsExpanded((value) => !value)}
+            >
+              <IconChevronDown
+                size={14}
+                className="recipient-summary-chevron"
+                aria-hidden="true"
+              />
+              <span>{t("composer.to")}</span>
+            </button>
+            <RecipientAddressList
+              values={recipients.to}
+              rawValue={message.to_addresses}
+              onCompose={onComposeTo}
+              onContextMenu={showAddressContextMenu}
             />
-            <span>
-              {message.from_address} ·{" "}
-              {t("reader.to", { recipient: message.to_addresses })}
-            </span>
-          </button>
+          </div>
           {recipientsExpanded ? (
             <dl className="recipient-details">
               <RecipientRow
                 label={t("composer.from")}
                 values={recipients.from}
+                rawValue={message.from_address}
+                onCompose={onComposeTo}
+                onContextMenu={showAddressContextMenu}
               />
-              <RecipientRow label={t("composer.to")} values={recipients.to} />
-              <RecipientRow label={t("composer.cc")} values={recipients.cc} />
-              <RecipientRow label={t("composer.bcc")} values={recipients.bcc} />
+              <RecipientRow
+                label={t("composer.to")}
+                values={recipients.to}
+                rawValue={message.to_addresses}
+                onCompose={onComposeTo}
+                onContextMenu={showAddressContextMenu}
+              />
+              <RecipientRow
+                label={t("composer.cc")}
+                values={recipients.cc}
+                rawValue={message.cc_addresses}
+                onCompose={onComposeTo}
+                onContextMenu={showAddressContextMenu}
+              />
+              <RecipientRow
+                label={t("composer.bcc")}
+                values={recipients.bcc}
+                rawValue={message.bcc_addresses}
+                onCompose={onComposeTo}
+                onContextMenu={showAddressContextMenu}
+              />
               <RecipientRow
                 label={t("reader.replyTo")}
                 values={recipients.replyTo}
+                rawValue={message.reply_to_addresses}
+                onCompose={onComposeTo}
+                onContextMenu={showAddressContextMenu}
               />
             </dl>
           ) : null}
@@ -941,24 +1003,26 @@ function ThreadMessage({
             </Menu.Item>
           </Menu.Dropdown>
         </Menu>
-        <Tooltip
-          label={t("reader.collapseMessage", {
-            sender: message.from_name || message.from_address,
-          })}
-        >
-          <ActionIcon
-            className="reader-header-action"
-            variant="subtle"
-            color="gray"
-            aria-expanded="true"
-            aria-label={t("reader.collapseMessage", {
+        {canCollapse ? (
+          <Tooltip
+            label={t("reader.collapseMessage", {
               sender: message.from_name || message.from_address,
             })}
-            onClick={onToggleExpanded}
           >
-            <IconChevronDown size={19} stroke={1.9} />
-          </ActionIcon>
-        </Tooltip>
+            <ActionIcon
+              className="reader-header-action"
+              variant="subtle"
+              color="gray"
+              aria-expanded="true"
+              aria-label={t("reader.collapseMessage", {
+                sender: message.from_name || message.from_address,
+              })}
+              onClick={onToggleExpanded}
+            >
+              <IconChevronDown size={19} stroke={1.9} />
+            </ActionIcon>
+          </Tooltip>
+        ) : null}
       </div>
       {exportStatus ? (
         <p className="attachment-status" role="status">
@@ -1102,17 +1166,111 @@ function ThreadMessage({
 function RecipientRow({
   label,
   values,
+  rawValue,
+  onCompose,
+  onContextMenu,
 }: {
   label: string;
-  values: ReturnType<typeof messageRecipients>["to"];
+  values: MailAddress[];
+  rawValue?: string;
+  onCompose: (address: string) => void;
+  onContextMenu: (
+    address: string,
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) => void;
 }) {
-  if (!values.length) return null;
+  if (!values.length && !rawValue?.trim()) return null;
   return (
     <div className="recipient-detail-row">
       <dt>{label}</dt>
-      <dd>{values.map(formatAddress).join(", ")}</dd>
+      <dd>
+        <RecipientAddressList
+          values={values}
+          rawValue={rawValue}
+          onCompose={onCompose}
+          onContextMenu={onContextMenu}
+        />
+      </dd>
     </div>
   );
+}
+
+function RecipientAddressList({
+  values,
+  rawValue,
+  onCompose,
+  onContextMenu,
+}: {
+  values: MailAddress[];
+  rawValue?: string;
+  onCompose: (address: string) => void;
+  onContextMenu: (
+    address: string,
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) => void;
+}) {
+  const rawParts = rawValue?.trim() ? splitAddressValues(rawValue) : [];
+  if (rawValue?.trim() && rawParts.length !== values.length) {
+    return <span className="recipient-address-list">{rawValue}</span>;
+  }
+  return (
+    <span className="recipient-address-list">
+      {values.map((value, index) => (
+        <Fragment key={`${value.name ?? ""}:${value.address}:${index}`}>
+          {index ? ", " : null}
+          {value.name ? (
+            <span className="recipient-address-name">{value.name} </span>
+          ) : null}
+          <EmailAddress
+            address={value.address}
+            onCompose={onCompose}
+            onContextMenu={onContextMenu}
+          />
+        </Fragment>
+      ))}
+    </span>
+  );
+}
+
+function EmailAddress({
+  address,
+  onCompose,
+  onContextMenu,
+}: {
+  address: string;
+  onCompose: (address: string) => void;
+  onContextMenu: (
+    address: string,
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <button
+      type="button"
+      className="recipient-address"
+      aria-label={t("reader.emailAddress", { address })}
+      onClick={(event) => {
+        event.stopPropagation();
+        if (hasSelectedText(event.currentTarget)) return;
+        onCompose(address);
+      }}
+      onContextMenu={(event) => onContextMenu(address, event)}
+    >
+      {address}
+    </button>
+  );
+}
+
+function hasSelectedText(target: HTMLElement) {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || !selection.rangeCount)
+    return false;
+  try {
+    return selection.getRangeAt(0).intersectsNode(target);
+  } catch {
+    return false;
+  }
 }
 
 function PlainTextMessage({ text }: { text: string }) {

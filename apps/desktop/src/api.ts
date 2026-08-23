@@ -77,6 +77,18 @@ const desktopApi = {
     invoke<Account>("update_account", { input }),
   showAccountContextMenu: (accountId: string, renameLabel: string) =>
     invoke<void>("show_account_context_menu", { accountId, renameLabel }),
+  showEmailAddressContextMenu: (
+    accountId: string,
+    address: string,
+    copyLabel: string,
+    newMessageLabel: string,
+  ) =>
+    invoke<void>("show_email_address_context_menu", {
+      accountId,
+      address,
+      copyLabel,
+      newMessageLabel,
+    }),
   removeAccount: (accountId: string) =>
     invoke<void>("remove_account", { accountId }),
   addAccount: (draft: Record<string, unknown>, password: string) =>
@@ -459,6 +471,10 @@ const demoApi: typeof desktopApi = {
     return demoAccount;
   },
   showAccountContextMenu: async () => undefined,
+  showEmailAddressContextMenu: (...args) =>
+    "__TAURI_INTERNALS__" in window
+      ? desktopApi.showEmailAddressContextMenu(...args)
+      : Promise.resolve(),
   removeAccount: async () => undefined,
   addAccount: async () => demoAccount,
   addOAuthAccount: async () => demoAccount,

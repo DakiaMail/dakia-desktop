@@ -1,5 +1,6 @@
 import {
   act,
+  createEvent,
   fireEvent,
   render,
   screen,
@@ -64,6 +65,8 @@ const props = {
   onToggleRead: vi.fn(),
   onSummarize: vi.fn(),
   onCopyAi: vi.fn(),
+  onComposeTo: vi.fn(),
+  onAddressContextMenu: vi.fn(),
   unsubscribeLoading: false,
   onUnsubscribe: vi.fn(),
   onToggleStar: vi.fn(),
@@ -469,11 +472,6 @@ describe("Reader unsubscribe action", () => {
       ).not.toBeInTheDocument(),
     );
     expect(screen.queryByRole("button", { name: "Save all" })).toBeNull();
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: `Collapse message from ${message.from_name || message.from_address}`,
-      }),
-    );
     expect(screen.queryByLabelText("Has attachments")).toBeNull();
   });
 
@@ -697,7 +695,11 @@ describe("Reader unsubscribe action", () => {
     fireEvent.click(screen.getByRole("button", { name: "Unsubscribe" }));
     expect(props.onUnsubscribe).toHaveBeenCalledWith(latest);
     expect(api.content).toHaveBeenCalledTimes(2);
-    fireEvent.click(screen.getByText("Latest Sender"));
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Collapse message from Latest Sender",
+      }),
+    );
     expect(screen.queryByText("Latest full body")).not.toBeInTheDocument();
     expect(
       screen.getByRole("button", {
@@ -833,6 +835,68 @@ describe("Reader unsubscribe action", () => {
     expect(api.content).not.toHaveBeenCalledWith(newer.id);
   });
 
+  it("only collapses threaded messages through their collapse control", async () => {
+    const earlier = {
+      ...message,
+      id: "message-earlier",
+      from_name: "Earlier Sender",
+    };
+    const latest = {
+      ...message,
+      id: "message-latest",
+      from_name: "Latest Sender",
+    };
+    vi.mocked(api.content).mockImplementation(async (id) => ({
+      body_text: id === latest.id ? "Latest full body" : "Earlier full body",
+      attachments: [],
+    }));
+    render(
+      <MantineProvider>
+        <Reader {...props} message={earlier} messages={[earlier, latest]} />
+      </MantineProvider>,
+    );
+
+    expect(await screen.findByText("Latest full body")).toBeVisible();
+    fireEvent.click(screen.getByText("Latest Sender"));
+    expect(screen.getByText("Latest full body")).toBeVisible();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Collapse message from Latest Sender",
+      }),
+    );
+    expect(screen.queryByText("Latest full body")).not.toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Expand message from Latest Sender",
+      }),
+    );
+    expect(await screen.findByText("Latest full body")).toBeVisible();
+  });
+
+  it("does not offer collapse for a single-message conversation", async () => {
+    const namedMessage = { ...message, from_name: "Only Sender" };
+    vi.mocked(api.content).mockResolvedValue({
+      body_text: "Only message body",
+      attachments: [],
+    });
+    render(
+      <MantineProvider>
+        <Reader {...props} message={namedMessage} />
+      </MantineProvider>,
+    );
+
+    expect(await screen.findByText("Only message body")).toBeVisible();
+    expect(
+      screen.queryByRole("button", {
+        name: "Collapse message from Only Sender",
+      }),
+    ).toBeNull();
+    fireEvent.click(screen.getByText("Only Sender"));
+    expect(screen.getByText("Only message body")).toBeVisible();
+  });
+
   it("resets expanded state for the same thread ID in another account", async () => {
     const firstAccountEarlier = {
       ...message,
@@ -904,7 +968,7 @@ describe("Reader unsubscribe action", () => {
     );
   });
 
-  it("expands complete recipient details without inventing missing rows", () => {
+  it("expands complete recipient details with interactive address controls", () => {
     render(
       <MantineProvider>
         <Reader
@@ -913,6 +977,7 @@ describe("Reader unsubscribe action", () => {
             ...message,
             from_name: "Mail Sender",
             cc_addresses: '"Doe, Jane" <jane@example.com>',
+            bcc_addresses: "blind@example.com",
             reply_to_addresses: "replies@example.com",
           }}
         />
@@ -927,10 +992,150 @@ describe("Reader unsubscribe action", () => {
     expect(
       screen.getByRole("button", { name: "Hide full recipient details" }),
     ).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByText("Mail Sender <list@example.com>")).toBeVisible();
-    expect(screen.getByText('"Doe, Jane" <jane@example.com>')).toBeVisible();
-    expect(screen.getByText("replies@example.com")).toBeVisible();
-    expect(screen.queryByText("Bcc")).not.toBeInTheDocument();
+    expect(
+      screen.getAllByRole("button", { name: "Email list@example.com" }),
+    ).toHaveLength(2);
+    expect(
+      screen.getAllByRole("button", { name: "Email me@example.com" }),
+    ).toHaveLength(2);
+    expect(
+      screen.getByRole("button", { name: "Email jane@example.com" }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Email blind@example.com" }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Email replies@example.com" }),
+    ).toBeVisible();
+  });
+
+  it("preserves unsupported raw mailbox headers without making them interactive", () => {
+    const rawRecipient = '"Jane Doe"@example.com, valid@example.com';
+    render(
+      <MantineProvider>
+        <Reader
+          {...props}
+          message={{
+            ...message,
+            from_name: "Provider fallback",
+            from_address: "malformed provider fallback",
+            to_addresses: rawRecipient,
+          }}
+        />
+      </MantineProvider>,
+    );
+
+    expect(screen.getByText("malformed provider fallback")).toBeVisible();
+    expect(screen.getByText(rawRecipient)).toBeVisible();
+    expect(
+      screen.queryByRole("button", {
+        name: "Email malformed provider fallback",
+      }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Email valid@example.com" }),
+    ).toBeNull();
+  });
+
+  it("opens a native compose target from an address without collapsing the message", () => {
+    render(
+      <MantineProvider>
+        <Reader {...props} message={message} />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Email list@example.com" }),
+    );
+
+    expect(props.onComposeTo).toHaveBeenCalledWith(message, "list@example.com");
+    expect(
+      screen.queryByRole("button", {
+        name: "Collapse message from list@example.com",
+      }),
+    ).toBeNull();
+  });
+
+  it("requests the native context menu for the right-clicked address", () => {
+    render(
+      <MantineProvider>
+        <Reader {...props} message={message} />
+      </MantineProvider>,
+    );
+
+    const address = screen.getByRole("button", {
+      name: "Email list@example.com",
+    });
+    const contextEvent = createEvent.contextMenu(address, {
+      clientX: 140,
+      clientY: 90,
+    });
+    fireEvent(address, contextEvent);
+
+    expect(contextEvent.defaultPrevented).toBe(true);
+    expect(props.onAddressContextMenu).toHaveBeenCalledWith(
+      message,
+      "list@example.com",
+    );
+    expect(
+      screen.queryByRole("button", {
+        name: "Collapse message from list@example.com",
+      }),
+    ).toBeNull();
+    expect(screen.queryByRole("menuitem")).toBeNull();
+  });
+
+  it("preserves a drag selection instead of opening a compose window", () => {
+    render(
+      <MantineProvider>
+        <Reader {...props} message={message} />
+      </MantineProvider>,
+    );
+
+    const address = screen.getByRole("button", {
+      name: "Email list@example.com",
+    });
+    const selection = window.getSelection()!;
+    const range = document.createRange();
+    range.selectNodeContents(address);
+    selection.removeAllRanges();
+    selection.addRange(range);
+
+    fireEvent.click(address);
+
+    expect(selection.toString()).toBe("list@example.com");
+    expect(props.onComposeTo).not.toHaveBeenCalled();
+    selection.removeAllRanges();
+  });
+
+  it("does not collapse the header when a selection extends beyond an address", () => {
+    const namedMessage = { ...message, from_name: "Mail Sender" };
+    render(
+      <MantineProvider>
+        <Reader {...props} message={namedMessage} />
+      </MantineProvider>,
+    );
+
+    const senderName = screen.getByText("Mail Sender");
+    const address = screen.getByRole("button", {
+      name: "Email list@example.com",
+    });
+    const selection = window.getSelection()!;
+    const range = document.createRange();
+    range.setStart(senderName.firstChild!, 0);
+    range.setEnd(address.firstChild!, "list@example.com".length);
+    selection.removeAllRanges();
+    selection.addRange(range);
+
+    fireEvent.click(senderName);
+
+    expect(selection.toString()).toBe("Mail Senderlist@example.com");
+    expect(
+      screen.queryByRole("button", {
+        name: "Collapse message from Mail Sender",
+      }),
+    ).toBeNull();
+    selection.removeAllRanges();
   });
 
   it("offers Reply All at the bottom and in the message menu", async () => {

@@ -118,6 +118,8 @@ export const en = {
       emptyBody: "Select an email to read it here.",
       to: "To {{recipient}}",
       replyTo: "Reply-To",
+      emailAddress: "Email {{address}}",
+      newMessageTo: "New message to {{address}}",
       quickReply: "Quick reply",
       showRecipientDetails: "Show full recipient details",
       hideRecipientDetails: "Hide full recipient details",
