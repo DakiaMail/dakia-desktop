@@ -83,7 +83,7 @@ const mocks = vi.hoisted(() => {
     api: {
       action: vi.fn(async () => undefined),
       aiAvailable: vi.fn(async () => false),
-      accounts: vi.fn(async () => [account]),
+      accounts: vi.fn(async (): Promise<Account[]> => [account]),
       classifyPending: vi.fn(async () => 0),
       configureTray: vi.fn(async () => undefined),
       content: vi.fn(
@@ -126,6 +126,12 @@ const mocks = vi.hoisted(() => {
     requestInitialNotificationAccess: vi.fn(async () => undefined),
     sendNewMailNotification: vi.fn(async () => false),
     openComposeWindow: vi.fn(),
+    createFeedbackComposeSeed: vi.fn(async (accountId, locale) => ({
+      accountId,
+      to: "support@dakiamail.com",
+      subject: "Dakia feedback",
+      body: `Language: ${locale}`,
+    })),
     openReaderWindow: vi.fn(async () => undefined),
     noopListener: vi.fn(async () => unlisten),
     onNativeMenuAction: vi.fn(async (handler: (action: string) => void) => {
@@ -211,6 +217,10 @@ vi.mock("./composeWindow", () => ({
   onComposeSent: mocks.noopListener,
   onOutboxChanged: mocks.noopListener,
   openComposeWindow: mocks.openComposeWindow,
+}));
+
+vi.mock("./feedback", () => ({
+  createFeedbackComposeSeed: mocks.createFeedbackComposeSeed,
 }));
 
 vi.mock("./readerWindow", () => ({
@@ -300,6 +310,108 @@ describe("App read state", () => {
 
     await screen.findByText("Unread thread");
     expect(mocks.api.aiAvailable).not.toHaveBeenCalled();
+  });
+
+  it("opens an editable support composer from the sidebar feedback action", async () => {
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const feedback = await screen.findByRole("button", { name: "Feedback" });
+    await waitFor(() => expect(feedback).toBeEnabled());
+    fireEvent.click(feedback);
+
+    await waitFor(() =>
+      expect(mocks.createFeedbackComposeSeed).toHaveBeenCalledWith(
+        "account-1",
+        "en",
+      ),
+    );
+    expect(mocks.openComposeWindow).toHaveBeenCalledWith({
+      accountId: "account-1",
+      to: "support@dakiamail.com",
+      subject: "Dakia feedback",
+      body: "Language: en",
+    });
+  });
+
+  it("uses the currently selected account as the feedback sender", async () => {
+    const workAccount: Account = {
+      ...mocks.account,
+      id: "account-2",
+      email: "work@example.com",
+      account_name: "Work",
+    };
+    mocks.api.accounts.mockResolvedValue([mocks.account, workAccount]);
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Work" }));
+    const feedback = screen.getByRole("button", { name: "Feedback" });
+    await waitFor(() => expect(feedback).toBeEnabled());
+    fireEvent.click(feedback);
+
+    await waitFor(() =>
+      expect(mocks.createFeedbackComposeSeed).toHaveBeenCalledWith(
+        "account-2",
+        "en",
+      ),
+    );
+  });
+
+  it("routes feedback through account setup when no sender account exists", async () => {
+    mocks.api.accounts.mockResolvedValue([]);
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Feedback" }));
+
+    await waitFor(() => expect(mocks.openAccountWindow).toHaveBeenCalledOnce());
+    expect(mocks.showNativeMessage).toHaveBeenCalledWith(
+      "New message",
+      "Connect an account before composing.",
+      "warning",
+    );
+    expect(mocks.createFeedbackComposeSeed).not.toHaveBeenCalled();
+    expect(mocks.openComposeWindow).not.toHaveBeenCalled();
+  });
+
+  it("does not route feedback to account setup before accounts finish loading", async () => {
+    let resolveAccounts: ((accounts: Account[]) => void) | undefined;
+    mocks.api.accounts.mockImplementationOnce(
+      () =>
+        new Promise<Account[]>((resolve) => {
+          resolveAccounts = resolve;
+        }),
+    );
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const feedback = screen.getByRole("button", { name: "Feedback" });
+    expect(feedback).toBeDisabled();
+    fireEvent.click(feedback);
+    expect(mocks.openAccountWindow).not.toHaveBeenCalled();
+
+    act(() => resolveAccounts?.([mocks.account]));
+    await waitFor(() => expect(feedback).toBeEnabled());
+    fireEvent.click(feedback);
+    await waitFor(() =>
+      expect(mocks.createFeedbackComposeSeed).toHaveBeenCalledWith(
+        "account-1",
+        "en",
+      ),
+    );
   });
 
   it("shows only one error prompt when repeated update menu events share a failed check", async () => {
