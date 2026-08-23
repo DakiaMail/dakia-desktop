@@ -186,12 +186,39 @@ textarea {
 }
 
 .mailbox-nav {
-  padding: 38px 9px 11px;
+  padding: 38px 0 0;
   border-right: 1px solid var(--dakia-divider);
   background: var(--dakia-sidebar);
   min-width: 0;
   display: flex;
   flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.mailbox-nav-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 0 9px 11px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+.mailbox-nav-footer {
+  flex: none;
+  padding: 9px;
+  border-top: 1px solid var(--dakia-divider);
+  background: var(--dakia-sidebar);
+}
+.sidebar-feedback {
+  margin: 0;
+  color: light-dark(#686e6b, #9fa6a3);
+}
+.sidebar-feedback:hover {
+  color: light-dark(#282d2b, #e3e7e5);
+  background: light-dark(#e8e5df, #202423);
+}
+.sidebar-feedback:disabled {
+  cursor: default;
+  opacity: 0.55;
 }
 .sidebar-compose {
   width: fit-content;
