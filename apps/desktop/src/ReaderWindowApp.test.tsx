@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
     conversationForTarget: vi.fn(),
     setRead: vi.fn(),
     setStarred: vi.fn(),
+    showEmailAddressContextMenu: vi.fn(),
     summarize: vi.fn(),
     unsubscribe: vi.fn(),
   },
@@ -56,11 +57,15 @@ vi.mock("./components/Reader", () => ({
     message,
     messages,
     onArchive,
+    onComposeTo,
+    onAddressContextMenu,
     onPermanentDelete,
   }: {
     message?: MailSummary;
     messages?: MailSummary[];
     onArchive: () => void;
+    onComposeTo: (message: MailSummary, address: string) => void;
+    onAddressContextMenu: (message: MailSummary, address: string) => void;
     onPermanentDelete: (message: MailSummary) => void;
   }) => (
     <div>
@@ -68,6 +73,22 @@ vi.mock("./components/Reader", () => ({
       <span data-testid="conversation-count">{messages?.length}</span>
       <button type="button" onClick={onArchive}>
         Archive
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          message && onComposeTo(message, "müller+news@example.com")
+        }
+      >
+        Compose to address
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          message && onAddressContextMenu(message, "müller+news@example.com")
+        }
+      >
+        Address context menu
       </button>
       <button
         type="button"
@@ -125,6 +146,16 @@ const thread: MailThread = {
   participants: [],
 };
 
+function encodeNativeMenuAddress(value: string) {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  bytes.forEach((byte) => (binary += String.fromCharCode(byte)));
+  return btoa(binary)
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/=+$/, "");
+}
+
 describe("ReaderWindowApp", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -144,6 +175,7 @@ describe("ReaderWindowApp", () => {
     mocks.api.aiAvailable.mockResolvedValue(false);
     mocks.api.action.mockResolvedValue(undefined);
     mocks.api.setRead.mockResolvedValue(undefined);
+    mocks.api.showEmailAddressContextMenu.mockResolvedValue(undefined);
     mocks.onReaderTarget.mockResolvedValue(() => undefined);
     mocks.notifyReaderWindowMutated.mockResolvedValue(undefined);
   });
@@ -238,6 +270,55 @@ describe("ReaderWindowApp", () => {
 
     await waitFor(() => expect(mocks.api.action).toHaveBeenCalledTimes(2));
     expect(mocks.closeReaderWindow).toHaveBeenCalledOnce();
+  });
+
+  it("routes address interactions through the dedicated reader window", async () => {
+    const { ReaderWindowApp } = await import("./ReaderWindowApp");
+    render(
+      <MantineProvider>
+        <ReaderWindowApp />
+      </MantineProvider>,
+    );
+    await screen.findByTestId("focused-message");
+
+    fireEvent.click(screen.getByRole("button", { name: "Compose to address" }));
+    expect(mocks.openComposeWindow).toHaveBeenCalledWith({
+      accountId: "account-1",
+      to: "müller+news@example.com",
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Address context menu" }),
+    );
+    expect(mocks.api.showEmailAddressContextMenu).toHaveBeenCalledWith(
+      "account-1",
+      "müller+news@example.com",
+      "actions.copy",
+      "reader.newMessageTo",
+    );
+
+    await waitFor(() =>
+      expect(mocks.nativeMenuHandlers.length).toBeGreaterThan(1),
+    );
+    act(() =>
+      mocks.nativeMenuHandlers.at(-1)?.(
+        `compose-email-address:account-1:${encodeNativeMenuAddress("müller+news@example.com")}`,
+      ),
+    );
+    expect(mocks.openComposeWindow).toHaveBeenLastCalledWith({
+      accountId: "account-1",
+      to: "müller+news@example.com",
+    });
+
+    act(() =>
+      mocks.nativeMenuHandlers.at(-1)?.(
+        `compose-email-address:wrong-account:${encodeNativeMenuAddress("attacker@example.com")}`,
+      ),
+    );
+    expect(mocks.openComposeWindow).not.toHaveBeenCalledWith({
+      accountId: "wrong-account",
+      to: "attacker@example.com",
+    });
   });
 
   it("removes only the permanently deleted message and keeps the conversation open", async () => {

@@ -54,7 +54,11 @@ import type {
   MessageContent,
   MessageContentErrorKind,
 } from "../types";
-import { type MailAddress, messageRecipients } from "../recipients";
+import {
+  type MailAddress,
+  messageRecipients,
+  splitAddressValues,
+} from "../recipients";
 import { splitQuotedText } from "../quotedHistory";
 import { EmptyState } from "./EmptyState";
 import { HtmlMessage } from "./HtmlMessage";
@@ -825,7 +829,10 @@ function ThreadMessage({
                 onContextMenu={showAddressContextMenu}
               />
             ) : (
-              <span>{message.from_name || message.from_address}</span>
+              <>
+                {message.from_name ? <span>{message.from_name}</span> : null}
+                <span className="sender-address">{message.from_address}</span>
+              </>
             )}
             {isSent ? (
               <span className="sent-by-you">{t("reader.sentByYou")}</span>
@@ -852,6 +859,7 @@ function ThreadMessage({
             </button>
             <RecipientAddressList
               values={recipients.to}
+              rawValue={message.to_addresses}
               onCompose={onComposeTo}
               onContextMenu={showAddressContextMenu}
             />
@@ -861,30 +869,35 @@ function ThreadMessage({
               <RecipientRow
                 label={t("composer.from")}
                 values={recipients.from}
+                rawValue={message.from_address}
                 onCompose={onComposeTo}
                 onContextMenu={showAddressContextMenu}
               />
               <RecipientRow
                 label={t("composer.to")}
                 values={recipients.to}
+                rawValue={message.to_addresses}
                 onCompose={onComposeTo}
                 onContextMenu={showAddressContextMenu}
               />
               <RecipientRow
                 label={t("composer.cc")}
                 values={recipients.cc}
+                rawValue={message.cc_addresses}
                 onCompose={onComposeTo}
                 onContextMenu={showAddressContextMenu}
               />
               <RecipientRow
                 label={t("composer.bcc")}
                 values={recipients.bcc}
+                rawValue={message.bcc_addresses}
                 onCompose={onComposeTo}
                 onContextMenu={showAddressContextMenu}
               />
               <RecipientRow
                 label={t("reader.replyTo")}
                 values={recipients.replyTo}
+                rawValue={message.reply_to_addresses}
                 onCompose={onComposeTo}
                 onContextMenu={showAddressContextMenu}
               />
@@ -1153,24 +1166,27 @@ function ThreadMessage({
 function RecipientRow({
   label,
   values,
+  rawValue,
   onCompose,
   onContextMenu,
 }: {
   label: string;
   values: MailAddress[];
+  rawValue?: string;
   onCompose: (address: string) => void;
   onContextMenu: (
     address: string,
     event: ReactMouseEvent<HTMLButtonElement>,
   ) => void;
 }) {
-  if (!values.length) return null;
+  if (!values.length && !rawValue?.trim()) return null;
   return (
     <div className="recipient-detail-row">
       <dt>{label}</dt>
       <dd>
         <RecipientAddressList
           values={values}
+          rawValue={rawValue}
           onCompose={onCompose}
           onContextMenu={onContextMenu}
         />
@@ -1181,16 +1197,22 @@ function RecipientRow({
 
 function RecipientAddressList({
   values,
+  rawValue,
   onCompose,
   onContextMenu,
 }: {
   values: MailAddress[];
+  rawValue?: string;
   onCompose: (address: string) => void;
   onContextMenu: (
     address: string,
     event: ReactMouseEvent<HTMLButtonElement>,
   ) => void;
 }) {
+  const rawParts = rawValue?.trim() ? splitAddressValues(rawValue) : [];
+  if (rawValue?.trim() && rawParts.length !== values.length) {
+    return <span className="recipient-address-list">{rawValue}</span>;
+  }
   return (
     <span className="recipient-address-list">
       {values.map((value, index) => (

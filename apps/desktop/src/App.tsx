@@ -5,6 +5,7 @@ import type { TFunction } from "i18next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "./api";
 import { AI_FEATURES_VISIBLE } from "./features";
+import { parseEmailAddressMenuAction } from "./emailAddressMenu";
 import {
   onComposeSent,
   onOutboxChanged,
@@ -132,22 +133,6 @@ function emptySmartSections(): Record<SmartSectionId, SmartSection> {
     },
     {} as Record<SmartSectionId, SmartSection>,
   );
-}
-
-function decodeNativeMenuAddress(value: string) {
-  try {
-    const standardBase64 = value
-      .replaceAll("-", "+")
-      .replaceAll("_", "/")
-      .padEnd(Math.ceil(value.length / 4) * 4, "=");
-    const bytes = Uint8Array.from(atob(standardBase64), (character) =>
-      character.charCodeAt(0),
-    );
-    const address = new TextDecoder().decode(bytes);
-    return address || undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 export default function App() {
@@ -1971,38 +1956,18 @@ export default function App() {
           void configureTerminalCommand();
           break;
         default:
-          if (action.startsWith("copy-email-address:")) {
-            const address = decodeNativeMenuAddress(
-              action.slice("copy-email-address:".length),
-            );
-            if (address) {
-              void navigator.clipboard
-                .writeText(address)
-                .catch(() =>
-                  showNativeMessage(
-                    t("errors.generic"),
-                    t("errors.copyFailed"),
-                    "error",
-                  ),
-                );
-            }
-            break;
-          }
-          if (action.startsWith("compose-email-address:")) {
-            const payload = action.slice("compose-email-address:".length);
-            const separator = payload.indexOf(":");
-            const accountId = payload.slice(0, separator);
-            const address = decodeNativeMenuAddress(
-              payload.slice(separator + 1),
-            );
+          {
+            const addressAction = parseEmailAddressMenuAction(action);
             if (
-              separator > 0 &&
-              address &&
-              accounts.some((account) => account.id === accountId)
+              addressAction?.kind === "compose" &&
+              accounts.some((account) => account.id === addressAction.accountId)
             ) {
-              openComposeWindow({ accountId, to: address });
+              openComposeWindow({
+                accountId: addressAction.accountId,
+                to: addressAction.address,
+              });
+              break;
             }
-            break;
           }
           if (action.startsWith("rename-account:")) {
             const accountId = action.slice("rename-account:".length);

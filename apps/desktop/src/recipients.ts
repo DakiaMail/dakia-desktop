@@ -31,13 +31,10 @@ export function splitAddressValues(value: string) {
 }
 
 export function messageRecipients(message: MailSummary): MessageRecipients {
+  const from = parseAddressList(message.from_address).slice(0, 1);
+  if (from[0] && message.from_name) from[0].name = message.from_name;
   return {
-    from: [
-      {
-        name: message.from_name || undefined,
-        address: message.from_address,
-      },
-    ].filter((item) => Boolean(item.address.trim())),
+    from,
     to: parseAddressList(message.to_addresses),
     cc: parseAddressList(message.cc_addresses),
     bcc: parseAddressList(message.bcc_addresses),

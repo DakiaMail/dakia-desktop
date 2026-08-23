@@ -1009,6 +1009,34 @@ describe("Reader unsubscribe action", () => {
     ).toBeVisible();
   });
 
+  it("preserves unsupported raw mailbox headers without making them interactive", () => {
+    const rawRecipient = '"Jane Doe"@example.com, valid@example.com';
+    render(
+      <MantineProvider>
+        <Reader
+          {...props}
+          message={{
+            ...message,
+            from_name: "Provider fallback",
+            from_address: "malformed provider fallback",
+            to_addresses: rawRecipient,
+          }}
+        />
+      </MantineProvider>,
+    );
+
+    expect(screen.getByText("malformed provider fallback")).toBeVisible();
+    expect(screen.getByText(rawRecipient)).toBeVisible();
+    expect(
+      screen.queryByRole("button", {
+        name: "Email malformed provider fallback",
+      }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Email valid@example.com" }),
+    ).toBeNull();
+  });
+
   it("opens a native compose target from an address without collapsing the message", () => {
     render(
       <MantineProvider>

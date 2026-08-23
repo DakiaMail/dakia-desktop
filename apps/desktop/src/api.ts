@@ -471,7 +471,10 @@ const demoApi: typeof desktopApi = {
     return demoAccount;
   },
   showAccountContextMenu: async () => undefined,
-  showEmailAddressContextMenu: async () => undefined,
+  showEmailAddressContextMenu: (...args) =>
+    "__TAURI_INTERNALS__" in window
+      ? desktopApi.showEmailAddressContextMenu(...args)
+      : Promise.resolve(),
   removeAccount: async () => undefined,
   addAccount: async () => demoAccount,
   addOAuthAccount: async () => demoAccount,

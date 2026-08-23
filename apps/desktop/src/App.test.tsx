@@ -417,8 +417,8 @@ describe("App read state", () => {
     });
   });
 
-  it("reports a clipboard failure when copying a header mailbox", async () => {
-    const writeText = vi.fn().mockRejectedValue(new Error("Clipboard denied"));
+  it("leaves native Copy actions to the Rust clipboard path", async () => {
+    const writeText = vi.fn();
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: { writeText },
@@ -432,16 +432,7 @@ describe("App read state", () => {
     fireEvent.click(
       (await screen.findByText("Unread thread")).closest("button")!,
     );
-    const address = await screen.findByRole("button", {
-      name: "Email sender@example.com",
-    });
-    fireEvent.contextMenu(address, { clientX: 140, clientY: 90 });
-    expect(mocks.api.showEmailAddressContextMenu).toHaveBeenCalledWith(
-      "account-1",
-      "sender@example.com",
-      "Copy",
-      "New message to sender@example.com",
-    );
+    await screen.findByRole("button", { name: "Email sender@example.com" });
     const menuHandler = mocks.nativeMenuHandlers.at(-1)!;
     act(() =>
       menuHandler(
@@ -449,16 +440,7 @@ describe("App read state", () => {
       ),
     );
 
-    await waitFor(() =>
-      expect(writeText).toHaveBeenCalledWith("sender@example.com"),
-    );
-    await waitFor(() =>
-      expect(mocks.showNativeMessage).toHaveBeenCalledWith(
-        "Something went wrong",
-        "Could not copy text",
-        "error",
-      ),
-    );
+    expect(writeText).not.toHaveBeenCalled();
   });
 
   it("opens a composer from the native address context menu", async () => {
