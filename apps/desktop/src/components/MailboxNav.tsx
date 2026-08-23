@@ -6,6 +6,7 @@ import {
   IconInbox,
   IconMail,
   IconMailbox,
+  IconMessageCircle,
   IconSend,
   IconShieldX,
   IconSparkles,
@@ -24,6 +25,8 @@ type Props = {
   onAccountContextMenu: (account: Account) => void;
   onAddAccount: () => void;
   onMailbox: (mailbox: string) => void;
+  onFeedback: () => void;
+  feedbackDisabled?: boolean;
   outboxCount?: number;
   starredCount?: number;
 };
@@ -36,6 +39,8 @@ export function MailboxNav({
   onAccountContextMenu,
   onAddAccount,
   onMailbox,
+  onFeedback,
+  feedbackDisabled = false,
   outboxCount = 0,
   starredCount = 0,
 }: Props) {
@@ -54,101 +59,113 @@ export function MailboxNav({
   ] as const;
   return (
     <nav className="mailbox-nav" aria-label={t("app.name")}>
-      <div className="nav-group-label">{t("nav.mailboxes")}</div>
-      <div
-        className="inbox-accordion-row"
-        data-active={mailbox === "INBOX" && !selectedAccountId}
-      >
-        <button
-          className="nav-link nav-link-primary inbox-nav-main"
-          data-active={mailbox === "INBOX" && !selectedAccountId}
-          onClick={() => onMailbox("INBOX")}
-        >
-          <IconInbox size={19} stroke={1.8} />
-          <span>{t("nav.inbox")}</span>
-        </button>
-        <button
-          className="inbox-toggle"
-          onClick={() => setAccountsExpanded((value) => !value)}
-          aria-expanded={accountsExpanded}
-          aria-controls="inbox-account-list"
-          aria-label={
-            accountsExpanded
-              ? t("actions.collapseAccounts")
-              : t("actions.expandAccounts")
-          }
-        >
-          <IconChevronDown
-            className="inbox-chevron"
-            data-expanded={accountsExpanded}
-            size={15}
-          />
-        </button>
-      </div>
-      {accountsExpanded ? (
+      <div className="mailbox-nav-scroll">
+        <div className="nav-group-label">{t("nav.mailboxes")}</div>
         <div
-          id="inbox-account-list"
-          className="account-list"
-          aria-label={t("nav.accounts")}
+          className="inbox-accordion-row"
+          data-active={mailbox === "INBOX" && !selectedAccountId}
         >
-          {accounts.map((account, index) => {
-            const active = selectedAccountId === account.id;
-            return (
-              <button
-                key={account.id}
-                className="account-row"
-                data-active={active}
-                onClick={() => onSelectAccount(account.id)}
-                onContextMenu={(event) => {
-                  event.preventDefault();
-                  onAccountContextMenu(account);
-                }}
-                aria-current={active ? "page" : undefined}
-                title={account.email}
-              >
-                <span
-                  className={`account-marker account-marker-${index % 5}`}
-                />
-                <span>{account.account_name}</span>
-              </button>
-            );
-          })}
-          <button className="account-row account-add" onClick={onAddAccount}>
-            <IconCirclePlus size={15} stroke={1.7} />
-            <span>{t("actions.addAccount")}</span>
+          <button
+            className="nav-link nav-link-primary inbox-nav-main"
+            data-active={mailbox === "INBOX" && !selectedAccountId}
+            onClick={() => onMailbox("INBOX")}
+          >
+            <IconInbox size={19} stroke={1.8} />
+            <span>{t("nav.inbox")}</span>
+          </button>
+          <button
+            className="inbox-toggle"
+            onClick={() => setAccountsExpanded((value) => !value)}
+            aria-expanded={accountsExpanded}
+            aria-controls="inbox-account-list"
+            aria-label={
+              accountsExpanded
+                ? t("actions.collapseAccounts")
+                : t("actions.expandAccounts")
+            }
+          >
+            <IconChevronDown
+              className="inbox-chevron"
+              data-expanded={accountsExpanded}
+              size={15}
+            />
           </button>
         </div>
-      ) : null}
-      <div className="nav-group-label nav-folders-label">
-        {t("nav.folders")}
+        {accountsExpanded ? (
+          <div
+            id="inbox-account-list"
+            className="account-list"
+            aria-label={t("nav.accounts")}
+          >
+            {accounts.map((account, index) => {
+              const active = selectedAccountId === account.id;
+              return (
+                <button
+                  key={account.id}
+                  className="account-row"
+                  data-active={active}
+                  onClick={() => onSelectAccount(account.id)}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    onAccountContextMenu(account);
+                  }}
+                  aria-current={active ? "page" : undefined}
+                  title={account.email}
+                >
+                  <span
+                    className={`account-marker account-marker-${index % 5}`}
+                  />
+                  <span>{account.account_name}</span>
+                </button>
+              );
+            })}
+            <button className="account-row account-add" onClick={onAddAccount}>
+              <IconCirclePlus size={15} stroke={1.7} />
+              <span>{t("actions.addAccount")}</span>
+            </button>
+          </div>
+        ) : null}
+        <div className="nav-group-label nav-folders-label">
+          {t("nav.folders")}
+        </div>
+        {links.map(([id, label, Icon]) => (
+          <button
+            key={id}
+            className="nav-link"
+            data-active={mailbox === id}
+            onClick={() => onMailbox(id)}
+          >
+            <Icon size={18} stroke={1.7} />
+            <span>{label}</span>
+            {id === "Outbox" && outboxCount > 0 ? (
+              <span
+                className="nav-count"
+                aria-label={t("nav.outboxCount", { count: outboxCount })}
+              >
+                {outboxCount}
+              </span>
+            ) : null}
+            {id === "starred" && starredCount > 0 ? (
+              <span
+                className="nav-count"
+                aria-label={t("nav.starredCount", { count: starredCount })}
+              >
+                {starredCount}
+              </span>
+            ) : null}
+          </button>
+        ))}
       </div>
-      {links.map(([id, label, Icon]) => (
+      <div className="mailbox-nav-footer">
         <button
-          key={id}
-          className="nav-link"
-          data-active={mailbox === id}
-          onClick={() => onMailbox(id)}
+          className="nav-link sidebar-feedback"
+          onClick={onFeedback}
+          disabled={feedbackDisabled}
         >
-          <Icon size={18} stroke={1.7} />
-          <span>{label}</span>
-          {id === "Outbox" && outboxCount > 0 ? (
-            <span
-              className="nav-count"
-              aria-label={t("nav.outboxCount", { count: outboxCount })}
-            >
-              {outboxCount}
-            </span>
-          ) : null}
-          {id === "starred" && starredCount > 0 ? (
-            <span
-              className="nav-count"
-              aria-label={t("nav.starredCount", { count: starredCount })}
-            >
-              {starredCount}
-            </span>
-          ) : null}
+          <IconMessageCircle size={18} stroke={1.7} />
+          <span>{t("nav.feedback")}</span>
         </button>
-      ))}
+      </div>
     </nav>
   );
 }
