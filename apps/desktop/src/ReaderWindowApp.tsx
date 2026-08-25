@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { api } from "./api";
 import { openComposeWindow } from "./composeWindow";
 import { Reader } from "./components/Reader";
+import { parseEmailAddressMenuAction } from "./emailAddressMenu";
 import { AI_FEATURES_VISIBLE } from "./features";
 import { forwardBody, forwardSubject } from "./forward";
 import {
@@ -444,8 +445,26 @@ export function ReaderWindowApp() {
     let dispose: () => void = () => undefined;
     let disposed = false;
     void onNativeMenuAction((action) => {
+      const addressAction = parseEmailAddressMenuAction(action);
+      if (
+        addressAction?.kind === "compose" &&
+        addressAction.accountId === focusedMessage?.account_id
+      ) {
+        openComposeWindow({
+          accountId: addressAction.accountId,
+          to: addressAction.address,
+        });
+        return;
+      }
       if (!focusedMessage) return;
       switch (action) {
+        case "copy-email-address-failed":
+          void showNativeMessage(
+            t("errors.generic"),
+            t("errors.copyFailed"),
+            "error",
+          );
+          break;
         case "reply":
           void reply(focusedMessage);
           break;
@@ -518,6 +537,21 @@ export function ReaderWindowApp() {
                 t("errors.copyFailed"),
                 "error",
               ),
+            )
+        }
+        onComposeTo={(message, address) =>
+          openComposeWindow({ accountId: message.account_id, to: address })
+        }
+        onAddressContextMenu={(message, address) =>
+          void readerApi
+            .showEmailAddressContextMenu(
+              message.account_id,
+              address,
+              t("actions.copy"),
+              t("reader.newMessageTo", { address }),
+            )
+            .catch((error) =>
+              showNativeMessage(t("errors.generic"), String(error), "error"),
             )
         }
         unsubscribeLoading={unsubscribeLoading}

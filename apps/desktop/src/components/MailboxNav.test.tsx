@@ -33,6 +33,7 @@ describe("MailboxNav accounts", () => {
         onAccountContextMenu={onAccountContextMenu}
         onAddAccount={vi.fn()}
         onMailbox={vi.fn()}
+        onFeedback={vi.fn()}
       />,
     );
 
@@ -52,6 +53,7 @@ describe("MailboxNav accounts", () => {
         onAccountContextMenu={vi.fn()}
         onAddAccount={vi.fn()}
         onMailbox={vi.fn()}
+        onFeedback={vi.fn()}
       />,
     );
 
@@ -71,8 +73,48 @@ describe("MailboxNav accounts", () => {
         onAccountContextMenu={vi.fn()}
         onAddAccount={vi.fn()}
         onMailbox={vi.fn()}
+        onFeedback={vi.fn()}
       />,
     );
     expect(screen.getByLabelText("7 starred conversations")).toBeVisible();
+  });
+
+  it("keeps feedback in a separate footer and invokes its callback", () => {
+    const onFeedback = vi.fn();
+    const { container } = render(
+      <MailboxNav
+        accounts={[account]}
+        mailbox="INBOX"
+        onSelectAccount={vi.fn()}
+        onAccountContextMenu={vi.fn()}
+        onAddAccount={vi.fn()}
+        onMailbox={vi.fn()}
+        onFeedback={onFeedback}
+      />,
+    );
+
+    const feedback = screen.getByRole("button", { name: "Feedback" });
+    expect(feedback.closest(".mailbox-nav-footer")).toBe(
+      container.querySelector(".mailbox-nav-footer"),
+    );
+    fireEvent.click(feedback);
+    expect(onFeedback).toHaveBeenCalledOnce();
+  });
+
+  it("disables feedback while sender accounts are still loading", () => {
+    render(
+      <MailboxNav
+        accounts={[]}
+        mailbox="INBOX"
+        onSelectAccount={vi.fn()}
+        onAccountContextMenu={vi.fn()}
+        onAddAccount={vi.fn()}
+        onMailbox={vi.fn()}
+        onFeedback={vi.fn()}
+        feedbackDisabled
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Feedback" })).toBeDisabled();
   });
 });

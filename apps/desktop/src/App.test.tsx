@@ -83,7 +83,7 @@ const mocks = vi.hoisted(() => {
     api: {
       action: vi.fn(async () => undefined),
       aiAvailable: vi.fn(async () => false),
-      accounts: vi.fn(async () => [account]),
+      accounts: vi.fn(async (): Promise<Account[]> => [account]),
       classifyPending: vi.fn(async () => 0),
       configureTray: vi.fn(async () => undefined),
       content: vi.fn(
@@ -104,6 +104,7 @@ const mocks = vi.hoisted(() => {
         sections: [],
       })),
       searchRemote: vi.fn(async () => []),
+      showEmailAddressContextMenu: vi.fn(async () => undefined),
       setRead: vi.fn(async () => undefined),
       setStarred: vi.fn(async () => undefined),
       starredCount: vi.fn(async () => 0),
@@ -126,6 +127,12 @@ const mocks = vi.hoisted(() => {
     requestInitialNotificationAccess: vi.fn(async () => undefined),
     sendNewMailNotification: vi.fn(async () => false),
     openComposeWindow: vi.fn(),
+    createFeedbackComposeSeed: vi.fn(async (accountId, locale) => ({
+      accountId,
+      to: "support@dakiamail.com",
+      subject: "Dakia feedback",
+      body: `Language: ${locale}`,
+    })),
     openReaderWindow: vi.fn(async () => undefined),
     noopListener: vi.fn(async () => unlisten),
     onNativeMenuAction: vi.fn(async (handler: (action: string) => void) => {
@@ -213,6 +220,10 @@ vi.mock("./composeWindow", () => ({
   openComposeWindow: mocks.openComposeWindow,
 }));
 
+vi.mock("./feedback", () => ({
+  createFeedbackComposeSeed: mocks.createFeedbackComposeSeed,
+}));
+
 vi.mock("./readerWindow", () => ({
   onReaderWindowFailed: mocks.onReaderWindowFailed,
   onReaderWindowMutated: mocks.onReaderWindowMutated,
@@ -260,6 +271,14 @@ vi.mock("./updater", () => ({
   installUpdateAndRelaunch: mocks.installUpdateAndRelaunch,
 }));
 
+function encodeNativeMenuAddress(address: string) {
+  const bytes = new TextEncoder().encode(address);
+  return btoa(String.fromCharCode(...bytes))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/=+$/, "");
+}
+
 describe("App read state", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -300,6 +319,108 @@ describe("App read state", () => {
 
     await screen.findByText("Unread thread");
     expect(mocks.api.aiAvailable).not.toHaveBeenCalled();
+  });
+
+  it("opens an editable support composer from the sidebar feedback action", async () => {
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const feedback = await screen.findByRole("button", { name: "Feedback" });
+    await waitFor(() => expect(feedback).toBeEnabled());
+    fireEvent.click(feedback);
+
+    await waitFor(() =>
+      expect(mocks.createFeedbackComposeSeed).toHaveBeenCalledWith(
+        "account-1",
+        "en",
+      ),
+    );
+    expect(mocks.openComposeWindow).toHaveBeenCalledWith({
+      accountId: "account-1",
+      to: "support@dakiamail.com",
+      subject: "Dakia feedback",
+      body: "Language: en",
+    });
+  });
+
+  it("uses the currently selected account as the feedback sender", async () => {
+    const workAccount: Account = {
+      ...mocks.account,
+      id: "account-2",
+      email: "work@example.com",
+      account_name: "Work",
+    };
+    mocks.api.accounts.mockResolvedValue([mocks.account, workAccount]);
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Work" }));
+    const feedback = screen.getByRole("button", { name: "Feedback" });
+    await waitFor(() => expect(feedback).toBeEnabled());
+    fireEvent.click(feedback);
+
+    await waitFor(() =>
+      expect(mocks.createFeedbackComposeSeed).toHaveBeenCalledWith(
+        "account-2",
+        "en",
+      ),
+    );
+  });
+
+  it("routes feedback through account setup when no sender account exists", async () => {
+    mocks.api.accounts.mockResolvedValue([]);
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Feedback" }));
+
+    await waitFor(() => expect(mocks.openAccountWindow).toHaveBeenCalledOnce());
+    expect(mocks.showNativeMessage).toHaveBeenCalledWith(
+      "New message",
+      "Connect an account before composing.",
+      "warning",
+    );
+    expect(mocks.createFeedbackComposeSeed).not.toHaveBeenCalled();
+    expect(mocks.openComposeWindow).not.toHaveBeenCalled();
+  });
+
+  it("does not route feedback to account setup before accounts finish loading", async () => {
+    let resolveAccounts: ((accounts: Account[]) => void) | undefined;
+    mocks.api.accounts.mockImplementationOnce(
+      () =>
+        new Promise<Account[]>((resolve) => {
+          resolveAccounts = resolve;
+        }),
+    );
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const feedback = screen.getByRole("button", { name: "Feedback" });
+    expect(feedback).toBeDisabled();
+    fireEvent.click(feedback);
+    expect(mocks.openAccountWindow).not.toHaveBeenCalled();
+
+    act(() => resolveAccounts?.([mocks.account]));
+    await waitFor(() => expect(feedback).toBeEnabled());
+    fireEvent.click(feedback);
+    await waitFor(() =>
+      expect(mocks.createFeedbackComposeSeed).toHaveBeenCalledWith(
+        "account-1",
+        "en",
+      ),
+    );
   });
 
   it("shows only one error prompt when repeated update menu events share a failed check", async () => {
@@ -370,6 +491,109 @@ describe("App read state", () => {
     await waitFor(() =>
       expect(mocks.api.setRead).toHaveBeenCalledWith("message-1", true),
     );
+  });
+
+  it("opens a new composer for the selected header mailbox", async () => {
+    const selectedAddress = "selected+header@example.com";
+    mocks.api.search.mockResolvedValue({
+      conversations: groupMessages([
+        {
+          ...mocks.message,
+          from_name: "Selected Sender",
+          from_address: selectedAddress,
+        },
+      ]),
+      nextCursor: null,
+    });
+
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(
+      (await screen.findByText("Unread thread")).closest("button")!,
+    );
+    mocks.openComposeWindow.mockClear();
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: `Email ${selectedAddress}`,
+      }),
+    );
+
+    expect(mocks.openComposeWindow).toHaveBeenCalledOnce();
+    expect(mocks.openComposeWindow).toHaveBeenCalledWith({
+      accountId: "account-1",
+      to: selectedAddress,
+    });
+  });
+
+  it("leaves native Copy actions to the Rust clipboard path", async () => {
+    const writeText = vi.fn();
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(
+      (await screen.findByText("Unread thread")).closest("button")!,
+    );
+    await screen.findByRole("button", { name: "Email sender@example.com" });
+    const menuHandler = mocks.nativeMenuHandlers.at(-1)!;
+    act(() =>
+      menuHandler(
+        `copy-email-address:${encodeNativeMenuAddress("sender@example.com")}`,
+      ),
+    );
+
+    expect(writeText).not.toHaveBeenCalled();
+
+    act(() => menuHandler("copy-email-address-failed"));
+    await waitFor(() =>
+      expect(mocks.showNativeMessage).toHaveBeenCalledWith(
+        "Something went wrong",
+        "Could not copy text",
+        "error",
+      ),
+    );
+  });
+
+  it("opens a composer from the native address context menu", async () => {
+    const selectedAddress = "séndér@example.com";
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(
+      (await screen.findByText("Unread thread")).closest("button")!,
+    );
+    const address = await screen.findByRole("button", {
+      name: "Email sender@example.com",
+    });
+    fireEvent.contextMenu(address, { clientX: 140, clientY: 90 });
+    await waitFor(() =>
+      expect(mocks.api.showEmailAddressContextMenu).toHaveBeenCalledOnce(),
+    );
+    mocks.openComposeWindow.mockClear();
+    const menuHandler = mocks.nativeMenuHandlers.at(-1)!;
+    act(() =>
+      menuHandler(
+        `compose-email-address:account-1:${encodeNativeMenuAddress(selectedAddress)}`,
+      ),
+    );
+
+    expect(mocks.openComposeWindow).toHaveBeenCalledWith({
+      accountId: "account-1",
+      to: selectedAddress,
+    });
   });
 
   it("updates every concrete duplicate copy instead of synthetic winner state", async () => {

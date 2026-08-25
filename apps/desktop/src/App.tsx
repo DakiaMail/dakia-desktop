@@ -5,6 +5,7 @@ import type { TFunction } from "i18next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "./api";
 import { AI_FEATURES_VISIBLE } from "./features";
+import { parseEmailAddressMenuAction } from "./emailAddressMenu";
 import {
   onComposeSent,
   onOutboxChanged,
@@ -33,6 +34,7 @@ import { replyRecipients } from "./recipients";
 import { confirmNativeAction, showNativeMessage } from "./nativeFeedback";
 import { concreteThreadMessages, groupMessages } from "./threads";
 import { forwardBody, forwardSubject } from "./forward";
+import { createFeedbackComposeSeed } from "./feedback";
 import { formatReplyHistory } from "./replyHistory";
 import {
   onNotificationAction,
@@ -135,7 +137,7 @@ function emptySmartSections(): Record<SmartSectionId, SmartSection> {
 }
 
 export default function App() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [threads, setThreads] = useState<MailThread[]>([]);
   const [smartSections, setSmartSections] =
@@ -1843,6 +1845,23 @@ export default function App() {
     }
     openComposeWindow({ accountId: activeAccounts[0] ?? accounts[0].id });
   };
+  const openFeedback = async () => {
+    if (!accounts.length) {
+      await showNativeMessage(
+        t("composer.title"),
+        t("composer.noAccount"),
+        "warning",
+      );
+      await openAccountWindow();
+      return;
+    }
+    openComposeWindow(
+      await createFeedbackComposeSeed(
+        activeAccounts[0] ?? accounts[0].id,
+        i18n.resolvedLanguage ?? i18n.language,
+      ),
+    );
+  };
 
   const configureTerminalCommand = async () => {
     try {
@@ -1954,7 +1973,27 @@ export default function App() {
         case "terminal-command":
           void configureTerminalCommand();
           break;
+        case "copy-email-address-failed":
+          void showNativeMessage(
+            t("errors.generic"),
+            t("errors.copyFailed"),
+            "error",
+          );
+          break;
         default:
+          {
+            const addressAction = parseEmailAddressMenuAction(action);
+            if (
+              addressAction?.kind === "compose" &&
+              accounts.some((account) => account.id === addressAction.accountId)
+            ) {
+              openComposeWindow({
+                accountId: addressAction.accountId,
+                to: addressAction.address,
+              });
+              break;
+            }
+          }
           if (action.startsWith("rename-account:")) {
             const accountId = action.slice("rename-account:".length);
             if (accounts.some((account) => account.id === accountId)) {
@@ -2056,6 +2095,8 @@ export default function App() {
           }
           onAddAccount={() => void openAccountWindow()}
           onMailbox={selectMailbox}
+          onFeedback={() => void openFeedback()}
+          feedbackDisabled={loading}
           outboxCount={outbox.length}
           starredCount={starredCount}
         />
@@ -2096,6 +2137,8 @@ export default function App() {
         }
         onAddAccount={() => void openAccountWindow()}
         onMailbox={selectMailbox}
+        onFeedback={() => void openFeedback()}
+        feedbackDisabled={loading}
         outboxCount={outbox.length}
         starredCount={starredCount}
       />
@@ -2303,6 +2346,21 @@ export default function App() {
                 t("errors.copyFailed"),
                 "error",
               ),
+            )
+        }
+        onComposeTo={(message, address) =>
+          openComposeWindow({ accountId: message.account_id, to: address })
+        }
+        onAddressContextMenu={(message, address) =>
+          void api
+            .showEmailAddressContextMenu(
+              message.account_id,
+              address,
+              t("actions.copy"),
+              t("reader.newMessageTo", { address }),
+            )
+            .catch((error) =>
+              showNativeMessage(t("errors.generic"), String(error), "error"),
             )
         }
         unsubscribeLoading={unsubscribeLoading}

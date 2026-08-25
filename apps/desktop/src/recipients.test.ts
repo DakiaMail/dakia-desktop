@@ -35,6 +35,15 @@ describe("recipient parsing and replies", () => {
     expect(messageRecipients(message).bcc).toEqual([
       { name: "Hidden", address: "hidden@example.com" },
     ]);
+    expect(messageRecipients(message).from).toEqual([
+      { name: "Sender", address: "sender@example.com" },
+    ]);
+    expect(
+      messageRecipients({
+        ...message,
+        from_address: "malformed provider fallback",
+      }).from,
+    ).toEqual([]);
   });
 
   it("uses Reply-To for Reply", () => {
