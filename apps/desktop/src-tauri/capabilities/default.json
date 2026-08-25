@@ -15,6 +15,9 @@
     "autostart:default",
     "notification:default",
     "opener:default",
+    "os:allow-arch",
+    "os:allow-os-type",
+    "os:allow-version",
     "process:allow-restart",
     "updater:default"
   ]
