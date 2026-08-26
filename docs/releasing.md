@@ -1,6 +1,10 @@
 # Releasing
 
-Run all release work locally:
+Nightly releases run automatically from `main` on the trusted Apple Silicon
+release runner. They skip when there are no commits after the public updater
+release. The workflow is `.github/workflows/nightly-release.yml`.
+
+For an exceptional manual release, run the same work on that runner:
 
 ```bash
 npm run verify:local
@@ -11,9 +15,9 @@ hosts the versioned DMG, signed updater archive, stable download alias, and
 updater manifest. A GitHub Release mirrors those same locally built assets for
 public downloads.
 
-GitHub Actions are not part of this process. Create the GitHub Release only
-after R2 publication is verified, using the signed source tag and the exact
-local artifacts produced by the release builder.
+The workflow creates the GitHub Release only after R2 publication is verified,
+using the signed source tag and the exact artifacts produced by the release
+builder.
 
 Follow:
 

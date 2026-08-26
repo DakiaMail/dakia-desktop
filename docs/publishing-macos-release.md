@@ -1,9 +1,17 @@
 # Publishing a macOS Release
 
-Dakia releases are built, signed, notarized, and published locally from the
-primary Apple Silicon Mac. R2 remains the production updater host. A GitHub
-Release mirrors the locally built assets for public downloads; GitHub Actions
-does not build or publish them. The release path is Apple Silicon only.
+Dakia releases are built, signed, notarized, and published from the trusted
+Apple Silicon release runner. R2 remains the production updater host. A GitHub
+Release mirrors the locally built assets for public downloads. The release path
+is Apple Silicon only.
+
+Every night at 02:17 UTC, GitHub Actions runs the same release path from
+`main`, but only if `main` contains commits after the version in the public
+updater manifest. The workflow runs exclusively on the self-hosted runner
+labeled `dakia-release`; it must have the primary release Mac's Keychain
+identities, notarization profile, updater key, and R2 credentials. It creates
+the next patch version, writes a concise user-facing release note, verifies,
+publishes to R2, and then publishes the matching GitHub Release.
 
 Before a release, ensure the intended code is present and the version matches
 `package.json`, the Cargo workspace, and `apps/desktop/src-tauri/tauri.conf.json`.
