@@ -1,0 +1,156 @@
+name: Hosted build measurement
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: Why this hosted build measurement is needed
+        required: true
+        type: string
+      run_hosted_measurement:
+        description: Explicitly authorize paid hosted macOS and Windows build jobs
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: hosted-build-measurement
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate-request:
+    name: Validate measurement request
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require an explicit reason and authorization
+        env:
+          REASON: ${{ inputs.reason }}
+          ENABLED: ${{ inputs.run_hosted_measurement }}
+        run: |
+          test -n "$(printf '%s' "$REASON" | tr -d '[:space:]')"
+          test "$ENABLED" = true
+
+  build:
+    name: ${{ matrix.name }}
+    needs: validate-request
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS Apple Silicon DMG
+            runner: macos-15
+            platform: macos
+            arch: aarch64
+            bundle_arch: arm64
+            target: aarch64-apple-darwin
+            bundles: dmg
+            artifact_glob: target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          - name: macOS Intel DMG
+            runner: macos-15-intel
+            platform: macos
+            arch: x86_64
+            bundle_arch: x86_64
+            target: x86_64-apple-darwin
+            bundles: dmg
+            artifact_glob: target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+          - name: Windows x64 NSIS installer
+            runner: windows-2025
+            platform: windows
+            arch: x86_64
+            bundle_arch: x86_64
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+            artifact_glob: target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          lfs: true
+      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4
+        with:
+          node-version: 20.19.0
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.89.0 --profile minimal
+          rustup default 1.89.0
+      - name: Install JavaScript dependencies
+        run: npm ci --ignore-scripts
+      - name: Prepare packaged assets
+        run: npm run prepare:desktop-assets
+      - name: Build target-specific CLI sidecar
+        env:
+          TAURI_ENV_PLATFORM: ${{ matrix.platform }}
+          TAURI_ENV_ARCH: ${{ matrix.arch }}
+          ORT_LIB_LOCATION: ${{ matrix.platform == 'macos' && format('{0}/apps/desktop/src-tauri/frameworks', github.workspace) || '' }}
+          ORT_PREFER_DYNAMIC_LINK: ${{ matrix.platform == 'macos' && '1' || '' }}
+        run: bash ./scripts/bundle-cli.sh release
+      - name: Build the web frontend
+        run: npm run build:web
+      - name: Write non-release Tauri overlay
+        run: |
+          printf '%s\n' '{"build":{"beforeBuildCommand":""},"bundle":{"createUpdaterArtifacts":false}}' > "$RUNNER_TEMP/tauri-measurement.conf.json"
+      - name: Build unsigned measurement package
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ matrix.platform == 'macos' && '-' || '' }}
+          ORT_LIB_LOCATION: ${{ matrix.platform == 'macos' && format('{0}/apps/desktop/src-tauri/frameworks', github.workspace) || '' }}
+          ORT_PREFER_DYNAMIC_LINK: ${{ matrix.platform == 'macos' && '1' || '' }}
+        run: |
+          ./node_modules/.bin/tauri build \
+            --target "${{ matrix.target }}" \
+            --bundles "${{ matrix.bundles }}" \
+            --config apps/desktop/src-tauri/tauri.conf.json \
+            --config "$RUNNER_TEMP/tauri-measurement.conf.json"
+      - name: Verify package exists and record checksum
+        run: |
+          shopt -s nullglob
+          files=( ${{ matrix.artifact_glob }} )
+          test "${#files[@]}" -eq 1
+          test -s "${files[0]}"
+          if command -v shasum >/dev/null; then
+            shasum -a 256 "${files[0]}"
+          else
+            sha256sum "${files[0]}"
+          fi
+      - name: Verify macOS DMG contents
+        if: matrix.platform == 'macos'
+        run: |
+          mount_dir="$RUNNER_TEMP/dakia-measurement-mount"
+          mkdir -p "$mount_dir"
+          hdiutil attach -readonly -nobrowse -mountpoint "$mount_dir" ${{ matrix.artifact_glob }}
+          trap 'hdiutil detach "$mount_dir" -quiet || true' EXIT
+          app="$mount_dir/Dakia.app"
+          test -L "$mount_dir/Applications"
+          test -x "$app/Contents/MacOS/dakia-desktop"
+          test -x "$app/Contents/MacOS/dakia"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist"
+          lipo -archs "$app/Contents/MacOS/dakia-desktop" | grep -wx "${{ matrix.bundle_arch }}"
+          lipo -archs "$app/Contents/MacOS/dakia" | grep -wx "${{ matrix.bundle_arch }}"
+          test -s "$app/Contents/Resources/resources/email-classifier-v2/model.onnx"
+          test -s "$app/Contents/Resources/THIRD_PARTY_NOTICES.md"
+          "$app/Contents/MacOS/dakia" --version
+          "$app/Contents/MacOS/dakia" --help >/dev/null
+      - name: Verify Windows installer exists
+        if: matrix.platform == 'windows'
+        run: |
+          files=( ${{ matrix.artifact_glob }} )
+          test "${#files[@]}" -eq 1
+          test -s "${files[0]}"
+      - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: hosted-build-measurement-${{ matrix.target }}-${{ github.run_id }}
+          path: ${{ matrix.artifact_glob }}
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+      - name: Explain measurement boundary
+        run: |
+          echo "Built an unsigned, non-publishing measurement package."
+          echo "No GitHub Release, tag, updater artifact, signature, or notarization was created."

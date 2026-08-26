@@ -1,12 +1,18 @@
 version: 2
+
+# Consolidate routine npm and Cargo version updates into one weekly PR so the
+# Linux verification workflow runs once per update cycle.
+multi-ecosystem-groups:
+  weekly-dependencies:
+    schedule:
+      interval: weekly
+
 updates:
   - package-ecosystem: npm
     directory: /
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
+    patterns: ["*"]
+    multi-ecosystem-group: weekly-dependencies
   - package-ecosystem: cargo
     directory: /
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
+    patterns: ["*"]
+    multi-ecosystem-group: weekly-dependencies
