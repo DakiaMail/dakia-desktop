@@ -14,6 +14,9 @@ case "$platform" in
   linux)
     target="${arch}-unknown-linux-gnu"
     ;;
+  windows | mingw* | msys*)
+    target="${arch}-pc-windows-msvc"
+    ;;
   *)
     echo "Bundling the Dakia CLI is not supported for platform: $platform" >&2
     exit 1
@@ -36,12 +39,21 @@ case "$profile" in
 esac
 
 cd "$repo_root"
-cargo build -p dakia-cli --bin dakia --target "$target" $profile_args
+cargo build --locked -p dakia-cli --bin dakia --target "$target" $profile_args
 
+executable=dakia
+if [ "$platform" = windows ] || echo "$platform" | grep -Eq '^(mingw|msys)'; then
+  executable=dakia.exe
+fi
 destination="$repo_root/apps/desktop/src-tauri/binaries/dakia-$target"
+if [ "$executable" = dakia.exe ]; then
+  destination="$destination.exe"
+fi
 mkdir -p "$(dirname "$destination")"
-cp "$repo_root/target/$target/$cargo_profile/dakia" "$destination"
-chmod 755 "$destination"
+cp "$repo_root/target/$target/$cargo_profile/$executable" "$destination"
+if [ "$executable" = dakia ]; then
+  chmod 755 "$destination"
+fi
 
 if [ "$platform" = "macos" ] || [ "$platform" = "darwin" ]; then
   # The sidecar lives in Contents/MacOS in a packaged app and next to the
