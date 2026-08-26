@@ -1,8 +1,8 @@
 # Releasing
 
-Nightly releases run automatically from `main` on the trusted Apple Silicon
-release runner. They skip when there are no commits after the public updater
-release. The workflow is `.github/workflows/nightly-release.yml`.
+Nightly releases run automatically from `main` through the local Codex
+automation on the trusted Apple Silicon release Mac. They skip when there are
+no commits after the public updater release.
 
 For an exceptional manual release, run the same work on that runner:
 
@@ -15,7 +15,7 @@ hosts the versioned DMG, signed updater archive, stable download alias, and
 updater manifest. A GitHub Release mirrors those same locally built assets for
 public downloads.
 
-The workflow creates the GitHub Release only after R2 publication is verified,
+The local Codex automation creates the GitHub Release only after R2 publication is verified,
 using the signed source tag and the exact artifacts produced by the release
 builder.
 
