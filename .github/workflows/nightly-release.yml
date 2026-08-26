@@ -1,0 +1,36 @@
+name: Nightly release
+
+on:
+  schedule:
+    - cron: '17 02 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: dakia-production-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    # Scheduled workflows execute from the repository default branch. Keep the
+    # condition too, so a manual run from another ref can never publish it.
+    if: github.repository == 'DakiaMail/dakia-desktop' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, macos, arm64, dakia-release]
+    timeout-minutes: 180
+    environment: production-release
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          fetch-depth: 0
+          lfs: false
+          persist-credentials: true
+      - name: Publish a release only when main changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name 'Dakia release bot'
+          git config user.email 'release-bot@dakiamail.com'
+          ./scripts/run-nightly-release.sh
