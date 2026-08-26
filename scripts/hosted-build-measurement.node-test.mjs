@@ -29,12 +29,16 @@ test("hosted build measurement covers both Macs and Windows without release writ
   assert.match(workflow, /APPLE_SIGNING_IDENTITY: \$\{\{ matrix\.platform == 'macos' && '-' \|\| '' \}\}/);
   assert.match(workflow, /retention-days: 1/);
   assert.match(workflow, /hdiutil attach/);
-  assert.match(workflow, /Verify Windows installer exists/);
+  assert.match(workflow, /NSIS installer failed/);
+  assert.match(workflow, /Installed Dakia CLI sidecar is missing/);
+  assert.match(workflow, /uninstall\.exe/);
   assert.match(workflow, /group: hosted-build-measurement/);
+  assert.match(workflow, /bash \.\/scripts\/prepare-desktop-assets\.sh/);
+  assert.match(workflow, /-- --locked/);
   assert.doesNotMatch(workflow, /gh release|gh api|TAURI_SIGNING_PRIVATE_KEY|notary/i);
 });
 
-test("Windows CLI sidecars keep Tauri's target-qualified executable name", () => {
+test("Windows CLI sidecars are built for the MSVC target", () => {
   assert.match(cliBundler, /windows \| mingw\* \| msys\*\)/);
   assert.match(cliBundler, /target="\$\{arch\}-pc-windows-msvc"/);
   assert.match(cliBundler, /executable=dakia\.exe/);

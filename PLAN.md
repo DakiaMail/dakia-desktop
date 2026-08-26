@@ -49,8 +49,8 @@ CLI are verified on Windows.
 - Add a `workflow_dispatch` release workflow requiring a version, immutable
   source revision, release notes, a non-empty reason, and an explicit publish
   confirmation.
-- Use the trusted self-hosted Apple Silicon runner for both macOS artifacts,
-  and a trusted Windows runner for the Windows installer.
+- Use hosted macOS Apple Silicon, hosted macOS Intel, and hosted Windows x64
+  runners only for an explicitly dispatched release workflow.
 - Protect the publish job with a GitHub `release` environment and upload only
   an exact asset allowlist with verified checksums.
 - Create the GitHub Release as a draft, download and compare its assets, then
@@ -82,8 +82,5 @@ usage from configuration or estimates.
 2. A Windows code-signing policy and certificate source are required. An
    unsigned NSIS installer is not an acceptable substitute without an explicit
    owner waiver.
-3. A trusted Windows x64 runner must be designated. GitHub-hosted Windows is
-   acceptable for infrequent manual releases, while a self-hosted Windows
-   runner avoids Actions-minute charges but must never accept fork PRs.
-4. GitHub CLI or equivalent authenticated read access is required to complete
+3. GitHub CLI or equivalent authenticated read access is required to complete
    the organization billing analysis.

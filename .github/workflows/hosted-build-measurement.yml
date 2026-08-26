@@ -84,14 +84,19 @@ jobs:
       - name: Install JavaScript dependencies
         run: npm ci --ignore-scripts
       - name: Prepare packaged assets
-        run: npm run prepare:desktop-assets
+        run: bash ./scripts/prepare-desktop-assets.sh
       - name: Build target-specific CLI sidecar
         env:
           TAURI_ENV_PLATFORM: ${{ matrix.platform }}
           TAURI_ENV_ARCH: ${{ matrix.arch }}
-          ORT_LIB_LOCATION: ${{ matrix.platform == 'macos' && format('{0}/apps/desktop/src-tauri/frameworks', github.workspace) || '' }}
-          ORT_PREFER_DYNAMIC_LINK: ${{ matrix.platform == 'macos' && '1' || '' }}
-        run: bash ./scripts/bundle-cli.sh release
+        run: |
+          if [[ "${{ matrix.platform }}" == "macos" ]]; then
+            export ORT_LIB_LOCATION="$GITHUB_WORKSPACE/apps/desktop/src-tauri/frameworks"
+            export ORT_PREFER_DYNAMIC_LINK=1
+          else
+            unset ORT_LIB_LOCATION ORT_PREFER_DYNAMIC_LINK
+          fi
+          bash ./scripts/bundle-cli.sh release
       - name: Build the web frontend
         run: npm run build:web
       - name: Write non-release Tauri overlay
@@ -100,14 +105,19 @@ jobs:
       - name: Build unsigned measurement package
         env:
           APPLE_SIGNING_IDENTITY: ${{ matrix.platform == 'macos' && '-' || '' }}
-          ORT_LIB_LOCATION: ${{ matrix.platform == 'macos' && format('{0}/apps/desktop/src-tauri/frameworks', github.workspace) || '' }}
-          ORT_PREFER_DYNAMIC_LINK: ${{ matrix.platform == 'macos' && '1' || '' }}
         run: |
+          if [[ "${{ matrix.platform }}" == "macos" ]]; then
+            export ORT_LIB_LOCATION="$GITHUB_WORKSPACE/apps/desktop/src-tauri/frameworks"
+            export ORT_PREFER_DYNAMIC_LINK=1
+          else
+            unset ORT_LIB_LOCATION ORT_PREFER_DYNAMIC_LINK
+          fi
           ./node_modules/.bin/tauri build \
             --target "${{ matrix.target }}" \
             --bundles "${{ matrix.bundles }}" \
             --config apps/desktop/src-tauri/tauri.conf.json \
-            --config "$RUNNER_TEMP/tauri-measurement.conf.json"
+            --config "$RUNNER_TEMP/tauri-measurement.conf.json" \
+            -- --locked
       - name: Verify package exists and record checksum
         run: |
           shopt -s nullglob
@@ -131,6 +141,10 @@ jobs:
           test -x "$app/Contents/MacOS/dakia-desktop"
           test -x "$app/Contents/MacOS/dakia"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist"
+          expected_version="$(node -p "require('./package.json').version")"
+          actual_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")"
+          test "$actual_version" = "$expected_version"
+          test "$(readlink "$mount_dir/Applications")" = /Applications
           lipo -archs "$app/Contents/MacOS/dakia-desktop" | grep -wx "${{ matrix.bundle_arch }}"
           lipo -archs "$app/Contents/MacOS/dakia" | grep -wx "${{ matrix.bundle_arch }}"
           test -s "$app/Contents/Resources/resources/email-classifier-v2/model.onnx"
@@ -139,10 +153,32 @@ jobs:
           "$app/Contents/MacOS/dakia" --help >/dev/null
       - name: Verify Windows installer exists
         if: matrix.platform == 'windows'
+        shell: pwsh
         run: |
-          files=( ${{ matrix.artifact_glob }} )
-          test "${#files[@]}" -eq 1
-          test -s "${files[0]}"
+          $installer = Get-ChildItem -Path 'target/x86_64-pc-windows-msvc/release/bundle/nsis' -Filter '*.exe' | Select-Object -First 1
+          if ($null -eq $installer -or $installer.Length -eq 0) { throw 'Missing NSIS installer.' }
+          $installDir = Join-Path $env:RUNNER_TEMP 'dakia-measurement-install'
+          try {
+            & $installer.FullName /S "/D=$installDir"
+            if ($LASTEXITCODE -ne 0) { throw "NSIS installer failed with exit code $LASTEXITCODE." }
+            $app = Join-Path $installDir 'dakia-desktop.exe'
+            if (-not (Test-Path -PathType Leaf $app)) { throw 'Installed desktop executable is missing.' }
+            $sidecar = Get-ChildItem -Path $installDir -Recurse -Filter 'dakia.exe' | Select-Object -First 1
+            if ($null -eq $sidecar) { throw 'Installed Dakia CLI sidecar is missing.' }
+            foreach ($required in @('model.onnx', 'tokenizer.json', 'THIRD_PARTY_NOTICES.md')) {
+              if ($null -eq (Get-ChildItem -Path $installDir -Recurse -Filter $required | Select-Object -First 1)) {
+                throw "Installed package is missing $required."
+              }
+            }
+            $expectedVersion = node -p "require('./package.json').version"
+            $actualVersion = & $sidecar.FullName --version
+            if ($actualVersion -ne "dakia $expectedVersion") { throw "Unexpected CLI version: $actualVersion" }
+            & $sidecar.FullName --help | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Installed CLI help command failed.' }
+          } finally {
+            $uninstaller = Join-Path $installDir 'uninstall.exe'
+            if (Test-Path -PathType Leaf $uninstaller) { & $uninstaller /S }
+          }
       - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
         with:
           name: hosted-build-measurement-${{ matrix.target }}-${{ github.run_id }}
