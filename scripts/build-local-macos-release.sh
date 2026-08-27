@@ -132,6 +132,7 @@ ORT_PREFER_DYNAMIC_LINK=1 \
     --config "$release_tauri_config"
 
 app="$root_dir/target/aarch64-apple-darwin/release/bundle/macos/Dakia.app"
+"$root_dir/scripts/thin-macos-onnx-runtime.sh" "$app"
 "$root_dir/scripts/sign-macos-release-app.sh" "$app" "$APPLE_SIGNING_IDENTITY"
 "$root_dir/scripts/verify-macos-release-app.sh" "$app"
 

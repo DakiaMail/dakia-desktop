@@ -20,6 +20,7 @@ const publisher = join(root, "scripts/publish-release-to-r2.sh");
 const releaseEnvironment = join(root, "scripts/local-release-env.sh");
 const appVerifier = join(root, "scripts/verify-macos-release-app.sh");
 const releaseBuilder = join(root, "scripts/build-local-macos-release.sh");
+const onnxRuntimeThinner = join(root, "scripts/thin-macos-onnx-runtime.sh");
 const cliBundler = join(root, "scripts/bundle-cli.sh");
 function createStaticAppFixture() {
   const fixtureRoot = mkdtempSync(join(tmpdir(), "dakia-release-app-test-"));
@@ -234,6 +235,107 @@ test("release builder invalidates cached desktop credentials before Tauri compil
   assert.ok(cliBundle >= 0);
   assert.ok(desktopClean > cliBundle);
   assert.ok(tauriBuild > desktopClean);
+});
+
+test("release builder thins only the packaged ONNX dylib before final signing", () => {
+  const script = readFileSync(releaseBuilder, "utf8");
+  const tauriBuild = script.indexOf('"$root_dir/node_modules/.bin/tauri" build');
+  const thin = script.indexOf(
+    '"$root_dir/scripts/thin-macos-onnx-runtime.sh" "$app"',
+  );
+  const finalSigning = script.indexOf(
+    '"$root_dir/scripts/sign-macos-release-app.sh" "$app" "$APPLE_SIGNING_IDENTITY"',
+  );
+
+  assert.ok(tauriBuild >= 0);
+  assert.ok(thin > tauriBuild);
+  assert.ok(finalSigning > thin);
+  const thinner = readFileSync(onnxRuntimeThinner, "utf8");
+  assert.match(
+    thinner,
+    /mktemp -d "\$framework_dir\/\.dakia-onnx-thin\.XXXXXX"/,
+  );
+  assert.match(thinner, /require_runtime_install_name "\$thin_runtime"/);
+});
+
+test("ONNX thinning makes a universal packaged runtime arm64 without changing its install name", () => {
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "dakia-onnx-thinning-test-"));
+  const app = join(fixtureRoot, "Dakia.app");
+  const frameworkDir = join(app, "Contents", "Frameworks");
+  const runtime = join(frameworkDir, "libonnxruntime.1.23.2.dylib");
+  const mockBin = join(fixtureRoot, "mock-bin");
+  mkdirSync(frameworkDir, { recursive: true });
+  mkdirSync(mockBin);
+  writeFileSync(
+    runtime,
+    "architectures=x86_64 arm64\ninstall_name=@rpath/libonnxruntime.1.23.2.dylib\n",
+  );
+  writeExecutable(
+    join(mockBin, "lipo"),
+    `#!/bin/sh
+set -eu
+case "$1" in
+  -archs) sed -n 's/^architectures=//p' "$2" ;;
+  *)
+    test "$2" = -thin
+    test "$3" = arm64
+    test "$4" = -output
+    sed 's/^architectures=.*/architectures=arm64/' "$1" > "$5"
+    ;;
+esac
+`,
+  );
+  writeExecutable(
+    join(mockBin, "otool"),
+    `#!/bin/sh
+set -eu
+test "$1" = -D
+printf '%s:\\n' "$2"
+sed -n 's/^install_name=//p' "$2"
+`,
+  );
+  try {
+    const result = spawnSync(onnxRuntimeThinner, [app], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${mockBin}:${process.env.PATH}` },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(
+      readFileSync(runtime, "utf8"),
+      "architectures=arm64\ninstall_name=@rpath/libonnxruntime.1.23.2.dylib\n",
+    );
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("ONNX thinning rejects an unexpected packaged runtime architecture", () => {
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "dakia-onnx-thinning-test-"));
+  const app = join(fixtureRoot, "Dakia.app");
+  const frameworkDir = join(app, "Contents", "Frameworks");
+  const runtime = join(frameworkDir, "libonnxruntime.1.23.2.dylib");
+  const mockBin = join(fixtureRoot, "mock-bin");
+  mkdirSync(frameworkDir, { recursive: true });
+  mkdirSync(mockBin);
+  writeFileSync(
+    runtime,
+    "architectures=arm64e\ninstall_name=@rpath/libonnxruntime.1.23.2.dylib\n",
+  );
+  writeExecutable(
+    join(mockBin, "lipo"),
+    '#!/bin/sh\nsed -n \'s/^architectures=//p\' "$2"\n',
+  );
+  try {
+    const result = spawnSync(onnxRuntimeThinner, [app], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${mockBin}:${process.env.PATH}` },
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /unsupported architecture set: arm64e/);
+    assert.match(readFileSync(runtime, "utf8"), /architectures=arm64e/);
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
 });
 
 test("publisher rejects incomplete release assets before requiring publication credentials", () => {
