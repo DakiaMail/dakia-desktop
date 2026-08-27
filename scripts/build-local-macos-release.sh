@@ -24,18 +24,51 @@ cargo_version="$(awk '
   in_workspace_package && /^version = / { gsub(/"/, "", $3); print $3; exit }
 ' "$root_dir/Cargo.toml")"
 tauri_version="$(node -p "require('$root_dir/apps/desktop/src-tauri/tauri.conf.json').version")"
+package_lock_matches="$(node -e '
+  const lock = require(process.argv[1]);
+  const expected = process.argv[2];
+  process.stdout.write(String(
+    lock.version === expected && lock.packages?.[""]?.version === expected
+  ));
+' "$root_dir/package-lock.json" "$version")"
 release_notes_source="$root_dir/docs/releases/$tag.md"
 lock_versions="$(awk '
-  /^name = "dakia-(core|cli|desktop)"$/ { read_version = 1; next }
-  read_version && /^version = / { gsub(/"/, "", $3); print $3; read_version = 0 }
+  /^name = "dakia-(core|cli|desktop)"$/ {
+    package_name = $3
+    gsub(/"/, "", package_name)
+    read_version = 1
+    next
+  }
+  read_version && /^version = / {
+    gsub(/"/, "", $3)
+    print package_name "=" $3
+    package_name = ""
+    read_version = 0
+  }
 ' "$root_dir/Cargo.lock" | sort -u)"
+expected_lock_versions="$(printf '%s\n' \
+  "dakia-cli=$version" \
+  "dakia-core=$version" \
+  "dakia-desktop=$version")"
 if [[ "$version" != "$package_version" || "$version" != "$cargo_version" || \
-      "$version" != "$tauri_version" || "$lock_versions" != "$version" ]]; then
-  echo "Tag, package, Cargo workspace, Tauri config, and workspace lock versions must match $tag." >&2
+      "$version" != "$tauri_version" || \
+      "$lock_versions" != "$expected_lock_versions" || \
+      "$package_lock_matches" != "true" ]]; then
+  echo "Tag, package, package lock, Cargo workspace, Tauri config, and workspace lock versions must match $tag." >&2
   exit 1
 fi
-if ! git -C "$root_dir" diff --quiet || ! git -C "$root_dir" diff --cached --quiet; then
-  echo "Release source has tracked changes; commit or stash them before building." >&2
+if [[ "$(git -C "$root_dir" branch --show-current)" != "main" ]]; then
+  echo "Release source must be built from main." >&2
+  exit 1
+fi
+source_commit="$(git -C "$root_dir" rev-parse HEAD)"
+origin_main_commit="$(git -C "$root_dir" rev-parse origin/main)"
+if [[ "$source_commit" != "$origin_main_commit" ]]; then
+  echo "Release source must exactly match the fetched origin/main." >&2
+  exit 1
+fi
+if [[ -n "$(git -C "$root_dir" status --porcelain=v1 --untracked-files=all)" ]]; then
+  echo "Release source has tracked or untracked changes; commit or remove them before building." >&2
   exit 1
 fi
 if ! git -C "$root_dir" ls-files --error-unmatch -- \
@@ -59,7 +92,8 @@ outputs=(
   "Dakia-aarch64.app.tar.gz"
   "Dakia-aarch64.app.tar.gz.sig"
 )
-for filename in "${outputs[@]}"; do
+local_release_files=("${outputs[@]}" "release-notes.md" "SHA256SUMS.txt" "source-commit.txt")
+for filename in "${local_release_files[@]}"; do
   if [[ -e "$output_dir/$filename" ]]; then
     echo "Refusing to overwrite existing local release artifact: $output_dir/$filename" >&2
     exit 1
@@ -125,4 +159,12 @@ for filename in "${outputs[@]}"; do
   }
 done
 (cd "$output_dir" && shasum -a 256 "${outputs[@]}" > SHA256SUMS.txt)
+printf '%s\n' "$source_commit" >"$output_dir/source-commit.txt"
+if [[ "$(git -C "$root_dir" branch --show-current)" != "main" || \
+      "$(git -C "$root_dir" rev-parse HEAD)" != "$source_commit" || \
+      "$(git -C "$root_dir" rev-parse origin/main)" != "$source_commit" || \
+      -n "$(git -C "$root_dir" status --porcelain=v1 --untracked-files=all)" ]]; then
+  echo "Release source changed while artifacts were being built." >&2
+  exit 1
+fi
 echo "Built signed, notarized Apple Silicon artifacts in $output_dir"

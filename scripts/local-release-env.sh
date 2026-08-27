@@ -18,12 +18,12 @@ dakia_load_signing_environment() {
   local user_home
   user_home="$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory | awk '{print $2}')"
 
+  DAKIA_EXPECTED_APPLE_SIGNING_IDENTITY="Developer ID Application: Mashal Tech OU (34T9L3FGZC)"
+  DAKIA_EXPECTED_APPLE_TEAM_ID="34T9L3FGZC"
+  export DAKIA_EXPECTED_APPLE_SIGNING_IDENTITY DAKIA_EXPECTED_APPLE_TEAM_ID
+
   if [[ -z "${APPLE_SIGNING_IDENTITY:-}" ]]; then
-    APPLE_SIGNING_IDENTITY="$(
-      /usr/bin/security find-identity -v -p codesigning 2>/dev/null |
-        sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' |
-        head -1
-    )"
+    APPLE_SIGNING_IDENTITY="$DAKIA_EXPECTED_APPLE_SIGNING_IDENTITY"
     export APPLE_SIGNING_IDENTITY
   fi
   local updater_key_source
@@ -189,8 +189,8 @@ dakia_clear_google_oauth_compiler_environment() {
 
 dakia_require_signing_environment() {
   dakia_load_signing_environment
-  if [[ -z "$APPLE_SIGNING_IDENTITY" ]]; then
-    echo "No Developer ID Application identity is available in Keychain." >&2
+  if [[ "$APPLE_SIGNING_IDENTITY" != "$DAKIA_EXPECTED_APPLE_SIGNING_IDENTITY" ]]; then
+    echo "Release signing identity must be exactly '$DAKIA_EXPECTED_APPLE_SIGNING_IDENTITY'." >&2
     return 1
   fi
   if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then

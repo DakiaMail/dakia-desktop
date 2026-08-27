@@ -1,0 +1,113 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { join } from "node:path";
+import test from "node:test";
+
+const root = new URL("..", import.meta.url).pathname;
+const draftScript = join(root, "scripts", "prepare-github-release-draft.sh");
+const publishScript = join(root, "scripts", "publish-github-release.sh");
+const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+
+function script(path) {
+  return readFileSync(path, "utf8");
+}
+
+test("GitHub release-stage scripts are syntactically valid Bash", () => {
+  for (const path of [draftScript, publishScript]) {
+    const result = spawnSync("bash", ["-n", path], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  }
+});
+
+test("draft staging is pinned to clean exact main provenance and an SSH-signed remote tag", () => {
+  const source = script(draftScript);
+  assert.match(source, /release_repo="DakiaMail\/dakia-desktop"/);
+  assert.match(source, /status --porcelain=v1 --untracked-files=all/);
+  assert.match(source, /branch --show-current\)" == "main"/);
+  assert.match(source, /refs\/remotes\/origin\/main/);
+  assert.match(source, /HEAD does not exactly match origin\/main/);
+  assert.match(source, /gpg\.format/);
+  assert.match(source, /gpg\.ssh\.allowedSignersFile/);
+  assert.match(
+    source,
+    /SHA256:kN9R3QFJZbrE5i2HjEpp\+ns5ZNxBTuFySvFx8Ldf\/gE/,
+  );
+  assert.match(source, /BEGIN SSH SIGNATURE/);
+  assert.match(source, /verify-tag "\$tag"/);
+  assert.match(
+    source,
+    /ls-remote --tags origin "refs\/tags\/\$tag" "refs\/tags\/\$tag\^\{\}"/,
+  );
+  assert.match(source, /Remote release tag object/);
+  assert.match(source, /Remote release tag \$tag does not target the exact origin\/main commit/);
+});
+
+test("draft staging accepts no unverified retry and validates exact local and draft bytes", () => {
+  const source = script(draftScript);
+  assert.match(source, /shasum -a 256 -c "\$checksums"/);
+  assert.match(source, /source-commit\.txt/);
+  assert.match(source, /must cover exactly the GitHub distributable artifacts/);
+  assert.match(source, /--verify-tag/);
+  assert.match(source, /--draft/);
+  assert.match(source, /--target "\$\(git -C "\$root_dir" rev-parse HEAD\)"/);
+  assert.match(source, /assets do not exactly match the expected four-file allowlist/);
+  assert.match(source, /GitHub Release body does not exactly match release-notes\.md/);
+  assert.match(source, /gh release download "\$tag" --repo "\$release_repo"/);
+  assert.match(source, /GitHub Release asset bytes do not match local/);
+  assert.match(source, /Verified exact existing GitHub Release draft/);
+  assert.match(source, /Verified exact existing public GitHub Release/);
+  assert.doesNotMatch(source, /--clobber/);
+  assert.doesNotMatch(source, /gh release delete/);
+});
+
+test("publication requires the exact public R2 candidate before making GitHub public", () => {
+  const source = script(publishScript);
+  const draftVerification = source.lastIndexOf("if verify_release true; then");
+  const r2Gate = source.indexOf("require_public_r2_candidate", draftVerification);
+  const publish = source.indexOf("gh release edit \"$tag\" --repo \"$release_repo\" --draft=false --latest");
+  assert.ok(draftVerification >= 0);
+  assert.ok(r2Gate >= 0);
+  assert.ok(publish > r2Gate);
+  assert.match(source, /macos\/latest\/latest\.json\?release-gate=\$tag/);
+  assert.match(source, /\.version == \$version/);
+  assert.match(source, /\.notes == \$notes/);
+  assert.match(source, /\.platforms\["darwin-aarch64"\]\.url == \$url/);
+  assert.match(source, /\.platforms\["darwin-aarch64"\]\.signature == \$signature/);
+  assert.match(source, /Public updater manifest is not the exact signed candidate/);
+  assert.match(
+    source,
+    /readFileSync\(process\.argv\[1\], "utf8"\)\.trim\(\)/,
+  );
+  assert.doesNotMatch(source, /expected_signature="\$\(base64/);
+});
+
+test("publication independently downloads and byte-compares every public GitHub asset", () => {
+  const source = script(publishScript);
+  assert.match(source, /https:\/\/github\.com\/\$release_repo\/releases\/download\/\$tag\/\$artifact/);
+  assert.match(source, /Public GitHub asset bytes do not match local/);
+  assert.match(source, /Public GitHub checksum file does not validate downloaded assets/);
+  assert.match(source, /verify_release false/);
+  assert.match(source, /return 2/);
+  assert.match(
+    source,
+    /if \[\[ "\$expected_draft" == "true" \]\]; then[\s\S]*?"\$actual_draft" == "true"[\s\S]*?else[\s\S]*?"\$actual_draft" == "false"/,
+  );
+  assert.doesNotMatch(source, /--clobber/);
+  assert.doesNotMatch(source, /gh release delete/);
+});
+
+test("package scripts expose the GitHub release stages and focused tests", () => {
+  assert.equal(
+    packageJson.scripts["release:github:draft"],
+    "./scripts/prepare-github-release-draft.sh",
+  );
+  assert.equal(
+    packageJson.scripts["release:github:publish"],
+    "./scripts/publish-github-release.sh",
+  );
+  assert.equal(
+    packageJson.scripts["test:github-release-stage"],
+    "node --test scripts/github-release-stage.node-test.mjs",
+  );
+});

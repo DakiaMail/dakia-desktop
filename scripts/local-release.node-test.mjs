@@ -83,6 +83,8 @@ function createCliContractFixture({
   invalidInputSucceeds = false,
   missingFrameworkRpath = false,
   missingOauthMarker = false,
+  appArchitecture = "arm64",
+  wrongTeam = false,
 } = {}) {
   const fixture = createStaticAppFixture();
   const { app } = fixture;
@@ -138,13 +140,21 @@ case "\${1:-}" in
 esac
 `,
   );
-  writeExecutable(join(mockBin, "lipo"), "#!/bin/sh\nprintf '%s\\n' arm64\n");
+  writeExecutable(
+    join(mockBin, "lipo"),
+    `#!/bin/sh
+case "$2" in
+  *dakia-desktop) printf '%s\\n' '${appArchitecture}' ;;
+  *) printf '%s\\n' arm64 ;;
+esac
+`,
+  );
   writeExecutable(
     join(mockBin, "codesign"),
     `#!/bin/sh
 case "$1" in
   --verify) exit 0 ;;
-  -dv) printf '%s\\n' TeamIdentifier=fixture-team >&2 ;;
+  -dv) printf '%s\\n' TeamIdentifier=${wrongTeam ? "unexpected-team" : "34T9L3FGZC"} >&2 ;;
   *) exit 64 ;;
 esac
 `,
@@ -196,6 +206,22 @@ test("release builder requires tracked human-readable release notes", () => {
     /cp "\$release_notes_source" "\$output_dir\/release-notes\.md"/,
   );
   assert.doesNotMatch(script, /printf 'Dakia %s\\n'/);
+});
+
+test("release builder requires exact clean main provenance and all version authorities", () => {
+  const script = readFileSync(releaseBuilder, "utf8");
+  assert.match(script, /package-lock\.json/);
+  assert.match(script, /lock\.version === expected/);
+  assert.match(script, /lock\.packages\?\.\[""\]\?\.version === expected/);
+  for (const packageName of ["dakia-cli", "dakia-core", "dakia-desktop"]) {
+    assert.match(script, new RegExp(`${packageName}=\\$version`));
+  }
+  assert.match(script, /branch --show-current/);
+  assert.match(script, /rev-parse origin\/main/);
+  assert.match(script, /status --porcelain=v1 --untracked-files=all/);
+  assert.match(script, /source_commit=/);
+  assert.match(script, /source-commit\.txt/);
+  assert.match(script, /Release source changed while artifacts were being built/);
 });
 
 test("release builder invalidates cached desktop credentials before Tauri compilation", () => {
@@ -308,7 +334,11 @@ test("static packaged-app verification rejects a symlinked CLI sidecar", () => {
 
 test("packaged-app verification declares an isolated CLI contract smoke", () => {
   const verifier = readFileSync(appVerifier, "utf8");
-  assert.match(verifier, /lipo -archs "\$cli"/);
+  assert.match(
+    verifier,
+    /for architecture_target in "\$executable" "\$cli" "\$runtime"/,
+  );
+  assert.match(verifier, /lipo -archs "\$architecture_target"/);
   assert.match(verifier, /@executable_path\/\.\.\/Frameworks/);
   assert.match(verifier, /codesign --verify --strict --verbose=2 "\$cli"/);
   assert.match(verifier, /TeamIdentifier/);
@@ -384,7 +414,9 @@ test(
     try {
       const result = spawnSync(appVerifier, [fixture.app], {
         encoding: "utf8",
-        env: { PATH: `${fixture.mockBin}:${process.env.PATH}` },
+        env: {
+          PATH: `${fixture.mockBin}:${process.env.PATH}`,
+        },
       });
       assert.notEqual(result.status, 0);
       assert.match(
@@ -398,6 +430,45 @@ test(
 );
 
 test(
+  "packaged-app verification rejects a non-arm64 app and an unexpected signing team",
+  { skip: process.platform !== "darwin" },
+  () => {
+    const wrongArchitecture = createCliContractFixture({
+      appArchitecture: "x86_64 arm64",
+    });
+    const wrongTeam = createCliContractFixture({ wrongTeam: true });
+    const environmentFor = (mockBin) => ({
+      PATH: `${mockBin}:${process.env.PATH}`,
+    });
+    try {
+      const architectureResult = spawnSync(
+        appVerifier,
+        [wrongArchitecture.app],
+        {
+          encoding: "utf8",
+          env: environmentFor(wrongArchitecture.mockBin),
+        },
+      );
+      assert.notEqual(architectureResult.status, 0);
+      assert.match(
+        architectureResult.stderr,
+        /not exactly Apple Silicon arm64/,
+      );
+
+      const teamResult = spawnSync(appVerifier, [wrongTeam.app], {
+        encoding: "utf8",
+        env: environmentFor(wrongTeam.mockBin),
+      });
+      assert.notEqual(teamResult.status, 0);
+      assert.match(teamResult.stderr, /expected TeamIdentifier 34T9L3FGZC/);
+    } finally {
+      rmSync(wrongArchitecture.fixtureRoot, { recursive: true, force: true });
+      rmSync(wrongTeam.fixtureRoot, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
   "packaged-app verification rejects a missing compiled Google OAuth marker",
   { skip: process.platform !== "darwin" },
   () => {
@@ -405,7 +476,9 @@ test(
     try {
       const result = spawnSync(appVerifier, [fixture.app], {
         encoding: "utf8",
-        env: { PATH: `${fixture.mockBin}:${process.env.PATH}` },
+        env: {
+          PATH: `${fixture.mockBin}:${process.env.PATH}`,
+        },
       });
       assert.notEqual(result.status, 0);
       assert.match(
@@ -476,6 +549,19 @@ test("release environment preserves an explicitly injected Google OAuth secret",
     },
   );
   assert.equal(result.status, 0, result.stderr);
+});
+
+test("release environment pins the exact Developer ID identity and team", () => {
+  const script = readFileSync(releaseEnvironment, "utf8");
+  assert.match(
+    script,
+    /Developer ID Application: Mashal Tech OU \(34T9L3FGZC\)/,
+  );
+  assert.match(script, /DAKIA_EXPECTED_APPLE_TEAM_ID/);
+  assert.match(
+    script,
+    /APPLE_SIGNING_IDENTITY.*DAKIA_EXPECTED_APPLE_SIGNING_IDENTITY/,
+  );
 });
 
 test("Google OAuth preflight keeps the secret out of curl arguments", () => {

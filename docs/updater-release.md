@@ -51,6 +51,7 @@ Dakia-aarch64.app.tar.gz
 Dakia-aarch64.app.tar.gz.sig
 release-notes.md
 SHA256SUMS.txt
+source-commit.txt (local provenance marker; not uploaded)
 ```
 
 The updater archive is made from the final Developer ID signed, notarized, and
@@ -62,7 +63,12 @@ required notices.
 ```bash
 npm run verify:local
 npm run release:build -- vX.Y.Z
+git tag -s vX.Y.Z -m "Dakia vX.Y.Z"
+git verify-tag vX.Y.Z
+git push origin refs/tags/vX.Y.Z
+npm run release:github:draft -- vX.Y.Z "$PWD/release-assets/vX.Y.Z"
 npm run release:publish -- vX.Y.Z "$PWD/release-assets/vX.Y.Z"
+npm run release:github:publish -- vX.Y.Z "$PWD/release-assets/vX.Y.Z"
 ```
 
 `verify:local` runs the repository's Rust and frontend checks without producing
@@ -91,7 +97,8 @@ Silicon download.
 
 ## Source-control marker
 
-After R2 publication is proven, push a signed `vX.Y.Z` Git tag as a source
-marker. It does not trigger a build. Create the GitHub Release from that
-verified tag and copy the already-built local release assets to it; do not
-rebuild assets on GitHub.
+After the local build is proven, push a signed `vX.Y.Z` Git tag as the immutable
+source marker. It does not trigger a build. Create and byte-verify the GitHub
+Release draft from that verified tag before any R2 mutation, then publish R2
+and finally make the already-verified GitHub draft public. Never rebuild assets
+on GitHub.

@@ -110,11 +110,14 @@ if [ "$static_only" = true ]; then
   exit 0
 fi
 
-cli_archs=$(lipo -archs "$cli")
-if [ "$cli_archs" != "arm64" ]; then
-  echo "Packaged Dakia CLI is not exactly Apple Silicon arm64: $cli_archs" >&2
-  exit 1
-fi
+expected_team=34T9L3FGZC
+for architecture_target in "$executable" "$cli" "$runtime"; do
+  target_archs=$(lipo -archs "$architecture_target")
+  if [ "$target_archs" != "arm64" ]; then
+    echo "Packaged release binary is not exactly Apple Silicon arm64: $architecture_target ($target_archs)" >&2
+    exit 1
+  fi
+done
 if ! otool -l "$cli" | awk '
   $1 == "cmd" && $2 == "LC_RPATH" { in_rpath = 1; next }
   in_rpath && $1 == "path" {
@@ -127,6 +130,7 @@ if ! otool -l "$cli" | awk '
   exit 1
 fi
 codesign --verify --strict --verbose=2 "$cli"
+codesign --verify --deep --strict --verbose=2 "$app"
 app_team=$(
   codesign -dv --verbose=4 "$app" 2>&1 |
     sed -n 's/^TeamIdentifier=//p'
@@ -135,8 +139,8 @@ cli_team=$(
   codesign -dv --verbose=4 "$cli" 2>&1 |
     sed -n 's/^TeamIdentifier=//p'
 )
-if [ -z "$app_team" ] || [ "$cli_team" != "$app_team" ]; then
-  echo "Packaged Dakia CLI TeamIdentifier does not match the outer app." >&2
+if [ "$app_team" != "$expected_team" ] || [ "$cli_team" != "$expected_team" ]; then
+  echo "Packaged Dakia app and CLI must use expected TeamIdentifier $expected_team." >&2
   exit 1
 fi
 
