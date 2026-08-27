@@ -1,5 +1,5 @@
 import { MantineProvider } from "@mantine/core";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import "../i18n";
 import type { Provider } from "../types";
@@ -36,12 +36,18 @@ const fastmail: Provider = {
   oauth: false,
 };
 
+async function settleComboboxUpdates() {
+  await act(async () => {
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+  });
+}
+
 beforeAll(() => {
   Element.prototype.scrollIntoView = vi.fn();
 });
 
 describe("AccountSetup provider guidance", () => {
-  it("shows the temporary verification notice for detected Gmail accounts", () => {
+  it("shows the temporary verification notice for detected Gmail accounts", async () => {
     render(
       <MantineProvider>
         <AccountSetup
@@ -59,6 +65,8 @@ describe("AccountSetup provider guidance", () => {
     expect(screen.getByRole("status")).toHaveTextContent(
       "Dakia’s app is awaiting Google verification, so you may see an “unverified app” warning during sign-in. This should be resolved soon; use an app password in the meantime.",
     );
+
+    await settleComboboxUpdates();
   });
 
   it("follows a manual provider override instead of the email domain", async () => {
@@ -80,6 +88,8 @@ describe("AccountSetup provider guidance", () => {
     fireEvent.click(await screen.findByRole("option", { name: "Fastmail" }));
 
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
+
+    await settleComboboxUpdates();
   });
 
   it("shows the notice when Gmail is chosen for a custom-domain account", async () => {
@@ -100,5 +110,7 @@ describe("AccountSetup provider guidance", () => {
     fireEvent.click(await screen.findByRole("option", { name: "Gmail" }));
 
     expect(screen.getByRole("status")).toBeVisible();
+
+    await settleComboboxUpdates();
   });
 });
