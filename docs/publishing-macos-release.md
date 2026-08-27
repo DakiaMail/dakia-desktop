@@ -23,7 +23,12 @@ R2 credentials directly, so there is no separate manual preflight checklist.
 ```bash
 npm run verify:local
 npm run release:build -- vX.Y.Z
+git tag -s vX.Y.Z -m "Dakia vX.Y.Z"
+git verify-tag vX.Y.Z
+git push origin refs/tags/vX.Y.Z
+npm run release:github:draft -- vX.Y.Z "$PWD/release-assets/vX.Y.Z"
 npm run release:publish -- vX.Y.Z "$PWD/release-assets/vX.Y.Z"
+npm run release:github:publish -- vX.Y.Z "$PWD/release-assets/vX.Y.Z"
 ```
 
 The verification command runs Rust formatting, Clippy, Rust tests, TypeScript,
@@ -49,91 +54,46 @@ uses immutable versioned R2 paths, anonymously verifies the published bytes,
 validates the updater manifest, and publishes `latest.json` only after all
 artifact checks pass.
 
-After R2 publication is proven, create the signed source tag and a draft GitHub
-Release. Use `release-assets/vX.Y.Z/release-notes.md` as the release body and
-upload the DMG, updater archive, detached signature, and `SHA256SUMS.txt` from
-that same local directory. Verify the uploaded assets against the local
-checksums before publishing the draft. GitHub is a download mirror; the Tauri
-manifest continues to reference immutable R2 URLs.
+## GitHub mirror order
 
-Use an explicit repository and refuse an unexpected existing Release:
+GitHub is a public download mirror, not the updater host. Create and verify its
+draft before any R2 mutation, so the exact signed local artifacts have already
+been checked by both services before the updater feed can move:
 
 ```bash
-release_repo="DakiaMail/dakia-desktop"
 release_tag="vX.Y.Z"
 release_dir="$PWD/release-assets/$release_tag"
-
-test "$(git rev-parse "$release_tag^{commit}")" = "$(git rev-parse HEAD)"
-if gh release view "$release_tag" --repo "$release_repo" >/dev/null 2>&1; then
-  echo "Refusing to replace an existing GitHub Release: $release_tag" >&2
-  exit 1
-fi
-
-gh release create "$release_tag" \
-  --repo "$release_repo" \
-  --verify-tag \
-  --draft \
-  --latest \
-  --title "Dakia $release_tag" \
-  --notes-file "$release_dir/release-notes.md" \
-  "$release_dir/Dakia_${release_tag#v}_aarch64.dmg" \
-  "$release_dir/Dakia-aarch64.app.tar.gz" \
-  "$release_dir/Dakia-aarch64.app.tar.gz.sig" \
-  "$release_dir/SHA256SUMS.txt"
+git tag -s "$release_tag" -m "Dakia $release_tag"
+git verify-tag "$release_tag"
+git push origin "refs/tags/$release_tag"
+npm run release:github:draft -- "$release_tag" "$release_dir"
+npm run release:publish -- "$release_tag" "$release_dir"
+npm run release:github:publish -- "$release_tag" "$release_dir"
 ```
 
-Before publishing the draft, require the exact four-file allowlist, compare the
-release body, download the draft assets through GitHub, and verify their bytes:
+The draft stage requires a clean local `main` equal to `origin/main`, the
+explicit `DakiaMail/dakia-desktop` origin, a pushed annotated SSH-signed tag
+whose commit exactly equals `HEAD`, and working GitHub authentication. It
+requires exactly the DMG, updater archive, detached signature, and
+`SHA256SUMS.txt`; verifies the local checksum file; creates a draft targeted at
+the exact commit; then downloads every draft asset and compares it byte-for-byte
+with the local input. The release title and body must also exactly match the
+candidate (`Dakia vX.Y.Z` and `release-notes.md`).
 
-```bash
-expected_assets="$(
-  printf '%s\n' \
-    "Dakia_${release_tag#v}_aarch64.dmg" \
-    "Dakia-aarch64.app.tar.gz" \
-    "Dakia-aarch64.app.tar.gz.sig" \
-    "SHA256SUMS.txt" |
-    sort
-)"
-actual_assets="$(
-  gh release view "$release_tag" \
-    --repo "$release_repo" \
-    --json assets \
-    --jq '.assets[].name' |
-    sort
-)"
-test "$actual_assets" = "$expected_assets"
-gh release view "$release_tag" \
-  --repo "$release_repo" \
-  --json body \
-  --jq .body |
-  cmp - "$release_dir/release-notes.md"
+Only after the R2 publisher has anonymously exposed an exact updater manifest
+for that version, archive URL, and updater signature may the final GitHub stage
+make the draft public. It rechecks every draft property and asset first, then
+downloads all four public GitHub assets and validates both their bytes and their
+downloaded `SHA256SUMS.txt`.
 
-github_verify_dir="$(mktemp -d)"
-gh release download "$release_tag" \
-  --repo "$release_repo" \
-  --dir "$github_verify_dir"
-cmp "$release_dir/SHA256SUMS.txt" "$github_verify_dir/SHA256SUMS.txt"
-(
-  cd "$github_verify_dir"
-  shasum -a 256 -c SHA256SUMS.txt
-)
-```
+Both stages are safe to retry: an existing GitHub draft or already-public
+release is accepted only after the full exact comparison succeeds. They never
+use `--clobber`, delete a release, or replace assets. A mismatch is a hard stop;
+remediation or removal requires separate approval.
 
-Only then publish the GitHub Release:
-
-```bash
-gh release edit "$release_tag" \
-  --repo "$release_repo" \
-  --draft=false \
-  --latest
-```
-
-Finally, anonymously download each public asset from
-`https://github.com/DakiaMail/dakia-desktop/releases/download/vX.Y.Z/` and
-compare it byte-for-byte with the corresponding local file. If an earlier
-attempt left a draft, do not use `--clobber`: download and compare its body and
-exact asset allowlist. Continue only if everything matches; otherwise stop and
-remove or replace the draft only with separate approval.
+The R2 publisher also invokes the draft verifier itself before its first remote
+mutation. This makes the required ordering fail closed even if an operator
+calls `release:publish` directly.
 
 For updater key custody and artifact details, see
 [Signed Desktop Updates](updater-release.md).
