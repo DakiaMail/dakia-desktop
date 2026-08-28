@@ -8,6 +8,7 @@ type Props = {
   title: string;
   showHistoryLabel: string;
   hideHistoryLabel: string;
+  onMailto?: (href: string) => void;
 };
 
 type EmailDocument = {
@@ -612,6 +613,7 @@ function useShadowEmailDocument(
   host: RefObject<HTMLDivElement | null>,
   source?: string,
   slotLightDom = false,
+  onMailto?: (href: string) => void,
 ) {
   useEffect(() => {
     const element = host.current;
@@ -664,6 +666,10 @@ function useShadowEmailDocument(
       event.stopPropagation();
       const href = anchor.getAttribute("data-dakia-external-href");
       if (href && safeUrl(href, "href") && !href.startsWith("#")) {
+        if (/^mailto:/i.test(href) && onMailto) {
+          onMailto(href);
+          return;
+        }
         void api
           .openExternal(href)
           .catch((error) =>
@@ -692,7 +698,7 @@ function useShadowEmailDocument(
       shadow.removeEventListener("auxclick", activateLink, true);
       shadow.removeEventListener("keydown", activateLink, true);
     };
-  }, [host, slotLightDom, source]);
+  }, [host, onMailto, slotLightDom, source]);
 }
 
 export function HtmlMessage({
@@ -700,6 +706,7 @@ export function HtmlMessage({
   title,
   showHistoryLabel,
   hideHistoryLabel,
+  onMailto,
 }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const historyHost = useRef<HTMLDivElement>(null);
@@ -728,8 +735,8 @@ export function HtmlMessage({
   }, []);
 
   useEffect(() => setHistoryVisible(false), [html]);
-  useShadowEmailDocument(host, email.source, true);
-  useShadowEmailDocument(historyHost, email.historySource);
+  useShadowEmailDocument(host, email.source, true, onMailto);
+  useShadowEmailDocument(historyHost, email.historySource, false, onMailto);
 
   return (
     <div
