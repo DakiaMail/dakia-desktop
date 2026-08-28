@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import appleMailReplySection from "../test/fixtures/apple-mail-reply-section.html?raw";
 import freshdeskReplySection from "../test/fixtures/freshdesk-reply-section.html?raw";
 import outlookWordReplySection from "../test/fixtures/outlook-word-reply-section.html?raw";
@@ -545,6 +545,33 @@ describe("HTML email appearance", () => {
     expect(anchor?.getAttribute("tabindex")).toBe("0");
     expect((anchor as HTMLElement | null)?.dataset.dakiaExternalHref).toBe(
       "https://example.test/details",
+    );
+  });
+
+  it("routes a clicked mailto link to Dakia's compose handler", () => {
+    const onMailto = vi.fn();
+    render(
+      <HtmlMessage
+        html={
+          '<a href="mailto:juhan%2Btamm@example.com?subject=Tere">Write</a>'
+        }
+        title="Message with email link"
+        showHistoryLabel="Show history"
+        hideHistoryLabel="Hide history"
+        onMailto={onMailto}
+      />,
+    );
+
+    const root = renderedEmailRoot(
+      screen.getByRole("document", { name: "Message with email link" }),
+    );
+    const anchor = root?.querySelector("a");
+    expect(anchor).not.toBeNull();
+    fireEvent.click(anchor!);
+
+    expect(onMailto).toHaveBeenCalledOnce();
+    expect(onMailto).toHaveBeenCalledWith(
+      "mailto:juhan%2Btamm@example.com?subject=Tere",
     );
   });
 
