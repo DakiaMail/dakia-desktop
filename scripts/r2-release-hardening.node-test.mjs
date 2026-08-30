@@ -40,7 +40,10 @@ test("R2 publisher proves the signed tag is the exact remote main source", () =>
 
   assert.match(script, /git -C "\$root_dir" status --porcelain/);
   assert.match(script, /branch --show-current/);
-  assert.match(script, /refs\/remotes\/origin\/main/);
+  assert.match(script, /dakia_require_live_main_provenance "\$root_dir"/);
+  assert.match(script, /dakia_require_release_mutation_provenance "\$root_dir"/);
+  assert.match(script, /dakia_require_expected_release_origin "\$root_dir"/);
+  assert.match(script, /local-release-env\.sh/);
   assert.match(script, /refs\/tags\/\$tag\^\{commit\}/);
   assert.match(script, /git -C "\$root_dir" verify-tag "\$tag"/);
   assert.match(script, /git -C "\$root_dir" ls-remote --tags origin/);
@@ -92,6 +95,13 @@ test("R2 publisher keeps latest last and repairs a CAS loser's stable alias to i
   const eligibility = position(script, 'case "$relation" in');
   assert.ok(eligibility < githubDraft);
   assert.ok(githubDraft < immutableDmg);
+  assert.match(script, /upload\(\)[\s\S]*?dakia_require_release_mutation_provenance "\$root_dir"/);
+  assert.match(script, /upload_immutable\(\)[\s\S]*?dakia_require_release_mutation_provenance "\$root_dir"/);
+  assert.match(script, /claim_publication_state\(\)[\s\S]*?dakia_require_release_mutation_provenance "\$root_dir"/);
+  assert.ok(
+    script.lastIndexOf('dakia_require_release_mutation_provenance "$root_dir"', latest) < latest,
+    "latest.json CAS must have its own final live-main gate",
+  );
   const publicationClaim = script.lastIndexOf("\nclaim_publication_state\n");
   assert.notEqual(publicationClaim, -1);
   assert.ok(immutableSignature < publicationClaim);

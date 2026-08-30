@@ -5,6 +5,10 @@ tag="${1:-}"
 source_dir="${2:-}"
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 release_repo="DakiaMail/dakia-desktop"
+download_origin="https://downloads.dakiamail.com"
+
+# shellcheck source=local-release-env.sh
+source "$root_dir/scripts/local-release-env.sh"
 
 die() {
   echo "$*" >&2
@@ -15,7 +19,7 @@ if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ || -z "$source_
   die "Usage: $0 vX.Y.Z /path/to/local-release-assets"
 fi
 
-for command in git gh jq shasum ssh-keygen; do
+for command in git gh jq shasum ssh-keygen curl node; do
   command -v "$command" >/dev/null 2>&1 || die "Required command is unavailable: $command"
 done
 
@@ -31,21 +35,52 @@ source_marker="source-commit.txt"
 expected_assets="$(printf '%s\n' "$apple_dmg" "$apple_update" "$apple_signature" "$checksums" | LC_ALL=C sort)"
 
 require_main_provenance() {
-  local status origin_url head remote_head
+  local status
   status="$(git -C "$root_dir" status --porcelain=v1 --untracked-files=all)"
   [[ -z "$status" ]] || die "Release checkout is not clean (including untracked files)."
   [[ "$(git -C "$root_dir" branch --show-current)" == "main" ]] ||
     die "GitHub Release staging must run from the local main branch."
-  origin_url="$(git -C "$root_dir" remote get-url origin 2>/dev/null || true)"
-  case "$origin_url" in
-    git@github.com:DakiaMail/dakia-desktop.git|https://github.com/DakiaMail/dakia-desktop.git|https://github.com/DakiaMail/dakia-desktop)
-      ;;
-    *) die "origin does not identify the expected repository: $release_repo" ;;
-  esac
-  head="$(git -C "$root_dir" rev-parse HEAD)"
-  remote_head="$(git -C "$root_dir" rev-parse --verify refs/remotes/origin/main 2>/dev/null)" ||
-    die "origin/main is unavailable; fetch origin before staging a release."
-  [[ "$head" == "$remote_head" ]] || die "HEAD does not exactly match origin/main."
+  dakia_require_expected_release_origin "$root_dir" || exit 1
+  dakia_require_live_main_provenance "$root_dir" || exit 1
+}
+
+require_exact_public_r2_resume() {
+  local manifest resume_dir status expected_url expected_signature expected_notes
+  manifest="$(mktemp)" || die "Could not create a temporary updater-manifest file."
+  if ! status="$(curl --silent --show-error --location --proto '=https' --connect-timeout 15 --max-time 90 \
+    --output "$manifest" --write-out '%{http_code}' "$download_origin/macos/latest/latest.json?release-gate=$tag")"; then
+    rm -f "$manifest"
+    die "Could not read the public updater manifest while checking an existing GitHub Release."
+  fi
+  if [[ "$status" != "200" ]]; then
+    rm -f "$manifest"
+    die "Existing GitHub Release may resume only when public latest.json is reachable (HTTP $status)."
+  fi
+  expected_url="$download_origin/macos/$tag/Dakia-aarch64.app.tar.gz"
+  expected_signature="$(node -e 'process.stdout.write(require("node:fs").readFileSync(process.argv[1], "utf8").trim())' "$asset_dir/$apple_signature")"
+  expected_notes="$(node -e 'process.stdout.write(require("node:fs").readFileSync(process.argv[1], "utf8").trim())' "$asset_dir/$notes")"
+  if ! jq -e --arg version "$version" --arg url "$expected_url" --arg signature "$expected_signature" --arg notes "$expected_notes" \
+    '.version == $version and .notes == $notes and .platforms["darwin-aarch64"].url == $url and .platforms["darwin-aarch64"].signature == $signature' \
+    "$manifest" >/dev/null; then
+    rm -f "$manifest"
+    die "Existing GitHub Release is public while public latest.json is not the exact R2 resume candidate."
+  fi
+  rm -f "$manifest"
+  resume_dir="$(mktemp -d)" || die "Could not create a temporary public-artifact directory."
+  for artifact in \
+    "$download_origin/macos/$tag/Dakia-aarch64.app.tar.gz|$asset_dir/$apple_update|updater archive" \
+    "$download_origin/macos/$tag/Dakia-aarch64.app.tar.gz.sig|$asset_dir/$apple_signature|updater signature" \
+    "$download_origin/macos/$tag/Dakia-Apple-Silicon.dmg|$asset_dir/$apple_dmg|Apple Silicon DMG"; do
+    IFS='|' read -r url local_file label <<<"$artifact"
+    if ! status="$(curl --silent --show-error --location --proto '=https' --connect-timeout 15 --max-time 90 \
+      --output "$resume_dir/$(basename "$url")" --write-out '%{http_code}' "$url")" || \
+      [[ "$status" != "200" ]] || \
+      ! cmp -s "$local_file" "$resume_dir/$(basename "$url")"; then
+      rm -rf "$resume_dir"
+      die "Public R2 resume $label is missing or differs from the local release artifact."
+    fi
+  done
+  rm -rf "$resume_dir"
 }
 
 require_exact_signed_tag() {
@@ -158,11 +193,13 @@ else
   release_status=$?
   if [[ "$release_status" -eq 2 ]]; then
     verify_release false || die "Existing public GitHub Release cannot be re-verified."
+    require_exact_public_r2_resume
     echo "Verified exact existing public GitHub Release for $tag; no draft mutation was made."
     exit 0
   fi
 fi
 
+dakia_require_release_mutation_provenance "$root_dir" || exit 1
 if ! gh release create "$tag" \
   --repo "$release_repo" \
   --verify-tag \
