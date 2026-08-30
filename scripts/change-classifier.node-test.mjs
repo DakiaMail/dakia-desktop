@@ -227,6 +227,8 @@ test("ordinary pull-request workflow preserves the cost and release boundaries",
   assert.match(workflow, /RUSTC_WRAPPER=sccache/);
   assert.match(workflow, /SCCACHE_GHA_ENABLED=on/);
   assert.match(workflow, /SCCACHE_GHA_RW_MODE=READ_ONLY/);
+  assert.match(workflow, /path: ~\/\.cargo\/bin\/sccache/);
+  assert.match(workflow, /cargo install sccache --version 0\.17\.0 --locked/);
   assert.doesNotMatch(
     workflow,
     /path: \|\n\s+~\/\.cargo\/registry\n\s+~\/\.cargo\/git\n\s+target/,
