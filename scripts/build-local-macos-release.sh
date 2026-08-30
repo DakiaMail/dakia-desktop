@@ -17,6 +17,8 @@ if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ || \
 fi
 version="${tag#v}"
 output_dir="${output_dir:-$root_dir/release-assets/$tag}"
+# shellcheck source=local-release-env.sh
+source "$root_dir/scripts/local-release-env.sh"
 package_version="$(node -p "require('$root_dir/package.json').version")"
 cargo_version="$(awk '
   /^\[workspace\.package\]$/ { in_workspace_package = 1; next }
@@ -62,11 +64,8 @@ if [[ "$(git -C "$root_dir" branch --show-current)" != "main" ]]; then
   exit 1
 fi
 source_commit="$(git -C "$root_dir" rev-parse HEAD)"
-origin_main_commit="$(git -C "$root_dir" rev-parse origin/main)"
-if [[ "$source_commit" != "$origin_main_commit" ]]; then
-  echo "Release source must exactly match the fetched origin/main." >&2
-  exit 1
-fi
+dakia_require_expected_release_origin "$root_dir" || exit 1
+dakia_require_live_main_provenance "$root_dir" || exit 1
 if [[ -n "$(git -C "$root_dir" status --porcelain=v1 --untracked-files=all)" ]]; then
   echo "Release source has tracked or untracked changes; commit or remove them before building." >&2
   exit 1
@@ -82,8 +81,6 @@ if [[ "$(uname -m)" != "arm64" ]]; then
   exit 1
 fi
 
-# shellcheck source=local-release-env.sh
-source "$root_dir/scripts/local-release-env.sh"
 dakia_require_google_oauth_environment
 dakia_require_signing_environment
 
@@ -163,8 +160,12 @@ done
 printf '%s\n' "$source_commit" >"$output_dir/source-commit.txt"
 if [[ "$(git -C "$root_dir" branch --show-current)" != "main" || \
       "$(git -C "$root_dir" rev-parse HEAD)" != "$source_commit" || \
-      "$(git -C "$root_dir" rev-parse origin/main)" != "$source_commit" || \
       -n "$(git -C "$root_dir" status --porcelain=v1 --untracked-files=all)" ]]; then
+  echo "Release source changed while artifacts were being built." >&2
+  exit 1
+fi
+if ! dakia_require_expected_release_origin "$root_dir" || \
+   ! dakia_require_live_main_provenance "$root_dir"; then
   echo "Release source changed while artifacts were being built." >&2
   exit 1
 fi

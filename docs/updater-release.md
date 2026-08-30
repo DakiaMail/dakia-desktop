@@ -98,7 +98,13 @@ Silicon download.
 ## Source-control marker
 
 After the local build is proven, push a signed `vX.Y.Z` Git tag as the immutable
-source marker. It does not trigger a build. Create and byte-verify the GitHub
-Release draft from that verified tag before any R2 mutation, then publish R2
-and finally make the already-verified GitHub draft public. Never rebuild assets
-on GitHub.
+source marker. It does not trigger a build. Each release mutation rechecks that
+`HEAD`, cached `origin/main`, and live `git ls-remote origin refs/heads/main`
+are identical. Create and byte-verify the GitHub Release draft from that
+verified tag before any R2 mutation, then publish R2 and finally make the
+already-verified GitHub draft public. An already-public GitHub Release can only
+resume when public `latest.json` is already the exact same updater candidate;
+the anonymous versioned updater archive, signature, and DMG must also
+byte-match the local artifacts. The scripts repeat live-main provenance before
+each external release mutation; otherwise the release stops. Never rebuild
+assets on GitHub.

@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -19,6 +20,11 @@ const publisherSource = join(
   repositoryRoot,
   "scripts",
   "publish-release-to-r2.sh",
+);
+const releaseEnvironmentSource = join(
+  repositoryRoot,
+  "scripts",
+  "local-release-env.sh",
 );
 const commit = "1234567890abcdef1234567890abcdef12345678";
 
@@ -72,16 +78,22 @@ function createHarness() {
   const bin = join(fixture, "bin");
   const store = join(fixture, "store");
   const publicStore = join(fixture, "public-store");
+  const awsPutLog = join(fixture, "aws-put.log");
+  const liveMainArmFile = join(fixture, "live-main-armed");
+  const liveMainCalls = join(fixture, "live-main-calls");
   mkdirSync(scripts, { recursive: true });
   mkdirSync(bin);
   mkdirSync(store);
   mkdirSync(publicStore);
+  writeFileSync(liveMainCalls, "0");
+  writeFileSync(awsPutLog, "");
   mkdirSync(join(root, "apps", "desktop", "src-tauri"), { recursive: true });
   writeFileSync(
     join(root, "apps", "desktop", "src-tauri", "tauri.conf.json"),
     "{}\n",
   );
   copyFileSync(publisherSource, join(scripts, "publish-release-to-r2.sh"));
+  copyFileSync(releaseEnvironmentSource, join(scripts, "local-release-env.sh"));
   chmodSync(join(scripts, "publish-release-to-r2.sh"), 0o755);
   for (const verifier of [
     "verify-macos-release-dmg.sh",
@@ -118,12 +130,24 @@ set -euo pipefail
 case "\${1:-}" in
   ls-files|status|verify-tag) ;;
   branch) printf 'main\n' ;;
+  remote) printf 'git@github.com:DakiaMail/dakia-desktop.git\n' ;;
   rev-parse)
     case "\${*: -1}" in
       refs/tags/*) [[ "\${*: -1}" == *'^{'* ]] && printf '${commit}\n' || printf 'abcdef1234567890abcdef1234567890abcdef12\n' ;;
       *) printf '${commit}\n' ;;
     esac ;;
-  ls-remote) printf 'abcdef1234567890abcdef1234567890abcdef12\trefs/tags/%s\n${commit}\trefs/tags/%s^{}\n' "\${MOCK_TAG}" "\${MOCK_TAG}" ;;
+  ls-remote)
+    if [[ "\${*: -1}" == refs/heads/main ]]; then
+      calls="$(cat "\${MOCK_LIVE_MAIN_CALLS}")"; calls=$((calls + 1)); printf '%s' "\$calls" > "\${MOCK_LIVE_MAIN_CALLS}"
+      if [[ -f "\${MOCK_LIVE_MAIN_ARM_FILE}" || ( -n "\${MOCK_LIVE_MAIN_MOVES_AT:-}" && "\$calls" == "\${MOCK_LIVE_MAIN_MOVES_AT}" ) ]]; then
+        printf 'ffffffffffffffffffffffffffffffffffffffff\trefs/heads/main\n'
+      else
+        printf '${commit}\trefs/heads/main\n'
+      fi
+    else
+      printf 'abcdef1234567890abcdef1234567890abcdef12\trefs/tags/%s\n${commit}\trefs/tags/%s^{}\n' "\${MOCK_TAG}" "\${MOCK_TAG}"
+    fi
+    ;;
   *) exit 64 ;;
 esac
 exit 0
@@ -162,9 +186,11 @@ const key = value("--key");
 if (operation === "get-object") {
   const source = keyPath(key); if (!fs.existsSync(source)) process.exit(1);
   const destination = args.at(-1); fs.copyFileSync(source, destination);
+  if (key === process.env.MOCK_ARM_LIVE_MAIN_AFTER_GET_KEY) fs.writeFileSync(process.env.MOCK_LIVE_MAIN_ARM_FILE, "armed");
   process.stdout.write(fs.readFileSync(source + ".etag", "utf8")); process.exit(0);
 }
 if (operation !== "put-object") process.exit(64);
+fs.appendFileSync(process.env.MOCK_AWS_PUT_LOG, key + "\\n");
 const source = value("--body");
 const current = keyPath(key);
 const currentEtag = fs.existsSync(current + ".etag") ? fs.readFileSync(current + ".etag", "utf8") : undefined;
@@ -222,7 +248,7 @@ mkdir -p "\$destination/Dakia.app/Contents"
 cp "\${MOCK_INFO_PLIST}" "\$destination/Dakia.app/Contents/Info.plist"
 `,
   );
-  return { fixture, root, scripts, bin, store, publicStore };
+  return { fixture, root, scripts, bin, store, publicStore, liveMainCalls, liveMainArmFile, awsPutLog };
 }
 
 function candidate(harness, version, bytes = `dmg-${version}\n`) {
@@ -272,7 +298,12 @@ function run(harness, release, mode = "normal", extraEnvironment = {}) {
         PATH: `${harness.bin}:${process.env.PATH}`,
         CLOUDFLARE_ACCOUNT_ID: "fixture-account",
         MOCK_INFO_PLIST: release.plist,
+        MOCK_ARM_LIVE_MAIN_AFTER_GET_KEY: "",
+        MOCK_AWS_PUT_LOG: harness.awsPutLog,
+        MOCK_LIVE_MAIN_ARM_FILE: harness.liveMainArmFile,
         MOCK_LATEST_MODE: mode,
+        MOCK_LIVE_MAIN_CALLS: harness.liveMainCalls,
+        MOCK_LIVE_MAIN_MOVES_AT: "",
         MOCK_PUBLIC_STORE: harness.publicStore,
         MOCK_STORE: harness.store,
         MOCK_TAG: release.tag,
@@ -315,6 +346,207 @@ test("a competing candidate loses before either mutable release object changes",
         "utf8",
       ),
       "dmg-0.4.0\n",
+    );
+  } finally {
+    rmSync(harness.fixture, { recursive: true, force: true });
+  }
+});
+
+test("a moved live main stops R2 before its first post-draft write", () => {
+  const harness = createHarness();
+  const release = candidate(harness, "0.4.1");
+  try {
+    putVisibleInitial(harness, "macos/latest/latest.json", manifest("0.4.0"));
+    putVisibleInitial(
+      harness,
+      "macos/latest/Dakia-Apple-Silicon.dmg",
+      "dmg-0.4.0\n",
+    );
+    const result = run(harness, release, "normal", { MOCK_LIVE_MAIN_MOVES_AT: "2" });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /HEAD, cached origin\/main, and live origin\/main must all match/);
+    assert.equal(currentVersion(harness.store), "0.4.0");
+    assert.equal(existsSync(objectPath(harness.store, "macos/v0.4.1")), false);
+  } finally {
+    rmSync(harness.fixture, { recursive: true, force: true });
+  }
+});
+
+test("an immutable-object read arms a moved main before its adjacent conditional create", () => {
+  const harness = createHarness();
+  const release = candidate(harness, "0.4.1");
+  const immutableKey = "macos/v0.4.1/Dakia-Apple-Silicon.dmg";
+  try {
+    seedPreRelease(harness);
+    putInitial(harness.store, immutableKey, "different immutable bytes\n");
+    const result = run(harness, release, "normal", {
+      MOCK_ARM_LIVE_MAIN_AFTER_GET_KEY: immutableKey,
+    });
+    expectLiveMainStop(result);
+    assert.equal(
+      readFileSync(objectPath(harness.store, immutableKey), "utf8"),
+      "different immutable bytes\n",
+    );
+    assert.equal(
+      readFileSync(harness.awsPutLog, "utf8").includes(`${immutableKey}\n`),
+      false,
+    );
+  } finally {
+    rmSync(harness.fixture, { recursive: true, force: true });
+  }
+});
+
+function seedPreRelease(harness) {
+  putVisibleInitial(harness, "macos/latest/latest.json", manifest("0.4.0"));
+  putVisibleInitial(
+    harness,
+    "macos/latest/Dakia-Apple-Silicon.dmg",
+    "dmg-0.4.0\n",
+  );
+}
+
+function expectLiveMainStop(result) {
+  assert.notEqual(result.status, 0);
+  assert.match(
+    result.stderr,
+    /HEAD, cached origin\/main, and live origin\/main must all match/,
+  );
+}
+
+test("a publication-state read arms a moved main before its adjacent CAS", () => {
+  const harness = createHarness();
+  const release = candidate(harness, "0.4.1");
+  const stateKey = "macos/latest/publication.json";
+  const priorState = `${JSON.stringify({ tag: "v0.4.0", version: "0.4.0", source: "prior" })}\n`;
+  try {
+    seedPreRelease(harness);
+    putInitial(harness.store, stateKey, priorState);
+    const result = run(harness, release, "normal", {
+      MOCK_ARM_LIVE_MAIN_AFTER_GET_KEY: stateKey,
+    });
+    expectLiveMainStop(result);
+    assert.equal(readFileSync(objectPath(harness.store, stateKey), "utf8"), priorState);
+    assert.doesNotMatch(readFileSync(harness.awsPutLog, "utf8"), /^macos\/latest\/publication\.json$/m);
+  } finally {
+    rmSync(harness.fixture, { recursive: true, force: true });
+  }
+});
+
+for (const {
+  name,
+  moveAt,
+  before,
+  mode = "normal",
+  extraEnvironment = {},
+  verify,
+} of [
+  {
+    name: "the first immutable conditional create",
+    moveAt: "2",
+    verify: (harness) => {
+      assert.equal(existsSync(objectPath(harness.store, "macos/v0.4.1")), false);
+    },
+  },
+  {
+    name: "the second immutable conditional create",
+    moveAt: "3",
+    verify: (harness) => {
+      assert.equal(existsSync(objectPath(harness.store, "macos/v0.4.1/Dakia-Apple-Silicon.dmg")), true);
+      assert.equal(existsSync(objectPath(harness.store, "macos/v0.4.1/Dakia-aarch64.app.tar.gz")), false);
+    },
+  },
+  {
+    name: "the third immutable conditional create",
+    moveAt: "4",
+    verify: (harness) => {
+      assert.equal(existsSync(objectPath(harness.store, "macos/v0.4.1/Dakia-aarch64.app.tar.gz")), true);
+      assert.equal(existsSync(objectPath(harness.store, "macos/v0.4.1/Dakia-aarch64.app.tar.gz.sig")), false);
+    },
+  },
+  {
+    name: "the publication-state create",
+    moveAt: "5",
+    verify: (harness) => {
+      assert.equal(existsSync(objectPath(harness.store, "macos/latest/publication.json")), false);
+    },
+  },
+  {
+    name: "the publication-state CAS",
+    moveAt: "5",
+    before: (harness) => {
+      putInitial(
+        harness.store,
+        "macos/latest/publication.json",
+        `${JSON.stringify({ tag: "v0.4.0", version: "0.4.0", source: "prior" })}\n`,
+      );
+    },
+    verify: (harness) => {
+      assert.equal(
+        readFileSync(objectPath(harness.store, "macos/latest/publication.json"), "utf8"),
+        `${JSON.stringify({ tag: "v0.4.0", version: "0.4.0", source: "prior" })}\n`,
+      );
+    },
+  },
+  {
+    name: "the normal stable-DMG copy",
+    moveAt: "6",
+    verify: (harness) => {
+      assert.equal(
+        readFileSync(objectPath(harness.store, "macos/latest/Dakia-Apple-Silicon.dmg"), "utf8"),
+        "dmg-0.4.0\n",
+      );
+    },
+  },
+  {
+    name: "the final latest.json CAS",
+    moveAt: "7",
+    verify: (harness) => {
+      assert.equal(currentVersion(harness.store), "0.4.0");
+      assert.equal(
+        readFileSync(objectPath(harness.store, "macos/latest/Dakia-Apple-Silicon.dmg"), "utf8"),
+        "dmg-0.4.1\n",
+      );
+    },
+  },
+]) {
+  test(`a call-indexed live-main drift blocks ${name}`, () => {
+    const harness = createHarness();
+    const release = candidate(harness, "0.4.1");
+    try {
+      seedPreRelease(harness);
+      before?.(harness);
+      const result = run(harness, release, mode, {
+        MOCK_LIVE_MAIN_MOVES_AT: moveAt,
+        ...extraEnvironment,
+      });
+      expectLiveMainStop(result);
+      assert.equal(currentVersion(harness.store), "0.4.0");
+      verify(harness);
+    } finally {
+      rmSync(harness.fixture, { recursive: true, force: true });
+    }
+  });
+}
+
+test("a call-indexed live-main drift blocks the winner-repair stable-DMG copy", () => {
+  const harness = createHarness();
+  const release = candidate(harness, "0.4.1");
+  const winnerManifest = join(harness.fixture, "winner-latest.json");
+  const winnerDmg = join(harness.fixture, "winner.dmg");
+  try {
+    seedPreRelease(harness);
+    writeFileSync(winnerManifest, manifest("0.4.2"));
+    writeFileSync(winnerDmg, "dmg-0.4.2\n");
+    const result = run(harness, release, "different-candidate-wins", {
+      MOCK_LIVE_MAIN_MOVES_AT: "8",
+      MOCK_WINNER_DMG: winnerDmg,
+      MOCK_WINNER_MANIFEST: winnerManifest,
+    });
+    expectLiveMainStop(result);
+    assert.equal(currentVersion(harness.store), "0.4.2");
+    assert.equal(
+      readFileSync(objectPath(harness.store, "macos/latest/Dakia-Apple-Silicon.dmg"), "utf8"),
+      "dmg-0.4.1\n",
     );
   } finally {
     rmSync(harness.fixture, { recursive: true, force: true });

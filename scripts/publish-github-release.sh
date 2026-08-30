@@ -7,6 +7,9 @@ root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 release_repo="DakiaMail/dakia-desktop"
 download_origin="https://downloads.dakiamail.com"
 
+# shellcheck source=local-release-env.sh
+source "$root_dir/scripts/local-release-env.sh"
+
 die() {
   echo "$*" >&2
   exit 1
@@ -33,21 +36,13 @@ expected_assets="$(printf '%s\n' "$apple_dmg" "$apple_update" "$apple_signature"
 curl_options=(--silent --show-error --location --proto '=https' --connect-timeout 15 --max-time 90 --retry 3 --retry-delay 1 --retry-max-time 180)
 
 require_main_provenance() {
-  local status origin_url head remote_head
+  local status
   status="$(git -C "$root_dir" status --porcelain=v1 --untracked-files=all)"
   [[ -z "$status" ]] || die "Release checkout is not clean (including untracked files)."
   [[ "$(git -C "$root_dir" branch --show-current)" == "main" ]] ||
     die "GitHub Release publishing must run from the local main branch."
-  origin_url="$(git -C "$root_dir" remote get-url origin 2>/dev/null || true)"
-  case "$origin_url" in
-    git@github.com:DakiaMail/dakia-desktop.git|https://github.com/DakiaMail/dakia-desktop.git|https://github.com/DakiaMail/dakia-desktop)
-      ;;
-    *) die "origin does not identify the expected repository: $release_repo" ;;
-  esac
-  head="$(git -C "$root_dir" rev-parse HEAD)"
-  remote_head="$(git -C "$root_dir" rev-parse --verify refs/remotes/origin/main 2>/dev/null)" ||
-    die "origin/main is unavailable; fetch origin before publishing a release."
-  [[ "$head" == "$remote_head" ]] || die "HEAD does not exactly match origin/main."
+  dakia_require_expected_release_origin "$root_dir" || exit 1
+  dakia_require_live_main_provenance "$root_dir" || exit 1
 }
 
 require_exact_signed_tag() {
@@ -194,6 +189,7 @@ verify_local_assets
 gh auth status --hostname github.com >/dev/null || die "GitHub authentication for github.com is required."
 if verify_release true; then
   require_public_r2_candidate
+  dakia_require_release_mutation_provenance "$root_dir" || exit 1
   gh release edit "$tag" --repo "$release_repo" --draft=false --latest
 else
   release_status=$?
