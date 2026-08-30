@@ -158,21 +158,31 @@ test("provider smoke contract validates secrets without exposing them or connect
   assert.equal(result.status, 0, result.stderr);
   assert.doesNotMatch(`${result.stdout}${result.stderr}`, new RegExp(secret));
   assert.doesNotMatch(result.stdout, /smoke@example\.invalid/);
-  assert.doesNotMatch(result.stdout, /example-provider|imap\.example\.invalid|smtp\.example\.invalid/);
+  assert.doesNotMatch(
+    result.stdout,
+    /example-provider|imap\.example\.invalid|smtp\.example\.invalid/,
+  );
 
-  const rejected = spawnSync(process.execPath, ["scripts/provider-smoke-contract.mjs"], {
-    cwd: root,
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      PROVIDER_SMOKE_CONFIG: JSON.stringify({
-        ...providerConfig,
-        credentials: { accessToken: secret },
-      }),
+  const rejected = spawnSync(
+    process.execPath,
+    ["scripts/provider-smoke-contract.mjs"],
+    {
+      cwd: root,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PROVIDER_SMOKE_CONFIG: JSON.stringify({
+          ...providerConfig,
+          credentials: { accessToken: secret },
+        }),
+      },
     },
-  });
+  );
   assert.notEqual(rejected.status, 0);
-  assert.doesNotMatch(`${rejected.stdout}${rejected.stderr}`, new RegExp(secret));
+  assert.doesNotMatch(
+    `${rejected.stdout}${rejected.stderr}`,
+    new RegExp(secret),
+  );
 });
 
 test("manual workflow remains dispatch-only and runs bounded infrastructure", () => {
@@ -196,6 +206,17 @@ test("manual workflow remains dispatch-only and runs bounded infrastructure", ()
   assert.match(workflow, /RUSTUP_TOOLCHAIN=1\.89\.0/);
   assert.match(
     workflow,
+    /restore-keys: \|\n\s+npm-\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-node-20\.19\.0-/,
+  );
+  assert.match(workflow, /RUSTC_WRAPPER=sccache/);
+  assert.match(workflow, /SCCACHE_GHA_ENABLED=on/);
+  assert.doesNotMatch(
+    workflow,
+    /path: \|\n\s+~\/\.cargo\/registry\n\s+~\/\.cargo\/git\n\s+target/,
+    "the immutable Actions cache must not store the entire target directory",
+  );
+  assert.match(
+    workflow,
     /rustup toolchain install 1\.89\.0 --profile minimal --component rustfmt --component clippy/,
     "rustup requires one --component flag per requested component",
   );
@@ -209,7 +230,9 @@ test("manual workflow remains dispatch-only and runs bounded infrastructure", ()
     /cargo run .*dakia-provider-smoke/,
     "the protected execution step must run the prebuilt artifact, never compile with a secret in scope",
   );
-  const buildIndex = providerJob.indexOf("cargo build --locked -p dakia-cli --bin dakia-provider-smoke");
+  const buildIndex = providerJob.indexOf(
+    "cargo build --locked -p dakia-cli --bin dakia-provider-smoke",
+  );
   const secretIndex = providerJob.indexOf("PROVIDER_SMOKE_CONFIG:");
   assert.ok(buildIndex >= 0 && secretIndex > buildIndex);
   assert.equal(
@@ -217,6 +240,7 @@ test("manual workflow remains dispatch-only and runs bounded infrastructure", ()
     1,
     "the provider secret may be scoped only to the artifact execution step",
   );
+  assert.doesNotMatch(providerJob, /RUSTC_WRAPPER=sccache|SCCACHE_GHA_ENABLED/);
   assert.match(
     providerJob,
     /run: \|\n\s+node scripts\/provider-smoke-contract\.mjs\n\s+target\/debug\/dakia-provider-smoke/,

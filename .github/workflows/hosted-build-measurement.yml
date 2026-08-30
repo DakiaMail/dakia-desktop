@@ -77,10 +77,41 @@ jobs:
       - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4
         with:
           node-version: 20.19.0
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ runner.arch }}-node-20.19.0-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-${{ runner.arch }}-node-20.19.0-
       - name: Install pinned Rust toolchain
         run: |
           rustup toolchain install 1.89.0 --profile minimal
           rustup default 1.89.0
+      - name: Install Rust compiler cache
+        uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
+        with:
+          version: v0.17.0
+      - name: Export GitHub Actions cache credentials for sccache
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+      - name: Configure target-specific Rust compiler cache
+        run: |
+          {
+            echo 'RUSTC_WRAPPER=sccache'
+            echo 'SCCACHE_GHA_ENABLED=on'
+            echo 'SCCACHE_GHA_VERSION=dakia-${{ matrix.target }}-rust-1.89.0-v1'
+          } >> "$GITHUB_ENV"
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-deps-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-deps-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-
       - name: Install JavaScript dependencies
         run: npm ci --ignore-scripts
       - name: Prepare packaged assets
@@ -179,13 +210,6 @@ jobs:
             $uninstaller = Join-Path $installDir 'uninstall.exe'
             if (Test-Path -PathType Leaf $uninstaller) { & $uninstaller /S }
           }
-      - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
-        with:
-          name: hosted-build-measurement-${{ matrix.target }}-${{ github.run_id }}
-          path: ${{ matrix.artifact_glob }}
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
       - name: Explain measurement boundary
         run: |
           echo "Built an unsigned, non-publishing measurement package."

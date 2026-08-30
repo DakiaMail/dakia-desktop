@@ -62,17 +62,37 @@ jobs:
         with:
           path: ~/.npm
           key: npm-${{ runner.os }}-${{ runner.arch }}-node-20.19.0-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-${{ runner.arch }}-node-20.19.0-
       - name: Install pinned Rust toolchain
         run: |
           rustup toolchain install 1.89.0 --profile minimal --component rustfmt --component clippy
           echo 'RUSTUP_TOOLCHAIN=1.89.0' >> "$GITHUB_ENV"
+      - name: Install Rust compiler cache
+        uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
+        with:
+          version: v0.17.0
+      - name: Export GitHub Actions cache credentials for sccache
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+      - name: Configure Rust compiler cache
+        run: |
+          {
+            echo 'RUSTC_WRAPPER=sccache'
+            echo 'SCCACHE_GHA_ENABLED=on'
+            echo 'SCCACHE_GHA_VERSION=dakia-rust-1.89.0-v1'
+          } >> "$GITHUB_ENV"
       - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-${{ hashFiles('Cargo.lock') }}
+          key: cargo-deps-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-deps-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-
       - name: Install Linux dependencies for workspace tests
         run: |
           sudo apt-get update
