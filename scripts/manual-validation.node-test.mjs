@@ -210,6 +210,7 @@ test("manual workflow remains dispatch-only and runs bounded infrastructure", ()
   );
   assert.match(workflow, /RUSTC_WRAPPER=sccache/);
   assert.match(workflow, /SCCACHE_GHA_ENABLED=on/);
+  assert.match(workflow, /SCCACHE_GHA_RW_MODE=READ_WRITE/);
   assert.match(
     workflow,
     /name: Report Rust compiler cache statistics\n\s+if: always\(\)\n\s+run: sccache --show-stats/,
