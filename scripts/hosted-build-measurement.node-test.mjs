@@ -40,6 +40,10 @@ test("hosted build measurement covers both Macs and Windows without release writ
   assert.match(workflow, /-- --locked/);
   assert.match(workflow, /RUSTC_WRAPPER=sccache/);
   assert.match(workflow, /SCCACHE_GHA_ENABLED=on/);
+  assert.match(
+    workflow,
+    /name: Report Rust compiler cache statistics\n\s+if: always\(\)\n\s+run: sccache --show-stats/,
+  );
   assert.match(workflow, /sccache-v0\.17\.0-aarch64-apple-darwin\.tar\.gz/);
   assert.match(workflow, /sccache-v0\.17\.0-x86_64-apple-darwin\.tar\.gz/);
   assert.match(workflow, /sccache-v0\.17\.0-x86_64-pc-windows-msvc\.tar\.gz/);

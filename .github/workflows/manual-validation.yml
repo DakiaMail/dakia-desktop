@@ -117,6 +117,9 @@ jobs:
           npm run test -- --maxWorkers=1
           npm run test:release-scripts
           npm run build:web
+      - name: Report Rust compiler cache statistics
+        if: always()
+        run: sccache --show-stats
 
   coverage:
     name: Coverage baseline candidate

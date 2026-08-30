@@ -171,6 +171,9 @@ jobs:
             --config apps/desktop/src-tauri/tauri.conf.json \
             --config "$RUNNER_TEMP/tauri-measurement.conf.json" \
             -- --locked
+      - name: Report Rust compiler cache statistics
+        if: always()
+        run: sccache --show-stats
       - name: Verify package exists and record checksum
         run: |
           shopt -s nullglob
