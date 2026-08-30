@@ -40,8 +40,11 @@ test("hosted build measurement covers both Macs and Windows without release writ
   assert.match(workflow, /-- --locked/);
   assert.match(workflow, /RUSTC_WRAPPER=sccache/);
   assert.match(workflow, /SCCACHE_GHA_ENABLED=on/);
-  assert.match(workflow, /path: ~\/\.cargo\/bin\/sccache/);
-  assert.match(workflow, /cargo install sccache --version 0\.17\.0 --locked/);
+  assert.match(workflow, /sccache-v0\.17\.0-aarch64-apple-darwin\.tar\.gz/);
+  assert.match(workflow, /sccache-v0\.17\.0-x86_64-apple-darwin\.tar\.gz/);
+  assert.match(workflow, /sccache-v0\.17\.0-x86_64-pc-windows-msvc\.tar\.gz/);
+  assert.match(workflow, /sccache_sha256/);
+  assert.doesNotMatch(workflow, /cargo install sccache/);
   assert.match(
     workflow,
     /SCCACHE_GHA_VERSION=dakia-\$\{\{ matrix\.target \}\}-rust-1\.89\.0-v1/,

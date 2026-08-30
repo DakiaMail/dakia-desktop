@@ -210,8 +210,15 @@ test("manual workflow remains dispatch-only and runs bounded infrastructure", ()
   );
   assert.match(workflow, /RUSTC_WRAPPER=sccache/);
   assert.match(workflow, /SCCACHE_GHA_ENABLED=on/);
-  assert.match(workflow, /path: ~\/\.cargo\/bin\/sccache/);
-  assert.match(workflow, /cargo install sccache --version 0\.17\.0 --locked/);
+  assert.match(
+    workflow,
+    /sccache-v0\.17\.0-x86_64-unknown-linux-musl\.tar\.gz/,
+  );
+  assert.match(
+    workflow,
+    /67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006/,
+  );
+  assert.doesNotMatch(workflow, /cargo install sccache/);
   assert.doesNotMatch(
     workflow,
     /path: \|\n\s+~\/\.cargo\/registry\n\s+~\/\.cargo\/git\n\s+target/,
