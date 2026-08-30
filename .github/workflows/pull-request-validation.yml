@@ -86,7 +86,7 @@ jobs:
           echo 'RUSTUP_TOOLCHAIN=1.89.0' >> "$GITHUB_ENV"
       - name: Install Rust compiler cache
         if: needs.classify.outputs.rust_core == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.tauri_boundary == 'true'
-        uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.17.0
       - name: Export GitHub Actions cache credentials for sccache
