@@ -153,16 +153,35 @@ export function restoreThreads(
   original: MailThread[],
   restoredIds: Set<string>,
 ) {
-  const byId = new Map(current.map((thread) => [thread.id, thread]));
+  const next = [...current];
+  const originalIds = original.map((thread) => thread.id);
   for (const thread of original) {
-    if (restoredIds.has(thread.id)) byId.set(thread.id, thread);
+    if (!restoredIds.has(thread.id)) continue;
+    const existing = next.findIndex((item) => item.id === thread.id);
+    if (existing >= 0) {
+      next[existing] = thread;
+      continue;
+    }
+
+    const originalIndex = originalIds.indexOf(thread.id);
+    const successor = originalIds
+      .slice(originalIndex + 1)
+      .map((id) => next.findIndex((item) => item.id === id))
+      .find((index) => index >= 0);
+    if (successor !== undefined) {
+      next.splice(successor, 0, thread);
+      continue;
+    }
+    const predecessor = originalIds
+      .slice(0, originalIndex)
+      .reverse()
+      .map((id) => next.findIndex((item) => item.id === id))
+      .find((index) => index >= 0);
+    next.splice(
+      predecessor === undefined ? next.length : predecessor + 1,
+      0,
+      thread,
+    );
   }
-  const originalOrder = new Map(
-    original.map((thread, index) => [thread.id, index]),
-  );
-  return [...byId.values()].sort(
-    (left, right) =>
-      (originalOrder.get(left.id) ?? Number.MAX_SAFE_INTEGER) -
-      (originalOrder.get(right.id) ?? Number.MAX_SAFE_INTEGER),
-  );
+  return next;
 }
