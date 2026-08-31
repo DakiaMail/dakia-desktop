@@ -39,6 +39,14 @@ Git LFS classifier assets, the macOS ONNX Runtime, and the debug CLI sidecar.
 Always rely on unit and integration tests as the primary form of verification.
 Do UI testing only after exhausting those layers, at the very end.
 
+## Optimistic mutations
+
+All user-facing mutations must use optimistic updates. Reflect the intended
+result in local UI state immediately, without blocking unrelated or subsequent
+mutations on the network request. Reconcile with the authoritative result in
+the background, and restore the affected state with clear error feedback when
+the mutation fails.
+
 Write regression tests from the actual failing input and user-visible outcome,
 not merely from the current helper implementation. When a bug comes from email
 markup, protocol data, database state, or another structured external input:

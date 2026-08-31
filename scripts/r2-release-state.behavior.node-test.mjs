@@ -6,6 +6,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -92,9 +93,20 @@ function createHarness() {
     join(root, "apps", "desktop", "src-tauri", "tauri.conf.json"),
     "{}\n",
   );
-  copyFileSync(publisherSource, join(scripts, "publish-release-to-r2.sh"));
+  const publisherFixture = join(scripts, "publish-release-to-r2.sh");
+  const publisher = readFileSync(publisherSource, "utf8");
+  const plistBuddyInvocation = "/usr/libexec/PlistBuddy";
+  assert.equal(
+    publisher.split(plistBuddyInvocation).length - 1,
+    1,
+    "publisher must contain exactly one trusted PlistBuddy invocation",
+  );
+  writeFileSync(
+    publisherFixture,
+    publisher.replace(plistBuddyInvocation, '"${DAKIA_TEST_PLIST_BUDDY}"'),
+  );
   copyFileSync(releaseEnvironmentSource, join(scripts, "local-release-env.sh"));
-  chmodSync(join(scripts, "publish-release-to-r2.sh"), 0o755);
+  chmodSync(publisherFixture, 0o755);
   for (const verifier of [
     "verify-macos-release-dmg.sh",
     "verify-macos-release-app.sh",
@@ -248,7 +260,29 @@ mkdir -p "\$destination/Dakia.app/Contents"
 cp "\${MOCK_INFO_PLIST}" "\$destination/Dakia.app/Contents/Info.plist"
 `,
   );
-  return { fixture, root, scripts, bin, store, publicStore, liveMainCalls, liveMainArmFile, awsPutLog };
+  const plistBuddy = join(bin, "PlistBuddy");
+  executable(
+    plistBuddy,
+    `#!/usr/bin/env node
+const { readFileSync } = require("node:fs");
+const plist = readFileSync(process.argv.at(-1), "utf8");
+const version = plist.match(/<key>CFBundleShortVersionString<\\/key>\\s*<string>([^<]+)<\\/string>/)?.[1];
+if (!version) process.exit(1);
+process.stdout.write(version + "\\n");
+`,
+  );
+  return {
+    fixture,
+    root,
+    scripts,
+    bin,
+    store,
+    publicStore,
+    liveMainCalls,
+    liveMainArmFile,
+    awsPutLog,
+    plistBuddy,
+  };
 }
 
 function candidate(harness, version, bytes = `dmg-${version}\n`) {
@@ -297,6 +331,7 @@ function run(harness, release, mode = "normal", extraEnvironment = {}) {
         ...process.env,
         PATH: `${harness.bin}:${process.env.PATH}`,
         CLOUDFLARE_ACCOUNT_ID: "fixture-account",
+        DAKIA_TEST_PLIST_BUDDY: harness.plistBuddy,
         MOCK_INFO_PLIST: release.plist,
         MOCK_ARM_LIVE_MAIN_AFTER_GET_KEY: "",
         MOCK_AWS_PUT_LOG: harness.awsPutLog,
@@ -320,6 +355,49 @@ function currentVersion(store) {
     readFileSync(objectPath(store, "macos/latest/latest.json"), "utf8"),
   ).version;
 }
+
+function assertStoresUntouched(harness) {
+  assert.deepEqual(readdirSync(harness.store), []);
+  assert.deepEqual(readdirSync(harness.publicStore), []);
+}
+
+test("publisher fails before R2 mutation when its configured PlistBuddy is unavailable", () => {
+  const harness = createHarness();
+  const release = candidate(harness, "0.4.1");
+  try {
+    const result = run(harness, release, "normal", {
+      DAKIA_TEST_PLIST_BUDDY: join(harness.bin, "missing-PlistBuddy"),
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(
+      result.stderr,
+      /missing-PlistBuddy: No such file or directory/,
+    );
+    assertStoresUntouched(harness);
+  } finally {
+    rmSync(harness.fixture, { recursive: true, force: true });
+  }
+});
+
+test("publisher rejects an updater version mismatch before R2 mutation", () => {
+  const harness = createHarness();
+  const release = candidate(harness, "0.4.1");
+  try {
+    writeFileSync(
+      release.plist,
+      '<?xml version="1.0"?><plist><dict><key>CFBundleShortVersionString</key><string>9.9.9</string></dict></plist>',
+    );
+    const result = run(harness, release);
+    assert.notEqual(result.status, 0);
+    assert.match(
+      result.stderr,
+      /Updater app version '9\.9\.9' does not match '0\.4\.1'/,
+    );
+    assertStoresUntouched(harness);
+  } finally {
+    rmSync(harness.fixture, { recursive: true, force: true });
+  }
+});
 
 test("a competing candidate loses before either mutable release object changes", () => {
   const harness = createHarness();

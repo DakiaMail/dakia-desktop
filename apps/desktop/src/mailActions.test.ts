@@ -210,4 +210,24 @@ describe("mail action state", () => {
       restoreThreads([second], [first, second], new Set(["first"])),
     ).toEqual([first, second]);
   });
+
+  it("preserves list order when concurrent failures restore from different snapshots", () => {
+    const threads = ["first", "second", "third"].map((id, index) => ({
+      id,
+      messages: [message(String(index + 1))],
+      latest: message(String(index + 1)),
+      unread: true,
+      hasAttachments: false,
+      participants: [],
+    })) satisfies MailThread[];
+
+    const afterFirstFailure = restoreThreads(
+      [threads[2]],
+      threads,
+      new Set(["first"]),
+    );
+    expect(
+      restoreThreads(afterFirstFailure, threads.slice(1), new Set(["second"])),
+    ).toEqual(threads);
+  });
 });

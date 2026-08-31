@@ -383,8 +383,9 @@ describe("App read state", () => {
 
     const feedback = await screen.findByRole("button", { name: "Feedback" });
     await waitFor(() => expect(feedback).toBeEnabled());
-    await waitFor(() => expect(mocks.openAccountWindow).toHaveBeenCalled());
+    await waitFor(() => expect(mocks.openAccountWindow).toHaveBeenCalledOnce());
     mocks.openAccountWindow.mockClear();
+    mocks.showNativeMessage.mockClear();
 
     fireEvent.click(feedback);
 
@@ -395,7 +396,7 @@ describe("App read state", () => {
         "warning",
       ),
     );
-    expect(mocks.openAccountWindow).toHaveBeenCalledOnce();
+    await waitFor(() => expect(mocks.openAccountWindow).toHaveBeenCalledOnce());
     expect(mocks.createFeedbackComposeSeed).not.toHaveBeenCalled();
     expect(mocks.openComposeWindow).not.toHaveBeenCalled();
   });
@@ -497,6 +498,100 @@ describe("App read state", () => {
 
     await waitFor(() =>
       expect(mocks.api.setRead).toHaveBeenCalledWith("message-1", true),
+    );
+  });
+
+  it("shows mark-as-read immediately while the server mutation is pending", async () => {
+    let finishRead: (() => void) | undefined;
+    mocks.api.setRead.mockImplementationOnce(
+      () =>
+        new Promise<undefined>((resolve) => {
+          finishRead = () => resolve(undefined);
+        }),
+    );
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const row = (await screen.findByText("Unread thread")).closest("button")!;
+    fireEvent.click(row);
+
+    await waitFor(() => expect(row).toHaveAttribute("data-unread", "false"));
+    expect(finishRead).toBeTypeOf("function");
+    act(() => finishRead?.());
+  });
+
+  it("archives consecutive conversations immediately without waiting for the network", async () => {
+    const messages = [1, 2, 3].map((uid) => ({
+      ...mocks.message,
+      id: `message-${uid}`,
+      uid,
+      thread_id: `thread-${uid}`,
+      subject: `Conversation ${uid}`,
+      received_at: `2026-07-19T1${3 - uid}:00:00Z`,
+    }));
+    mocks.api.search.mockResolvedValue({
+      conversations: groupMessages(messages),
+      nextCursor: null,
+    });
+    const finishActions: Array<() => void> = [];
+    mocks.api.action.mockImplementation(
+      () =>
+        new Promise<undefined>((resolve) => {
+          finishActions.push(() => resolve(undefined));
+        }),
+    );
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(
+      (await screen.findByText("Conversation 1")).closest("button")!,
+    );
+    fireEvent.keyDown(document.documentElement, { key: "e" });
+    await waitFor(() =>
+      expect(screen.queryByText("Conversation 1")).not.toBeInTheDocument(),
+    );
+    const searchesBeforeRefresh = mocks.api.search.mock.calls.length;
+    act(() => mocks.mailChangedHandlers.at(-1)?.());
+    await waitFor(() =>
+      expect(mocks.api.search.mock.calls.length).toBeGreaterThan(
+        searchesBeforeRefresh,
+      ),
+    );
+    expect(screen.queryByText("Conversation 1")).not.toBeInTheDocument();
+
+    fireEvent.keyDown(document.documentElement, { key: "e" });
+    await waitFor(() =>
+      expect(screen.queryByText("Conversation 2")).not.toBeInTheDocument(),
+    );
+    fireEvent.keyDown(document.documentElement, { key: "e" });
+
+    await waitFor(() => {
+      expect(screen.queryByText("Conversation 3")).not.toBeInTheDocument();
+      expect(mocks.api.action).toHaveBeenCalledTimes(3);
+    });
+    expect(
+      (mocks.api.action.mock.calls as unknown[][]).map((call) => call[2]),
+    ).toEqual([1, 2, 3]);
+    expect(finishActions).toHaveLength(3);
+
+    mocks.api.search.mockResolvedValue({ conversations: [], nextCursor: null });
+    const searchesBeforeSettlement = mocks.api.search.mock.calls.length;
+    await act(async () => {
+      finishActions[0]();
+      await Promise.resolve();
+    });
+    expect(mocks.api.search).toHaveBeenCalledTimes(searchesBeforeSettlement);
+    act(() => finishActions.slice(1).forEach((finish) => finish()));
+    await waitFor(() =>
+      expect(mocks.api.search.mock.calls.length).toBeGreaterThan(
+        searchesBeforeSettlement,
+      ),
     );
   });
 
