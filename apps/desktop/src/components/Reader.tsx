@@ -17,6 +17,7 @@ import {
   IconFile,
   IconFiles,
   IconMailForward,
+  IconRepeat,
   IconLanguage,
   IconMail,
   IconPaperclip,
@@ -85,6 +86,7 @@ type Props = {
   onReply: (message: MailSummary) => void;
   onReplyAll: (message: MailSummary) => void;
   onForward: (message: MailSummary) => void;
+  onSendAgain: (message: MailSummary) => void;
   onToggleRead: (read: boolean) => void;
   onSummarize: () => void;
   onCopyAi: () => void;
@@ -112,6 +114,7 @@ export function Reader({
   onReply,
   onReplyAll,
   onForward,
+  onSendAgain,
   onToggleRead,
   onSummarize,
   onCopyAi,
@@ -563,6 +566,7 @@ export function Reader({
             message={threadMessage}
             isSent={
               Boolean(accountEmail) &&
+              threadMessage.mailbox !== "Outbox" &&
               threadMessage.from_address.toLowerCase() ===
                 accountEmail?.toLowerCase()
             }
@@ -578,6 +582,7 @@ export function Reader({
             onReply={() => onReply(threadMessage)}
             onReplyAll={() => onReplyAll(threadMessage)}
             onForward={() => onForward(threadMessage)}
+            onSendAgain={() => onSendAgain(threadMessage)}
             onComposeTo={(address) => onComposeTo(threadMessage, address)}
             onComposeLink={(seed) => onComposeLink?.(threadMessage, seed)}
             onAddressContextMenu={(address) =>
@@ -611,6 +616,7 @@ function ThreadMessage({
   onReply,
   onReplyAll,
   onForward,
+  onSendAgain,
   onComposeTo,
   onComposeLink,
   onAddressContextMenu,
@@ -635,6 +641,7 @@ function ThreadMessage({
   onReply: () => void;
   onReplyAll: () => void;
   onForward: () => void;
+  onSendAgain: () => void;
   onComposeTo: (address: string) => void;
   onComposeLink: (seed: ComposeSeed) => void;
   onAddressContextMenu: (address: string) => void;
@@ -963,6 +970,14 @@ function ThreadMessage({
             >
               {t("actions.forward")}
             </Menu.Item>
+            {isSent ? (
+              <Menu.Item
+                leftSection={<IconRepeat size={16} />}
+                onClick={onSendAgain}
+              >
+                {t("actions.sendAgain")}
+              </Menu.Item>
+            ) : null}
             <Menu.Item
               leftSection={
                 exporting ? <Loader size={16} /> : <IconDownload size={16} />

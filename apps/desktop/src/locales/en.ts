@@ -43,6 +43,7 @@ export const en = {
       reply: "Reply",
       replyAll: "Reply all",
       forward: "Forward",
+      sendAgain: "Send again",
       exportMessage: "Export message (.eml)",
       more: "More actions",
       star: "Star conversation",
@@ -139,6 +140,7 @@ export const en = {
       date: "Date",
       replyErrorTitle: "Could not reply to message",
       forwardErrorTitle: "Could not forward message",
+      sendAgainErrorTitle: "Could not prepare message",
       permanentDeleteTitle: "Permanently delete this message?",
       permanentDeleteBody:
         "Dakia will request deletion of this message without moving it to Trash. It cannot be undone in Dakia; your email provider controls the final IMAP disposition.",
@@ -187,7 +189,8 @@ export const en = {
       saved_one: "Saved 1 attachment to Downloads",
       saved_other: "Saved {{count}} attachments to Downloads",
       saveError: "Could not save the attachment to Downloads",
-      loadError: "Could not load attachment details",
+      loadError:
+        "Could not load the original attachments. You can still edit and send this message.",
       unsafe:
         "This file may run software. Only open it if you trust the sender.",
     },

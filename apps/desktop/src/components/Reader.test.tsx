@@ -1,5 +1,6 @@
 import {
   act,
+  cleanup,
   createEvent,
   fireEvent,
   render,
@@ -62,6 +63,7 @@ const props = {
   onReply: vi.fn(),
   onReplyAll: vi.fn(),
   onForward: vi.fn(),
+  onSendAgain: vi.fn(),
   onToggleRead: vi.fn(),
   onSummarize: vi.fn(),
   onCopyAi: vi.fn(),
@@ -166,10 +168,14 @@ describe("Reader unsubscribe action", () => {
     const documentRole = await screen.findByRole("document", {
       name: "Weekly notes",
     });
-    const surface = documentRole.shadowRoot?.firstElementChild as HTMLElement;
-    const anchor = surface.shadowRoot?.querySelector("a");
-    expect(anchor).not.toBeNull();
-    fireEvent.click(anchor!);
+    const anchor = await waitFor(() => {
+      const surface = documentRole.shadowRoot?.firstElementChild as
+        HTMLElement | undefined;
+      const nextAnchor = surface?.shadowRoot?.querySelector("a");
+      expect(nextAnchor).not.toBeNull();
+      return nextAnchor!;
+    });
+    fireEvent.click(anchor);
 
     expect(props.onComposeLink).toHaveBeenCalledWith(message, {
       to: "juhan+tamm@example.com",
@@ -277,6 +283,60 @@ describe("Reader unsubscribe action", () => {
     fireEvent.click(await screen.findByRole("menuitem", { name: "Forward" }));
     expect(props.onForward).toHaveBeenCalledOnce();
     expect(props.onForward).toHaveBeenCalledWith(message);
+  });
+
+  it("offers send again only for sent messages", async () => {
+    const sentMessage = {
+      ...message,
+      mailbox: "Sent",
+      from_address: "me@example.com",
+      to_addresses: "recipient@example.com",
+    };
+    render(
+      <MantineProvider>
+        <Reader
+          {...props}
+          accountEmail="me@example.com"
+          message={sentMessage}
+        />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Send again" }),
+    );
+    expect(props.onSendAgain).toHaveBeenCalledWith(sentMessage);
+
+    cleanup();
+    render(
+      <MantineProvider>
+        <Reader {...props} accountEmail="me@example.com" message={message} />
+      </MantineProvider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    expect(
+      screen.queryByRole("menuitem", { name: "Send again" }),
+    ).not.toBeInTheDocument();
+
+    cleanup();
+    render(
+      <MantineProvider>
+        <Reader
+          {...props}
+          accountEmail="me@example.com"
+          message={{
+            ...sentMessage,
+            id: "outbox-message",
+            mailbox: "Outbox",
+          }}
+        />
+      </MantineProvider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    expect(
+      screen.queryByRole("menuitem", { name: "Send again" }),
+    ).not.toBeInTheDocument();
   });
 
   it("exports the selected message once and reports the saved path", async () => {
