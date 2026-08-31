@@ -191,6 +191,10 @@ export default function App() {
   const searchRef = useRef<HTMLInputElement>(null);
   const statusId = useRef(0);
   const actionBusyRef = useRef(false);
+  const mailboxActionsInFlightRef = useRef(0);
+  const mailboxActionThreadIdsRef = useRef(new Set<string>());
+  const readMutationGenerationRef = useRef(0);
+  const readMutationByMessageRef = useRef(new Map<string, number>());
   const loadRequestIdRef = useRef(0);
   const smartLoadRequestIdRef = useRef(0);
   const starredCountRequestIdRef = useRef(0);
@@ -438,7 +442,10 @@ export default function App() {
             for (const section of page.sections) {
               next[section.id] = {
                 id: section.id,
-                threads: section.conversations,
+                threads: excludeThreads(
+                  section.conversations,
+                  mailboxActionThreadIdsRef.current,
+                ),
                 nextCursor: section.nextCursor,
                 loadingMore: false,
               };
@@ -471,7 +478,9 @@ export default function App() {
         sameMailView(currentView, currentViewRef.current)
       ) {
         nextCursorRef.current = page.nextCursor;
-        setThreads(page.conversations);
+        setThreads(
+          excludeThreads(page.conversations, mailboxActionThreadIdsRef.current),
+        );
         setHasMore(page.nextCursor !== null);
       }
       if (currentView.query.trim()) {
@@ -494,10 +503,13 @@ export default function App() {
               if (!merged.has(thread.id)) merged.set(thread.id, thread);
             }
             setThreads(
-              [...merged.values()].sort(
-                (left, right) =>
-                  new Date(right.latest.received_at).getTime() -
-                  new Date(left.latest.received_at).getTime(),
+              excludeThreads(
+                [...merged.values()].sort(
+                  (left, right) =>
+                    new Date(right.latest.received_at).getTime() -
+                    new Date(left.latest.received_at).getTime(),
+                ),
+                mailboxActionThreadIdsRef.current,
               ),
             );
           }
@@ -1202,7 +1214,6 @@ export default function App() {
       setSyncStatus(undefined);
     }
   };
-  const actionBusy = Object.keys(pendingActions).length > 0;
   const applyAction = async (
     action: MailAction,
     explicitThreads: MailThread[] = targetThreads,
@@ -1213,8 +1224,8 @@ export default function App() {
         messages: conversationActionMessages(thread, mailbox, action),
       }))
       .filter((target) => target.messages.length > 0);
-    if (!actionThreads.length || actionBusyRef.current) return;
-    actionBusyRef.current = true;
+    if (!actionThreads.length) return;
+    mailboxActionsInFlightRef.current += 1;
     // An open/read transition may already be refreshing Smart sections with
     // the pre-action INBOX row. Make that result stale before moving the row.
     loadRequestIdRef.current += 1;
@@ -1227,13 +1238,10 @@ export default function App() {
     const targetThreadIds = new Set(
       actionThreads.map((target) => target.thread.id),
     );
+    for (const id of targetThreadIds) mailboxActionThreadIdsRef.current.add(id);
     const reducedMotion = window.matchMedia(
       "(prefers-reduced-motion: reduce)",
     ).matches;
-    const maxDelay = reducedMotion
-      ? 0
-      : Math.min((actionTargets.length - 1) * 24, 144);
-
     setPendingActions((current) => {
       const next = { ...current };
       actionTargets.forEach((message, index) => {
@@ -1263,21 +1271,9 @@ export default function App() {
       setActiveThreadSnapshot(next);
     }
 
-    const resultsPromise = Promise.allSettled(
-      actionThreads.map(({ messages }) =>
-        Promise.all(
-          messages.map((message) =>
-            api.action(
-              message.account_id,
-              message.mailbox,
-              message.uid,
-              action,
-            ),
-          ),
-        ),
-      ),
-    );
-    await wait(reducedMotion ? 0 : 210 + maxDelay);
+    // Remove the affected conversations in the same render as the action.
+    // Network work continues independently so the next visible conversation
+    // can be acted on immediately.
     setThreads((current) =>
       current.filter((thread) => !targetThreadIds.has(thread.id)),
     );
@@ -1300,6 +1296,21 @@ export default function App() {
       for (const id of targetThreadIds) next.delete(id);
       return next;
     });
+
+    const resultsPromise = Promise.allSettled(
+      actionThreads.map(({ messages }) =>
+        Promise.all(
+          messages.map((message) =>
+            api.action(
+              message.account_id,
+              message.mailbox,
+              message.uid,
+              action,
+            ),
+          ),
+        ),
+      ),
+    );
     const results = await resultsPromise;
     const failedThreadIds = new Set(
       actionThreads
@@ -1367,8 +1378,10 @@ export default function App() {
       for (const id of targetIds) delete next[id];
       return next;
     });
-    actionBusyRef.current = false;
-    await loadMessages();
+    mailboxActionsInFlightRef.current -= 1;
+    for (const id of targetThreadIds)
+      mailboxActionThreadIdsRef.current.delete(id);
+    if (mailboxActionsInFlightRef.current === 0) await loadMessages();
   };
   const permanentlyDeleteMessage = async (message: MailSummary) => {
     if (actionBusyRef.current) return;
@@ -1730,10 +1743,19 @@ export default function App() {
       is_read: message.is_read,
     }));
     const ids = new Set(previous.map((message) => message.id));
+    const mutationGeneration = ++readMutationGenerationRef.current;
+    for (const id of ids)
+      readMutationByMessageRef.current.set(id, mutationGeneration);
+    const previousThreads = threads;
     const previousSmartSections = smartSections;
-    setThreads((current) =>
-      current.map((item) => updateThreadReadState(item, ids, read)),
-    );
+    setThreads((current) => {
+      const updated = current.map((item) =>
+        updateThreadReadState(item, ids, read),
+      );
+      return read && mailbox === "unread"
+        ? updated.filter((item) => item.id !== thread.id)
+        : updated;
+    });
     setSmartSections(
       (current) =>
         Object.fromEntries(
@@ -1780,13 +1802,40 @@ export default function App() {
     );
     const failed = new Set(
       results.flatMap((result, index) =>
-        result.status === "rejected" ? [previous[index].id] : [],
+        result.status === "rejected" &&
+        readMutationByMessageRef.current.get(previous[index].id) ===
+          mutationGeneration
+          ? [previous[index].id]
+          : [],
       ),
     );
     if (failed.size) {
       const prior = new Map(previous.map((item) => [item.id, item.is_read]));
+      const failedThreadIds = new Set(
+        Object.values(previousSmartSections)
+          .flatMap((section) => section.threads)
+          .filter((item) =>
+            concreteThreadMessages(item).some((message) =>
+              failed.has(message.id),
+            ),
+          )
+          .map((item) => item.id)
+          .filter((id) => !mailboxActionThreadIdsRef.current.has(id)),
+      );
+      const failedRegularThreadIds = new Set(
+        previousThreads
+          .filter((item) =>
+            concreteThreadMessages(item).some((message) =>
+              failed.has(message.id),
+            ),
+          )
+          .map((item) => item.id)
+          .filter((id) => !mailboxActionThreadIdsRef.current.has(id)),
+      );
       setThreads((current) =>
-        current.map((item) => restoreThreadReadState(item, failed, prior)),
+        restoreThreads(current, previousThreads, failedRegularThreadIds).map(
+          (item) => restoreThreadReadState(item, failed, prior),
+        ),
       );
       setActive((current) =>
         current ? restoreMessageReadState(current, failed, prior) : current,
@@ -1794,7 +1843,22 @@ export default function App() {
       setActiveThreadSnapshot((current) =>
         current ? restoreThreadReadState(current, failed, prior) : current,
       );
-      setSmartSections(previousSmartSections);
+      setSmartSections(
+        (current) =>
+          Object.fromEntries(
+            smartSectionIds.map((id) => [
+              id,
+              {
+                ...current[id],
+                threads: restoreThreads(
+                  current[id].threads,
+                  previousSmartSections[id].threads,
+                  failedThreadIds,
+                ).map((item) => restoreThreadReadState(item, failed, prior)),
+              },
+            ]),
+          ) as Record<SmartSectionId, SmartSection>,
+      );
       if (!silent) {
         showStatus(
           t(read ? "feedback.readFailed" : "feedback.unreadFailed", {
@@ -1803,10 +1867,18 @@ export default function App() {
           "error",
         );
       }
+      for (const id of ids) {
+        if (readMutationByMessageRef.current.get(id) === mutationGeneration)
+          readMutationByMessageRef.current.delete(id);
+      }
       return;
     }
     if (!silent) {
       showStatus(t(read ? "feedback.readSuccess" : "feedback.unreadSuccess"));
+    }
+    for (const id of ids) {
+      if (readMutationByMessageRef.current.get(id) === mutationGeneration)
+        readMutationByMessageRef.current.delete(id);
     }
     if (smartInboxActive) await loadMessages();
   };
@@ -2308,7 +2380,7 @@ export default function App() {
         onLoadMore={() => void loadMoreMessages()}
         onLoadMoreSmart={(id) => void loadMoreSmartSection(id)}
         pendingActions={pendingActions}
-        actionsDisabled={actionBusy || permanentDeleteLoading}
+        actionsDisabled={permanentDeleteLoading}
         searchRef={searchRef}
       />
       <Reader
@@ -2320,7 +2392,7 @@ export default function App() {
         aiResult={aiResult}
         aiLoading={aiLoading}
         aiConnected={aiConnected}
-        actionsDisabled={actionBusy || permanentDeleteLoading}
+        actionsDisabled={permanentDeleteLoading}
         onArchive={() => void applyAction("archive")}
         onSpam={() =>
           void applyAction(
@@ -2415,6 +2487,10 @@ function mergeThreads(current: MailThread[], incoming: MailThread[]) {
       new Date(right.latest.received_at).getTime() -
       new Date(left.latest.received_at).getTime(),
   );
+}
+
+function excludeThreads(threads: MailThread[], excludedIds: Set<string>) {
+  return threads.filter((thread) => !excludedIds.has(thread.id));
 }
 
 function updateMessageReadState(
