@@ -224,7 +224,18 @@ test("ordinary pull-request workflow preserves the cost and release boundaries",
     workflow,
     /cargo-deps-\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-rust-1\.89\.0-/,
   );
-  assert.doesNotMatch(workflow, /sccache/);
+  assert.match(workflow, /RUSTC_WRAPPER=sccache/);
+  assert.match(workflow, /SCCACHE_GHA_ENABLED=on/);
+  assert.match(workflow, /SCCACHE_GHA_RW_MODE=READ_ONLY/);
+  assert.match(
+    workflow,
+    /sccache-v0\.17\.0-x86_64-unknown-linux-musl\.tar\.gz/,
+  );
+  assert.match(
+    workflow,
+    /67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006/,
+  );
+  assert.doesNotMatch(workflow, /cargo install sccache/);
   assert.doesNotMatch(
     workflow,
     /path: \|\n\s+~\/\.cargo\/registry\n\s+~\/\.cargo\/git\n\s+target/,

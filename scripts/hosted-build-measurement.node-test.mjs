@@ -38,7 +38,22 @@ test("hosted build measurement covers both Macs and Windows without release writ
   assert.match(workflow, /group: hosted-build-measurement/);
   assert.match(workflow, /bash \.\/scripts\/prepare-desktop-assets\.sh/);
   assert.match(workflow, /-- --locked/);
-  assert.doesNotMatch(workflow, /sccache/);
+  assert.match(workflow, /RUSTC_WRAPPER=sccache/);
+  assert.match(workflow, /SCCACHE_GHA_ENABLED=on/);
+  assert.match(workflow, /SCCACHE_GHA_RW_MODE=READ_WRITE/);
+  assert.match(
+    workflow,
+    /name: Report Rust compiler cache statistics\n\s+if: always\(\)\n\s+run: sccache --show-stats/,
+  );
+  assert.match(workflow, /sccache-v0\.17\.0-aarch64-apple-darwin\.tar\.gz/);
+  assert.match(workflow, /sccache-v0\.17\.0-x86_64-apple-darwin\.tar\.gz/);
+  assert.match(workflow, /sccache-v0\.17\.0-x86_64-pc-windows-msvc\.tar\.gz/);
+  assert.match(workflow, /sccache_sha256/);
+  assert.doesNotMatch(workflow, /cargo install sccache/);
+  assert.match(
+    workflow,
+    /SCCACHE_GHA_VERSION=dakia-\$\{\{ matrix\.target \}\}-rust-1\.89\.0-v1/,
+  );
   assert.match(
     workflow,
     /restore-keys: \|\n\s+npm-\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-node-20\.19\.0-/,
