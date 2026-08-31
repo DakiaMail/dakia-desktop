@@ -5,6 +5,12 @@ import {
   enable as enableAutostart,
   isEnabled as isAutostartEnabled,
 } from "@tauri-apps/plugin-autostart";
+import {
+  readAnalyticsSettings,
+  listenForAnalyticsConsent,
+  setAnalyticsConsent,
+  type AnalyticsSettings,
+} from "./analytics";
 import { api } from "./api";
 import { AccountSetup } from "./components/AccountSetup";
 import { Settings } from "./components/Settings";
@@ -97,6 +103,9 @@ export function SettingsWindowApp() {
   );
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [accountsLoading, setAccountsLoading] = useState(true);
+  const [analytics, setAnalytics] = useState<AnalyticsSettings>(
+    readAnalyticsSettings,
+  );
   const [accountSaving, setAccountSaving] = useState(false);
   const [accountRemoving, setAccountRemoving] = useState(false);
   const [accountFullSyncing, setAccountFullSyncing] = useState(false);
@@ -183,6 +192,14 @@ export function SettingsWindowApp() {
     };
   }, [t]);
 
+  useEffect(() => {
+    let dispose: () => void = () => undefined;
+    void listenForAnalyticsConsent(setAnalytics)
+      .then((unlisten) => (dispose = unlisten))
+      .catch(() => undefined);
+    return () => dispose();
+  }, []);
+
   const updateAi = (value: AiSettings) => {
     const generation = ++aiSettingsGenerationRef.current;
     const apiKeyChanged = value.apiKey !== ai.apiKey;
@@ -203,6 +220,10 @@ export function SettingsWindowApp() {
     setNotifications(value);
     saveNotificationSettings(value);
     void notifyNotificationSettingsChanged(value);
+  };
+
+  const updateAnalytics = (enabled: boolean) => {
+    setAnalytics(setAnalyticsConsent(enabled));
   };
 
   const testNotification = async () => {
@@ -306,6 +327,7 @@ export function SettingsWindowApp() {
       notifications={notifications}
       notificationPermission={notificationPermission}
       launchAtLogin={launchAtLogin}
+      analytics={analytics}
       realtimeStatuses={realtimeStatuses}
       onAiChange={updateAi}
       onAddAccount={() => void openAccountWindow()}
@@ -316,6 +338,7 @@ export function SettingsWindowApp() {
       onNotificationsChange={updateNotifications}
       onTestNotification={() => void testNotification()}
       onLaunchAtLoginChange={(enabled) => void updateLaunchAtLogin(enabled)}
+      onAnalyticsChange={updateAnalytics}
     />
   );
 
