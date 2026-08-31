@@ -381,14 +381,19 @@ describe("App read state", () => {
       </MantineProvider>,
     );
 
+    await waitFor(() => expect(mocks.openAccountWindow).toHaveBeenCalledOnce());
+    mocks.openAccountWindow.mockClear();
+    mocks.showNativeMessage.mockClear();
     fireEvent.click(await screen.findByRole("button", { name: "Feedback" }));
 
-    await waitFor(() => expect(mocks.openAccountWindow).toHaveBeenCalledOnce());
-    expect(mocks.showNativeMessage).toHaveBeenCalledWith(
-      "New message",
-      "Connect an account before composing.",
-      "warning",
+    await waitFor(() =>
+      expect(mocks.showNativeMessage).toHaveBeenCalledWith(
+        "New message",
+        "Connect an account before composing.",
+        "warning",
+      ),
     );
+    await waitFor(() => expect(mocks.openAccountWindow).toHaveBeenCalledOnce());
     expect(mocks.createFeedbackComposeSeed).not.toHaveBeenCalled();
     expect(mocks.openComposeWindow).not.toHaveBeenCalled();
   });
