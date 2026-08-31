@@ -7,6 +7,7 @@ export type ComposeSeed = {
   accountId?: string;
   to?: string;
   cc?: string;
+  bcc?: string;
   subject?: string;
   body?: string;
   bodyHtml?: string;

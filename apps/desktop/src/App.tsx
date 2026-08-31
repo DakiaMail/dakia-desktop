@@ -1604,6 +1604,31 @@ export default function App() {
   const openThreadForward = async (
     thread: MailThread | undefined = activeThread,
   ) => openForwardForMessage(thread?.latest);
+  const openSendAgainForMessage = async (message: MailSummary) => {
+    try {
+      const content = await api.content(message.id);
+      openComposeWindow({
+        accountId: message.account_id,
+        to: message.to_addresses,
+        ...(message.cc_addresses ? { cc: message.cc_addresses } : {}),
+        ...(message.bcc_addresses ? { bcc: message.bcc_addresses } : {}),
+        subject: message.subject,
+        body: content.body_text,
+        ...(content.body_html ? { bodyHtml: content.body_html } : {}),
+        forwardMessageId: content.attachments.some(
+          (attachment) => attachment.presentation !== "embedded",
+        )
+          ? message.id
+          : undefined,
+      });
+    } catch (error) {
+      await showNativeMessage(
+        t("reader.sendAgainErrorTitle"),
+        error instanceof Error ? error.message : String(error),
+        "error",
+      );
+    }
+  };
   const toggleThreadStar = async (thread: MailThread, flagged: boolean) => {
     if (actionBusyRef.current) return;
     actionBusyRef.current = true;
@@ -2332,6 +2357,7 @@ export default function App() {
         onReply={(message) => void openReplyForMessage(message)}
         onReplyAll={(message) => void openReplyForMessage(message, true)}
         onForward={(message) => void openForwardForMessage(message)}
+        onSendAgain={(message) => void openSendAgainForMessage(message)}
         onToggleRead={(read) =>
           activeThread ? void setThreadReadState(activeThread, read) : undefined
         }

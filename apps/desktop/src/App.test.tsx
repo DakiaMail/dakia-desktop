@@ -1937,6 +1937,8 @@ describe("App read state", () => {
       from_name: "Me",
       from_address: "me@example.com",
       to_addresses: "sender-a@example.com",
+      cc_addresses: "peer@example.com",
+      bcc_addresses: "hidden@example.com",
       message_id: "<sent-b@example.com>",
       reference_ids: "<received-a@example.com>",
       received_at: "2026-07-19T10:00:00Z",
@@ -1954,11 +1956,26 @@ describe("App read state", () => {
       conversations: groupMessages([receivedA, sentB, receivedC]),
       nextCursor: null,
     });
-    mocks.api.content.mockImplementation(async (messageId) => ({
-      body_text:
-        messageId === sentB.id ? "Sent B full body" : "Received message body",
-      attachments: [],
-    }));
+    mocks.api.content.mockImplementation(async (messageId) =>
+      messageId === sentB.id
+        ? {
+            body_text: "Sent B full body",
+            body_html: "<p>Sent B <strong>full body</strong></p>",
+            attachments: [
+              {
+                id: "sent-attachment",
+                message_id: "sent-b",
+                filename: "notes.pdf",
+                mime_type: "application/pdf",
+                size_bytes: 42,
+                is_inline: false,
+                is_potentially_unsafe: false,
+                presentation: "downloadable" as const,
+              },
+            ],
+          }
+        : { body_text: "Received message body", attachments: [] },
+    );
     render(
       <MantineProvider>
         <App />
@@ -1969,7 +1986,9 @@ describe("App read state", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: "Expand message from Me" }),
     );
-    await screen.findByText("Sent B full body");
+    await waitFor(() =>
+      expect(mocks.api.content).toHaveBeenCalledWith("sent-b"),
+    );
 
     for (const action of ["Quick reply", "Reply all"]) {
       mocks.openComposeWindow.mockClear();
@@ -1990,6 +2009,26 @@ describe("App read state", () => {
       );
       expect(mocks.api.content).toHaveBeenCalledWith("sent-b");
     }
+
+    mocks.openComposeWindow.mockClear();
+    mocks.api.content.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Send again" }),
+    );
+    await waitFor(() =>
+      expect(mocks.openComposeWindow).toHaveBeenCalledWith({
+        accountId: "account-1",
+        to: "sender-a@example.com",
+        cc: "peer@example.com",
+        bcc: "hidden@example.com",
+        subject: "Sent B",
+        body: "Sent B full body",
+        bodyHtml: "<p>Sent B <strong>full body</strong></p>",
+        forwardMessageId: "sent-b",
+      }),
+    );
+    expect(mocks.api.content).toHaveBeenCalledWith("sent-b");
   });
 
   it("opens Reply All with Reply-To and deduplicated non-self Cc recipients", async () => {

@@ -428,6 +428,28 @@ export function ReaderWindowApp() {
     }
   };
 
+  const sendAgain = async (message: MailSummary) => {
+    try {
+      const content = await readerApi.content(message.id);
+      openComposeWindow({
+        accountId: message.account_id,
+        to: message.to_addresses,
+        ...(message.cc_addresses ? { cc: message.cc_addresses } : {}),
+        ...(message.bcc_addresses ? { bcc: message.bcc_addresses } : {}),
+        subject: message.subject,
+        body: content.body_text,
+        ...(content.body_html ? { bodyHtml: content.body_html } : {}),
+        forwardMessageId: content.attachments.some(
+          (attachment) => attachment.presentation !== "embedded",
+        )
+          ? message.id
+          : undefined,
+      });
+    } catch (error) {
+      showError(error, t("reader.sendAgainErrorTitle"));
+    }
+  };
+
   const unsubscribe = async (message: MailSummary) => {
     if (unsubscribeLoading) return;
     setUnsubscribeLoading(true);
@@ -525,6 +547,7 @@ export function ReaderWindowApp() {
         onReply={(message) => void reply(message)}
         onReplyAll={(message) => void reply(message, true)}
         onForward={(message) => void forward(message)}
+        onSendAgain={(message) => void sendAgain(message)}
         onToggleRead={(read) => void toggleRead(read)}
         onSummarize={() => void summarize()}
         onCopyAi={() =>

@@ -294,23 +294,47 @@ describe("Composer send feedback", () => {
     expect(screen.getByLabelText("Write your message…").innerHTML).toBe("");
   });
 
-  it("initializes and sends Reply All Cc recipients from the compose seed", () => {
+  it("falls back to the plain body when sanitizing seeded HTML removes everything", () => {
+    render(
+      <Composer
+        {...props}
+        seed={{
+          to: "recipient@example.com",
+          body: "Accessible image description",
+          bodyHtml: '<img src="cid:chart" alt="Accessible image description">',
+        }}
+        sendState="idle"
+      />,
+    );
+
+    expect(screen.getByLabelText("Write your message…")).toHaveTextContent(
+      "Accessible image description",
+    );
+  });
+
+  it("initializes and sends Cc and Bcc recipients from the compose seed", () => {
     const onSend = vi.fn();
     render(
       <Composer
         {...props}
-        seed={{ to: "sender@example.com", cc: "peer@example.com" }}
+        seed={{
+          to: "sender@example.com",
+          cc: "peer@example.com",
+          bcc: "hidden@example.com",
+        }}
         onSend={onSend}
         sendState="idle"
       />,
     );
 
     expect(screen.getByLabelText("Cc")).toHaveValue("peer@example.com");
+    expect(screen.getByLabelText("Bcc")).toHaveValue("hidden@example.com");
     fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
     expect(onSend).toHaveBeenCalledWith(
       expect.objectContaining({
         to: ["sender@example.com"],
         cc: ["peer@example.com"],
+        bcc: ["hidden@example.com"],
       }),
     );
   });

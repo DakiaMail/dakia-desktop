@@ -60,6 +60,7 @@ vi.mock("./components/Reader", () => ({
     onComposeTo,
     onAddressContextMenu,
     onPermanentDelete,
+    onSendAgain,
   }: {
     message?: MailSummary;
     messages?: MailSummary[];
@@ -67,12 +68,16 @@ vi.mock("./components/Reader", () => ({
     onComposeTo: (message: MailSummary, address: string) => void;
     onAddressContextMenu: (message: MailSummary, address: string) => void;
     onPermanentDelete: (message: MailSummary) => void;
+    onSendAgain: (message: MailSummary) => void;
   }) => (
     <div>
       <span data-testid="focused-message">{message?.id}</span>
       <span data-testid="conversation-count">{messages?.length}</span>
       <button type="button" onClick={onArchive}>
         Archive
+      </button>
+      <button type="button" onClick={() => message && onSendAgain(message)}>
+        Send again
       </button>
       <button
         type="button"
@@ -327,6 +332,45 @@ describe("ReaderWindowApp", () => {
         "errors.copyFailed",
         "error",
       ),
+    );
+  });
+
+  it("opens a clean editable copy when sending a message again", async () => {
+    mocks.api.content.mockResolvedValue({
+      body_text: "Exact original body",
+      body_html: "<p>Exact <strong>original</strong> body</p>",
+      attachments: [
+        {
+          id: "attachment-1",
+          message_id: "message-1",
+          filename: "report.pdf",
+          mime_type: "application/pdf",
+          size_bytes: 42,
+          is_inline: false,
+          is_potentially_unsafe: false,
+          presentation: "downloadable",
+        },
+      ],
+    });
+    const { ReaderWindowApp } = await import("./ReaderWindowApp");
+    render(
+      <MantineProvider>
+        <ReaderWindowApp />
+      </MantineProvider>,
+    );
+    await screen.findByTestId("focused-message");
+
+    fireEvent.click(screen.getByRole("button", { name: "Send again" }));
+
+    await waitFor(() =>
+      expect(mocks.openComposeWindow).toHaveBeenCalledWith({
+        accountId: "account-1",
+        to: "alex@example.com",
+        subject: "Project",
+        body: "Exact original body",
+        bodyHtml: "<p>Exact <strong>original</strong> body</p>",
+        forwardMessageId: "message-1",
+      }),
     );
   });
 

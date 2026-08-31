@@ -51,12 +51,18 @@ export function Composer({
   );
   const [to, setTo] = useState(seed?.to ?? "");
   const [cc, setCc] = useState(seed?.cc ?? "");
-  const [bcc, setBcc] = useState("");
+  const [bcc, setBcc] = useState(seed?.bcc ?? "");
   const [subject, setSubject] = useState(seed?.subject ?? "");
-  const [bodyHtml, setBodyHtml] = useState(() =>
-    sanitizeRichText(seed?.bodyHtml ?? richTextFromPlainText(seed?.body ?? "")),
-  );
-  const [showCopies, setShowCopies] = useState(Boolean(seed?.cc));
+  const [bodyHtml, setBodyHtml] = useState(() => {
+    if (seed?.bodyHtml === undefined) {
+      return richTextFromPlainText(seed?.body ?? "");
+    }
+    const sanitizedHtml = sanitizeRichText(seed?.bodyHtml ?? "");
+    return seed.bodyHtml && isRichTextEmpty(sanitizedHtml)
+      ? richTextFromPlainText(seed?.body ?? "")
+      : sanitizedHtml;
+  });
+  const [showCopies, setShowCopies] = useState(Boolean(seed?.cc || seed?.bcc));
   const [aiLoading, setAiLoading] = useState(false);
   const [attachments, setAttachments] = useState<ComposeAttachment[]>(
     seed?.attachments ?? [],

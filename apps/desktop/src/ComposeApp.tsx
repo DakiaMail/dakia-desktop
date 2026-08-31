@@ -38,7 +38,10 @@ export function ComposeApp() {
     Promise.all([
       api.accounts(),
       seed.forwardMessageId
-        ? api.forwardAttachments(seed.forwardMessageId)
+        ? api.forwardAttachments(seed.forwardMessageId).catch((error) => {
+            showError(error, t("attachments.loadError"));
+            return [];
+          })
         : Promise.resolve([]),
     ])
       .then(([nextAccounts, attachments]) => {
@@ -47,7 +50,7 @@ export function ComposeApp() {
           setSeed((current) => ({ ...current, attachments }));
         }
       })
-      .catch((error) => showError(error, t("reader.forwardErrorTitle")))
+      .catch((error) => showError(error))
       .finally(() => setLoading(false));
   }, []);
 
