@@ -262,6 +262,22 @@ test("manual workflow remains dispatch-only and runs bounded infrastructure", ()
   assert.match(fullSourceJob, /environment: sccache-r2/);
   assert.match(fullSourceJob, /RUSTC_WRAPPER: sccache/);
   assert.match(fullSourceJob, /CARGO_INCREMENTAL: 0/);
+  const cacheStartStep = fullSourceJob.slice(
+    fullSourceJob.indexOf("- name: Start private R2 compiler cache"),
+    fullSourceJob.indexOf("- name: Install Linux dependencies"),
+  );
+  const fullSuiteStep = fullSourceJob.slice(
+    fullSourceJob.indexOf("- name: Run full source suite"),
+    fullSourceJob.indexOf("- name: Report Rust compiler cache statistics"),
+  );
+  assert.match(cacheStartStep, /sccache --start-server/);
+  assert.match(cacheStartStep, /AWS_ACCESS_KEY_ID:/);
+  assert.match(cacheStartStep, /AWS_SECRET_ACCESS_KEY:/);
+  assert.doesNotMatch(
+    fullSuiteStep,
+    /AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|R2_SCCACHE_/,
+    "the source suite must connect to the cache server without inheriting R2 credentials",
+  );
   assert.equal(
     [
       ...fullSourceJob.matchAll(
@@ -269,7 +285,7 @@ test("manual workflow remains dispatch-only and runs bounded infrastructure", ()
       ),
     ].length,
     2,
-    "R2 credentials must be scoped to the one compiler-cache execution step",
+    "R2 credentials must be scoped to the cache-server startup step",
   );
   assert.doesNotMatch(
     workflow.slice(0, workflow.indexOf("\n  full-source:")),
