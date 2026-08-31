@@ -1821,6 +1821,8 @@ describe("App read state", () => {
     });
     mocks.api.content.mockResolvedValue({
       body_text: "Provider body\r\n> Nested history",
+      body_html:
+        '<table style="width: 600px"><tbody><tr><td><a href="https://example.com/settings">Manage budgets</a></td></tr></tbody></table>',
       attachments: [],
     });
     render(
@@ -1843,7 +1845,7 @@ describe("App read state", () => {
           subject: "Re: Unread thread",
           body: expect.stringContaining("> > Nested history"),
           bodyHtml: expect.stringContaining(
-            '<blockquote type="cite">Provider body<br>&gt; Nested history</blockquote>',
+            '<blockquote type="cite"><div data-dakia-quoted-email="true"><table',
           ),
         }),
       ),

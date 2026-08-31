@@ -54,7 +54,9 @@ export function RichTextEditor({ value, disabled = false, onChange }: Props) {
   const publish = () => {
     const editor = editorRef.current;
     if (!editor) return;
-    const html = sanitizeRichText(editor.innerHTML);
+    const html = sanitizeRichText(editor.innerHTML, {
+      preserveQuotedEmail: true,
+    });
     if (html !== editor.innerHTML) editor.innerHTML = html;
     latestValue.current = html;
     onChange(html);

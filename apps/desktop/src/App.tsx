@@ -33,7 +33,7 @@ import {
 import { replyRecipients } from "./recipients";
 import { confirmNativeAction, showNativeMessage } from "./nativeFeedback";
 import { concreteThreadMessages, groupMessages } from "./threads";
-import { forwardBody, forwardSubject } from "./forward";
+import { formatForwardHistory, forwardSubject } from "./forward";
 import { createFeedbackComposeSeed } from "./feedback";
 import { formatReplyHistory } from "./replyHistory";
 import {
@@ -1522,6 +1522,7 @@ export default function App() {
       const replyHistory = formatReplyHistory({
         message: replyMessage,
         bodyText: content.body_text,
+        bodyHtml: content.body_html,
         formatCitation: ({ date, sender }) =>
           t("reader.replyCitation", { date, sender }),
       });
@@ -1576,16 +1577,18 @@ export default function App() {
     if (!message) return;
     try {
       const content = await api.content(message.id);
+      const history = formatForwardHistory(message, content, {
+        originalMessage: t("reader.originalMessage"),
+        from: t("composer.from"),
+        date: t("reader.date"),
+        subject: t("composer.subject"),
+        to: t("composer.to"),
+      });
       openComposeWindow({
         accountId: message.account_id,
         subject: forwardSubject(message.subject, t("reader.forwardPrefix")),
-        body: forwardBody(message, content, {
-          originalMessage: t("reader.originalMessage"),
-          from: t("composer.from"),
-          date: t("reader.date"),
-          subject: t("composer.subject"),
-          to: t("composer.to"),
-        }),
+        body: history.body,
+        bodyHtml: history.bodyHtml,
         forwardMessageId: content.attachments.some(
           (attachment) => attachment.presentation !== "embedded",
         )

@@ -38,12 +38,50 @@ describe("rich text conversion", () => {
     ).toBe("<div>Citation</div><blockquote>Original</blockquote>");
   });
 
+  it("preserves safe rich email layout only inside generated quoted history", () => {
+    const quoted = [
+      '<div data-dakia-quoted-email="true">',
+      '<table width="600" cellpadding="0" style="width: 600px; background-color: rgb(255, 255, 255); position: fixed">',
+      '<tbody><tr><td align="center" style="padding: 24px; color: rgb(36, 48, 44)">',
+      '<img alt="GitHub" width="32" src="https://example.com/github.png" onerror="alert(1)">',
+      '<a href="https://example.com/settings" style="display: inline-block; background-color: rgb(22, 136, 63); padding: 12px; color: white; position: fixed" onclick="alert(1)">Manage budgets</a>',
+      "</td></tr></tbody></table><script>alert(1)</script></div>",
+    ].join("");
+
+    const sanitized = sanitizeRichText(quoted, {
+      preserveQuotedEmail: true,
+    });
+    expect(sanitized).toContain('<table width="600" cellpadding="0"');
+    expect(sanitized).toContain("background-color: rgb(255, 255, 255)");
+    expect(sanitized).toContain(
+      '<img alt="GitHub" width="32" src="https://example.com/github.png">',
+    );
+    expect(sanitized).toContain(
+      'style="display: inline-block; background-color: rgb(22, 136, 63);',
+    );
+    expect(sanitized).toContain(
+      'href="https://example.com/settings" rel="noreferrer noopener">Manage budgets</a>',
+    );
+    expect(sanitized).not.toContain("position");
+    expect(sanitized).not.toContain("onerror");
+    expect(sanitized).not.toContain("script");
+
+    expect(sanitizeRichText(quoted)).toBe(
+      '<div><a href="https://example.com/settings" rel="noreferrer noopener">Manage budgets</a></div>',
+    );
+  });
+
   it("creates a readable text alternative for structured content", () => {
     expect(
       plainTextFromRichText(
         "<p>Hello <strong>there</strong></p><ul><li>One</li><li>Two</li></ul><blockquote>Thanks</blockquote>",
       ),
     ).toBe("Hello there\n• One\n• Two\n> Thanks");
+    expect(
+      plainTextFromRichText(
+        '<div data-dakia-quoted-email="true"><table><tbody><tr><td>Plan</td><td>0.5 GB</td></tr></tbody></table></div>',
+      ),
+    ).toBe("Plan\n0.5 GB");
   });
 
   it("prefixes non-empty lines within nested blockquotes by quote depth", () => {

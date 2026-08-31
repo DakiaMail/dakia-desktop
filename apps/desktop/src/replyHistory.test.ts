@@ -57,4 +57,21 @@ describe("reply history", () => {
     expect(quote.body).toContain("Citation: mara@example.com");
     expect(quote.bodyHtml).toContain("Citation: mara@example.com");
   });
+
+  it("quotes the original rich HTML without replacing it with flattened text", () => {
+    const quote = formatReplyHistory({
+      message,
+      bodyText: "GitHub Actions Usage Manage budgets",
+      bodyHtml:
+        '<table style="width: 600px"><tbody><tr><td><img alt="GitHub" src="https://example.com/github.png"><a href="https://example.com/settings">Manage budgets</a></td></tr></tbody></table>',
+      formatCitation: ({ sender }) => `${sender} wrote:`,
+    });
+
+    expect(quote.body).toContain("> GitHub Actions Usage Manage budgets");
+    expect(quote.bodyHtml).toContain(
+      '<blockquote type="cite"><div data-dakia-quoted-email="true"><table',
+    );
+    expect(quote.bodyHtml).toContain("Manage budgets</a>");
+    expect(quote.bodyHtml).not.toContain("> GitHub Actions Usage");
+  });
 });

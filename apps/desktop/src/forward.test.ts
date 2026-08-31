@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MailSummary } from "./types";
-import { forwardBody, forwardSubject } from "./forward";
+import { formatForwardHistory, forwardSubject } from "./forward";
 
 const message: MailSummary = {
   id: "message-1",
@@ -29,7 +29,7 @@ describe("email forwarding", () => {
   });
 
   it("quotes the provider-loaded plain-text body with message metadata", () => {
-    const body = forwardBody(
+    const history = formatForwardHistory(
       message,
       { body_text: "Full original body", attachments: [] },
       {
@@ -40,10 +40,36 @@ describe("email forwarding", () => {
         to: "To",
       },
     );
-    expect(body).toContain("---------- Original message ----------");
-    expect(body).toContain("From: Mara <mara@example.com>");
-    expect(body).toContain("Subject: Release plan");
-    expect(body).toContain("Full original body");
-    expect(body).not.toContain("Cached preview");
+    expect(history.body).toContain("---------- Original message ----------");
+    expect(history.body).toContain("From: Mara <mara@example.com>");
+    expect(history.body).toContain("Subject: Release plan");
+    expect(history.body).toContain("Full original body");
+    expect(history.body).not.toContain("Cached preview");
+    expect(history.bodyHtml).toContain(
+      "---------- Original message ----------",
+    );
+  });
+
+  it("preserves the provider-loaded rich body in the HTML alternative", () => {
+    const history = formatForwardHistory(
+      message,
+      {
+        body_text: "GitHub Actions Usage Manage budgets",
+        body_html:
+          '<table style="width: 600px"><tbody><tr><td style="background-color: #ffffff"><img alt="GitHub" width="32" src="https://example.com/github.png"><a href="https://example.com/settings">Manage budgets</a></td></tr></tbody></table>',
+        attachments: [],
+      },
+      {
+        originalMessage: "Original message",
+        from: "From",
+        date: "Date",
+        subject: "Subject",
+        to: "To",
+      },
+    );
+
+    expect(history.bodyHtml).toContain('data-dakia-quoted-email="true"');
+    expect(history.bodyHtml).toContain('<table style="width: 600px">');
+    expect(history.bodyHtml).toContain("Manage budgets");
   });
 });
