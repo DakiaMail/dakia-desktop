@@ -3,8 +3,8 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use clap::{Args, Parser, Subcommand};
 use dakia_core::{
     ai::{AiConfig, AiProvider, AiService},
-    mailbox_action_destination, ComposeMessage, LocalEmailClassifier, MailService, MailboxAction,
-    SearchQuery, Store,
+    mailbox_action_destination, ComposeMessage, EmailClassificationInput, LocalEmailClassifier,
+    MailService, MailboxAction, ModelClassificationUpdate, SearchQuery, Store,
 };
 use directories::ProjectDirs;
 use secrecy::SecretString;
@@ -250,28 +250,7 @@ async fn main() -> Result<()> {
             }
         }
         Command::Classify(args) => {
-            let messages = if args.all {
-                store.messages_for_model_reclassification().await?
-            } else {
-                Vec::new()
-            };
-            let mut classifier = LocalEmailClassifier::from_dir(args.model_dir)?;
-            let mut classified = 0;
-            if args.all {
-                for batch in messages.chunks(CLASSIFICATION_BATCH_SIZE) {
-                    classified += classify_batch(&store, &mut classifier, batch).await?;
-                }
-            } else {
-                loop {
-                    let batch = store
-                        .messages_for_model_classification_batch(CLASSIFICATION_BATCH_SIZE)
-                        .await?;
-                    if batch.is_empty() {
-                        break;
-                    }
-                    classified += classify_batch(&store, &mut classifier, &batch).await?;
-                }
-            }
+            let classified = run_classification(&store, args).await?;
             if cli.json {
                 println!("{}", serde_json::json!({"classified" : classified}));
             } else {
@@ -408,35 +387,109 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+async fn run_classification(store: &Store, args: ClassifyArgs) -> Result<usize> {
+    let owner = Uuid::new_v4().to_string();
+    let result = run_owned_classification(store, args, &owner).await;
+    let release = store.release_classification_revision(&owner).await;
+    match (result, release) {
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Ok(classified), Ok(())) => Ok(classified),
+    }
+}
+
+async fn run_owned_classification(store: &Store, args: ClassifyArgs, owner: &str) -> Result<usize> {
+    let mut classifier = LocalEmailClassifier::from_dir(args.model_dir)?;
+    store
+        .claim_classification_revision(owner, classifier.revision())
+        .await?;
+    let messages = if args.all {
+        store.messages_for_model_reclassification().await?
+    } else {
+        Vec::new()
+    };
+    let mut classified = 0;
+    if args.all {
+        for batch in messages.chunks(CLASSIFICATION_BATCH_SIZE) {
+            classified += classify_batch(store, &mut classifier, batch, owner).await?;
+        }
+    } else {
+        loop {
+            let batch = store
+                .messages_for_model_classification_batch(CLASSIFICATION_BATCH_SIZE)
+                .await?;
+            if batch.is_empty() {
+                break;
+            }
+            classified += classify_batch(store, &mut classifier, &batch, owner).await?;
+        }
+    }
+    Ok(classified)
+}
+
 async fn classify_batch(
     store: &Store,
     classifier: &mut LocalEmailClassifier,
     messages: &[dakia_core::MailSummary],
+    owner: &str,
 ) -> Result<usize> {
+    let model_revision = classifier.revision().to_owned();
+    store
+        .claim_classification_revision(owner, &model_revision)
+        .await?;
     let ids: Vec<String> = messages.iter().map(|message| message.id.clone()).collect();
-    let inputs: Vec<String> = messages
+    let known_correspondence = store.messages_from_known_correspondents(messages).await?;
+    let inputs: Vec<EmailClassificationInput> = messages
         .iter()
         .map(|message| {
-            dakia_core::classification::email_text(
+            let body = if message.body_text.trim().is_empty() {
+                &message.snippet
+            } else {
+                &message.body_text
+            };
+            EmailClassificationInput::new(
                 message.from_name.as_deref(),
                 &message.from_address,
                 &message.subject,
-                &message.snippet,
+                body,
                 &message.classification_signals,
             )
+            .with_known_correspondence(known_correspondence.contains(&message.id))
         })
         .collect();
     let classifications = classifier.classify(&inputs)?;
-    let updates = classification_updates(ids, classifications)?;
+    let updates = classification_updates(ids, classifications)?
+        .into_iter()
+        .zip(messages)
+        .map(|((_id, category, confidence), message)| {
+            ModelClassificationUpdate::from_message(
+                message,
+                category,
+                confidence,
+                known_correspondence.contains(&message.id),
+                owner,
+                &model_revision,
+            )
+        })
+        .collect::<Vec<_>>();
     let count = updates.len();
-    store.apply_model_classifications(&updates).await?;
-    Ok(count)
+    let applied = store.apply_model_classifications(&updates).await?;
+    validate_classification_apply_count(count, applied)
+}
+
+fn validate_classification_apply_count(attempted: usize, applied: usize) -> Result<usize> {
+    if attempted != applied {
+        bail!(
+            "classification batch became stale ({applied}/{attempted} results applied); rerun after the active classifier finishes"
+        );
+    }
+    Ok(applied)
 }
 
 fn classification_updates(
     ids: Vec<String>,
     classifications: Vec<dakia_core::classification::ModelClassification>,
-) -> Result<Vec<(String, String, f64)>> {
+) -> Result<Vec<(String, String, Option<f64>)>> {
     if ids.len() != classifications.len() {
         bail!(
             "classifier returned {} results for {} messages",
@@ -847,7 +900,7 @@ mod tests {
             vec!["message-1".into(), "message-2".into()],
             vec![ModelClassification {
                 category: "work".into(),
-                confidence: 0.9,
+                confidence: Some(0.9),
             }],
         )
         .expect_err("short classifier output must not partially update messages");
@@ -865,11 +918,11 @@ mod tests {
             vec![
                 ModelClassification {
                     category: "work".into(),
-                    confidence: 0.9,
+                    confidence: Some(0.9),
                 },
                 ModelClassification {
                     category: "personal".into(),
-                    confidence: 0.8,
+                    confidence: Some(0.8),
                 },
             ],
         )
@@ -878,6 +931,17 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "classifier returned 2 results for 1 messages"
+        );
+    }
+
+    #[test]
+    fn stale_classification_apply_stops_instead_of_looping() {
+        assert_eq!(validate_classification_apply_count(2, 2).unwrap(), 2);
+        assert_eq!(
+            validate_classification_apply_count(2, 0)
+                .unwrap_err()
+                .to_string(),
+            "classification batch became stale (0/2 results applied); rerun after the active classifier finishes"
         );
     }
 
