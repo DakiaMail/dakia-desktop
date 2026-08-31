@@ -6,7 +6,7 @@ import { openComposeWindow } from "./composeWindow";
 import { Reader } from "./components/Reader";
 import { parseEmailAddressMenuAction } from "./emailAddressMenu";
 import { AI_FEATURES_VISIBLE } from "./features";
-import { forwardBody, forwardSubject } from "./forward";
+import { formatForwardHistory, forwardSubject } from "./forward";
 import {
   conversationActionMessages,
   removeConcreteMessage,
@@ -379,6 +379,7 @@ export function ReaderWindowApp() {
       const history = formatReplyHistory({
         message,
         bodyText: content.body_text,
+        bodyHtml: content.body_html,
         formatCitation: ({ date, sender }) =>
           t("reader.replyCitation", { date, sender }),
       });
@@ -406,16 +407,18 @@ export function ReaderWindowApp() {
   const forward = async (message: MailSummary) => {
     try {
       const content = await readerApi.content(message.id);
+      const history = formatForwardHistory(message, content, {
+        originalMessage: t("reader.originalMessage"),
+        from: t("composer.from"),
+        date: t("reader.date"),
+        subject: t("composer.subject"),
+        to: t("composer.to"),
+      });
       openComposeWindow({
         accountId: message.account_id,
         subject: forwardSubject(message.subject, t("reader.forwardPrefix")),
-        body: forwardBody(message, content, {
-          originalMessage: t("reader.originalMessage"),
-          from: t("composer.from"),
-          date: t("reader.date"),
-          subject: t("composer.subject"),
-          to: t("composer.to"),
-        }),
+        body: history.body,
+        bodyHtml: history.bodyHtml,
         forwardMessageId: content.attachments.some(
           (attachment) => attachment.presentation !== "embedded",
         )

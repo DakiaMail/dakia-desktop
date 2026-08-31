@@ -37,16 +37,110 @@ const DISCARD_TAGS = new Set([
   "video",
 ]);
 
-const BLOCK_TAGS = new Set(["blockquote", "div", "h1", "h2", "h3", "p", "pre"]);
+const BLOCK_TAGS = new Set([
+  "blockquote",
+  "div",
+  "h1",
+  "h2",
+  "h3",
+  "p",
+  "pre",
+  "table",
+  "tr",
+]);
+
+const QUOTED_EMAIL_TAGS = new Set([
+  ...ALLOWED_TAGS,
+  "caption",
+  "col",
+  "colgroup",
+  "font",
+  "h4",
+  "h5",
+  "h6",
+  "img",
+  "table",
+  "tbody",
+  "td",
+  "tfoot",
+  "th",
+  "thead",
+  "tr",
+]);
+
+const QUOTED_EMAIL_ATTRIBUTES = new Set([
+  "align",
+  "alt",
+  "bgcolor",
+  "border",
+  "cellpadding",
+  "cellspacing",
+  "colspan",
+  "height",
+  "role",
+  "rowspan",
+  "title",
+  "valign",
+  "width",
+]);
+
+const SAFE_QUOTED_STYLE_PROPERTIES = new Set([
+  "background",
+  "background-color",
+  "border",
+  "border-bottom",
+  "border-color",
+  "border-left",
+  "border-radius",
+  "border-right",
+  "border-style",
+  "border-top",
+  "border-width",
+  "box-sizing",
+  "color",
+  "display",
+  "font-family",
+  "font-size",
+  "font-style",
+  "font-weight",
+  "height",
+  "letter-spacing",
+  "line-height",
+  "margin",
+  "margin-bottom",
+  "margin-left",
+  "margin-right",
+  "margin-top",
+  "max-width",
+  "min-width",
+  "padding",
+  "padding-bottom",
+  "padding-left",
+  "padding-right",
+  "padding-top",
+  "text-align",
+  "text-decoration",
+  "text-decoration-line",
+  "text-indent",
+  "text-transform",
+  "vertical-align",
+  "white-space",
+  "width",
+  "word-break",
+  "word-wrap",
+]);
 
 /**
- * Keeps the outgoing HTML intentionally small and email-safe. In particular,
- * images and their data URLs are excluded until inline attachments are built
- * as proper MIME related parts.
+ * Keeps authored outgoing HTML intentionally small and email-safe. Generated
+ * quoted-history wrappers may retain a larger, separately sanitized subset of
+ * email layout markup so replies and forwards do not flatten the original.
  */
-export function sanitizeRichText(html: string) {
+export function sanitizeRichText(
+  html: string,
+  options: { preserveQuotedEmail?: boolean } = {},
+) {
   const document = new DOMParser().parseFromString(html, "text/html");
-  sanitizeChildren(document.body);
+  sanitizeChildren(document.body, options.preserveQuotedEmail === true);
   return document.body.innerHTML;
 }
 
@@ -63,7 +157,7 @@ export function richTextFromPlainText(text: string) {
 
 export function plainTextFromRichText(html: string) {
   const document = new DOMParser().parseFromString(
-    sanitizeRichText(html),
+    sanitizeRichText(html, { preserveQuotedEmail: true }),
     "text/html",
   );
   let output = "";
@@ -111,6 +205,14 @@ export function plainTextFromRichText(html: string) {
       addBreak();
       return;
     }
+    if (tag === "td" || tag === "th") {
+      addBreak();
+      element.childNodes.forEach((child) => {
+        visit(child, quoteDepth);
+      });
+      addBreak();
+      return;
+    }
     if (BLOCK_TAGS.has(tag)) addBreak();
     element.childNodes.forEach((child) => {
       visit(child, quoteDepth);
@@ -128,27 +230,40 @@ export function isRichTextEmpty(html: string) {
   return !plainTextFromRichText(html).trim();
 }
 
-function sanitizeChildren(parent: Element) {
+function sanitizeChildren(parent: Element, preserveQuotedEmail: boolean) {
   for (const node of [...parent.childNodes]) {
     if (node.nodeType !== Node.ELEMENT_NODE) continue;
     const element = node as HTMLElement;
     const tag = element.tagName.toLowerCase();
 
-    if (DISCARD_TAGS.has(tag)) {
+    const quotedRoot =
+      preserveQuotedEmail &&
+      tag === "div" &&
+      element.getAttribute("data-dakia-quoted-email") === "true";
+    const insideQuotedEmail =
+      preserveQuotedEmail &&
+      (quotedRoot ||
+        parent.closest("[data-dakia-quoted-email='true']") !== null);
+
+    if (DISCARD_TAGS.has(tag) && !(insideQuotedEmail && tag === "img")) {
       element.remove();
       continue;
     }
 
-    sanitizeChildren(element);
-    if (!ALLOWED_TAGS.has(tag)) {
+    sanitizeChildren(element, preserveQuotedEmail);
+    if (!(insideQuotedEmail ? QUOTED_EMAIL_TAGS : ALLOWED_TAGS).has(tag)) {
       element.replaceWith(...[...element.childNodes]);
       continue;
     }
 
     if (tag === "a") {
       const href = safeHref(node as HTMLAnchorElement);
-      for (const attribute of [...element.attributes]) {
-        element.removeAttribute(attribute.name);
+      if (insideQuotedEmail) {
+        sanitizeQuotedEmailElement(element, tag, quotedRoot);
+      } else {
+        for (const attribute of [...element.attributes]) {
+          element.removeAttribute(attribute.name);
+        }
       }
       if (href) {
         element.setAttribute("href", href);
@@ -156,6 +271,8 @@ function sanitizeChildren(parent: Element) {
       } else {
         element.replaceWith(...[...element.childNodes]);
       }
+    } else if (insideQuotedEmail) {
+      sanitizeQuotedEmailElement(element, tag, quotedRoot);
     } else {
       const citePrefix =
         tag === "div" && element.getAttribute("class") === "moz-cite-prefix";
@@ -170,6 +287,54 @@ function sanitizeChildren(parent: Element) {
       if (citeBlock) element.setAttribute("type", "cite");
     }
   }
+}
+
+function sanitizeQuotedEmailElement(
+  element: HTMLElement,
+  tag: string,
+  quotedRoot: boolean,
+) {
+  const attributes = [...element.attributes];
+  for (const attribute of attributes) {
+    const name = attribute.name.toLowerCase();
+    if (name === "style") continue;
+    if (quotedRoot && name === "data-dakia-quoted-email") continue;
+    if (QUOTED_EMAIL_ATTRIBUTES.has(name)) continue;
+    if (tag === "img" && name === "src" && safeImageSource(attribute.value)) {
+      continue;
+    }
+    element.removeAttribute(attribute.name);
+  }
+  const style = safeQuotedEmailStyle(element.getAttribute("style") ?? "");
+  if (style) element.setAttribute("style", style);
+  else element.removeAttribute("style");
+}
+
+function safeQuotedEmailStyle(style: string) {
+  const source = document.createElement("span");
+  source.setAttribute("style", style);
+  const declarations: string[] = [];
+  for (const property of [...source.style]) {
+    const normalized = property.toLowerCase();
+    const value = source.style.getPropertyValue(property).trim();
+    if (
+      SAFE_QUOTED_STYLE_PROPERTIES.has(normalized) &&
+      value &&
+      !/(?:expression\s*\(|javascript\s*:|behavior\s*:|-moz-binding|url\s*\()/i.test(
+        value,
+      )
+    ) {
+      declarations.push(`${normalized}: ${value}`);
+    }
+  }
+  return declarations.join("; ");
+}
+
+function safeImageSource(value: string) {
+  const normalized = value.trim().replace(/[\u0000-\u001f\u007f\s]+/g, "");
+  return /^(?:https?:|data:image\/(?:png|gif|jpe?g|webp|svg\+xml);)/i.test(
+    normalized,
+  );
 }
 
 function safeStyle(element: HTMLElement) {

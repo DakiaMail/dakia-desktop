@@ -11,12 +11,14 @@ type ReplyHistoryInput = {
     "from_address" | "from_name" | "received_at"
   >;
   readonly bodyText: string;
+  readonly bodyHtml?: string | null;
   readonly formatCitation: (citation: ReplyCitation) => string;
 };
 
 export function formatReplyHistory({
   message,
   bodyText,
+  bodyHtml,
   formatCitation,
 }: ReplyHistoryInput) {
   const citation = formatCitation({
@@ -31,7 +33,11 @@ export function formatReplyHistory({
     bodyHtml: [
       "<p><br></p>",
       `<div class="moz-cite-prefix">${escapeHtml(citation)}</div>`,
-      `<blockquote type="cite">${escapeHtml(normalizedBody).replaceAll("\n", "<br>")}</blockquote>`,
+      `<blockquote type="cite">${
+        bodyHtml
+          ? `<div data-dakia-quoted-email="true">${bodyHtml}</div>`
+          : escapeHtml(normalizedBody).replaceAll("\n", "<br>")
+      }</blockquote>`,
     ].join(""),
   };
 }
