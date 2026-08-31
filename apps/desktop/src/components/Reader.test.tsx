@@ -66,6 +66,7 @@ const props = {
   onSummarize: vi.fn(),
   onCopyAi: vi.fn(),
   onComposeTo: vi.fn(),
+  onComposeLink: vi.fn(),
   onAddressContextMenu: vi.fn(),
   unsubscribeLoading: false,
   onUnsubscribe: vi.fn(),
@@ -147,6 +148,34 @@ describe("Reader unsubscribe action", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Unsubscribe" }));
     expect(props.onUnsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it("opens email-body mailto links in Dakia compose with the message account context", async () => {
+    vi.mocked(api.content).mockResolvedValue({
+      body_text: "Write to Juhan",
+      body_html:
+        '<p><a href="mailto:juhan%2Btamm@example.com?subject=Tere&amp;body=Kohtume%20homme">Write to Juhan</a></p>',
+      attachments: [],
+    });
+    render(
+      <MantineProvider>
+        <Reader {...props} message={message} />
+      </MantineProvider>,
+    );
+
+    const documentRole = await screen.findByRole("document", {
+      name: "Weekly notes",
+    });
+    const surface = documentRole.shadowRoot?.firstElementChild as HTMLElement;
+    const anchor = surface.shadowRoot?.querySelector("a");
+    expect(anchor).not.toBeNull();
+    fireEvent.click(anchor!);
+
+    expect(props.onComposeLink).toHaveBeenCalledWith(message, {
+      to: "juhan+tamm@example.com",
+      subject: "Tere",
+      body: "Kohtume homme",
+    });
   });
 
   it("disables unsubscribe while the request is in progress", () => {

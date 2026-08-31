@@ -218,11 +218,17 @@ test("release builder requires exact clean main provenance and all version autho
     assert.match(script, new RegExp(`${packageName}=\\$version`));
   }
   assert.match(script, /branch --show-current/);
-  assert.match(script, /rev-parse origin\/main/);
+  assert.match(script, /dakia_require_live_main_provenance "\$root_dir"/);
+  assert.match(script, /dakia_require_expected_release_origin "\$root_dir"/);
   assert.match(script, /status --porcelain=v1 --untracked-files=all/);
   assert.match(script, /source_commit=/);
   assert.match(script, /source-commit\.txt/);
   assert.match(script, /Release source changed while artifacts were being built/);
+  assert.ok(
+    script.lastIndexOf('dakia_require_expected_release_origin "$root_dir"') >
+      script.indexOf("npm run setup:worktree"),
+    "builder must recheck its origin after the long build path",
+  );
 });
 
 test("release builder invalidates cached desktop credentials before Tauri compilation", () => {
@@ -664,6 +670,47 @@ test("release environment pins the exact Developer ID identity and team", () => 
     script,
     /APPLE_SIGNING_IDENTITY.*DAKIA_EXPECTED_APPLE_SIGNING_IDENTITY/,
   );
+});
+
+test("release environment pins the expected Dakia origin before a release", () => {
+  const script = readFileSync(releaseEnvironment, "utf8");
+  assert.match(script, /dakia_require_expected_release_origin\(\)/);
+  assert.match(script, /git@github\.com:DakiaMail\/dakia-desktop\.git/);
+  assert.match(script, /origin does not identify the expected repository/);
+});
+
+test("release environment rejects stale cached origin/main even when HEAD matches it", () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), "dakia-live-main-test-"));
+  const gitPath = join(tempRoot, "git");
+  writeExecutable(
+    gitPath,
+    `#!/bin/sh
+if [ "$1" = -C ]; then shift 2; fi
+case "$1 $*" in
+  "rev-parse"*" HEAD"|"rev-parse"*" refs/remotes/origin/main") printf '%s\\n' 1234567890abcdef1234567890abcdef12345678 ;;
+  "ls-remote"*" refs/heads/main") printf '%s\\t%s\\n' ffffffffffffffffffffffffffffffffffffffff refs/heads/main ;;
+esac
+`,
+  );
+  try {
+    const result = spawnSync(
+      "/bin/bash",
+      [
+        "-c",
+        'source "$1"; dakia_require_live_main_provenance /fixture',
+        "bash",
+        releaseEnvironment,
+      ],
+      {
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${tempRoot}:${process.env.PATH}` },
+      },
+    );
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /HEAD, cached origin\/main, and live origin\/main must all match/);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
 });
 
 test("Google OAuth preflight keeps the secret out of curl arguments", () => {

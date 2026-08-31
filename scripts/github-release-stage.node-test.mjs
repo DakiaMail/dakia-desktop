@@ -25,8 +25,8 @@ test("draft staging is pinned to clean exact main provenance and an SSH-signed r
   assert.match(source, /release_repo="DakiaMail\/dakia-desktop"/);
   assert.match(source, /status --porcelain=v1 --untracked-files=all/);
   assert.match(source, /branch --show-current\)" == "main"/);
-  assert.match(source, /refs\/remotes\/origin\/main/);
-  assert.match(source, /HEAD does not exactly match origin\/main/);
+  assert.match(source, /dakia_require_live_main_provenance "\$root_dir"/);
+  assert.match(source, /local-release-env\.sh/);
   assert.match(source, /gpg\.format/);
   assert.match(source, /gpg\.ssh\.allowedSignersFile/);
   assert.match(
@@ -57,6 +57,15 @@ test("draft staging accepts no unverified retry and validates exact local and dr
   assert.match(source, /GitHub Release asset bytes do not match local/);
   assert.match(source, /Verified exact existing GitHub Release draft/);
   assert.match(source, /Verified exact existing public GitHub Release/);
+  assert.match(source, /require_exact_public_r2_resume/);
+  assert.match(source, /public latest\.json is not the exact R2 resume candidate/);
+  assert.match(source, /Public R2 resume .* differs from the local release artifact/);
+  const finalProvenanceGate = source.lastIndexOf(
+    'dakia_require_release_mutation_provenance "$root_dir"',
+  );
+  const create = source.indexOf('gh release create "$tag"');
+  assert.ok(finalProvenanceGate > 0);
+  assert.ok(finalProvenanceGate < create);
   assert.doesNotMatch(source, /--clobber/);
   assert.doesNotMatch(source, /gh release delete/);
 });
@@ -66,9 +75,15 @@ test("publication requires the exact public R2 candidate before making GitHub pu
   const draftVerification = source.lastIndexOf("if verify_release true; then");
   const r2Gate = source.indexOf("require_public_r2_candidate", draftVerification);
   const publish = source.indexOf("gh release edit \"$tag\" --repo \"$release_repo\" --draft=false --latest");
+  const mutationProvenance = source.lastIndexOf(
+    'dakia_require_release_mutation_provenance "$root_dir"',
+    publish,
+  );
   assert.ok(draftVerification >= 0);
   assert.ok(r2Gate >= 0);
   assert.ok(publish > r2Gate);
+  assert.ok(mutationProvenance > r2Gate);
+  assert.ok(mutationProvenance < publish);
   assert.match(source, /macos\/latest\/latest\.json\?release-gate=\$tag/);
   assert.match(source, /\.version == \$version/);
   assert.match(source, /\.notes == \$notes/);

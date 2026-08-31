@@ -2423,6 +2423,9 @@ export default function App() {
         onComposeTo={(message, address) =>
           openComposeWindow({ accountId: message.account_id, to: address })
         }
+        onComposeLink={(message, seed) =>
+          openComposeWindow({ ...seed, accountId: message.account_id })
+        }
         onAddressContextMenu={(message, address) =>
           void api
             .showEmailAddressContextMenu(

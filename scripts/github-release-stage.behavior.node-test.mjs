@@ -111,9 +111,11 @@ function createHarness({
   const manifestPath = join(fixtureRoot, "latest.json");
   const statePath = join(fixtureRoot, "release-state");
   const editLog = join(fixtureRoot, "edit.log");
+  const liveMainCalls = join(fixtureRoot, "live-main-calls");
   const allowedSigners = join(fixtureRoot, "allowed-signers");
   const signingKey = join(fixtureRoot, "release-signing-key.pub");
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  writeFileSync(liveMainCalls, "0");
   writeFileSync(statePath, `${releaseState}\n`);
   writeFileSync(allowedSigners, "release@example.test ssh-ed25519 AAAA\n");
   writeFileSync(signingKey, "ssh-ed25519 AAAA release@example.test\n");
@@ -157,6 +159,15 @@ case "\${1:-}" in
     ;;
   verify-tag) ;;
   ls-remote)
+    if [[ "\${*: -1}" == refs/heads/main ]]; then
+      calls="$(cat "\${MOCK_LIVE_MAIN_CALLS}")"; calls=$((calls + 1)); printf '%s' "\$calls" > "\${MOCK_LIVE_MAIN_CALLS}"
+      if [[ "\${MOCK_GIT_SCENARIO}" == live-main-mismatch || ( "\${MOCK_GIT_SCENARIO}" == live-main-moves && "\$calls" -gt 1 ) ]]; then
+        printf 'ffffffffffffffffffffffffffffffffffffffff\trefs/heads/main\n'
+      else
+        printf '${commit}\trefs/heads/main\n'
+      fi
+      exit 0
+    fi
     remote_object='${tagObject}'
     [[ "\${MOCK_GIT_SCENARIO}" == tag-mismatch ]] && remote_object='ffffffffffffffffffffffffffffffffffffffff'
     printf '%s\trefs/tags/${tag}\n%s\trefs/tags/${tag}^{}\n' "\$remote_object" '${commit}'
@@ -255,6 +266,7 @@ printf '200'
     MOCK_ASSET_DIR: assets,
     MOCK_EDIT_LOG: editLog,
     MOCK_GIT_SCENARIO: gitScenario,
+    MOCK_LIVE_MAIN_CALLS: liveMainCalls,
     MOCK_MANIFEST: manifestPath,
     MOCK_RELEASE_STATE: statePath,
     MOCK_SIGNING_KEY: signingKey,
@@ -333,6 +345,28 @@ test("a remote tag-object mismatch fails before GitHub publication", () => {
     assert.notEqual(harness.result.status, 0);
     assert.equal(harness.edits, 0);
     assert.match(harness.result.stderr, /Remote release tag object/);
+  } finally {
+    rmSync(harness.fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("a live origin/main mismatch fails before GitHub publication", () => {
+  const harness = runHarness({ gitScenario: "live-main-mismatch" });
+  try {
+    assert.notEqual(harness.result.status, 0);
+    assert.equal(harness.edits, 0);
+    assert.match(harness.result.stderr, /HEAD, cached origin\/main, and live origin\/main must all match/);
+  } finally {
+    rmSync(harness.fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("a moved live origin/main stops GitHub publication immediately before edit", () => {
+  const harness = runHarness({ gitScenario: "live-main-moves" });
+  try {
+    assert.notEqual(harness.result.status, 0);
+    assert.equal(harness.edits, 0);
+    assert.match(harness.result.stderr, /HEAD, cached origin\/main, and live origin\/main must all match/);
   } finally {
     rmSync(harness.fixtureRoot, { recursive: true, force: true });
   }
