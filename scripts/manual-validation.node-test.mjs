@@ -208,22 +208,7 @@ test("manual workflow remains dispatch-only and runs bounded infrastructure", ()
     workflow,
     /restore-keys: \|\n\s+npm-\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-node-20\.19\.0-/,
   );
-  assert.match(workflow, /RUSTC_WRAPPER=sccache/);
-  assert.match(workflow, /SCCACHE_GHA_ENABLED=on/);
-  assert.match(workflow, /SCCACHE_GHA_RW_MODE=READ_WRITE/);
-  assert.match(
-    workflow,
-    /name: Report Rust compiler cache statistics\n\s+if: always\(\)\n\s+run: sccache --show-stats/,
-  );
-  assert.match(
-    workflow,
-    /sccache-v0\.17\.0-x86_64-unknown-linux-musl\.tar\.gz/,
-  );
-  assert.match(
-    workflow,
-    /67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006/,
-  );
-  assert.doesNotMatch(workflow, /cargo install sccache/);
+  assert.doesNotMatch(workflow, /sccache/);
   assert.doesNotMatch(
     workflow,
     /path: \|\n\s+~\/\.cargo\/registry\n\s+~\/\.cargo\/git\n\s+target/,
@@ -254,7 +239,6 @@ test("manual workflow remains dispatch-only and runs bounded infrastructure", ()
     1,
     "the provider secret may be scoped only to the artifact execution step",
   );
-  assert.doesNotMatch(providerJob, /RUSTC_WRAPPER=sccache|SCCACHE_GHA_ENABLED/);
   assert.match(
     providerJob,
     /run: \|\n\s+node scripts\/provider-smoke-contract\.mjs\n\s+target\/debug\/dakia-provider-smoke/,
