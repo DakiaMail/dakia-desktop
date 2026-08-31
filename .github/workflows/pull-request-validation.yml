@@ -65,6 +65,8 @@ jobs:
         with:
           path: ~/.npm
           key: npm-${{ runner.os }}-${{ runner.arch }}-node-20.19.0-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-${{ runner.arch }}-node-20.19.0-
       - name: Install JavaScript dependencies without lifecycle preparation
         if: needs.classify.outputs.frontend == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.release_only == 'true'
         run: npm ci --ignore-scripts
@@ -88,8 +90,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-${{ hashFiles('Cargo.lock') }}
+          key: cargo-deps-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-deps-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-
       - id: rust_core
         name: Validate Rust core scope
         if: needs.classify.outputs.rust_core == 'true'

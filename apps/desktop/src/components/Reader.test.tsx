@@ -1976,20 +1976,21 @@ describe("Reader unsubscribe action", () => {
     const renderedMessage = await screen.findByRole("document", {
       name: "Weekly notes",
     });
-    const emailSurface = renderedMessage.shadowRoot
-      ?.firstElementChild as HTMLElement | null;
+    const currentEmailRoot = () =>
+      (renderedMessage.shadowRoot?.firstElementChild as HTMLElement | null)
+        ?.shadowRoot;
     expect(translationMocks.translate).toHaveBeenLastCalledWith(
       "et",
       "<p>Tere <strong>maailm</strong></p>",
       true,
     );
     await waitFor(() =>
-      expect(
-        emailSurface?.shadowRoot?.querySelector("strong")?.textContent,
-      ).toBe("world"),
+      expect(currentEmailRoot()?.querySelector("strong")?.textContent).toBe(
+        "world",
+      ),
     );
     expect(
-      emailSurface?.shadowRoot?.querySelector("script, iframe, form"),
+      currentEmailRoot()?.querySelector("script, iframe, form"),
     ).toBeNull();
   });
 
