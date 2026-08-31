@@ -51,6 +51,10 @@ jobs:
     if: inputs.lane == 'full-source'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    # This environment holds a dedicated, bucket-scoped R2 credential. Its
+    # deployment-branch policy must admit only trusted refs; do not reuse it
+    # from pull_request, provider-smoke, or hosted packaging jobs.
+    environment: sccache-r2
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -62,24 +66,57 @@ jobs:
         with:
           path: ~/.npm
           key: npm-${{ runner.os }}-${{ runner.arch }}-node-20.19.0-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-${{ runner.arch }}-node-20.19.0-
       - name: Install pinned Rust toolchain
         run: |
           rustup toolchain install 1.89.0 --profile minimal --component rustfmt --component clippy
           echo 'RUSTUP_TOOLCHAIN=1.89.0' >> "$GITHUB_ENV"
+      - name: Install verified Rust compiler cache
+        run: |
+          archive="$RUNNER_TEMP/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz"
+          install_dir="$RUNNER_TEMP/sccache-bin"
+          curl --fail --location --retry 3 --silent --show-error \
+            https://github.com/mozilla/sccache/releases/download/v0.17.0/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz \
+            --output "$archive"
+          printf '%s  %s\n' '67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006' "$archive" | sha256sum --check -
+          mkdir -p "$install_dir"
+          tar -xzf "$archive" --strip-components=1 -C "$install_dir"
+          echo "$install_dir" >> "$GITHUB_PATH"
+          "$install_dir/sccache" --version
       - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-${{ hashFiles('Cargo.lock') }}
+          key: cargo-deps-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-deps-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-
+      - name: Start private R2 compiler cache
+        env:
+          SCCACHE_BUCKET: dakia-sccache
+          SCCACHE_ENDPOINT: https://b225fd2027198472b627795dd126aa15.r2.cloudflarestorage.com
+          SCCACHE_REGION: auto
+          SCCACHE_S3_KEY_PREFIX: dakia/linux-x64/rust-1.89.0/
+          SCCACHE_S3_RW_MODE: READ_WRITE
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_SCCACHE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SCCACHE_SECRET_ACCESS_KEY }}
+        run: |
+          test -n "$AWS_ACCESS_KEY_ID"
+          test -n "$AWS_SECRET_ACCESS_KEY"
+          sccache --start-server
       - name: Install Linux dependencies for workspace tests
         run: |
           sudo apt-get update
           sudo apt-get install --yes libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
       - run: npm ci --ignore-scripts
       - run: git lfs pull --include='apps/desktop/src-tauri/resources/email-classifier-v2/model.onnx,apps/desktop/src-tauri/resources/email-classifier-v2/tokenizer.json'
-      - run: |
+      - name: Run full source suite with private R2 compiler cache
+        env:
+          RUSTC_WRAPPER: sccache
+          # sccache cannot cache rustc incremental compilation outputs.
+          CARGO_INCREMENTAL: 0
+        run: |
           npm run bundle:cli:dev
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets -- -D warnings
@@ -89,7 +126,9 @@ jobs:
           npm run test -- --maxWorkers=1
           npm run test:release-scripts
           npm run build:web
-
+      - name: Report Rust compiler cache statistics
+        if: always()
+        run: sccache --show-stats
   coverage:
     name: Coverage baseline candidate
     needs: validate-request

@@ -216,6 +216,20 @@ test("ordinary pull-request workflow preserves the cost and release boundaries",
     /rustup toolchain install 1\.89\.0 --profile minimal --component rustfmt --component clippy/,
     "rustup requires one --component flag per requested component",
   );
+  assert.match(
+    workflow,
+    /restore-keys: \|\n\s+npm-\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-node-20\.19\.0-/,
+  );
+  assert.match(
+    workflow,
+    /cargo-deps-\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-rust-1\.89\.0-/,
+  );
+  assert.doesNotMatch(workflow, /sccache/);
+  assert.doesNotMatch(
+    workflow,
+    /path: \|\n\s+~\/\.cargo\/registry\n\s+~\/\.cargo\/git\n\s+target/,
+    "the immutable Actions cache must not store the entire target directory",
+  );
   for (const action of workflow.matchAll(/uses:\s*[^@\s]+@([^\s#]+)/g)) {
     assert.match(action[1], /^[a-f0-9]{40}$/, `unpinned action: ${action[0]}`);
   }

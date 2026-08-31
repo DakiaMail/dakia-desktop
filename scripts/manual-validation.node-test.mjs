@@ -158,21 +158,31 @@ test("provider smoke contract validates secrets without exposing them or connect
   assert.equal(result.status, 0, result.stderr);
   assert.doesNotMatch(`${result.stdout}${result.stderr}`, new RegExp(secret));
   assert.doesNotMatch(result.stdout, /smoke@example\.invalid/);
-  assert.doesNotMatch(result.stdout, /example-provider|imap\.example\.invalid|smtp\.example\.invalid/);
+  assert.doesNotMatch(
+    result.stdout,
+    /example-provider|imap\.example\.invalid|smtp\.example\.invalid/,
+  );
 
-  const rejected = spawnSync(process.execPath, ["scripts/provider-smoke-contract.mjs"], {
-    cwd: root,
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      PROVIDER_SMOKE_CONFIG: JSON.stringify({
-        ...providerConfig,
-        credentials: { accessToken: secret },
-      }),
+  const rejected = spawnSync(
+    process.execPath,
+    ["scripts/provider-smoke-contract.mjs"],
+    {
+      cwd: root,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PROVIDER_SMOKE_CONFIG: JSON.stringify({
+          ...providerConfig,
+          credentials: { accessToken: secret },
+        }),
+      },
     },
-  });
+  );
   assert.notEqual(rejected.status, 0);
-  assert.doesNotMatch(`${rejected.stdout}${rejected.stderr}`, new RegExp(secret));
+  assert.doesNotMatch(
+    `${rejected.stdout}${rejected.stderr}`,
+    new RegExp(secret),
+  );
 });
 
 test("manual workflow remains dispatch-only and runs bounded infrastructure", () => {
@@ -196,10 +206,92 @@ test("manual workflow remains dispatch-only and runs bounded infrastructure", ()
   assert.match(workflow, /RUSTUP_TOOLCHAIN=1\.89\.0/);
   assert.match(
     workflow,
+    /restore-keys: \|\n\s+npm-\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-node-20\.19\.0-/,
+  );
+  assert.match(workflow, /environment: sccache-r2/);
+  assert.match(workflow, /RUSTC_WRAPPER: sccache/);
+  assert.match(workflow, /CARGO_INCREMENTAL: 0/);
+  assert.match(workflow, /SCCACHE_BUCKET: dakia-sccache/);
+  assert.match(
+    workflow,
+    /SCCACHE_ENDPOINT: https:\/\/b225fd2027198472b627795dd126aa15\.r2\.cloudflarestorage\.com/,
+  );
+  assert.match(workflow, /SCCACHE_REGION: auto/);
+  assert.match(
+    workflow,
+    /SCCACHE_S3_KEY_PREFIX: dakia\/linux-x64\/rust-1\.89\.0\//,
+  );
+  assert.match(workflow, /SCCACHE_S3_RW_MODE: READ_WRITE/);
+  assert.match(
+    workflow,
+    /AWS_ACCESS_KEY_ID: \$\{\{ secrets\.R2_SCCACHE_ACCESS_KEY_ID \}\}/,
+  );
+  assert.match(
+    workflow,
+    /AWS_SECRET_ACCESS_KEY: \$\{\{ secrets\.R2_SCCACHE_SECRET_ACCESS_KEY \}\}/,
+  );
+  assert.match(
+    workflow,
+    /name: Report Rust compiler cache statistics\n\s+if: always\(\)\n\s+run: sccache --show-stats/,
+  );
+  assert.match(
+    workflow,
+    /sccache-v0\.17\.0-x86_64-unknown-linux-musl\.tar\.gz/,
+  );
+  assert.match(
+    workflow,
+    /67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006/,
+  );
+  assert.doesNotMatch(workflow, /SCCACHE_GHA_ENABLED|SCCACHE_GHA_RW_MODE/);
+  assert.doesNotMatch(workflow, /cargo install sccache/);
+  assert.doesNotMatch(
+    workflow,
+    /path: \|\n\s+~\/\.cargo\/registry\n\s+~\/\.cargo\/git\n\s+target/,
+    "the immutable Actions cache must not store the entire target directory",
+  );
+  assert.match(
+    workflow,
     /rustup toolchain install 1\.89\.0 --profile minimal --component rustfmt --component clippy/,
     "rustup requires one --component flag per requested component",
   );
   const providerJob = workflow.slice(workflow.indexOf("\n  provider-smoke:"));
+  const fullSourceJob = workflow.slice(
+    workflow.indexOf("\n  full-source:"),
+    workflow.indexOf("\n  coverage:"),
+  );
+  assert.match(fullSourceJob, /environment: sccache-r2/);
+  assert.match(fullSourceJob, /RUSTC_WRAPPER: sccache/);
+  assert.match(fullSourceJob, /CARGO_INCREMENTAL: 0/);
+  const cacheStartStep = fullSourceJob.slice(
+    fullSourceJob.indexOf("- name: Start private R2 compiler cache"),
+    fullSourceJob.indexOf("- name: Install Linux dependencies"),
+  );
+  const fullSuiteStep = fullSourceJob.slice(
+    fullSourceJob.indexOf("- name: Run full source suite"),
+    fullSourceJob.indexOf("- name: Report Rust compiler cache statistics"),
+  );
+  assert.match(cacheStartStep, /sccache --start-server/);
+  assert.match(cacheStartStep, /AWS_ACCESS_KEY_ID:/);
+  assert.match(cacheStartStep, /AWS_SECRET_ACCESS_KEY:/);
+  assert.doesNotMatch(
+    fullSuiteStep,
+    /AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|R2_SCCACHE_/,
+    "the source suite must connect to the cache server without inheriting R2 credentials",
+  );
+  assert.equal(
+    [
+      ...fullSourceJob.matchAll(
+        /R2_SCCACHE_(?:ACCESS_KEY_ID|SECRET_ACCESS_KEY)/g,
+      ),
+    ].length,
+    2,
+    "R2 credentials must be scoped to the cache-server startup step",
+  );
+  assert.doesNotMatch(
+    workflow.slice(0, workflow.indexOf("\n  full-source:")),
+    /R2_SCCACHE_|RUSTC_WRAPPER: sccache/,
+  );
+  assert.doesNotMatch(providerJob, /R2_SCCACHE_|RUSTC_WRAPPER: sccache/);
   assert.match(
     providerJob,
     /cargo build --locked -p dakia-cli --bin dakia-provider-smoke/,
@@ -209,7 +301,9 @@ test("manual workflow remains dispatch-only and runs bounded infrastructure", ()
     /cargo run .*dakia-provider-smoke/,
     "the protected execution step must run the prebuilt artifact, never compile with a secret in scope",
   );
-  const buildIndex = providerJob.indexOf("cargo build --locked -p dakia-cli --bin dakia-provider-smoke");
+  const buildIndex = providerJob.indexOf(
+    "cargo build --locked -p dakia-cli --bin dakia-provider-smoke",
+  );
   const secretIndex = providerJob.indexOf("PROVIDER_SMOKE_CONFIG:");
   assert.ok(buildIndex >= 0 && secretIndex > buildIndex);
   assert.equal(
