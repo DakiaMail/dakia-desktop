@@ -7,6 +7,9 @@ bucket="dakia-releases"
 download_origin="https://downloads.dakiamail.com"
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# shellcheck source=local-release-env.sh
+source "$root_dir/scripts/local-release-env.sh"
+
 if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ || -z "$source_dir" ]]; then
   echo "Usage: $0 vX.Y.Z /path/to/local-release-assets" >&2
   exit 1
@@ -84,7 +87,7 @@ if [[ "$updater_version" != "$version" ]]; then
 fi
 
 verify_source_provenance() {
-  local head origin_main tag_commit local_tag_object remote_refs remote_tag_object remote_tag_commit branch
+  local head tag_commit local_tag_object remote_refs remote_tag_object remote_tag_commit branch
   if [[ -n "$(git -C "$root_dir" status --porcelain)" ]]; then
     echo "Release source has uncommitted or untracked changes." >&2
     exit 1
@@ -95,13 +98,14 @@ verify_source_provenance() {
     exit 1
   fi
   head="$(git -C "$root_dir" rev-parse HEAD)"
+  if ! dakia_require_expected_release_origin "$root_dir"; then
+    exit 1
+  fi
   if [[ "$(tr -d '\n' <"$source_marker")" != "$head" ]]; then
     echo "source-commit.txt does not bind these artifacts to the exact main commit." >&2
     exit 1
   fi
-  origin_main="$(git -C "$root_dir" rev-parse --verify refs/remotes/origin/main)"
-  if [[ "$head" != "$origin_main" ]]; then
-    echo "HEAD must exactly match origin/main before publication." >&2
+  if ! dakia_require_live_main_provenance "$root_dir"; then
     exit 1
   fi
   tag_commit="$(git -C "$root_dir" rev-parse --verify "refs/tags/$tag^{commit}")"
@@ -264,6 +268,9 @@ esac
 
 upload() {
   local key="$1" file="$2" content_type="$3" filename="$4" cache_control="$5"
+  # This call is reached only after the caller's authenticated/public reads.
+  # Keep the live-main check adjacent to the mutating copy.
+  dakia_require_release_mutation_provenance "$root_dir" || exit 1
   AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" AWS_DEFAULT_REGION="auto" \
     aws s3 cp "$file" "s3://$bucket/$key" --endpoint-url "$r2_endpoint" --content-type "$content_type" \
       --content-disposition "attachment; filename=\"$filename\"" --cache-control "$cache_control" --no-progress
@@ -278,6 +285,9 @@ immutable_object_matches() {
 upload_immutable() {
   local key="$1" file="$2" content_type="$3" filename="$4" cache_control="$5"
   if immutable_object_matches "$key" "$file"; then return; fi
+  # Recheck after the authenticated immutable-object read and immediately
+  # before the conditional create.
+  dakia_require_release_mutation_provenance "$root_dir" || exit 1
   if AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" AWS_DEFAULT_REGION="auto" \
     aws s3api put-object --bucket "$bucket" --key "$key" --body "$file" --content-type "$content_type" \
       --content-disposition "attachment; filename=\"$filename\"" --cache-control "$cache_control" --if-none-match "*" \
@@ -325,6 +335,7 @@ claim_publication_state() {
       echo "Another incomplete release owns the mutable publication state (version ${state_version:-unknown})." >&2
       exit 1
     fi
+    dakia_require_release_mutation_provenance "$root_dir" || exit 1
     if AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" AWS_DEFAULT_REGION="auto" \
       aws s3api put-object --bucket "$bucket" --key "$publication_state_key" --body "$publication_state" \
         --content-type "application/json; charset=utf-8" --cache-control "no-store, max-age=0" \
@@ -332,6 +343,7 @@ claim_publication_state() {
       return
     fi
   else
+    dakia_require_release_mutation_provenance "$root_dir" || exit 1
     if AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" AWS_DEFAULT_REGION="auto" \
       aws s3api put-object --bucket "$bucket" --key "$publication_state_key" --body "$publication_state" \
         --content-type "application/json; charset=utf-8" --cache-control "no-store, max-age=0" \
@@ -431,6 +443,9 @@ node "$root_dir/scripts/updater-manifest.mjs" validate --manifest "$manifest" --
 # This is the final normal-path R2 mutation. Never mutate an R2 object after a
 # successful CAS; only a losing CAS can enter the explicit winner-repair path.
 manifest_written=false
+if ! dakia_require_release_mutation_provenance "$root_dir"; then
+  exit 1
+fi
 if AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" AWS_DEFAULT_REGION="auto" \
   aws s3api put-object --bucket "$bucket" --key "$manifest_key" --body "$manifest" \
     --content-type "application/json; charset=utf-8" \

@@ -43,6 +43,8 @@ import {
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { api, messageContentErrorFromUnknown } from "../api";
+import type { ComposeSeed } from "../composeWindow";
+import { composeSeedFromMailto } from "../mailto";
 import { confirmNativeAction, showNativeMessage } from "../nativeFeedback";
 import {
   detectTranslationLanguage,
@@ -89,6 +91,7 @@ type Props = {
   onSummarize: () => void;
   onCopyAi: () => void;
   onComposeTo: (message: MailSummary, address: string) => void;
+  onComposeLink?: (message: MailSummary, seed: ComposeSeed) => void;
   onAddressContextMenu: (message: MailSummary, address: string) => void;
   unsubscribeLoading: boolean;
   onUnsubscribe: (message: MailSummary) => void;
@@ -116,6 +119,7 @@ export function Reader({
   onSummarize,
   onCopyAi,
   onComposeTo,
+  onComposeLink,
   onAddressContextMenu,
   unsubscribeLoading,
   onUnsubscribe,
@@ -580,6 +584,7 @@ export function Reader({
             onForward={() => onForward(threadMessage)}
             onSendAgain={() => onSendAgain(threadMessage)}
             onComposeTo={(address) => onComposeTo(threadMessage, address)}
+            onComposeLink={(seed) => onComposeLink?.(threadMessage, seed)}
             onAddressContextMenu={(address) =>
               onAddressContextMenu(threadMessage, address)
             }
@@ -613,6 +618,7 @@ function ThreadMessage({
   onForward,
   onSendAgain,
   onComposeTo,
+  onComposeLink,
   onAddressContextMenu,
   threadUnread,
   onToggleRead,
@@ -637,6 +643,7 @@ function ThreadMessage({
   onForward: () => void;
   onSendAgain: () => void;
   onComposeTo: (address: string) => void;
+  onComposeLink: (seed: ComposeSeed) => void;
   onAddressContextMenu: (address: string) => void;
   threadUnread: boolean;
   onToggleRead: (read: boolean) => void;
@@ -1070,6 +1077,10 @@ function ThreadMessage({
           title={message.subject}
           showHistoryLabel={t("reader.showHistory")}
           hideHistoryLabel={t("reader.hideHistory")}
+          onMailto={(href) => {
+            const seed = composeSeedFromMailto(href);
+            if (seed) onComposeLink(seed);
+          }}
         />
       ) : (
         <PlainTextMessage text={displayContent?.body_text ?? ""} />

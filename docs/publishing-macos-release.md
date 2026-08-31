@@ -71,9 +71,11 @@ npm run release:publish -- "$release_tag" "$release_dir"
 npm run release:github:publish -- "$release_tag" "$release_dir"
 ```
 
-The draft stage requires a clean local `main` equal to `origin/main`, the
-explicit `DakiaMail/dakia-desktop` origin, a pushed annotated SSH-signed tag
-whose commit exactly equals `HEAD`, and working GitHub authentication. It
+The draft stage requires a clean local `main` whose `HEAD`, cached
+`origin/main`, and live `git ls-remote origin refs/heads/main` all name the
+same commit, the explicit `DakiaMail/dakia-desktop` origin, a pushed annotated
+SSH-signed tag whose commit exactly equals `HEAD`, and working GitHub
+authentication. It
 requires exactly the DMG, updater archive, detached signature, and
 `SHA256SUMS.txt`; verifies the local checksum file; creates a draft targeted at
 the exact commit; then downloads every draft asset and compares it byte-for-byte
@@ -86,10 +88,16 @@ make the draft public. It rechecks every draft property and asset first, then
 downloads all four public GitHub assets and validates both their bytes and their
 downloaded `SHA256SUMS.txt`.
 
-Both stages are safe to retry: an existing GitHub draft or already-public
-release is accepted only after the full exact comparison succeeds. They never
-use `--clobber`, delete a release, or replace assets. A mismatch is a hard stop;
-remediation or removal requires separate approval.
+Both stages are safe to retry: an existing GitHub draft is accepted only after
+the full exact comparison succeeds. An already-public release is accepted only
+as an exact R2 resume: public `latest.json` must already contain the candidate
+version, archive URL, signature, and notes, and the anonymous versioned updater
+archive, detached signature, and DMG must byte-match the local artifacts. A
+newer R2 candidate therefore requires a GitHub draft and stops before any R2
+mutation if its GitHub Release is already public. Each external release
+mutation repeats the live-main provenance check immediately beforehand. The
+scripts never use `--clobber`, delete a release, or replace assets. A mismatch
+is a hard stop; remediation or removal requires separate approval.
 
 The R2 publisher also invokes the draft verifier itself before its first remote
 mutation. This makes the required ordering fail closed even if an operator
