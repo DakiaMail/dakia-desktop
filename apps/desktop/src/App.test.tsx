@@ -381,14 +381,21 @@ describe("App read state", () => {
       </MantineProvider>,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Feedback" }));
+    const feedback = await screen.findByRole("button", { name: "Feedback" });
+    await waitFor(() => expect(feedback).toBeEnabled());
+    await waitFor(() => expect(mocks.openAccountWindow).toHaveBeenCalled());
+    mocks.openAccountWindow.mockClear();
 
-    await waitFor(() => expect(mocks.openAccountWindow).toHaveBeenCalledOnce());
-    expect(mocks.showNativeMessage).toHaveBeenCalledWith(
-      "New message",
-      "Connect an account before composing.",
-      "warning",
+    fireEvent.click(feedback);
+
+    await waitFor(() =>
+      expect(mocks.showNativeMessage).toHaveBeenCalledWith(
+        "New message",
+        "Connect an account before composing.",
+        "warning",
+      ),
     );
+    expect(mocks.openAccountWindow).toHaveBeenCalledOnce();
     expect(mocks.createFeedbackComposeSeed).not.toHaveBeenCalled();
     expect(mocks.openComposeWindow).not.toHaveBeenCalled();
   });
