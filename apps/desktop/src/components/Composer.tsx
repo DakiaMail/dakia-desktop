@@ -54,7 +54,12 @@ export function Composer({
   const [bcc, setBcc] = useState("");
   const [subject, setSubject] = useState(seed?.subject ?? "");
   const [bodyHtml, setBodyHtml] = useState(() =>
-    sanitizeRichText(seed?.bodyHtml ?? richTextFromPlainText(seed?.body ?? "")),
+    sanitizeRichText(
+      seed?.bodyHtml ?? richTextFromPlainText(seed?.body ?? ""),
+      {
+        preserveQuotedEmail: true,
+      },
+    ),
   );
   const [showCopies, setShowCopies] = useState(Boolean(seed?.cc));
   const [aiLoading, setAiLoading] = useState(false);

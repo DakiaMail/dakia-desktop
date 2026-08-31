@@ -1924,18 +1924,41 @@ fn build_compose_message(account: &Account, draft: &ComposeMessage) -> Result<Me
     if let Some(references) = &draft.references {
         builder = builder.references(references.clone());
     }
-    let body = if let Some(html) = &draft.body_html {
-        MultiPart::alternative()
-            .singlepart(SinglePart::plain(draft.body_text.clone()))
-            .singlepart(
-                SinglePart::builder()
-                    .header(ContentType::TEXT_HTML)
-                    .body(html.clone()),
-            )
+    let (body, inline_images) = if let Some(html) = &draft.body_html {
+        let (html, inline_images) = decode_outbound_inline_images(html)?;
+        let html = SinglePart::builder()
+            .header(ContentType::TEXT_HTML)
+            .body(html);
+        let alternative =
+            MultiPart::alternative().singlepart(SinglePart::plain(draft.body_text.clone()));
+        let alternative = if inline_images.is_empty() {
+            alternative.singlepart(html)
+        } else {
+            let related = inline_images.iter().fold(
+                MultiPart::related().singlepart(html),
+                |related, image| {
+                    related.singlepart(
+                        LettreAttachment::new_inline(image.content_id.clone())
+                            .body(image.bytes.clone(), image.content_type.clone()),
+                    )
+                },
+            );
+            alternative.multipart(related)
+        };
+        (alternative, inline_images)
     } else {
-        MultiPart::alternative().singlepart(SinglePart::plain(draft.body_text.clone()))
+        (
+            MultiPart::alternative().singlepart(SinglePart::plain(draft.body_text.clone())),
+            Vec::new(),
+        )
     };
-    let attachments = decode_outbound_attachments(&draft.attachments)?;
+    let inline_bytes = inline_images.iter().try_fold(0usize, |total, image| {
+        total
+            .checked_add(image.bytes.len())
+            .context("attachment bytes overflowed the safety limit")
+    })?;
+    let attachments =
+        decode_outbound_attachments(&draft.attachments, inline_images.len(), inline_bytes)?;
     let body =
         attachments
             .into_iter()
@@ -2128,13 +2151,23 @@ struct DecodedComposeAttachment {
     content_type: ContentType,
 }
 
+struct DecodedInlineImage {
+    content_id: String,
+    bytes: Vec<u8>,
+    content_type: ContentType,
+}
+
 fn decode_outbound_attachments(
     input: &[ComposeAttachment],
+    existing_count: usize,
+    mut total: usize,
 ) -> Result<Vec<DecodedComposeAttachment>> {
-    if input.len() > MAX_ATTACHMENT_COUNT {
+    if existing_count
+        .checked_add(input.len())
+        .is_none_or(|count| count > MAX_ATTACHMENT_COUNT)
+    {
         bail!("a message can include at most {MAX_ATTACHMENT_COUNT} attachments");
     }
-    let mut total = 0usize;
     input
         .iter()
         .enumerate()
@@ -2165,6 +2198,128 @@ fn decode_outbound_attachments(
             })
         })
         .collect()
+}
+
+fn decode_outbound_inline_images(html: &str) -> Result<(String, Vec<DecodedInlineImage>)> {
+    let mut data_urls = BTreeMap::new();
+    let mut ambiguous = false;
+    let mut cursor = 0;
+    while let Some(offset) = html[cursor..].find('<') {
+        let start = cursor + offset;
+        if html[start..].starts_with("<!--") {
+            cursor = html[start + 4..]
+                .find("-->")
+                .map_or(html.len(), |offset| start + 4 + offset + 3);
+            continue;
+        }
+        let Some(end) = html_tag_end(html, start) else {
+            break;
+        };
+        collect_html_tag_resource_ranges(&html[start..end], |_, value| {
+            if value
+                .get(..11)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:image/"))
+            {
+                let key = value.to_ascii_lowercase();
+                if let Some(existing) = data_urls.get(&key) {
+                    if existing != value {
+                        // Resource-reference rewriting is intentionally case-insensitive for
+                        // CID and Content-Location values. Base64 is not case-insensitive, so
+                        // refuse an ambiguous pair instead of attaching the wrong image bytes.
+                        ambiguous = true;
+                    }
+                } else {
+                    data_urls.insert(key, value.to_owned());
+                }
+            }
+        });
+        cursor = raw_text_element_end(html, start, end).unwrap_or(end);
+    }
+    if ambiguous {
+        bail!("ambiguous inline image data URLs");
+    }
+
+    if data_urls.len() > MAX_ATTACHMENT_COUNT {
+        bail!("a message can include at most {MAX_ATTACHMENT_COUNT} attachments");
+    }
+
+    let mut total = 0usize;
+    let mut replacements = BTreeMap::new();
+    let mut images = Vec::with_capacity(data_urls.len());
+    for (index, (key, data_url)) in data_urls.into_iter().enumerate() {
+        let (mime_type, bytes) = decode_inline_image_data_url(&data_url)?;
+        if bytes.len() > MAX_OUTBOUND_ATTACHMENT_BYTES {
+            bail!(
+                "inline image exceeds the {} MiB attachment limit",
+                MAX_OUTBOUND_ATTACHMENT_BYTES / 1024 / 1024
+            );
+        }
+        total = total
+            .checked_add(bytes.len())
+            .context("attachment bytes overflowed the safety limit")?;
+        if total > MAX_OUTBOUND_ATTACHMENT_TOTAL_BYTES {
+            bail!(
+                "attachments exceed the {} MiB total limit",
+                MAX_OUTBOUND_ATTACHMENT_TOTAL_BYTES / 1024 / 1024
+            );
+        }
+        let content_id = format!(
+            "dakia-inline-{}-{}@dakia.local",
+            uuid::Uuid::new_v4(),
+            index
+        );
+        replacements.insert(key, format!("cid:{content_id}"));
+        images.push(DecodedInlineImage {
+            content_id,
+            bytes,
+            content_type: ContentType::parse(&mime_type).expect("validated image MIME type"),
+        });
+    }
+    Ok((
+        rewrite_html_resource_references(html, &replacements)?,
+        images,
+    ))
+}
+
+fn decode_inline_image_data_url(value: &str) -> Result<(String, Vec<u8>)> {
+    let data = value
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
+        .then_some(&value[5..])
+        .context("inline image is not a data URL")?;
+    let (metadata, encoded) = data
+        .split_once(',')
+        .context("inline image data URL is missing its payload")?;
+    let mut metadata = metadata.split(';');
+    let mime_type = metadata.next().unwrap_or_default();
+    let safe_mime_type = safe_mime_type(mime_type);
+    if !mime_type.eq_ignore_ascii_case(&safe_mime_type) || !safe_mime_type.starts_with("image/") {
+        bail!("inline image data URL has an unsafe MIME type");
+    }
+    let is_base64 = metadata.any(|parameter| parameter.eq_ignore_ascii_case("base64"));
+    let max_encoded = if is_base64 {
+        MAX_OUTBOUND_ATTACHMENT_BYTES
+            .checked_add(2)
+            .and_then(|bytes| bytes.checked_div(3))
+            .and_then(|groups| groups.checked_mul(4))
+    } else {
+        MAX_OUTBOUND_ATTACHMENT_BYTES.checked_mul(3)
+    }
+    .context("inline image size limit overflowed")?;
+    if encoded.len() > max_encoded {
+        bail!(
+            "inline image exceeds the {} MiB attachment limit",
+            MAX_OUTBOUND_ATTACHMENT_BYTES / 1024 / 1024
+        );
+    }
+    let bytes = if is_base64 {
+        STANDARD
+            .decode(encoded)
+            .context("inline image data is not valid base64")?
+    } else {
+        percent_decode_str(encoded).collect::<Vec<_>>()
+    };
+    Ok((safe_mime_type, bytes))
 }
 struct ImapClient<S = TlsStream<TcpStream>> {
     reader: BufReader<S>,
@@ -10172,6 +10327,53 @@ For you, Alex =E2=80=94 related to your saved topic."
         assert!(source.contains("<p>Hello <strong>there</strong></p>"));
         assert!(source.contains("In-Reply-To: <parent@example.com>"));
         assert!(source.contains("References: <root@example.com> <parent@example.com>"));
+    }
+
+    #[test]
+    fn sends_data_url_images_as_related_cid_parts() {
+        let account = test_account();
+        let draft = ComposeMessage {
+            account_id: account.id,
+            to: vec!["recipient@example.com".into()],
+            cc: vec![],
+            bcc: vec![],
+            subject: "Inline image".into(),
+            body_text: "Image reply history".into(),
+            body_html: Some(
+                "<p>Image reply history</p><img src=\"data:image/png;base64,aW1hZ2U=\"><img src=\"data:image/svg+xml;charset=utf-8,%3Csvg%3Eicon%3C/svg%3E\">".into(),
+            ),
+            in_reply_to: None,
+            references: None,
+            attachments: vec![ComposeAttachment {
+                filename: "invoice.pdf".into(),
+                mime_type: "application/pdf".into(),
+                content_base64: "cGRm".into(),
+            }],
+        };
+
+        let source =
+            String::from_utf8(build_compose_message(&account, &draft).unwrap().formatted())
+                .unwrap();
+        let content_id = source
+            .lines()
+            .find_map(|line| line.strip_prefix("Content-ID: <"))
+            .and_then(|line| line.strip_suffix('>'))
+            .expect("inline image Content-ID");
+        let parsed = parse_complete_message(source.as_bytes()).unwrap();
+
+        assert!(source.contains("multipart/mixed"));
+        assert!(source.contains("multipart/alternative"));
+        assert!(source.contains("multipart/related"));
+        assert!(source.contains("Content-Type: image/png"));
+        assert!(source.contains("Content-Type: image/svg+xml"));
+        assert!(source.contains("Content-Disposition: inline"));
+        assert!(source.contains("\r\n\r\nimage\r\n--"));
+        assert!(source.contains("Content-Disposition: attachment; filename=\"invoice.pdf\""));
+        let decoded_html = extract_html(&parsed).unwrap();
+        assert!(decoded_html.contains(&format!("src=\"cid:{content_id}\"")));
+        assert_eq!(decoded_html.matches("src=\"cid:").count(), 2);
+        assert!(!source.contains("data:image/png;base64"));
+        assert!(!source.contains("data:image/svg+xml"));
     }
 
     #[test]

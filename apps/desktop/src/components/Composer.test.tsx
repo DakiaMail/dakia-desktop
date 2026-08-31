@@ -236,6 +236,48 @@ describe("Composer send feedback", () => {
     );
   });
 
+  it("renders and sends safe table and image layout in quoted rich email history", () => {
+    const onSend = vi.fn();
+    const bodyHtml = [
+      "<p><br></p>",
+      '<div class="moz-cite-prefix">GitHub wrote:</div>',
+      '<blockquote type="cite"><div data-dakia-quoted-email="true">',
+      '<table width="600" style="width: 600px; background-color: rgb(255, 255, 255)"><tbody><tr>',
+      '<td align="center" style="padding: 24px"><img alt="GitHub" width="32" src="https://example.com/github.png">',
+      '<a href="https://example.com/settings" style="display: inline-block; background-color: rgb(22, 136, 63); padding: 12px; color: white">Manage budgets</a></td>',
+      "</tr></tbody></table></div></blockquote>",
+    ].join("");
+    render(
+      <Composer
+        {...props}
+        seed={{ to: "sender@example.com", bodyHtml }}
+        onSend={onSend}
+        sendState="idle"
+      />,
+    );
+
+    const editor = screen.getByLabelText("Write your message…");
+    expect(editor.innerHTML).toContain('<table width="600"');
+    expect(editor.innerHTML).toContain('<img alt="GitHub" width="32"');
+    expect(editor.innerHTML).toContain("background-color: rgb(255, 255, 255)");
+    expect(editor.innerHTML).toContain("background-color: rgb(22, 136, 63)");
+
+    editor.innerHTML = `<p>Authored text</p>${editor.innerHTML}`;
+    fireEvent.input(editor);
+    fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
+    expect(onSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body_html: expect.stringContaining('<table width="600"'),
+        body_text: expect.stringContaining("Authored text"),
+      }),
+    );
+    expect(onSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body_text: expect.stringContaining("Manage budgets"),
+      }),
+    );
+  });
+
   it("sanitizes a hostile seeded reply before rendering and sends that unchanged sanitized HTML", () => {
     const onSend = vi.fn();
     const bodyHtml = [
