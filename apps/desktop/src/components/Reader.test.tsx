@@ -168,10 +168,14 @@ describe("Reader unsubscribe action", () => {
     const documentRole = await screen.findByRole("document", {
       name: "Weekly notes",
     });
-    const surface = documentRole.shadowRoot?.firstElementChild as HTMLElement;
-    const anchor = surface.shadowRoot?.querySelector("a");
-    expect(anchor).not.toBeNull();
-    fireEvent.click(anchor!);
+    const anchor = await waitFor(() => {
+      const surface = documentRole.shadowRoot?.firstElementChild as
+        HTMLElement | undefined;
+      const nextAnchor = surface?.shadowRoot?.querySelector("a");
+      expect(nextAnchor).not.toBeNull();
+      return nextAnchor!;
+    });
+    fireEvent.click(anchor);
 
     expect(props.onComposeLink).toHaveBeenCalledWith(message, {
       to: "juhan+tamm@example.com",
