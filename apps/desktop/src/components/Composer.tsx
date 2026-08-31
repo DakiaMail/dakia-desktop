@@ -57,7 +57,9 @@ export function Composer({
     if (seed?.bodyHtml === undefined) {
       return richTextFromPlainText(seed?.body ?? "");
     }
-    const sanitizedHtml = sanitizeRichText(seed?.bodyHtml ?? "");
+    const sanitizedHtml = sanitizeRichText(seed.bodyHtml, {
+      preserveQuotedEmail: true,
+    });
     return seed.bodyHtml && isRichTextEmpty(sanitizedHtml)
       ? richTextFromPlainText(seed?.body ?? "")
       : sanitizedHtml;

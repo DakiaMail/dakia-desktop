@@ -20,6 +20,8 @@ export type ComposeSeed = {
 
 const isTauri = () => "__TAURI_INTERNALS__" in window;
 const composeSeedStoragePrefix = "dakia.compose-seed.";
+const composeSeedDatabase = "dakia-compose-seeds";
+const composeSeedStore = "seeds";
 
 function parseComposeSeed(value: string | null): ComposeSeed | undefined {
   if (!value) return undefined;
@@ -64,13 +66,41 @@ export function readComposeSeed(): ComposeSeed {
   return parseComposeSeed(params.get("seed")) ?? {};
 }
 
+export async function readDatabaseComposeSeed() {
+  const token = new URLSearchParams(window.location.search).get("seedDbKey");
+  if (!token || !globalThis.indexedDB) return undefined;
+  const database = await openComposeSeedDatabase();
+  return new Promise<ComposeSeed | undefined>((resolve, reject) => {
+    const transaction = database.transaction(composeSeedStore, "readwrite");
+    const store = transaction.objectStore(composeSeedStore);
+    const request = store.get(token);
+    request.onsuccess = () => {
+      const seed = request.result as ComposeSeed | undefined;
+      store.delete(token);
+      resolve(seed);
+    };
+    request.onerror = () => reject(request.error);
+    transaction.oncomplete = () => database.close();
+  });
+}
+
 export function openComposeWindow(seed: ComposeSeed) {
   const params = new URLSearchParams({ view: "compose" });
   const storedSeedToken = storeComposeSeed(seed);
   if (storedSeedToken) params.set("seedKey", storedSeedToken);
-  else params.set("seed", JSON.stringify(seed));
-  const url = `/?${params.toString()}`;
+  else if (isTauri() && globalThis.indexedDB) {
+    void storeDatabaseComposeSeed(seed)
+      .then((token) => {
+        params.set("seedDbKey", token);
+        createComposeWindow(`/?${params.toString()}`);
+      })
+      .catch((error) => console.error("Could not store compose seed", error));
+    return;
+  } else params.set("seed", JSON.stringify(seed));
+  createComposeWindow(`/?${params.toString()}`);
+}
 
+function createComposeWindow(url: string) {
   if (!isTauri()) {
     window.open(
       url,
@@ -97,6 +127,33 @@ export function openComposeWindow(seed: ComposeSeed) {
   });
   composeWindow.once("tauri://error", (event) => {
     console.error("Could not open compose window", event.payload);
+  });
+}
+
+async function storeDatabaseComposeSeed(seed: ComposeSeed) {
+  const database = await openComposeSeedDatabase();
+  const token = crypto.randomUUID();
+  return new Promise<string>((resolve, reject) => {
+    const transaction = database.transaction(composeSeedStore, "readwrite");
+    transaction.objectStore(composeSeedStore).put(seed, token);
+    transaction.oncomplete = () => {
+      database.close();
+      resolve(token);
+    };
+    transaction.onerror = () => reject(transaction.error);
+  });
+}
+
+function openComposeSeedDatabase() {
+  return new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDB.open(composeSeedDatabase, 1);
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains(composeSeedStore)) {
+        request.result.createObjectStore(composeSeedStore);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
   });
 }
 

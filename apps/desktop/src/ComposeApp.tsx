@@ -4,6 +4,7 @@ import { api } from "./api";
 import {
   closeComposeWindow,
   notifyOutbox,
+  readDatabaseComposeSeed,
   readComposeSeed,
 } from "./composeWindow";
 import { Composer } from "./components/Composer";
@@ -35,15 +36,22 @@ export function ComposeApp() {
 
   useEffect(() => {
     document.title = t("composer.title");
-    Promise.all([
-      api.accounts(),
-      seed.forwardMessageId
-        ? api.forwardAttachments(seed.forwardMessageId).catch((error) => {
-            showError(error, t("attachments.loadError"));
-            return [];
-          })
-        : Promise.resolve([]),
-    ])
+    readDatabaseComposeSeed()
+      .then((databaseSeed) => {
+        const nextSeed = databaseSeed ?? seed;
+        if (databaseSeed) setSeed(databaseSeed);
+        return Promise.all([
+          api.accounts(),
+          nextSeed.forwardMessageId
+            ? api
+                .forwardAttachments(nextSeed.forwardMessageId)
+                .catch((error) => {
+                  showError(error, t("attachments.loadError"));
+                  return [];
+                })
+            : Promise.resolve([]),
+        ]);
+      })
       .then(([nextAccounts, attachments]) => {
         setAccounts(nextAccounts);
         if (attachments.length) {
