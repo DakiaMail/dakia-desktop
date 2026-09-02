@@ -230,6 +230,18 @@ test("ordinary pull-request workflow preserves the cost and release boundaries",
     /path: \|\n\s+~\/\.cargo\/registry\n\s+~\/\.cargo\/git\n\s+target/,
     "the immutable Actions cache must not store the entire target directory",
   );
+  for (const testName of [
+    "local_model_and_policy_classify_the_production_regression_corpus",
+    "model_and_policy_preserve_representative_categories",
+  ]) {
+    assert.match(
+      workflow,
+      new RegExp(
+        `--skip classification::model_integration_tests::${testName}`,
+      ),
+      `the LFS-free PR lane must skip ${testName}`,
+    );
+  }
   for (const action of workflow.matchAll(/uses:\s*[^@\s]+@([^\s#]+)/g)) {
     assert.match(action[1], /^[a-f0-9]{40}$/, `unpinned action: ${action[0]}`);
   }

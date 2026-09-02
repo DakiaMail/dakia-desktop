@@ -12,10 +12,11 @@ use dakia_core::storage::{ConversationTarget, MessageContentFetchAcquire};
 use dakia_core::{
     ai::{AiConfig, AiProvider, AiService},
     mailbox_action_destination, provider, Account, AccountAuth, AccountDraft, Attachment,
-    CachedMessageContent, ComposeMessage, LocalEmailClassifier, MailConversation,
-    MailConversationPage, MailRebuildJob, MailService, MailSummary, MailboxAction, OAuthFlow,
-    OAuthProviderConfig, ProviderPreset, SearchQuery, SmartInboxPage, SmartInboxQuery, Store,
-    SyncProgress, SyncResult, UnsubscribeOutcome,
+    CachedMessageContent, ComposeMessage, EmailClassificationInput, LocalEmailClassifier,
+    MailConversation, MailConversationPage, MailRebuildJob, MailService, MailSummary,
+    MailboxAction, ModelClassificationUpdate, OAuthFlow, OAuthProviderConfig, ProviderPreset,
+    SearchQuery, SmartInboxPage, SmartInboxQuery, Store, SyncProgress, SyncResult,
+    UnsubscribeOutcome,
 };
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -68,6 +69,7 @@ struct AppState {
     store: Store,
     data_dir: PathBuf,
     classifier: Mutex<Box<dyn EmailClassifier>>,
+    classification_owner: String,
     classification: Arc<ClassificationScheduler>,
     realtime: RealtimeSyncManager,
     remote_operation_slots: Arc<Semaphore>,
@@ -77,16 +79,24 @@ struct AppState {
 }
 
 trait EmailClassifier: Send {
+    fn revision(&self) -> &str {
+        "test-classifier"
+    }
+
     fn classify(
         &mut self,
-        emails: &[String],
+        emails: &[EmailClassificationInput],
     ) -> anyhow::Result<Vec<dakia_core::classification::ModelClassification>>;
 }
 
 impl EmailClassifier for LocalEmailClassifier {
+    fn revision(&self) -> &str {
+        LocalEmailClassifier::revision(self)
+    }
+
     fn classify(
         &mut self,
-        emails: &[String],
+        emails: &[EmailClassificationInput],
     ) -> anyhow::Result<Vec<dakia_core::classification::ModelClassification>> {
         LocalEmailClassifier::classify(self, emails)
     }
@@ -342,6 +352,15 @@ fn validate_classification_output_count(
     Ok(())
 }
 
+fn validate_classification_apply_count(attempted: usize, applied: usize) -> anyhow::Result<usize> {
+    if attempted != applied {
+        anyhow::bail!(
+            "classification batch became stale ({applied}/{attempted} results applied); retrying with current evidence"
+        );
+    }
+    Ok(applied)
+}
+
 async fn retry_classification_batch<T, F, Fut>(mut operation: F) -> anyhow::Result<T>
 where
     F: FnMut() -> Fut,
@@ -470,6 +489,17 @@ mod classification_scheduler_tests {
                 .unwrap_err()
                 .to_string(),
             "classifier returned 4 results for 3 messages"
+        );
+    }
+
+    #[test]
+    fn stale_classification_apply_is_retryable_instead_of_counted_as_progress() {
+        assert_eq!(validate_classification_apply_count(3, 3).unwrap(), 3);
+        assert_eq!(
+            validate_classification_apply_count(3, 0)
+                .unwrap_err()
+                .to_string(),
+            "classification batch became stale (0/3 results applied); retrying with current evidence"
         );
     }
 }
@@ -1393,7 +1423,7 @@ mod message_content_repair_tests {
     impl EmailClassifier for UnexpectedClassifier {
         fn classify(
             &mut self,
-            _emails: &[String],
+            _emails: &[EmailClassificationInput],
         ) -> anyhow::Result<Vec<dakia_core::classification::ModelClassification>> {
             panic!("message-content loading must not invoke email classification")
         }
@@ -1405,6 +1435,7 @@ mod message_content_repair_tests {
             store,
             data_dir: PathBuf::new(),
             classifier: Mutex::new(Box::new(UnexpectedClassifier)),
+            classification_owner: "message-content-test".into(),
             classification: Arc::new(ClassificationScheduler::default()),
             mail_rebuilds: Mutex::new(HashMap::new()),
             account_operations: AccountOperationLocks::default(),
@@ -3488,6 +3519,16 @@ fn kick_classification(state: Arc<AppState>) -> u64 {
 }
 
 async fn classify_pending_batch(state: Arc<AppState>) -> anyhow::Result<usize> {
+    let model_revision = state
+        .classifier
+        .lock()
+        .map_err(|_| anyhow::anyhow!("email classifier lock is unavailable"))?
+        .revision()
+        .to_owned();
+    state
+        .store
+        .claim_classification_revision(&state.classification_owner, &model_revision)
+        .await?;
     let messages = state
         .store
         .messages_for_model_classification_batch(CLASSIFICATION_BATCH_SIZE)
@@ -3496,16 +3537,26 @@ async fn classify_pending_batch(state: Arc<AppState>) -> anyhow::Result<usize> {
         return Ok(0);
     }
     let ids: Vec<String> = messages.iter().map(|message| message.id.clone()).collect();
-    let inputs: Vec<String> = messages
+    let known_correspondence = state
+        .store
+        .messages_from_known_correspondents(&messages)
+        .await?;
+    let inputs: Vec<EmailClassificationInput> = messages
         .iter()
         .map(|message| {
-            dakia_core::classification::email_text(
+            let body = if message.body_text.trim().is_empty() {
+                &message.snippet
+            } else {
+                &message.body_text
+            };
+            EmailClassificationInput::new(
                 message.from_name.as_deref(),
                 &message.from_address,
                 &message.subject,
-                &message.snippet,
+                body,
                 &message.classification_signals,
             )
+            .with_known_correspondence(known_correspondence.contains(&message.id))
         })
         .collect();
     let classifier_state = state.clone();
@@ -3519,17 +3570,39 @@ async fn classify_pending_batch(state: Arc<AppState>) -> anyhow::Result<usize> {
     .await
     .map_err(|error| anyhow::anyhow!("email classifier task failed: {error}"))??;
     validate_classification_output_count(ids.len(), classifications.len())?;
-    let updates: Vec<(String, String, f64)> = ids
-        .into_iter()
+    let updates: Vec<ModelClassificationUpdate> = messages
+        .iter()
         .zip(classifications)
-        .map(|(id, result)| (id, result.category, result.confidence))
+        .map(|(message, result)| {
+            ModelClassificationUpdate::from_message(
+                message,
+                result.category,
+                result.confidence,
+                known_correspondence.contains(&message.id),
+                &state.classification_owner,
+                &model_revision,
+            )
+        })
         .collect();
     let count = updates.len();
-    state.store.apply_model_classifications(&updates).await?;
-    Ok(count)
+    let applied = state.store.apply_model_classifications(&updates).await?;
+    validate_classification_apply_count(count, applied)
 }
 
 async fn drain_pending_classifications(state: Arc<AppState>) -> anyhow::Result<()> {
+    let result = drain_pending_classifications_owned(state.clone()).await;
+    let release = state
+        .store
+        .release_classification_revision(&state.classification_owner)
+        .await;
+    match (result, release) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
+async fn drain_pending_classifications_owned(state: Arc<AppState>) -> anyhow::Result<()> {
     let mut classified = 0;
     loop {
         let generation = state.classification.next_generation();
@@ -4389,6 +4462,7 @@ pub fn run() {
                     store,
                     data_dir,
                     classifier: Mutex::new(Box::new(classifier)),
+                    classification_owner: Uuid::new_v4().to_string(),
                     classification: Arc::new(ClassificationScheduler::default()),
                     mail_rebuilds: Mutex::new(mail_rebuilds),
                     account_operations: AccountOperationLocks::default(),
