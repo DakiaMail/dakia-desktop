@@ -85,6 +85,14 @@ import {
   downloadUpdate,
   installUpdateAndRelaunch,
 } from "./updater";
+import {
+  readAnalyticsSettings,
+  reportUsageIfConsented,
+  listenForAnalyticsConsent,
+  setAnalyticsConsent,
+  type AnalyticsSettings,
+} from "./analytics";
+import { AnalyticsConsentDialog } from "./components/AnalyticsConsentDialog";
 
 const defaultAi: AiSettings = {
   provider: "ollama",
@@ -139,6 +147,10 @@ function emptySmartSections(): Record<SmartSectionId, SmartSection> {
 export default function App() {
   const { t, i18n } = useTranslation();
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [accountsLoaded, setAccountsLoaded] = useState(false);
+  const [analytics, setAnalytics] = useState<AnalyticsSettings>(
+    readAnalyticsSettings,
+  );
   const [threads, setThreads] = useState<MailThread[]>([]);
   const [smartSections, setSmartSections] =
     useState<Record<SmartSectionId, SmartSection>>(emptySmartSections);
@@ -347,6 +359,7 @@ export default function App() {
         );
         accountsRef.current = next;
         setAccounts(next);
+        setAccountsLoaded(true);
         if (next.length === 0) {
           setLoading(false);
           void openAccountWindow();
@@ -356,6 +369,17 @@ export default function App() {
         showError(error);
         setLoading(false);
       });
+  }, []);
+  useEffect(() => {
+    if (!accountsLoaded || analytics.consent !== "enabled") return;
+    void reportUsageIfConsented(accounts);
+  }, [accounts, accountsLoaded, analytics.consent]);
+  useEffect(() => {
+    let dispose: () => void = () => undefined;
+    void listenForAnalyticsConsent(setAnalytics)
+      .then((unlisten) => (dispose = unlisten))
+      .catch(() => undefined);
+    return () => dispose();
   }, []);
   const activeAccounts = useMemo(
     () =>
@@ -2169,6 +2193,13 @@ export default function App() {
           : mailbox === "starred"
             ? t("nav.starred")
             : mailbox;
+  const analyticsConsentDialog = (
+    <AnalyticsConsentDialog
+      accounts={accounts}
+      opened={accountsLoaded && analytics.consent === "unknown"}
+      onChoose={(enabled) => setAnalytics(setAnalyticsConsent(enabled))}
+    />
+  );
   if (!loading && accounts.length === 0)
     return (
       <div className="app-shell">
@@ -2209,6 +2240,7 @@ export default function App() {
             onAction={() => void openAccountWindow()}
           />
         </main>
+        {analyticsConsentDialog}
       </div>
     );
 
@@ -2478,6 +2510,7 @@ export default function App() {
           tone={actionStatus.tone}
         />
       ) : null}
+      {analyticsConsentDialog}
     </div>
   );
 

@@ -1,0 +1,19 @@
+{
+  "name": "@dakia/usage-analytics-collector",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "types": "wrangler types worker-configuration.d.ts && tsc --noEmit",
+    "report": "wrangler d1 execute dakia-usage-analytics --remote --file queries/monthly-summary.sql",
+    "deploy:dry-run": "wrangler deploy --dry-run"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260826.1",
+    "@types/node": "^26.4.0",
+    "typescript": "^5.9.2",
+    "vitest": "^4.1.10",
+    "wrangler": "^4.126.0"
+  }
+}
