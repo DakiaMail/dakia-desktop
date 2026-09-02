@@ -20,6 +20,14 @@ export function userFacingSubject(subject) {
     .replace(/^(feat|fix|perf|refactor|docs|chore)(\([^)]*\))?!?:\s*/i, "")
     .trim();
   if (!cleaned || /^(merge|prepare v?\d|bump )/i.test(cleaned)) return null;
+  // Internal or umbrella subjects carry no user-visible claim and must never
+  // become release-note bullets on their own.
+  if (
+    /^(optimize ci|harden release|update (?:dakia )?desktop (?:application|implementation)|update desktop app|prepare v?\d|bump )/i.test(
+      cleaned,
+    )
+  )
+    return null;
   const knownChanges = [
     [
       /^interactive email address header actions$/i,
@@ -31,15 +39,11 @@ export function userFacingSubject(subject) {
     ],
     [
       /^add privacy-preserving usage analytics$/i,
-      "Add privacy-preserving usage analytics.",
+      "Added privacy-preserving usage analytics.",
     ],
     [
       /^fix people categorization across desktop, CLI, and core$/i,
       "Improve people categorization across desktop, CLI, and core.",
-    ],
-    [
-      /^optimize CI caching and harden release validation boundaries$/i,
-      "Optimize CI caching and strengthen release validation.",
     ],
     [
       /^add send again action for sent messages$/i,

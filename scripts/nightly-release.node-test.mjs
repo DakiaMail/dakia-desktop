@@ -47,12 +47,9 @@ test("generated notes retain reader-facing changes and hide release mechanics", 
       "Merge branch 'main'",
     ],
   });
-  assert.match(notes, /Add privacy-preserving usage analytics\./);
+  assert.match(notes, /Added privacy-preserving usage analytics\./);
   assert.match(notes, /Improve people categorization/);
-  assert.match(
-    notes,
-    /Optimize CI caching and strengthen release validation\./,
-  );
+  assert.doesNotMatch(notes, /Optimize CI caching|strengthen release validation/);
   assert.match(notes, /new Send again action\./);
   assert.match(notes, /faster optimistic updates\./);
   assert.doesNotMatch(notes, /Merge branch/);
