@@ -15,8 +15,16 @@ import { join } from "node:path";
 import test from "node:test";
 
 const repositoryRoot = new URL("..", import.meta.url).pathname;
-const draftSource = join(repositoryRoot, "scripts", "prepare-github-release-draft.sh");
-const releaseEnvironmentSource = join(repositoryRoot, "scripts", "local-release-env.sh");
+const draftSource = join(
+  repositoryRoot,
+  "scripts",
+  "prepare-github-release-draft.sh",
+);
+const releaseEnvironmentSource = join(
+  repositoryRoot,
+  "scripts",
+  "local-release-env.sh",
+);
 const tag = "v0.4.2";
 const version = tag.slice(1);
 const commit = "1234567890abcdef1234567890abcdef12345678";
@@ -31,7 +39,13 @@ function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function createHarness({ manifestVersion = version, corruptAsset = "", missingAsset = "", liveMainMoves = false, releaseExists = true } = {}) {
+function createHarness({
+  manifestVersion = version,
+  corruptAsset = "",
+  missingAsset = "",
+  liveMainMoves = false,
+  releaseExists = true,
+} = {}) {
   const fixture = mkdtempSync(join(tmpdir(), "dakia-draft-resume-test-"));
   const root = join(fixture, "repo");
   const scripts = join(root, "scripts");
@@ -60,7 +74,8 @@ function createHarness({ manifestVersion = version, corruptAsset = "", missingAs
     "release-notes.md": "Release notes\n",
     "source-commit.txt": `${commit}\n`,
   };
-  for (const [filename, body] of Object.entries(files)) writeFileSync(join(assets, filename), body);
+  for (const [filename, body] of Object.entries(files))
+    writeFileSync(join(assets, filename), body);
   writeFileSync(
     join(assets, "SHA256SUMS.txt"),
     [
@@ -79,13 +94,18 @@ function createHarness({ manifestVersion = version, corruptAsset = "", missingAs
       platforms: {
         "darwin-aarch64": {
           url: `https://downloads.dakiamail.com/macos/v${manifestVersion}/Dakia-aarch64.app.tar.gz`,
-          signature: manifestVersion === version ? files["Dakia-aarch64.app.tar.gz.sig"].trim() : "older-signature",
+          signature:
+            manifestVersion === version
+              ? files["Dakia-aarch64.app.tar.gz.sig"].trim()
+              : "older-signature",
         },
       },
     })}\n`,
   );
 
-  executable(join(bin, "git"), `#!/bin/bash
+  executable(
+    join(bin, "git"),
+    `#!/bin/bash
 set -euo pipefail
 [[ "\${1:-}" == -C ]] && shift 2
 while [[ "\${1:-}" == -c ]]; do shift 2; done
@@ -120,9 +140,35 @@ case "\${1:-}" in
     fi ;;
   *) exit 64 ;;
 esac
-`);
-  executable(join(bin, "ssh-keygen"), "#!/bin/sh\nprintf '%s\\n' '256 SHA256:kN9R3QFJZbrE5i2HjEpp+ns5ZNxBTuFySvFx8Ldf/gE release@example.test'\n");
-  executable(join(bin, "gh"), `#!/bin/bash
+`,
+  );
+  executable(
+    join(bin, "ssh-keygen"),
+    "#!/bin/sh\nprintf '%s\\n' '256 SHA256:kN9R3QFJZbrE5i2HjEpp+ns5ZNxBTuFySvFx8Ldf/gE release@example.test'\n",
+  );
+  executable(
+    join(bin, "jq"),
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+const values = {};
+for (let index = 0; index < args.length; index += 1) if (args[index] === "--arg") values[args[index + 1]] = args[index + 2];
+const filter = args.find((value) => value.startsWith(".")) ?? "";
+const file = args.find((value) => value.startsWith("/") && fs.existsSync(value));
+const data = JSON.parse(file ? fs.readFileSync(file, "utf8") : fs.readFileSync(0, "utf8"));
+if (args.includes("-e")) {
+  const platform = values.platform ?? "darwin-aarch64";
+  const entry = data.platforms?.[platform];
+  process.exit(data.version === values.version && data.notes === values.notes && entry?.url === values.url && entry?.signature === values.signature ? 0 : 1);
+}
+if (filter === ".assets[].name") process.stdout.write(data.assets.map((asset) => asset.name).join("\\n") + "\\n");
+else if (filter === ".body") process.stdout.write(data.body);
+else process.stdout.write(String(data[filter.slice(1)]) + "\\n");
+`,
+  );
+  executable(
+    join(bin, "gh"),
+    `#!/bin/bash
 set -euo pipefail
 case "\${1:-} \${2:-}" in
   'auth status') ;;
@@ -141,8 +187,12 @@ NODE
   'release create') printf create >> "\${MOCK_CREATE_LOG}" ;;
   *) exit 64 ;;
 esac
-`);
-  executable(join(bin, "curl"), "#!/bin/bash\nset -euo pipefail\noutput= url=\nwhile [[ \"$#\" -gt 0 ]]; do case \"$1\" in --output) output=\"$2\"; shift 2 ;; --write-out|--connect-timeout|--max-time|--proto) shift 2 ;; --silent|--show-error|--location) shift ;; *) url=\"$1\"; shift ;; esac; done\nif [[ \"$url\" == *'/macos/latest/latest.json?'* ]]; then cp \"$MOCK_MANIFEST\" \"$output\"; printf 200; exit 0; fi\nname=\"${url##*/}\"\nif [[ \"$name\" == Dakia-Apple-Silicon.dmg ]]; then source=\"$MOCK_ASSETS/Dakia_0.4.2_aarch64.dmg\"; else source=\"$MOCK_ASSETS/$name\"; fi\nif [[ \"$name\" == \"$MOCK_MISSING_ASSET\" ]]; then : > \"$output\"; printf 404; exit 0; fi\nif [[ \"$name\" == \"$MOCK_CORRUPT_ASSET\" ]]; then printf corrupt > \"$output\"; printf 200; exit 0; fi\ncp \"$source\" \"$output\"; printf 200\n");
+`,
+  );
+  executable(
+    join(bin, "curl"),
+    '#!/bin/bash\nset -euo pipefail\noutput= url=\nwhile [[ "$#" -gt 0 ]]; do case "$1" in --output) output="$2"; shift 2 ;; --write-out|--connect-timeout|--max-time|--proto) shift 2 ;; --silent|--show-error|--location) shift ;; *) url="$1"; shift ;; esac; done\nif [[ "$url" == *\'/macos/latest/latest.json?\'* ]]; then cp "$MOCK_MANIFEST" "$output"; printf 200; exit 0; fi\nname="${url##*/}"\nif [[ "$name" == Dakia-Apple-Silicon.dmg ]]; then source="$MOCK_ASSETS/Dakia_0.4.2_aarch64.dmg"; else source="$MOCK_ASSETS/$name"; fi\nif [[ "$name" == "$MOCK_MISSING_ASSET" ]]; then : > "$output"; printf 404; exit 0; fi\nif [[ "$name" == "$MOCK_CORRUPT_ASSET" ]]; then printf corrupt > "$output"; printf 200; exit 0; fi\ncp "$source" "$output"; printf 200\n',
+  );
 
   return {
     fixture,
@@ -169,9 +219,15 @@ esac
 test("an already-public GitHub release cannot precede a newer updater candidate", () => {
   const harness = createHarness({ manifestVersion: "0.4.1" });
   try {
-    const result = spawnSync(harness.command, [tag, harness.assets], { encoding: "utf8", env: harness.env });
+    const result = spawnSync(harness.command, [tag, harness.assets], {
+      encoding: "utf8",
+      env: harness.env,
+    });
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /Existing GitHub Release is public while public latest\.json is not the exact R2 resume candidate/);
+    assert.match(
+      result.stderr,
+      /Existing GitHub Release is public while public latest\.json is not the exact R2 resume candidate/,
+    );
     assert.equal(readFileSync(harness.createLog, "utf8"), "");
   } finally {
     rmSync(harness.fixture, { recursive: true, force: true });
@@ -181,9 +237,15 @@ test("an already-public GitHub release cannot precede a newer updater candidate"
 test("an already-public GitHub release is accepted only for its exact R2 resume", () => {
   const harness = createHarness();
   try {
-    const result = spawnSync(harness.command, [tag, harness.assets], { encoding: "utf8", env: harness.env });
+    const result = spawnSync(harness.command, [tag, harness.assets], {
+      encoding: "utf8",
+      env: harness.env,
+    });
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /Verified exact existing public GitHub Release/);
+    assert.match(
+      result.stdout,
+      /Verified exact existing public GitHub Release/,
+    );
   } finally {
     rmSync(harness.fixture, { recursive: true, force: true });
   }
@@ -192,9 +254,15 @@ test("an already-public GitHub release is accepted only for its exact R2 resume"
 test("an exact public resume rejects corrupt versioned R2 bytes", () => {
   const harness = createHarness({ corruptAsset: "Dakia-aarch64.app.tar.gz" });
   try {
-    const result = spawnSync(harness.command, [tag, harness.assets], { encoding: "utf8", env: harness.env });
+    const result = spawnSync(harness.command, [tag, harness.assets], {
+      encoding: "utf8",
+      env: harness.env,
+    });
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /Public R2 resume updater archive is missing or differs/);
+    assert.match(
+      result.stderr,
+      /Public R2 resume updater archive is missing or differs/,
+    );
     assert.equal(readFileSync(harness.createLog, "utf8"), "");
   } finally {
     rmSync(harness.fixture, { recursive: true, force: true });
@@ -204,9 +272,15 @@ test("an exact public resume rejects corrupt versioned R2 bytes", () => {
 test("an exact public resume rejects a missing versioned R2 DMG", () => {
   const harness = createHarness({ missingAsset: "Dakia-Apple-Silicon.dmg" });
   try {
-    const result = spawnSync(harness.command, [tag, harness.assets], { encoding: "utf8", env: harness.env });
+    const result = spawnSync(harness.command, [tag, harness.assets], {
+      encoding: "utf8",
+      env: harness.env,
+    });
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /Public R2 resume Apple Silicon DMG is missing or differs/);
+    assert.match(
+      result.stderr,
+      /Public R2 resume Apple Silicon DMG is missing or differs/,
+    );
     assert.equal(readFileSync(harness.createLog, "utf8"), "");
   } finally {
     rmSync(harness.fixture, { recursive: true, force: true });
@@ -216,9 +290,15 @@ test("an exact public resume rejects a missing versioned R2 DMG", () => {
 test("a moved live main stops draft creation immediately before mutation", () => {
   const harness = createHarness({ liveMainMoves: true, releaseExists: false });
   try {
-    const result = spawnSync(harness.command, [tag, harness.assets], { encoding: "utf8", env: harness.env });
+    const result = spawnSync(harness.command, [tag, harness.assets], {
+      encoding: "utf8",
+      env: harness.env,
+    });
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /HEAD, cached origin\/main, and live origin\/main must all match/);
+    assert.match(
+      result.stderr,
+      /HEAD, cached origin\/main, and live origin\/main must all match/,
+    );
     assert.equal(readFileSync(harness.createLog, "utf8"), "");
   } finally {
     rmSync(harness.fixture, { recursive: true, force: true });

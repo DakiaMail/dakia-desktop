@@ -1,9 +1,20 @@
 # Release source provenance
 
-Production macOS releases are built locally from a clean `main` commit that
-exactly matches `origin/main`. Beginning with v0.4.1, the release path requires
-an annotated SSH-signed tag whose local and remote tag objects both target that
-exact commit before a GitHub draft or R2 object can be published.
+Production releases are built by the GitHub-hosted `production-release`
+workflow from a clean commit that exactly matches live `origin/main`. If the
+workflow prepares a patch version, it pushes that commit first and every later
+validation, build, publication, and verification job checks out that exact
+pushed commit.
+
+Before a GitHub Release draft or R2 object is published, the workflow requires
+an annotated SSH-signed `vX.Y.Z` tag whose tag object and peeled commit are on
+origin and whose commit exactly equals the release commit. It verifies an
+existing tag instead of replacing it, and fails rather than producing an
+unsigned source marker. The GitHub Release is a mirror of that tagged source
+and becomes public only after R2 artifact and feed verification succeeds.
+
+The manual Apple Silicon fallback follows the same provenance rule. It is not
+permitted to build or publish from an arbitrary local checkout.
 
 ## Transitional v0.4.0 baseline
 

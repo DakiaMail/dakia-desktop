@@ -22,6 +22,10 @@ if ! command -v curl >/dev/null 2>&1; then
   echo "curl is required for anonymous public-artifact verification." >&2
   exit 1
 fi
+if [[ "$(uname -s)" != "Darwin" ]] && ! command -v python3 >/dev/null 2>&1; then
+  echo "python3 is required for portable macOS artifact metadata verification." >&2
+  exit 1
+fi
 if [[ -z "${R2_ACCESS_KEY_ID:-}" || -z "${R2_SECRET_ACCESS_KEY:-}" || -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]]; then
   echo "R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, and CLOUDFLARE_ACCOUNT_ID are required." >&2
   exit 1
@@ -68,7 +72,6 @@ if ! cmp -s "$expected_checksums" "$checksums_file"; then
   exit 1
 fi
 
-"$root_dir/scripts/verify-macos-release-dmg.sh" "$apple_dmg"
 node "$root_dir/scripts/verify-updater-signature.mjs" "$apple_update" "$apple_signature" "$root_dir/apps/desktop/src-tauri/tauri.conf.json"
 
 updater_verify_dir="$work_dir/updater-archive"
@@ -79,8 +82,39 @@ if [[ ! -d "$updater_app" ]]; then
   echo "Updater archive is missing Dakia.app." >&2
   exit 1
 fi
-"$root_dir/scripts/verify-macos-release-app.sh" "$updater_app"
-updater_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$updater_app/Contents/Info.plist")"
+if [[ "$(uname -s)" == "Darwin" || -n "${DAKIA_TEST_PLIST_BUDDY:-}" ]]; then
+  "$root_dir/scripts/verify-macos-release-dmg.sh" "$apple_dmg"
+  "$root_dir/scripts/verify-macos-release-app.sh" "$updater_app"
+  plist_buddy="${DAKIA_TEST_PLIST_BUDDY:-/usr/libexec/PlistBuddy}"
+  updater_version="$("$plist_buddy" -c 'Print :CFBundleShortVersionString' "$updater_app/Contents/Info.plist")"
+else
+  ci_verification="${DAKIA_MACOS_CI_VERIFICATION:-}"
+  if [[ -z "$ci_verification" || ! -s "$ci_verification" ]]; then
+    echo "Non-macOS publication requires the macOS builder verification record." >&2
+    exit 1
+  fi
+  checksums_sha256="$(shasum -a 256 "$checksums_file" | awk '{ print $1 }')"
+  node - "$ci_verification" "$tag" "$(tr -d '\n' <"$source_marker")" "$checksums_sha256" <<'NODE'
+const { readFileSync } = require("node:fs");
+const [recordPath, tag, sourceCommit, checksumsSha256] = process.argv.slice(2);
+const record = JSON.parse(readFileSync(recordPath, "utf8"));
+if (
+  record.tag !== tag ||
+  record.source_commit !== sourceCommit ||
+  record.checksums_sha256 !== checksumsSha256 ||
+  record.verification !== "scripts/build-local-macos-release.sh completed"
+) {
+  throw new Error("macOS builder verification record does not bind the exact release assets.");
+}
+NODE
+  updater_version="$(python3 - "$updater_app/Contents/Info.plist" <<'PY'
+import plistlib
+import sys
+with open(sys.argv[1], "rb") as plist:
+    print(plistlib.load(plist)["CFBundleShortVersionString"])
+PY
+)"
+fi
 if [[ "$updater_version" != "$version" ]]; then
   echo "Updater app version '$updater_version' does not match '$version'." >&2
   exit 1
@@ -141,6 +175,7 @@ publication_state_key="macos/latest/publication.json"
 apple_dmg_key="$release_prefix/Dakia-Apple-Silicon.dmg"
 apple_update_key="$release_prefix/Dakia-aarch64.app.tar.gz"
 apple_signature_key="$apple_update_key.sig"
+apple_checksums_key="$release_prefix/SHA256SUMS.txt"
 curl_options=(--silent --show-error --location --proto '=https' --connect-timeout 15 --max-time 90 --retry 3 --retry-delay 1 --retry-max-time 180)
 
 fetch_public_file() {
@@ -368,11 +403,13 @@ immutable_cache="public, max-age=31536000, immutable"
 upload_immutable "$apple_dmg_key" "$apple_dmg" "application/x-apple-diskimage" "Dakia-$version-Apple-Silicon.dmg" "$immutable_cache"
 upload_immutable "$apple_update_key" "$apple_update" "application/gzip" "Dakia-$version-aarch64.app.tar.gz" "$immutable_cache"
 upload_immutable "$apple_signature_key" "$apple_signature" "text/plain; charset=utf-8" "Dakia-$version-aarch64.app.tar.gz.sig" "$immutable_cache"
+upload_immutable "$apple_checksums_key" "$checksums_file" "text/plain; charset=utf-8" "SHA256SUMS.txt" "$immutable_cache"
 
 # Anonymous downloads must match the signed source before either mutable object can move.
 verify_public_copy "$apple_update_key" "$apple_update"
 verify_public_copy "$apple_signature_key" "$apple_signature"
 verify_public_copy "$apple_dmg_key" "$apple_dmg"
+verify_public_copy "$apple_checksums_key" "$checksums_file"
 
 # Serialize the stable DMG + latest.json pair. If a run stops after claiming,
 # only the same tag/source may resume until latest.json reaches that version.
@@ -429,7 +466,167 @@ if ! public_copy_matches "$stable_dmg_key" "$apple_dmg"; then
 fi
 verify_public_copy "$stable_dmg_key" "$apple_dmg"
 
+# Optional hosted-runner assets use the Tauri v2 names documented in
+# updater-manifest.mjs. Each platform directory contains exactly its installer,
+# updater/installer, detached signature, and an ordered SHA256SUMS.txt covering
+# those two distributable files. Preflight every present directory before any
+# optional-platform mutation so one malformed platform cannot advance another.
+validate_optional_platform() {
+  local platform_name="$1" platform_dir="$2" installer_name="$3" updater_name="$4"
+  local installer="$platform_dir/$installer_name" updater="$platform_dir/$updater_name"
+  local signature="$updater.sig" platform_checksums="$platform_dir/SHA256SUMS.txt"
+  local expected_platform_checksums="$work_dir/$platform_name-SHA256SUMS.expected" artifact
+
+  for artifact in "$installer" "$updater" "$signature" "$platform_checksums"; do
+    if [[ ! -s "$artifact" ]]; then
+      echo "Missing or empty $platform_name release artifact: $artifact" >&2
+      exit 1
+    fi
+  done
+  if find "$platform_dir" -mindepth 1 -maxdepth 1 -type f ! -name "$installer_name" ! -name "$updater_name" ! -name "$updater_name.sig" ! -name SHA256SUMS.txt | grep -q .; then
+    echo "$platform_dir contains files outside the expected $platform_name release allowlist." >&2
+    exit 1
+  fi
+  (
+    cd "$platform_dir"
+    shasum -a 256 "$installer_name" "$updater_name.sig"
+  ) >"$expected_platform_checksums"
+  if ! cmp -s "$expected_platform_checksums" "$platform_checksums"; then
+    echo "$platform_name/SHA256SUMS.txt must exactly verify the updater installer and signature." >&2
+    exit 1
+  fi
+  node "$root_dir/scripts/verify-updater-signature.mjs" "$updater" "$signature" "$root_dir/apps/desktop/src-tauri/tauri.conf.json"
+}
+
+publish_optional_platform() {
+  local platform="$1" platform_name="$2" platform_dir="$3" installer_name="$4" updater_name="$5"
+  local installer_content_type="$6"
+  local installer="$platform_dir/$installer_name" updater="$platform_dir/$updater_name"
+  local signature="$updater.sig"
+  local platform_prefix="$platform_name/$tag" platform_manifest_key="$platform_name/latest/latest.json"
+  local installer_key="$platform_prefix/$installer_name" updater_key="$platform_prefix/$updater_name"
+  local signature_key="$updater_key.sig" checksums_key="$platform_prefix/SHA256SUMS.txt" current_manifest="$work_dir/$platform_name-latest-before.json"
+  local authenticated_current="$work_dir/$platform_name-latest-authenticated-before.json"
+  local candidate_manifest="$work_dir/$platform_name-latest-candidate.json"
+  local authenticated_after="$work_dir/$platform_name-latest-authenticated-after.json"
+  local public_after="$work_dir/$platform_name-latest-public-after.json"
+  local current_status current_etag existing_platform_version relation platform_resuming=false manifest_written=false
+
+  current_status="$(fetch_public_file "$platform_manifest_key" "$current_manifest")"
+  if [[ "$current_status" == "200" ]]; then
+    node "$root_dir/scripts/updater-manifest.mjs" validate --platform "$platform" --manifest "$current_manifest" --tauri-config "$root_dir/apps/desktop/src-tauri/tauri.conf.json"
+    if ! current_etag="$(
+      AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" AWS_DEFAULT_REGION="auto" \
+        aws s3api get-object --bucket "$bucket" --key "$platform_manifest_key" --endpoint-url "$r2_endpoint" \
+          --no-cli-pager --query ETag --output text "$authenticated_current"
+    )" || ! cmp -s "$current_manifest" "$authenticated_current"; then
+      echo "Authenticated and public $platform_name updater manifests must be the same current bytes." >&2
+      exit 1
+    fi
+    existing_platform_version="$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).version)' "$current_manifest")"
+    relation="$(version_relation "$version" "$existing_platform_version")"
+    case "$relation" in
+      1) ;;
+      0)
+        node - "$current_manifest" "$version" "$download_origin/$updater_key" "$signature" "$notes_file" "$platform" <<'NODE'
+const { readFileSync } = require("node:fs");
+const [manifestPath, version, url, signaturePath, notesPath, platform] = process.argv.slice(2);
+const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+const entry = manifest.platforms?.[platform];
+if (manifest.version !== version || entry?.url !== url || entry?.signature?.trim() !== readFileSync(signaturePath, "utf8").trim() || manifest.notes !== readFileSync(notesPath, "utf8").trim()) {
+  throw new Error(`The existing ${platform} latest.json is not an exact resume of this candidate.`);
+}
+NODE
+        platform_resuming=true
+        ;;
+      -1) echo "Refusing to publish $tag: public $platform_name updater version $existing_platform_version is newer." >&2; exit 1 ;;
+      *) echo "Unable to compare candidate $version with public $platform_name updater version $existing_platform_version." >&2; exit 1 ;;
+    esac
+  elif [[ "$current_status" != "404" ]]; then
+    echo "Public $platform_name updater manifest lookup failed (HTTP $current_status)." >&2
+    exit 1
+  fi
+
+  upload_immutable "$installer_key" "$installer" "$installer_content_type" "$installer_name" "$immutable_cache"
+  upload_immutable "$signature_key" "$signature" "text/plain; charset=utf-8" "$updater_name.sig" "$immutable_cache"
+  upload_immutable "$checksums_key" "$platform_dir/SHA256SUMS.txt" "text/plain; charset=utf-8" "SHA256SUMS.txt" "$immutable_cache"
+  verify_public_copy "$installer_key" "$installer"
+  verify_public_copy "$signature_key" "$signature"
+  verify_public_copy "$checksums_key" "$platform_dir/SHA256SUMS.txt"
+
+  if [[ "$platform_resuming" == true ]]; then
+    echo "Verified exact $platform_name R2 resume for $tag."
+    return
+  fi
+
+  node "$root_dir/scripts/updater-manifest.mjs" create --platform "$platform" --version "$version" \
+    --pub-date "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" --notes-file "$notes_file" \
+    --url "$download_origin/$updater_key" --signature-file "$signature" \
+    --tauri-config "$root_dir/apps/desktop/src-tauri/tauri.conf.json" --output "$candidate_manifest"
+  node "$root_dir/scripts/updater-manifest.mjs" validate --platform "$platform" --manifest "$candidate_manifest" --tauri-config "$root_dir/apps/desktop/src-tauri/tauri.conf.json"
+  dakia_require_release_mutation_provenance "$root_dir" || exit 1
+  if [[ "$current_status" == "200" ]]; then
+    if AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" AWS_DEFAULT_REGION="auto" \
+      aws s3api put-object --bucket "$bucket" --key "$platform_manifest_key" --body "$candidate_manifest" \
+        --content-type "application/json; charset=utf-8" --content-disposition 'attachment; filename="latest.json"' \
+        --cache-control "no-store, max-age=0" --if-match "$current_etag" --endpoint-url "$r2_endpoint" --no-cli-pager >/dev/null; then
+      manifest_written=true
+    fi
+  elif AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" AWS_DEFAULT_REGION="auto" \
+    aws s3api put-object --bucket "$bucket" --key "$platform_manifest_key" --body "$candidate_manifest" \
+      --content-type "application/json; charset=utf-8" --content-disposition 'attachment; filename="latest.json"' \
+      --cache-control "no-store, max-age=0" --if-none-match "*" --endpoint-url "$r2_endpoint" --no-cli-pager >/dev/null; then
+    manifest_written=true
+  fi
+  if ! AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" AWS_DEFAULT_REGION="auto" \
+    aws s3api get-object --bucket "$bucket" --key "$platform_manifest_key" --endpoint-url "$r2_endpoint" \
+      --no-cli-pager "$authenticated_after" >/dev/null || \
+    ! cmp -s "$candidate_manifest" "$authenticated_after" || \
+    ! public_manifest_converges_to_key "$platform_manifest_key" "$authenticated_after" "$public_after"; then
+    if [[ "$manifest_written" == true ]]; then
+      echo "Published $platform_name latest.json did not converge to the exact candidate." >&2
+    else
+      echo "Another publisher won $platform_name latest.json with a different candidate." >&2
+    fi
+    exit 1
+  fi
+  echo "Published signed $platform_name updater and installer for $tag."
+}
+
+public_manifest_converges_to_key() {
+  local key="$1" authoritative="$2" public_copy="$3" status attempt
+  for attempt in 1 2 3 4 5; do
+    if status="$(fetch_public_file "$key" "$public_copy")" && [[ "$status" == "200" ]] && cmp -s "$authoritative" "$public_copy"; then
+      return 0
+    fi
+    if [[ "$attempt" != "5" ]]; then sleep 1; fi
+  done
+  return 1
+}
+
+publish_optional_platforms() {
+  if [[ -d "$asset_dir/linux" ]]; then
+    validate_optional_platform "linux" "$asset_dir/linux" \
+      "Dakia_${version}_amd64.AppImage" "Dakia_${version}_amd64.AppImage"
+  fi
+  if [[ -d "$asset_dir/windows" ]]; then
+    validate_optional_platform "windows" "$asset_dir/windows" \
+      "Dakia_${version}_x64-setup.exe" "Dakia_${version}_x64-setup.exe"
+  fi
+  if [[ -d "$asset_dir/linux" ]]; then
+    publish_optional_platform "linux-x86_64" "linux" "$asset_dir/linux" \
+      "Dakia_${version}_amd64.AppImage" "Dakia_${version}_amd64.AppImage" \
+      "application/vnd.appimage"
+  fi
+  if [[ -d "$asset_dir/windows" ]]; then
+    publish_optional_platform "windows-x86_64" "windows" "$asset_dir/windows" \
+      "Dakia_${version}_x64-setup.exe" "Dakia_${version}_x64-setup.exe" \
+      "application/vnd.microsoft.portable-executable"
+  fi
+}
+
 if [[ "$resuming" == true ]]; then
+  publish_optional_platforms
   echo "Verified exact R2 resume for $tag; latest.json and stable DMG are current."
   exit 0
 fi
@@ -484,5 +681,6 @@ else
   exit 1
 fi
 
+publish_optional_platforms
 echo "Published signed Apple Silicon updater and download for $tag."
 echo "Updater manifest: $download_origin/$manifest_key"

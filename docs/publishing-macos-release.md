@@ -1,24 +1,35 @@
 # Publishing a macOS Release
 
-Dakia releases are built, signed, notarized, and published from the trusted
-Apple Silicon release runner. R2 remains the production updater host. A GitHub
-Release mirrors the locally built assets for public downloads. The release path
-is Apple Silicon only.
+The normal production release path is the GitHub-hosted
+`production-release` workflow, scheduled for 02:17 UTC. It builds the macOS
+Apple Silicon release on `macos-15` after the complete verification suite has
+passed, imports the Developer ID identity, notarizes and staples the release,
+and publishes it alongside the Linux x64 and Windows x64 artifacts. It runs
+only from an exact live `origin/main` commit and creates an annotated
+SSH-signed source tag before publication.
 
-Every night at 02:17 local time, a Codex automation runs the release path on
-the primary Apple Silicon Mac from `main`, but only if `main` contains commits
-after the version in the public updater manifest. The local release Mac must
-have its Keychain identities, notarization profile, updater key, and R2
-credentials available. It creates the next patch version, writes a concise
-user-facing release note, verifies, publishes to R2, and then publishes the
-matching GitHub Release.
+The macOS updater remains R2-hosted at:
 
-Before a release, ensure the intended code is present and the version matches
-`package.json`, the Cargo workspace, and `apps/desktop/src-tauri/tauri.conf.json`.
-The release commands validate their required signing, notarization, OAuth, and
-R2 credentials directly, so there is no separate manual preflight checklist.
+```text
+https://downloads.dakiamail.com/macos/latest/latest.json
+```
 
-## Commands
+The workflow uploads immutable release objects beneath
+`https://downloads.dakiamail.com/macos/vX.Y.Z/`, writes `latest.json` only
+after the candidate has passed its checks, and makes the matching GitHub
+Release public only after R2 is publicly converged. The final workflow job
+performs anonymous public verification; a failed verification is not a
+successful release.
+
+## Manual Apple Silicon fallback
+
+Use this path only for an exceptional manual recovery/release on a trusted
+Apple Silicon Mac. It produces the macOS part of a release; the hosted
+workflow is the normal cross-platform producer. Start from a clean local
+`main` that exactly matches cached and live `origin/main` and has the required
+Developer ID identity, `dakia-notary` Keychain profile, updater signing key,
+Google Desktop OAuth values, R2 credentials, GitHub authentication, and the
+trusted SSH tag-signing key.
 
 ```bash
 npm run verify:local
@@ -31,77 +42,16 @@ npm run release:publish -- vX.Y.Z "$PWD/release-assets/vX.Y.Z"
 npm run release:github:publish -- vX.Y.Z "$PWD/release-assets/vX.Y.Z"
 ```
 
-The verification command runs Rust formatting, Clippy, Rust tests, TypeScript,
-formatting, frontend tests, release-script tests, and the frontend build. It no
-longer builds a separate packaged app: the release builder verifies the actual
-signed final artifact instead.
+`release:build` signs, notarizes, staples, and verifies the final application
+and DMG before it creates and Tauri-signs the updater archive. The local
+publisher refuses to replace immutable versioned objects, anonymously
+byte-verifies uploads, validates the updater manifest, and publishes the feed
+last. The GitHub scripts require an exact source tag and release assets; they
+create and verify a draft before R2 mutation, then publish that verified draft
+only after R2 confirms the candidate. They do not clobber assets or replace a
+release on mismatch.
 
-The builder:
-
-1. assembles, Developer ID signs, and verifies the Apple Silicon app;
-2. verifies the packaged app and CLI executables, Apple-Silicon architecture,
-   matching Developer ID ownership/version, classifier resources, legal
-   notices, and compiled Google OAuth configuration without runtime overrides;
-3. runs isolated packaged CLI and app startup checks on the release Mac;
-4. notarizes and staples the app;
-5. rebuilds, notarizes, staples, mounts, and verifies the DMG;
-6. archives that same final app, extracts and repeats the app/CLI acceptance
-   checks on the archive contents, then signs the exact archive bytes for Tauri.
-
-The publisher re-verifies the DMG, cryptographically verifies and extracts the
-updater archive, checks the archived app version and packaged-app acceptance,
-uses immutable versioned R2 paths, anonymously verifies the published bytes,
-validates the updater manifest, and publishes `latest.json` only after all
-artifact checks pass.
-
-## GitHub mirror order
-
-GitHub is a public download mirror, not the updater host. Create and verify its
-draft before any R2 mutation, so the exact signed local artifacts have already
-been checked by both services before the updater feed can move:
-
-```bash
-release_tag="vX.Y.Z"
-release_dir="$PWD/release-assets/$release_tag"
-git tag -s "$release_tag" -m "Dakia $release_tag"
-git verify-tag "$release_tag"
-git push origin "refs/tags/$release_tag"
-npm run release:github:draft -- "$release_tag" "$release_dir"
-npm run release:publish -- "$release_tag" "$release_dir"
-npm run release:github:publish -- "$release_tag" "$release_dir"
-```
-
-The draft stage requires a clean local `main` whose `HEAD`, cached
-`origin/main`, and live `git ls-remote origin refs/heads/main` all name the
-same commit, the explicit `DakiaMail/dakia-desktop` origin, a pushed annotated
-SSH-signed tag whose commit exactly equals `HEAD`, and working GitHub
-authentication. It
-requires exactly the DMG, updater archive, detached signature, and
-`SHA256SUMS.txt`; verifies the local checksum file; creates a draft targeted at
-the exact commit; then downloads every draft asset and compares it byte-for-byte
-with the local input. The release title and body must also exactly match the
-candidate (`Dakia vX.Y.Z` and `release-notes.md`).
-
-Only after the R2 publisher has anonymously exposed an exact updater manifest
-for that version, archive URL, and updater signature may the final GitHub stage
-make the draft public. It rechecks every draft property and asset first, then
-downloads all four public GitHub assets and validates both their bytes and their
-downloaded `SHA256SUMS.txt`.
-
-Both stages are safe to retry: an existing GitHub draft is accepted only after
-the full exact comparison succeeds. An already-public release is accepted only
-as an exact R2 resume: public `latest.json` must already contain the candidate
-version, archive URL, signature, and notes, and the anonymous versioned updater
-archive, detached signature, and DMG must byte-match the local artifacts. A
-newer R2 candidate therefore requires a GitHub draft and stops before any R2
-mutation if its GitHub Release is already public. Each external release
-mutation repeats the live-main provenance check immediately beforehand. The
-scripts never use `--clobber`, delete a release, or replace assets. A mismatch
-is a hard stop; remediation or removal requires separate approval.
-
-The R2 publisher also invokes the draft verifier itself before its first remote
-mutation. This makes the required ordering fail closed even if an operator
-calls `release:publish` directly.
-
-For updater key custody and artifact details, see
-[Signed Desktop Updates](updater-release.md).
+The locally built macOS asset directory contains the Apple Silicon DMG,
+updater archive and detached signature, release notes, checksums, and source
+commit marker. Consult [Signed Desktop Updates](updater-release.md) for the
+cross-platform artifact layout and key-custody requirements.

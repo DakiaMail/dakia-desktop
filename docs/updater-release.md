@@ -1,110 +1,68 @@
 # Signed Desktop Updates
 
-Dakia publishes signed Apple Silicon updates through Tauri's native updater.
-The installed app downloads over the native transport, verifies the archive
-with its embedded public key, and installs only after the user chooses
-**Install and Restart**. GitHub Releases mirror the locally built assets for
-public downloads, but they do not replace the R2 updater feed. GitHub Actions,
-staging channels, and Intel builds are not part of this release path.
+Dakia's hosted production workflow publishes one signed updater candidate for
+each supported platform: macOS Apple Silicon, Linux x64, and Windows x64. The
+installed app downloads its own platform feed over HTTPS and Tauri verifies the
+artifact with the embedded updater public key before an update is installed.
+GitHub Releases are public mirrors, never the updater host.
 
-## Local trust material
+## Feeds and versioned objects
+
+Each platform has an independent feed and immutable versioned-object prefix:
+
+| Platform | Feed | Versioned prefix |
+| --- | --- | --- |
+| macOS Apple Silicon | `macos/latest/latest.json` | `macos/vX.Y.Z/` |
+| Linux x64 | `linux/latest/latest.json` | `linux/vX.Y.Z/` |
+| Windows x64 | `windows/latest/latest.json` | `windows/vX.Y.Z/` |
+
+All paths are rooted at `https://downloads.dakiamail.com/`. The feeds carry
+the same release version, but only the single updater platform appropriate to
+that operating system. Versioned artifacts are immutable; `latest.json` is the
+only moving updater pointer and is written after the platform candidate is
+fully checked.
+
+The release artifacts are:
+
+- macOS: `Dakia_<version>_aarch64.dmg`, `Dakia-aarch64.app.tar.gz`, and
+  `Dakia-aarch64.app.tar.gz.sig`;
+- Linux: `Dakia_<version>_amd64.AppImage` and its `.sig`;
+- Windows: `Dakia_<version>_x64-setup.exe` and its `.sig`.
+
+Each platform directory also has a `SHA256SUMS.txt` for its distributable
+files. macOS release inputs additionally contain `release-notes.md` and
+`source-commit.txt` for publication/provenance checks.
+
+## Hosted release gate
+
+`production-release` first decides whether commits exist after the current
+public version. If a version bump is needed, it prepares and pushes it to
+`main`, then checks out that exact pushed commit for every later job. The
+complete Rust and frontend verification suite must pass before any platform
+build begins. The macOS builder signs, notarizes, staples, and verifies its
+final updater archive; Linux and Windows build their native updater installers
+with platform-specific feed configuration. Windows signing is conditional on
+the configured Windows certificate.
+
+Before external publication, the workflow creates or verifies an annotated
+SSH-signed `vX.Y.Z` tag that points exactly to the release commit. It stages a
+GitHub Release, publishes and anonymously verifies immutable R2 objects and
+all three manifests, then makes the verified GitHub Release public. An
+anonymous final job checks manifests, checksums, updater signatures,
+versioned-object bytes, tag provenance, and GitHub Release assets. Any failed
+gate leaves the workflow unsuccessful and does not assert a completed release.
+
+## Key custody and manual fallback
 
 The permanent updater public key is embedded in
-`apps/desktop/src-tauri/tauri.conf.json`. Its private key stays on the primary
-release Mac at `~/.tauri/dakia-updater.key` with mode `0600`; store its password
-in the login Keychain:
+`apps/desktop/src-tauri/tauri.conf.json`; its private counterpart must remain
+restricted to the production release environment and the trusted local
+Apple Silicon fallback machine. The hosted macOS job also needs its Developer
+ID certificate and notarization API credentials. Store only the necessary
+values as environment-scoped GitHub secrets; never commit signing keys,
+certificate material, OAuth client secrets, or R2 credentials.
 
-```bash
-./scripts/store-local-release-secret.sh updater-password
-```
-
-Keep an encrypted offline backup of both values. Losing them permanently breaks
-updates for installed builds that trust this key.
-
-The release Mac also needs a valid Developer ID Application certificate, a
-working `dakia-notary` Keychain profile, the Google Desktop OAuth client secret,
-and R2 credentials scoped to the `dakia-releases` bucket. Store the latter
-without adding them to shell history:
-
-```bash
-./scripts/store-local-release-secret.sh google-oauth-client-secret
-./scripts/store-local-release-secret.sh r2-access-key-id
-./scripts/store-local-release-secret.sh r2-secret-access-key
-```
-
-Release scripts read these Keychain items only into their own process. The OAuth
-secret is supplied only to the Dakia Rust compiler process that needs it.
-
-## Artifacts and publication
-
-The production updater endpoint is:
-
-```text
-https://downloads.dakiamail.com/macos/latest/latest.json
-```
-
-Local artifacts live under the ignored `release-assets/` directory:
-
-```text
-Dakia_<version>_aarch64.dmg
-Dakia-aarch64.app.tar.gz
-Dakia-aarch64.app.tar.gz.sig
-release-notes.md
-SHA256SUMS.txt
-source-commit.txt (local provenance marker; not uploaded)
-```
-
-The updater archive is made from the final Developer ID signed, notarized, and
-stapled app, including the CLI sidecar, ONNX Runtime, classifier resources, and
-required notices.
-
-## Release sequence
-
-```bash
-npm run verify:local
-npm run release:build -- vX.Y.Z
-git tag -s vX.Y.Z -m "Dakia vX.Y.Z"
-git verify-tag vX.Y.Z
-git push origin refs/tags/vX.Y.Z
-npm run release:github:draft -- vX.Y.Z "$PWD/release-assets/vX.Y.Z"
-npm run release:publish -- vX.Y.Z "$PWD/release-assets/vX.Y.Z"
-npm run release:github:publish -- vX.Y.Z "$PWD/release-assets/vX.Y.Z"
-```
-
-`verify:local` runs the repository's Rust and frontend checks without producing
-a redundant packaged app. `release:build` builds the Apple Silicon app, signs
-and verifies it, notarizes and staples it, rebuilds and verifies the DMG, then
-creates the final updater archive. The extracted archive must pass the same
-Apple-Silicon app and isolated bundled-CLI artifact checks before the archive is
-Tauri-signed. This is artifact acceptance, not an installed-client
-update/relaunch test.
-
-`release:publish` verifies the final DMG, refuses to overwrite versioned R2
-objects, uploads the immutable DMG/archive/signature, and anonymously downloads
-and byte-compares each. It generates and validates the Apple-Silicon-only Tauri
-manifest, updates the stable DMG alias, and writes `latest.json` last. Therefore
-a failed upload or public-byte check leaves installed clients on the previous
-release.
-
-There is no staging update feed or installed-client acceptance harness in this
-early-development workflow. Unit tests cover the updater interface and manifest
-structure; a real update/install/relaunch test should be restored before relying
-on automatic updates for broad distribution.
-
-Existing Intel installs are no longer supported and will not receive a matching
-entry in future updater manifests. The public website links only to the Apple
-Silicon download.
-
-## Source-control marker
-
-After the local build is proven, push a signed `vX.Y.Z` Git tag as the immutable
-source marker. It does not trigger a build. Each release mutation rechecks that
-`HEAD`, cached `origin/main`, and live `git ls-remote origin refs/heads/main`
-are identical. Create and byte-verify the GitHub Release draft from that
-verified tag before any R2 mutation, then publish R2 and finally make the
-already-verified GitHub draft public. An already-public GitHub Release can only
-resume when public `latest.json` is already the exact same updater candidate;
-the anonymous versioned updater archive, signature, and DMG must also
-byte-match the local artifacts. The scripts repeat live-main provenance before
-each external release mutation; otherwise the release stops. Never rebuild
-assets on GitHub.
+For an exceptional manual macOS release, use the commands and preconditions in
+[Publishing a macOS Release](publishing-macos-release.md). That fallback must
+keep the same signed-tag provenance and GitHub-draft → R2 → public-GitHub
+ordering. It does not replace the hosted cross-platform nightly path.
