@@ -39,6 +39,15 @@ const MESSAGE_CONTENT_CACHE_RECENT_WINDOW_DAYS: i64 = 30;
 /// part when interpreted by the sectioned MIME planner.
 const ATTACHMENT_PRESENTATION_CACHE_VERSION: &str = "2";
 const ATTACHMENT_PRESENTATION_VERSION: i64 = 2;
+/// Classification policy is versioned independently from the bundled model.
+/// A policy change must re-run model-owned classifications while preserving
+/// categories the user chose explicitly.
+const CLASSIFICATION_POLICY_VERSION: &str = "2";
+/// Prevent two concurrently running app/CLI versions from repeatedly claiming
+/// different classifier revisions and requeueing each other's results. A
+/// normal batch is far shorter than this; an inactive/crashed process yields
+/// automatically without a durable lock.
+const CLASSIFICATION_REVISION_ACTIVITY_SECONDS: i64 = 90;
 /// Foreground readers wait at most 60 seconds for another body fetch. Keep a
 /// short grace period beyond that before a crashed process's lease may be
 /// replaced, while preserving fresh claims across concurrently open processes.
@@ -309,6 +318,53 @@ pub struct CachedMessageContent {
     pub attachments: Vec<Attachment>,
 }
 
+/// One model decision tied to the exact catalogue evidence used for inference.
+/// Applying it is compare-and-swap: a concurrent sync that changes any input
+/// makes the result stale instead of letting it overwrite newer evidence.
+#[derive(Debug, Clone)]
+pub struct ModelClassificationUpdate {
+    id: String,
+    category: String,
+    confidence: Option<f64>,
+    expected_from_name: Option<String>,
+    expected_from_address: String,
+    expected_subject: String,
+    expected_snippet: String,
+    expected_body_text: String,
+    expected_signals: String,
+    expected_known_correspondence: bool,
+    expected_owner: String,
+    expected_model_revision: String,
+    expected_policy_revision: &'static str,
+}
+
+impl ModelClassificationUpdate {
+    pub fn from_message(
+        message: &MailSummary,
+        category: String,
+        confidence: Option<f64>,
+        known_correspondence: bool,
+        owner: &str,
+        model_revision: &str,
+    ) -> Self {
+        Self {
+            id: message.id.clone(),
+            category,
+            confidence,
+            expected_from_name: message.from_name.clone(),
+            expected_from_address: message.from_address.clone(),
+            expected_subject: message.subject.clone(),
+            expected_snippet: message.snippet.clone(),
+            expected_body_text: message.body_text.clone(),
+            expected_signals: message.classification_signals.clone(),
+            expected_known_correspondence: known_correspondence,
+            expected_owner: owner.to_owned(),
+            expected_model_revision: model_revision.to_owned(),
+            expected_policy_revision: CLASSIFICATION_POLICY_VERSION,
+        }
+    }
+}
+
 /// Minimal mailbox metadata used to refresh classification signals without
 /// downloading or changing an email's body or user-selected category.
 #[derive(Debug, Clone, FromRow)]
@@ -529,6 +585,7 @@ impl Store {
             "CREATE TABLE IF NOT EXISTS mailbox_catalog_state (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, remote_name TEXT NOT NULL, uid_validity INTEGER NOT NULL, remote_total INTEGER NOT NULL DEFAULT 0, historical_complete INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox))",
             "CREATE TABLE IF NOT EXISTS mail_rebuild_jobs (account_id TEXT PRIMARY KEY, phase TEXT NOT NULL, completed INTEGER NOT NULL DEFAULT 0, total INTEGER, updated_at TEXT NOT NULL)",
             "CREATE TABLE IF NOT EXISTS deleted_account_tombstones (account_id TEXT PRIMARY KEY, deleted_at TEXT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS sent_correspondents (account_id TEXT NOT NULL, address TEXT NOT NULL COLLATE NOCASE, PRIMARY KEY(account_id, address))",
         ] {
             sqlx::query(statement)
                 .execute(&self.pool)
@@ -569,6 +626,7 @@ impl Store {
             "CREATE TRIGGER IF NOT EXISTS mailbox_action_tombstones_require_account BEFORE INSERT ON mailbox_action_tombstones WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
             "CREATE TRIGGER IF NOT EXISTS mailbox_catalog_state_require_account BEFORE INSERT ON mailbox_catalog_state WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
             "CREATE TRIGGER IF NOT EXISTS mail_rebuild_jobs_require_account BEFORE INSERT ON mail_rebuild_jobs WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS sent_correspondents_require_account BEFORE INSERT ON sent_correspondents WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
         ] {
             sqlx::query(statement)
                 .execute(&self.pool)
@@ -715,6 +773,7 @@ impl Store {
                 .await?;
             }
         }
+        self.initialize_classification_policy().await?;
         self.migrate_attachment_presentation_metadata().await?;
         if !sync_state_exists {
             sqlx::query("INSERT OR IGNORE INTO mailbox_sync_state(account_id, mailbox, initialized_at) SELECT id, 'INBOX', ? FROM accounts")
@@ -725,6 +784,10 @@ impl Store {
         if migrated_legacy_profile {
             self.restore_legacy_desktop_profile().await?;
         }
+        // Legacy Sent rows are restored above. Backfill only after every
+        // source of existing messages has run, otherwise the one-time version
+        // marker would permanently skip those correspondents.
+        self.migrate_sent_correspondents().await?;
         // Replace the legacy body FTS before any migration-time message
         // updates. External-content FTS triggers must match the active table
         // definition or SQLite can report a malformed database.
@@ -738,6 +801,156 @@ impl Store {
                 self.rebuild_threads_for_account(&account_id).await?;
             }
         }
+        Ok(())
+    }
+
+    /// Fresh databases need a policy value so later write reservations have a
+    /// stable row. Existing values are not changed here: upgrades are guarded
+    /// by the owner-scoped classifier claim below.
+    async fn initialize_classification_policy(&self) -> Result<()> {
+        sqlx::query("INSERT OR IGNORE INTO app_meta(key, value) VALUES ('classification_policy_version', ?)")
+            .bind(CLASSIFICATION_POLICY_VERSION)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Claims or renews the current classifier model and policy for one drain.
+    /// A different live owner fails closed; a clean owner releases immediately
+    /// and the activity timeout remains only for crash recovery.
+    pub async fn claim_classification_revision(&self, owner: &str, revision: &str) -> Result<()> {
+        if owner.trim().is_empty() {
+            return Err(anyhow!("classification owner cannot be empty"));
+        }
+        if revision.trim().is_empty() {
+            return Err(anyhow!("classification model revision cannot be empty"));
+        }
+        let mut transaction = self.pool.begin().await?;
+        // Serialize the read/compare/update across CLI and desktop processes.
+        sqlx::query(
+            "UPDATE app_meta SET value = value WHERE key = 'classification_policy_version'",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        let current_model: Option<String> = sqlx::query_scalar(
+            "SELECT value FROM app_meta WHERE key = 'classification_model_revision'",
+        )
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let current_policy: Option<String> = sqlx::query_scalar(
+            "SELECT value FROM app_meta WHERE key = 'classification_policy_version'",
+        )
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let current_owner: Option<String> = sqlx::query_scalar(
+            "SELECT value FROM app_meta WHERE key = 'classification_revision_owner'",
+        )
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let last_activity: Option<String> = sqlx::query_scalar(
+            "SELECT value FROM app_meta WHERE key = 'classification_revision_active_at'",
+        )
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let now = Utc::now().timestamp();
+        let another_owner_is_active = current_owner.as_deref().is_some_and(|value| value != owner)
+            && last_activity
+                .as_deref()
+                .and_then(|value| value.parse::<i64>().ok())
+                .is_some_and(|timestamp| {
+                    now.saturating_sub(timestamp) < CLASSIFICATION_REVISION_ACTIVITY_SECONDS
+                });
+        if another_owner_is_active {
+            return Err(anyhow!(
+                "another email classifier is active; retry after it finishes"
+            ));
+        }
+        let revisions_differ = current_model.as_deref() != Some(revision)
+            || current_policy.as_deref() != Some(CLASSIFICATION_POLICY_VERSION);
+        if revisions_differ {
+            sqlx::query("UPDATE messages SET classification_source = NULL, classification_confidence = NULL WHERE classification_source = 'model'")
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::query("INSERT INTO app_meta(key, value) VALUES ('classification_model_revision', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+                .bind(revision)
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::query("INSERT INTO app_meta(key, value) VALUES ('classification_policy_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+                .bind(CLASSIFICATION_POLICY_VERSION)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        sqlx::query("INSERT INTO app_meta(key, value) VALUES ('classification_revision_active_at', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+            .bind(now.to_string())
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("INSERT INTO app_meta(key, value) VALUES ('classification_revision_owner', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+            .bind(owner)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn release_classification_revision(&self, owner: &str) -> Result<()> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE app_meta SET value = value WHERE key = 'classification_policy_version'",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        let current_owner: Option<String> = sqlx::query_scalar(
+            "SELECT value FROM app_meta WHERE key = 'classification_revision_owner'",
+        )
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if current_owner.as_deref() == Some(owner) {
+            sqlx::query("DELETE FROM app_meta WHERE key IN ('classification_revision_owner', 'classification_revision_active_at')")
+                .execute(&mut *transaction)
+                .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn migrate_sent_correspondents(&self) -> Result<()> {
+        let version: Option<String> = sqlx::query_scalar(
+            "SELECT value FROM app_meta WHERE key = 'sent_correspondents_version'",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        if version.as_deref() == Some("1") {
+            return Ok(());
+        }
+
+        let sent_headers = sqlx::query_as::<_, (String, String, String, String)>(
+            "SELECT account_id, to_addresses, cc_addresses, bcc_addresses FROM messages WHERE mailbox = 'Sent' OR mailbox LIKE 'Sent::%'",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut correspondents = HashSet::new();
+        for (account_id, to, cc, bcc) in sent_headers {
+            for address in [to, cc, bcc]
+                .iter()
+                .flat_map(|header| crate::mail::parsed_header_mailboxes(header))
+            {
+                correspondents.insert((account_id.clone(), address.to_lowercase()));
+            }
+        }
+        let mut tx = self.pool.begin().await?;
+        for (account_id, address) in correspondents {
+            sqlx::query(
+                "INSERT OR IGNORE INTO sent_correspondents(account_id, address) VALUES (?, ?)",
+            )
+            .bind(account_id)
+            .bind(address)
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query("INSERT INTO app_meta(key, value) VALUES ('sent_correspondents_version', '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -813,6 +1026,7 @@ impl Store {
                  UNION SELECT account_id FROM mailbox_catalog_state \
                  UNION SELECT account_id FROM mailbox_action_tombstones \
                  UNION SELECT account_id FROM mail_rebuild_jobs \
+                 UNION SELECT account_id FROM sent_correspondents \
              ) AS orphan \
              WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE id = orphan.account_id)",
         )
@@ -831,6 +1045,7 @@ impl Store {
             "DELETE FROM mailbox_catalog_state WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = mailbox_catalog_state.account_id)",
             "DELETE FROM mailbox_action_tombstones WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = mailbox_action_tombstones.account_id)",
             "DELETE FROM mail_rebuild_jobs WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = mail_rebuild_jobs.account_id)",
+            "DELETE FROM sent_correspondents WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = sent_correspondents.account_id)",
         ] {
             sqlx::query(statement).execute(&mut *tx).await?;
         }
@@ -1213,6 +1428,10 @@ impl Store {
             .bind(id.to_string())
             .execute(&mut *tx)
             .await?;
+        sqlx::query("DELETE FROM sent_correspondents WHERE account_id = ?")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("DELETE FROM messages WHERE account_id = ?")
             .bind(id.to_string())
             .execute(&mut *tx)
@@ -1238,6 +1457,7 @@ impl Store {
             "DELETE FROM mailbox_catalog_state WHERE account_id = ?",
             "DELETE FROM mailbox_sync_state WHERE account_id = ?",
             "DELETE FROM mailbox_action_tombstones WHERE account_id = ?",
+            "DELETE FROM sent_correspondents WHERE account_id = ?",
             "DELETE FROM messages WHERE account_id = ?",
         ] {
             sqlx::query(statement)
@@ -3203,6 +3423,27 @@ impl Store {
             .await?)
     }
 
+    /// Returns candidate message IDs whose sender is an RFC-parsed recipient
+    /// of account-local Sent mail. This is stronger People evidence than a
+    /// sender-controlled Reply-To, In-Reply-To, or reply-shaped subject.
+    pub async fn messages_from_known_correspondents(
+        &self,
+        messages: &[MailSummary],
+    ) -> Result<HashSet<String>> {
+        if messages.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let placeholders = vec!["?"; messages.len()].join(",");
+        let sql = format!(
+            "SELECT candidate.id FROM messages candidate JOIN sent_correspondents known ON known.account_id = candidate.account_id AND known.address = candidate.from_address WHERE candidate.id IN ({placeholders})"
+        );
+        let mut query = sqlx::query_scalar::<_, String>(&sql);
+        for message in messages {
+            query = query.bind(&message.id);
+        }
+        Ok(query.fetch_all(&self.pool).await?.into_iter().collect())
+    }
+
     /// Messages eligible for an explicitly requested model reclassification.
     /// User-selected categories are deliberately excluded.
     pub async fn messages_for_model_reclassification(&self) -> Result<Vec<MailSummary>> {
@@ -3229,7 +3470,12 @@ impl Store {
     pub async fn update_classification_signals(&self, updates: &[(String, String)]) -> Result<()> {
         let mut tx = self.pool.begin().await?;
         for (id, signals) in updates {
-            sqlx::query("UPDATE messages SET classification_signals = ? WHERE id = ?")
+            // Evidence changes invalidate only model-owned decisions. Keep the
+            // visible category until the background classifier replaces it,
+            // and never override a user's explicit categorization.
+            sqlx::query("UPDATE messages SET classification_source = CASE WHEN classification_source = 'model' AND classification_signals != ? THEN NULL ELSE classification_source END, classification_confidence = CASE WHEN classification_source = 'model' AND classification_signals != ? THEN NULL ELSE classification_confidence END, classification_signals = ? WHERE id = ?")
+                .bind(signals)
+                .bind(signals)
                 .bind(signals)
                 .bind(id)
                 .execute(&mut *tx)
@@ -3241,19 +3487,39 @@ impl Store {
 
     pub async fn apply_model_classifications(
         &self,
-        classifications: &[(String, String, f64)],
-    ) -> Result<()> {
+        classifications: &[ModelClassificationUpdate],
+    ) -> Result<usize> {
         let mut tx = self.pool.begin().await?;
-        for (id, category, confidence) in classifications {
-            sqlx::query("UPDATE messages SET category = ?, classification_confidence = ?, classification_source = 'model' WHERE id = ? AND (classification_source IS NULL OR classification_source = 'model')")
-                .bind(category)
-                .bind(confidence)
-                .bind(id)
+        let mut applied = 0;
+        // Acquire the SQLite write reservation before checking evidence so a
+        // concurrent sync cannot change signals or Sent relationships between
+        // validation and commit.
+        sqlx::query(
+            "UPDATE app_meta SET value = value WHERE key = 'classification_policy_version'",
+        )
+        .execute(&mut *tx)
+        .await?;
+        for update in classifications {
+            let result = sqlx::query("UPDATE messages SET category = ?, classification_confidence = ?, classification_source = 'model' WHERE id = ? AND from_name IS ? AND from_address = ? AND subject = ? AND snippet = ? AND body_text = ? AND classification_signals = ? AND EXISTS(SELECT 1 FROM sent_correspondents known WHERE known.account_id = messages.account_id AND known.address = messages.from_address) = ? AND EXISTS(SELECT 1 FROM app_meta WHERE key = 'classification_revision_owner' AND value = ?) AND EXISTS(SELECT 1 FROM app_meta WHERE key = 'classification_model_revision' AND value = ?) AND EXISTS(SELECT 1 FROM app_meta WHERE key = 'classification_policy_version' AND value = ?) AND (classification_source IS NULL OR classification_source = 'model')")
+                .bind(&update.category)
+                .bind(update.confidence)
+                .bind(&update.id)
+                .bind(&update.expected_from_name)
+                .bind(&update.expected_from_address)
+                .bind(&update.expected_subject)
+                .bind(&update.expected_snippet)
+                .bind(&update.expected_body_text)
+                .bind(&update.expected_signals)
+                .bind(update.expected_known_correspondence)
+                .bind(&update.expected_owner)
+                .bind(&update.expected_model_revision)
+                .bind(update.expected_policy_revision)
                 .execute(&mut *tx)
                 .await?;
+            applied += result.rows_affected() as usize;
         }
         tx.commit().await?;
-        Ok(())
+        Ok(applied)
     }
 
     pub async fn attachments(&self, message_id: &str) -> Result<Vec<Attachment>> {
@@ -3612,7 +3878,7 @@ async fn persist_message_with_flag_policy(
         FlagUpdatePolicy::CompareAndSwap(expected_flags) => (false, expected_flags),
     };
     let (expected_read, expected_flagged) = expected_flags.unwrap_or_default();
-    sqlx::query("INSERT INTO messages(id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, threading_scanned, recipient_headers_scanned, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, unsubscribe_scanned, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(account_id, mailbox, uid) DO UPDATE SET message_id=excluded.message_id, in_reply_to=excluded.in_reply_to, reference_ids=excluded.reference_ids, threading_scanned=1, recipient_headers_scanned=1, subject=excluded.subject, from_name=excluded.from_name, from_address=excluded.from_address, to_addresses=excluded.to_addresses, cc_addresses=excluded.cc_addresses, bcc_addresses=excluded.bcc_addresses, reply_to_addresses=excluded.reply_to_addresses, received_at=excluded.received_at, snippet=CASE WHEN excluded.content_state = 'complete' THEN excluded.snippet ELSE messages.snippet END, body_text=CASE WHEN excluded.content_state = 'complete' THEN excluded.body_text ELSE messages.body_text END, body_html=CASE WHEN excluded.content_state = 'complete' THEN excluded.body_html ELSE messages.body_html END, content_state=CASE WHEN messages.content_state = 'complete' THEN messages.content_state ELSE excluded.content_state END, unsubscribe_kind=CASE WHEN excluded.content_state = 'complete' THEN excluded.unsubscribe_kind ELSE messages.unsubscribe_kind END, unsubscribe_url=CASE WHEN excluded.content_state = 'complete' THEN excluded.unsubscribe_url ELSE messages.unsubscribe_url END, unsubscribe_scanned=CASE WHEN excluded.content_state = 'complete' THEN 1 ELSE messages.unsubscribe_scanned END, is_read=CASE WHEN ? OR (? AND messages.is_read = ? AND messages.is_flagged = ?) THEN excluded.is_read ELSE messages.is_read END, is_flagged=CASE WHEN ? OR (? AND messages.is_read = ? AND messages.is_flagged = ?) THEN excluded.is_flagged ELSE messages.is_flagged END, has_attachments=CASE WHEN excluded.content_state = 'complete' THEN excluded.has_attachments ELSE messages.has_attachments END, classification_signals=excluded.classification_signals")
+    sqlx::query("INSERT INTO messages(id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, threading_scanned, recipient_headers_scanned, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, unsubscribe_scanned, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(account_id, mailbox, uid) DO UPDATE SET message_id=excluded.message_id, in_reply_to=excluded.in_reply_to, reference_ids=excluded.reference_ids, threading_scanned=1, recipient_headers_scanned=1, subject=excluded.subject, from_name=excluded.from_name, from_address=excluded.from_address, to_addresses=excluded.to_addresses, cc_addresses=excluded.cc_addresses, bcc_addresses=excluded.bcc_addresses, reply_to_addresses=excluded.reply_to_addresses, received_at=excluded.received_at, snippet=CASE WHEN excluded.content_state = 'complete' THEN excluded.snippet ELSE messages.snippet END, body_text=CASE WHEN excluded.content_state = 'complete' THEN excluded.body_text ELSE messages.body_text END, body_html=CASE WHEN excluded.content_state = 'complete' THEN excluded.body_html ELSE messages.body_html END, content_state=CASE WHEN messages.content_state = 'complete' THEN messages.content_state ELSE excluded.content_state END, unsubscribe_kind=CASE WHEN excluded.content_state = 'complete' THEN excluded.unsubscribe_kind ELSE messages.unsubscribe_kind END, unsubscribe_url=CASE WHEN excluded.content_state = 'complete' THEN excluded.unsubscribe_url ELSE messages.unsubscribe_url END, unsubscribe_scanned=CASE WHEN excluded.content_state = 'complete' THEN 1 ELSE messages.unsubscribe_scanned END, is_read=CASE WHEN ? OR (? AND messages.is_read = ? AND messages.is_flagged = ?) THEN excluded.is_read ELSE messages.is_read END, is_flagged=CASE WHEN ? OR (? AND messages.is_read = ? AND messages.is_flagged = ?) THEN excluded.is_flagged ELSE messages.is_flagged END, has_attachments=CASE WHEN excluded.content_state = 'complete' THEN excluded.has_attachments ELSE messages.has_attachments END, classification_confidence=CASE WHEN messages.classification_source = 'model' AND (messages.from_name IS NOT excluded.from_name OR messages.from_address != excluded.from_address OR messages.subject != excluded.subject OR messages.classification_signals != excluded.classification_signals OR (excluded.content_state = 'complete' AND (messages.snippet != excluded.snippet OR messages.body_text != excluded.body_text))) THEN NULL ELSE messages.classification_confidence END, classification_source=CASE WHEN messages.classification_source = 'model' AND (messages.from_name IS NOT excluded.from_name OR messages.from_address != excluded.from_address OR messages.subject != excluded.subject OR messages.classification_signals != excluded.classification_signals OR (excluded.content_state = 'complete' AND (messages.snippet != excluded.snippet OR messages.body_text != excluded.body_text))) THEN NULL ELSE messages.classification_source END, classification_signals=excluded.classification_signals")
         .bind(&message.id).bind(&message.account_id).bind(&message.mailbox).bind(message.uid)
         .bind(&message.message_id).bind(&message.in_reply_to).bind(&message.reference_ids).bind(&message.thread_id)
         .bind(&message.subject).bind(&message.from_name)
@@ -3637,6 +3903,37 @@ async fn persist_message_with_flag_policy(
         .bind(expected_read)
         .bind(expected_flagged)
         .execute(&mut **tx).await?;
+    if message.mailbox == "Sent" || message.mailbox.starts_with("Sent::") {
+        let recipients = [
+            &message.to_addresses,
+            &message.cc_addresses,
+            &message.bcc_addresses,
+        ]
+        .into_iter()
+        .flat_map(|header| crate::mail::parsed_header_mailboxes(header))
+        .map(|address| address.to_lowercase())
+        .collect::<HashSet<_>>();
+        for recipient in recipients {
+            let inserted = sqlx::query(
+                "INSERT OR IGNORE INTO sent_correspondents(account_id, address) VALUES (?, ?)",
+            )
+            .bind(&message.account_id)
+            .bind(&recipient)
+            .execute(&mut **tx)
+            .await?;
+            if inserted.rows_affected() == 0 {
+                continue;
+            }
+            // A new user-authored message is durable relationship evidence.
+            // Reconsider only prior model decisions from that correspondent;
+            // explicit user categories remain authoritative.
+            sqlx::query("UPDATE messages SET classification_source = NULL, classification_confidence = NULL WHERE account_id = ? AND lower(from_address) = ? AND classification_source = 'model'")
+                .bind(&message.account_id)
+                .bind(recipient)
+                .execute(&mut **tx)
+                .await?;
+        }
+    }
     let effective_is_flagged = if matches!(flag_policy, FlagUpdatePolicy::CompareAndSwap(_)) {
         sqlx::query_scalar(
             "SELECT is_flagged FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?",
@@ -4264,6 +4561,508 @@ mod tests {
             classification_signals: String::new(),
             attachments: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn classification_policy_upgrade_requeues_only_model_owned_categories_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("classification-policy.db");
+        let store = Store::open(&database).await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let account = account_with_id(account_id, "classification-policy@example.test");
+        store.save_account(&account).await.unwrap();
+
+        let mut model_owned = message("Dispatched: an order", "");
+        model_owned.id = "model-owned".into();
+        model_owned.account_id = account_id.to_string();
+        model_owned.category = Some("people".into());
+        model_owned.classification_confidence = Some(0.91);
+        model_owned.classification_source = Some("model".into());
+        let mut user_owned = message("A category chosen by the user", "");
+        user_owned.id = "user-owned".into();
+        user_owned.account_id = account_id.to_string();
+        user_owned.uid = 2;
+        user_owned.category = Some("people".into());
+        user_owned.classification_confidence = Some(1.0);
+        user_owned.classification_source = Some("user".into());
+        store
+            .upsert_messages(&[model_owned, user_owned])
+            .await
+            .unwrap();
+        sqlx::query("UPDATE app_meta SET value = '1' WHERE key = 'classification_policy_version'")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        drop(store);
+
+        let migrated = Store::open(&database).await.unwrap();
+        migrated
+            .claim_classification_revision("policy-owner", "test-model")
+            .await
+            .unwrap();
+        let pending = migrated.message("model-owned").await.unwrap().unwrap();
+        assert_eq!(pending.category.as_deref(), Some("people"));
+        assert_eq!(pending.classification_source, None);
+        assert_eq!(pending.classification_confidence, None);
+        let preserved = migrated.message("user-owned").await.unwrap().unwrap();
+        assert_eq!(preserved.category.as_deref(), Some("people"));
+        assert_eq!(preserved.classification_source.as_deref(), Some("user"));
+        assert_eq!(preserved.classification_confidence, Some(1.0));
+
+        let update = ModelClassificationUpdate::from_message(
+            &pending,
+            "transactions".into(),
+            Some(1.0),
+            false,
+            "policy-owner",
+            "test-model",
+        );
+        migrated
+            .apply_model_classifications(&[update])
+            .await
+            .unwrap();
+        drop(migrated);
+
+        let reopened = Store::open(&database).await.unwrap();
+        let classified = reopened.message("model-owned").await.unwrap().unwrap();
+        assert_eq!(classified.category.as_deref(), Some("transactions"));
+        assert_eq!(classified.classification_source.as_deref(), Some("model"));
+        assert_eq!(classified.classification_confidence, Some(1.0));
+
+        let old_policy_update = ModelClassificationUpdate::from_message(
+            &classified,
+            "people".into(),
+            Some(0.99),
+            false,
+            "policy-owner",
+            "test-model",
+        );
+        sqlx::query("UPDATE app_meta SET value = 'future-policy' WHERE key = 'classification_policy_version'")
+            .execute(&reopened.pool)
+            .await
+            .unwrap();
+        reopened
+            .apply_model_classifications(&[old_policy_update])
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .message("model-owned")
+                .await
+                .unwrap()
+                .unwrap()
+                .category
+                .as_deref(),
+            Some("transactions"),
+            "an in-flight result from an older policy must fail the final CAS"
+        );
+    }
+
+    #[tokio::test]
+    async fn classification_model_revision_requeues_model_owned_rows_only_on_change() {
+        let store = Store::in_memory().await.unwrap();
+        let mut model_owned = message("Model-owned decision", "original evidence");
+        model_owned.id = "revision-model".into();
+        model_owned.category = Some("people".into());
+        model_owned.classification_confidence = Some(0.9);
+        model_owned.classification_source = Some("model".into());
+        let mut user_owned = message("User-owned decision", "original evidence");
+        user_owned.id = "revision-user".into();
+        user_owned.uid = 2;
+        user_owned.category = Some("people".into());
+        user_owned.classification_confidence = Some(1.0);
+        user_owned.classification_source = Some("user".into());
+        store
+            .upsert_messages(&[model_owned, user_owned])
+            .await
+            .unwrap();
+
+        store
+            .claim_classification_revision("revision-owner-a", "model-a")
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .message("revision-model")
+                .await
+                .unwrap()
+                .unwrap()
+                .classification_source,
+            None
+        );
+        assert_eq!(
+            store
+                .message("revision-user")
+                .await
+                .unwrap()
+                .unwrap()
+                .classification_source
+                .as_deref(),
+            Some("user")
+        );
+
+        let pending = store.message("revision-model").await.unwrap().unwrap();
+        store
+            .apply_model_classifications(&[ModelClassificationUpdate::from_message(
+                &pending,
+                "notifications".into(),
+                Some(0.8),
+                false,
+                "revision-owner-a",
+                "model-a",
+            )])
+            .await
+            .unwrap();
+        store
+            .claim_classification_revision("revision-owner-a", "model-a")
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .message("revision-model")
+                .await
+                .unwrap()
+                .unwrap()
+                .classification_source
+                .as_deref(),
+            Some("model")
+        );
+
+        let old_model_update = ModelClassificationUpdate::from_message(
+            &store.message("revision-model").await.unwrap().unwrap(),
+            "people".into(),
+            Some(0.99),
+            false,
+            "revision-owner-a",
+            "model-a",
+        );
+        assert_eq!(
+            store
+                .claim_classification_revision("revision-owner-b", "model-b")
+                .await
+                .unwrap_err()
+                .to_string(),
+            "another email classifier is active; retry after it finishes"
+        );
+        store
+            .release_classification_revision("revision-owner-a")
+            .await
+            .unwrap();
+        store
+            .claim_classification_revision("revision-owner-b", "model-b")
+            .await
+            .unwrap();
+        store
+            .apply_model_classifications(&[old_model_update])
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .message("revision-model")
+                .await
+                .unwrap()
+                .unwrap()
+                .classification_source,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_stores_cannot_ping_pong_active_classifier_revisions() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("classifier-revision-lease.db");
+        let first = Store::open(&database).await.unwrap();
+        let second = Store::open(&database).await.unwrap();
+
+        first
+            .claim_classification_revision("owner-a", "model-a")
+            .await
+            .unwrap();
+        assert!(second
+            .claim_classification_revision("owner-b", "model-b")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("another email classifier is active"));
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT value FROM app_meta WHERE key = 'classification_model_revision'",
+            )
+            .fetch_one(&second.pool)
+            .await
+            .unwrap(),
+            "model-a"
+        );
+
+        first
+            .release_classification_revision("owner-a")
+            .await
+            .unwrap();
+        second
+            .claim_classification_revision("owner-b", "model-b")
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT value FROM app_meta WHERE key = 'classification_model_revision'",
+            )
+            .fetch_one(&first.pool)
+            .await
+            .unwrap(),
+            "model-b"
+        );
+
+        sqlx::query(
+            "UPDATE app_meta SET value = ? WHERE key = 'classification_revision_active_at'",
+        )
+        .bind((Utc::now().timestamp() - CLASSIFICATION_REVISION_ACTIVITY_SECONDS - 1).to_string())
+        .execute(&second.pool)
+        .await
+        .unwrap();
+        first
+            .claim_classification_revision("owner-c", "model-c")
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT value FROM app_meta WHERE key = 'classification_model_revision'",
+            )
+            .fetch_one(&second.pool)
+            .await
+            .unwrap(),
+            "model-c",
+            "an expired owner must not block crash recovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn classification_signal_changes_requeue_only_model_owned_categories() {
+        let store = Store::in_memory().await.unwrap();
+        store
+            .claim_classification_revision("test-owner", "test-model")
+            .await
+            .unwrap();
+        let mut model_owned = message("Account update", "");
+        model_owned.id = "signal-model".into();
+        model_owned.category = Some("people".into());
+        model_owned.classification_confidence = Some(0.8);
+        model_owned.classification_source = Some("model".into());
+        let mut user_owned = message("User override", "");
+        user_owned.id = "signal-user".into();
+        user_owned.category = Some("people".into());
+        user_owned.classification_confidence = Some(1.0);
+        user_owned.classification_source = Some("user".into());
+        store
+            .upsert_messages(&[model_owned, user_owned])
+            .await
+            .unwrap();
+
+        let stale_update = ModelClassificationUpdate::from_message(
+            &store.message("signal-model").await.unwrap().unwrap(),
+            "people".into(),
+            Some(0.8),
+            false,
+            "test-owner",
+            "test-model",
+        );
+
+        store
+            .update_classification_signals(&[
+                (
+                    "signal-model".into(),
+                    "Mailing-list unsubscribe header present".into(),
+                ),
+                (
+                    "signal-user".into(),
+                    "Mailing-list unsubscribe header present".into(),
+                ),
+            ])
+            .await
+            .unwrap();
+        store
+            .apply_model_classifications(&[stale_update])
+            .await
+            .unwrap();
+
+        let pending = store.message("signal-model").await.unwrap().unwrap();
+        assert_eq!(pending.category.as_deref(), Some("people"));
+        assert_eq!(pending.classification_source, None);
+        assert_eq!(pending.classification_confidence, None);
+        let preserved = store.message("signal-user").await.unwrap().unwrap();
+        assert_eq!(preserved.category.as_deref(), Some("people"));
+        assert_eq!(preserved.classification_source.as_deref(), Some("user"));
+        assert_eq!(preserved.classification_confidence, Some(1.0));
+    }
+
+    #[tokio::test]
+    async fn changed_message_evidence_requeues_and_rejects_an_in_flight_model_result() {
+        let store = Store::in_memory().await.unwrap();
+        store
+            .claim_classification_revision("test-owner", "test-model")
+            .await
+            .unwrap();
+        let mut original = message("Original subject", "original preview");
+        original.id = "changing-evidence".into();
+        original.category = Some("people".into());
+        original.classification_confidence = Some(0.9);
+        original.classification_source = Some("model".into());
+        store
+            .upsert_messages(std::slice::from_ref(&original))
+            .await
+            .unwrap();
+        let stale_update = ModelClassificationUpdate::from_message(
+            &store.message("changing-evidence").await.unwrap().unwrap(),
+            "people".into(),
+            Some(0.9),
+            false,
+            "test-owner",
+            "test-model",
+        );
+
+        original.subject = "Dispatched: replacement order".into();
+        original.snippet = "Your replacement has shipped.".into();
+        store.upsert_messages(&[original]).await.unwrap();
+        store
+            .apply_model_classifications(&[stale_update])
+            .await
+            .unwrap();
+
+        let changed = store.message("changing-evidence").await.unwrap().unwrap();
+        assert_eq!(changed.subject, "Dispatched: replacement order");
+        assert_eq!(changed.classification_source, None);
+        assert_eq!(changed.classification_confidence, None);
+    }
+
+    #[tokio::test]
+    async fn known_correspondent_evidence_is_account_scoped_and_rfc_parsed() {
+        let store = Store::in_memory().await.unwrap();
+        store
+            .claim_classification_revision("test-owner", "test-model")
+            .await
+            .unwrap();
+        let account_id = uuid::Uuid::new_v4().to_string();
+        let other_account_id = uuid::Uuid::new_v4().to_string();
+        let mut incoming = message("Re: Project", "A real follow-up");
+        incoming.id = "known-correspondence".into();
+        incoming.account_id = account_id.clone();
+        incoming.thread_id = "shared-thread-name".into();
+        incoming.category = Some("other".into());
+        incoming.classification_source = Some("model".into());
+        incoming.classification_confidence = Some(0.7);
+        let mut sent = message("Re: Project", "My prior reply");
+        sent.id = "sent-member".into();
+        sent.account_id = account_id;
+        sent.thread_id = "older-independent-thread".into();
+        sent.mailbox = "Sent::Sent Messages".into();
+        sent.uid = 2;
+        sent.to_addresses = incoming.from_address.clone();
+        let mut wrong_sender = message("Re: Project", "A forged thread member");
+        wrong_sender.id = "wrong-sender".into();
+        wrong_sender.account_id = sent.account_id.clone();
+        wrong_sender.thread_id = incoming.thread_id.clone();
+        wrong_sender.from_address = "bulk-sender@example.test".into();
+        wrong_sender.uid = 3;
+        wrong_sender.category = Some("other".into());
+        wrong_sender.classification_source = Some("model".into());
+        wrong_sender.classification_confidence = Some(0.7);
+        let mut display_name_spoof = message("Unrelated sender", "Not a correspondent");
+        display_name_spoof.id = "display-name-spoof".into();
+        display_name_spoof.account_id = sent.account_id.clone();
+        display_name_spoof.from_address = "victim@example.com".into();
+        display_name_spoof.uid = 4;
+        let mut sent_with_address_in_display_name = message("Prior sent", "A different recipient");
+        sent_with_address_in_display_name.id = "sent-display-name".into();
+        sent_with_address_in_display_name.account_id = sent.account_id.clone();
+        sent_with_address_in_display_name.mailbox = "Sent::Sent Messages".into();
+        sent_with_address_in_display_name.uid = 4;
+        sent_with_address_in_display_name.to_addresses =
+            "\"victim@example.com\" <actual@example.net>".into();
+        let mut cross_account = message("Re: Unrelated", "Not my correspondent");
+        cross_account.id = "cross-account".into();
+        cross_account.account_id = other_account_id;
+        cross_account.thread_id = incoming.thread_id.clone();
+        let stale_update = ModelClassificationUpdate::from_message(
+            &incoming,
+            "other".into(),
+            Some(0.7),
+            false,
+            "test-owner",
+            "test-model",
+        );
+        store
+            .upsert_messages(&[
+                incoming.clone(),
+                sent.clone(),
+                wrong_sender.clone(),
+                display_name_spoof.clone(),
+                sent_with_address_in_display_name,
+                cross_account.clone(),
+            ])
+            .await
+            .unwrap();
+
+        let known = store
+            .messages_from_known_correspondents(&[
+                incoming,
+                wrong_sender,
+                display_name_spoof,
+                cross_account,
+            ])
+            .await
+            .unwrap();
+        assert_eq!(known, HashSet::from(["known-correspondence".into()]));
+        store
+            .apply_model_classifications(&[stale_update])
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .message("known-correspondence")
+                .await
+                .unwrap()
+                .unwrap()
+                .classification_source,
+            None
+        );
+        assert_eq!(
+            store
+                .message("wrong-sender")
+                .await
+                .unwrap()
+                .unwrap()
+                .classification_source
+                .as_deref(),
+            Some("model")
+        );
+
+        let current = store
+            .message("known-correspondence")
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .apply_model_classifications(&[ModelClassificationUpdate::from_message(
+                &current,
+                "people".into(),
+                None,
+                true,
+                "test-owner",
+                "test-model",
+            )])
+            .await
+            .unwrap();
+        store.upsert_messages(&[sent]).await.unwrap();
+        assert_eq!(
+            store
+                .message("known-correspondence")
+                .await
+                .unwrap()
+                .unwrap()
+                .classification_source
+                .as_deref(),
+            Some("model"),
+            "refreshing an already-indexed Sent message must not requeue history"
+        );
     }
 
     fn cached_content(body_text: &str) -> CachedMessageContent {
@@ -7503,7 +8302,17 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::query("INSERT INTO mailboxes(id, accountId, path, uidValidity) VALUES ('sent', ?, 'Sent', 43)")
+            .bind(account_id.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO messages(id, accountId, mailboxId, threadId, uid, messageId, inReplyTo, referencesJson, fromAddress, toAddresses, subject, date, flags, snippet) VALUES ('legacy-message', ?, 'inbox', NULL, 5, '<legacy@example.test>', NULL, '[]', 'sender@example.test', 'person@example.test', 'Legacy subject', 'Mon, 01 Jan 2024 12:00:00 +0000', '[\"\\\\Seen\"]', 'Legacy preview')")
+            .bind(account_id.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO messages(id, accountId, mailboxId, threadId, uid, messageId, inReplyTo, referencesJson, fromAddress, toAddresses, subject, date, flags, snippet) VALUES ('legacy-sent', ?, 'sent', NULL, 6, '<legacy-sent@example.test>', NULL, '[]', 'person@example.test', 'Sender <sender@example.test>', 'Prior reply', 'Mon, 01 Jan 2024 13:00:00 +0000', '[\"\\\\Seen\"]', 'My reply')")
             .bind(account_id.to_string())
             .execute(&pool)
             .await
@@ -7527,6 +8336,13 @@ mod tests {
         assert_eq!(messages[0].id, "legacy-message");
         assert_eq!(messages[0].content_state, "headers_only");
         assert!(messages[0].is_read);
+        assert_eq!(
+            store
+                .messages_from_known_correspondents(&messages)
+                .await
+                .unwrap(),
+            HashSet::from(["legacy-message".into()])
+        );
         let state = store
             .mailbox_catalog_state(account_id, "INBOX")
             .await
@@ -8419,6 +9235,7 @@ mod tests {
             "mailbox_catalog_state",
             "mail_rebuild_jobs",
             "mailbox_action_tombstones",
+            "sent_correspondents",
         ] {
             let count: i64 = sqlx::query_scalar(&format!(
                 "SELECT COUNT(*) FROM {table} WHERE account_id = ?"
@@ -8507,6 +9324,11 @@ mod tests {
             .execute(&initial.pool)
             .await
             .unwrap();
+        sqlx::query("INSERT INTO sent_correspondents(account_id, address) VALUES (?, 'orphan@example.test')")
+            .bind(orphan_id.to_string())
+            .execute(&initial.pool)
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO attachments(id, message_id, filename, mime_type, size_bytes, is_inline, is_potentially_unsafe, data) VALUES ('orphan-attachment', ?, 'old.txt', 'text/plain', 3, 0, 0, X'6f6c64')")
             .bind(&orphan.id)
             .execute(&initial.pool)
@@ -8544,6 +9366,7 @@ mod tests {
             "mailbox_catalog_state",
             "mail_rebuild_jobs",
             "mailbox_action_tombstones",
+            "sent_correspondents",
         ] {
             let count: i64 = sqlx::query_scalar(&format!(
                 "SELECT COUNT(*) FROM {table} WHERE account_id = ?"

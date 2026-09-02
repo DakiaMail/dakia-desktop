@@ -119,10 +119,8 @@ jobs:
           cargo fmt --all -- --check
           cargo clippy -p dakia-core --all-targets -- -D warnings
           cargo test -p dakia-core -- \
-            --skip classification::tests::local_model_classifies_representative_email_types \
-            --skip classification::tests::does_not_treat_a_branded_monthly_update_as_personal_correspondence \
-            --skip classification::tests::does_not_treat_brand_marketing_as_personal_correspondence \
-            --skip classification::tests::bulk_insurance_price_promotion_is_not_a_transaction
+            --skip classification::model_integration_tests::local_model_and_policy_classify_the_production_regression_corpus \
+            --skip classification::model_integration_tests::model_and_policy_preserve_representative_categories
           cargo clippy -p dakia-cli --all-targets -- -D warnings
           cargo test -p dakia-cli
       - id: mail_boundary
