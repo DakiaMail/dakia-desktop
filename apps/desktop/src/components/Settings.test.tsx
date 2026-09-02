@@ -9,6 +9,19 @@ import { Settings } from "./Settings";
 const translationSettingsMocks = vi.hoisted(() => ({
   confirm: vi.fn(),
   resetTranslator: vi.fn(),
+  createAnalyticsPayload: vi.fn(async () => ({
+    schema: 1,
+    month: "2026-08",
+    app_version: "0.4.0",
+    os: "macos",
+    os_version: "15.6",
+    arch: "arm64",
+    providers: [],
+  })),
+}));
+
+vi.mock("../analytics", () => ({
+  createAnalyticsPayload: translationSettingsMocks.createAnalyticsPayload,
 }));
 
 vi.mock("../nativeFeedback", async (importOriginal) => ({
@@ -46,6 +59,7 @@ const props = {
   notifications,
   notificationPermission: true,
   launchAtLogin: false,
+  analytics: { consent: "disabled" as const },
   realtimeStatuses: [],
   onAiChange: vi.fn(),
   onAddAccount: vi.fn(),
@@ -55,6 +69,7 @@ const props = {
   onNotificationsChange: vi.fn(),
   onTestNotification: vi.fn(),
   onLaunchAtLoginChange: vi.fn(),
+  onAnalyticsChange: vi.fn(),
 };
 
 describe("Settings offline translation models", () => {
@@ -91,6 +106,51 @@ describe("Settings offline translation models", () => {
     expect(screen.queryByRole("tab", { name: "AI model" })).toBeNull();
     expect(screen.queryByRole("tab", { name: "Plugins" })).toBeNull();
     expect(screen.queryByText("Before you use AI")).toBeNull();
+  });
+
+  it("keeps the exact analytics data preview collapsed until the user opens it", async () => {
+    render(
+      <MantineProvider>
+        <Settings {...props} />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("tab", { name: "Privacy" }));
+    const preview = screen.getByText("See exactly what Dakia sends");
+    expect(preview.closest("details")).not.toHaveAttribute("open");
+
+    fireEvent.click(preview);
+    expect(
+      await screen.findByLabelText("See exactly what Dakia sends"),
+    ).toBeVisible();
+  });
+
+  it("lets a user opt in or back out from the Privacy settings", () => {
+    render(
+      <MantineProvider>
+        <Settings {...props} />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("tab", { name: "Privacy" }));
+    fireEvent.click(
+      screen.getByRole("switch", { name: /^Share anonymous statistics/ }),
+    );
+    expect(props.onAnalyticsChange).toHaveBeenCalledWith(true);
+  });
+
+  it("lets a user opt out from the Privacy settings", () => {
+    render(
+      <MantineProvider>
+        <Settings {...props} analytics={{ consent: "enabled" }} />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("tab", { name: "Privacy" }));
+    fireEvent.click(
+      screen.getByRole("switch", { name: /^Share anonymous statistics/ }),
+    );
+    expect(props.onAnalyticsChange).toHaveBeenCalledWith(false);
   });
 
   it("loads and labels installed and available dedicated language packs", async () => {

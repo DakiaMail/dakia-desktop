@@ -48,5 +48,6 @@ npm run build
 
 See [docs/architecture.md](docs/architecture.md),
 [docs/providers.md](docs/providers.md),
+[docs/usage-analytics.md](docs/usage-analytics.md),
 [docs/testing-strategy.md](docs/testing-strategy.md), and
 [docs/releasing.md](docs/releasing.md).

@@ -23,6 +23,7 @@ import {
 } from "@tabler/icons-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { ANALYTICS_PRIVACY_URL, type AnalyticsSettings } from "../analytics";
 import { api } from "../api";
 import { AI_FEATURES_VISIBLE } from "../features";
 import { confirmNativeAction } from "../nativeFeedback";
@@ -36,6 +37,7 @@ import type {
   TranslationModelStatus,
 } from "../types";
 import { AccountsSettings } from "./AccountsSettings";
+import { AnalyticsDataPreview } from "./AnalyticsDataPreview";
 
 type Props = {
   ai: AiSettings;
@@ -48,6 +50,7 @@ type Props = {
   notifications: NotificationSettings;
   notificationPermission: boolean | null;
   launchAtLogin: boolean;
+  analytics: AnalyticsSettings;
   realtimeStatuses: RealtimeSyncStatus[];
   onAiChange: (settings: AiSettings) => void;
   onAddAccount: () => void;
@@ -58,6 +61,7 @@ type Props = {
   onNotificationsChange: (settings: NotificationSettings) => void;
   onTestNotification: () => void;
   onLaunchAtLoginChange: (enabled: boolean) => void;
+  onAnalyticsChange: (enabled: boolean) => void;
 };
 
 const DEFAULT_TAB = "accounts";
@@ -73,6 +77,7 @@ export function Settings({
   notifications,
   notificationPermission,
   launchAtLogin,
+  analytics,
   realtimeStatuses,
   onAiChange,
   onAddAccount,
@@ -83,6 +88,7 @@ export function Settings({
   onNotificationsChange,
   onTestNotification,
   onLaunchAtLoginChange,
+  onAnalyticsChange,
 }: Props) {
   const { t } = useTranslation();
   const { colorScheme, setColorScheme } = useMantineColorScheme();
@@ -422,7 +428,36 @@ export function Settings({
           </Stack>
         </Tabs.Panel>
         <Tabs.Panel value="privacy" className="settings-pane">
-          <Stack gap="xs">
+          <Stack gap="sm">
+            <div>
+              <Text fw={650}>{t("settings.analyticsTitle")}</Text>
+              <Text size="sm">{t("settings.analyticsBody")}</Text>
+            </div>
+            <Switch
+              label={t("settings.analyticsEnable")}
+              description={t("settings.analyticsDisclosure")}
+              checked={analytics.consent === "enabled"}
+              onChange={(event) =>
+                onAnalyticsChange(event.currentTarget.checked)
+              }
+            />
+            <AnalyticsDataPreview
+              accounts={accounts}
+              enabled={analytics.consent === "enabled"}
+            />
+            <Text size="sm" c="dimmed">
+              {t("settings.analyticsProcessingDisclosure")}{" "}
+              <Text
+                component="button"
+                td="underline"
+                c="blue"
+                inherit
+                onClick={() => void api.openExternal(ANALYTICS_PRIVACY_URL)}
+              >
+                {t("settings.analyticsPrivacyDetails")}
+              </Text>
+            </Text>
+            <Divider my="xs" />
             <Text fw={650}>{t("settings.privacy")}</Text>
             <Text size="sm">{t("settings.privacyBody")}</Text>
             {AI_FEATURES_VISIBLE ? (

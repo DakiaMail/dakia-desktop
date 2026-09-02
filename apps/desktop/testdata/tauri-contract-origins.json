@@ -5,6 +5,7 @@
     "account-connected": "frontend",
     "account-removed": "native",
     "account-updated": "frontend",
+    "analytics-consent-changed": "frontend",
     "compose-sent": "frontend",
     "dakia://dropped-file-error": "native",
     "dakia://dropped-file-receipt": "native",

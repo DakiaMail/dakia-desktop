@@ -361,6 +361,22 @@ export const en = {
       ai: "AI model",
       translation: "Translation",
       privacy: "Privacy",
+      analyticsTitle: "Help shape Dakia",
+      analyticsBody:
+        "Dakia is an early, small, independent mail app. If you choose to share anonymous usage statistics, they help us improve reliability and prioritise the features that matter most.",
+      analyticsEnable: "Share anonymous statistics",
+      analyticsKeepOff: "Keep statistics off",
+      analyticsDisclosure:
+        "Dakia sends only its version, macOS version and chip family, broad categories for enabled email providers, and a random token that changes every month. The analytics payload never includes emails, email addresses, account details, message data, credentials, server names, IP addresses, or a permanent device identifier. Sharing is optional and can be turned off at any time.",
+      analyticsProcessingDisclosure:
+        "Dakia’s first-party service runs on Cloudflare. Cloudflare receives ordinary connection metadata to deliver the request; Dakia does not log or store it. A transient salted network-key rate limit prevents abuse. Deduplication hashes are deleted after 35 days and aggregate statistics after 24 months.",
+      analyticsPrivacyDetails: "Read the full privacy details.",
+      analyticsPreview: "See exactly what Dakia sends",
+      analyticsPreviewEnabled:
+        "This is the exact JSON Dakia will send to Dakia’s analytics service. The monthly token helps count active installations without a permanent identifier.",
+      analyticsPreviewDisabled:
+        "This is the exact JSON apart from the random monthly token, which Dakia generates only after you opt in and never reuses in a later month.",
+      analyticsPreviewLoading: "Preparing the data preview…",
       accounts: "Accounts",
       mailAccounts: "Mail accounts",
       loadingAccounts: "Loading accounts",

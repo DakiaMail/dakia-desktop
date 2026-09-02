@@ -192,7 +192,12 @@ test("ordinary pull-request workflow preserves the cost and release boundaries",
   assert.match(workflow, /cancel-in-progress: true/);
   assert.deepEqual(
     [...workflow.matchAll(/^  ([a-z][a-z0-9-]+):$/gm)].map((match) => match[1]),
-    ["classify", "validate"],
+    ["analytics", "classify", "validate"],
+  );
+  assert.match(
+    workflow,
+    /analytics:\n\s+name: Validate analytics collector[\s\S]*?node-version: 22\.19\.0[\s\S]*?npm run deploy:dry-run/,
+    "the privacy-sensitive collector must keep its separate Node 22 validation gate",
   );
   assert.match(
     workflow,

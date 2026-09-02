@@ -1,0 +1,49 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "dakia-usage-analytics",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-26",
+  "workers_dev": false,
+
+  "routes": [
+    {
+      "pattern": "analytics.dakiamail.com",
+      "custom_domain": true,
+    },
+  ],
+
+  // Deliberately disable Workers Logs. Do not enable Logpush, Tail Workers, or
+  // request-body logging for this privacy-sensitive collector.
+  "observability": {
+    "enabled": false,
+  },
+
+  "vars": {
+    // This must be the production Tauri webview origin, not a wildcard.
+    "ALLOWED_ORIGIN": "tauri://localhost",
+  },
+
+  "d1_databases": [
+    {
+      "binding": "ANALYTICS_DB",
+      "database_name": "dakia-usage-analytics",
+      "database_id": "f9f1c7c9-695e-4a76-a4d3-1092db068ac6",
+      "migrations_dir": "migrations",
+    },
+  ],
+
+  // The key is a salted digest of Cloudflare's connection address. It exists
+  // only in Cloudflare's short-lived rate-limit counters and is never stored
+  // in D1 or application logs.
+  "ratelimits": [
+    {
+      "name": "INGEST_RATE_LIMITER",
+      "namespace_id": "2026083101",
+      "simple": { "limit": 20, "period": 60 },
+    },
+  ],
+
+  "triggers": {
+    "crons": ["0 3 * * *"],
+  },
+}
