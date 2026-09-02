@@ -22,6 +22,10 @@ if ! command -v curl >/dev/null 2>&1; then
   echo "curl is required for anonymous public-artifact verification." >&2
   exit 1
 fi
+if [[ "$(uname -s)" != "Darwin" ]] && ! command -v python3 >/dev/null 2>&1; then
+  echo "python3 is required for portable macOS artifact metadata verification." >&2
+  exit 1
+fi
 if [[ -z "${R2_ACCESS_KEY_ID:-}" || -z "${R2_SECRET_ACCESS_KEY:-}" || -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]]; then
   echo "R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, and CLOUDFLARE_ACCOUNT_ID are required." >&2
   exit 1
@@ -68,7 +72,6 @@ if ! cmp -s "$expected_checksums" "$checksums_file"; then
   exit 1
 fi
 
-"$root_dir/scripts/verify-macos-release-dmg.sh" "$apple_dmg"
 node "$root_dir/scripts/verify-updater-signature.mjs" "$apple_update" "$apple_signature" "$root_dir/apps/desktop/src-tauri/tauri.conf.json"
 
 updater_verify_dir="$work_dir/updater-archive"
@@ -79,8 +82,39 @@ if [[ ! -d "$updater_app" ]]; then
   echo "Updater archive is missing Dakia.app." >&2
   exit 1
 fi
-"$root_dir/scripts/verify-macos-release-app.sh" "$updater_app"
-updater_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$updater_app/Contents/Info.plist")"
+if [[ "$(uname -s)" == "Darwin" || -n "${DAKIA_TEST_PLIST_BUDDY:-}" ]]; then
+  "$root_dir/scripts/verify-macos-release-dmg.sh" "$apple_dmg"
+  "$root_dir/scripts/verify-macos-release-app.sh" "$updater_app"
+  plist_buddy="${DAKIA_TEST_PLIST_BUDDY:-/usr/libexec/PlistBuddy}"
+  updater_version="$("$plist_buddy" -c 'Print :CFBundleShortVersionString' "$updater_app/Contents/Info.plist")"
+else
+  ci_verification="${DAKIA_MACOS_CI_VERIFICATION:-}"
+  if [[ -z "$ci_verification" || ! -s "$ci_verification" ]]; then
+    echo "Non-macOS publication requires the macOS builder verification record." >&2
+    exit 1
+  fi
+  checksums_sha256="$(shasum -a 256 "$checksums_file" | awk '{ print $1 }')"
+  node - "$ci_verification" "$tag" "$(tr -d '\n' <"$source_marker")" "$checksums_sha256" <<'NODE'
+const { readFileSync } = require("node:fs");
+const [recordPath, tag, sourceCommit, checksumsSha256] = process.argv.slice(2);
+const record = JSON.parse(readFileSync(recordPath, "utf8"));
+if (
+  record.tag !== tag ||
+  record.source_commit !== sourceCommit ||
+  record.checksums_sha256 !== checksumsSha256 ||
+  record.verification !== "scripts/build-local-macos-release.sh completed"
+) {
+  throw new Error("macOS builder verification record does not bind the exact release assets.");
+}
+NODE
+  updater_version="$(python3 - "$updater_app/Contents/Info.plist" <<'PY'
+import plistlib
+import sys
+with open(sys.argv[1], "rb") as plist:
+    print(plistlib.load(plist)["CFBundleShortVersionString"])
+PY
+)"
+fi
 if [[ "$updater_version" != "$version" ]]; then
   echo "Updater app version '$updater_version' does not match '$version'." >&2
   exit 1
@@ -141,6 +175,7 @@ publication_state_key="macos/latest/publication.json"
 apple_dmg_key="$release_prefix/Dakia-Apple-Silicon.dmg"
 apple_update_key="$release_prefix/Dakia-aarch64.app.tar.gz"
 apple_signature_key="$apple_update_key.sig"
+apple_checksums_key="$release_prefix/SHA256SUMS.txt"
 curl_options=(--silent --show-error --location --proto '=https' --connect-timeout 15 --max-time 90 --retry 3 --retry-delay 1 --retry-max-time 180)
 
 fetch_public_file() {
@@ -368,11 +403,13 @@ immutable_cache="public, max-age=31536000, immutable"
 upload_immutable "$apple_dmg_key" "$apple_dmg" "application/x-apple-diskimage" "Dakia-$version-Apple-Silicon.dmg" "$immutable_cache"
 upload_immutable "$apple_update_key" "$apple_update" "application/gzip" "Dakia-$version-aarch64.app.tar.gz" "$immutable_cache"
 upload_immutable "$apple_signature_key" "$apple_signature" "text/plain; charset=utf-8" "Dakia-$version-aarch64.app.tar.gz.sig" "$immutable_cache"
+upload_immutable "$apple_checksums_key" "$checksums_file" "text/plain; charset=utf-8" "SHA256SUMS.txt" "$immutable_cache"
 
 # Anonymous downloads must match the signed source before either mutable object can move.
 verify_public_copy "$apple_update_key" "$apple_update"
 verify_public_copy "$apple_signature_key" "$apple_signature"
 verify_public_copy "$apple_dmg_key" "$apple_dmg"
+verify_public_copy "$apple_checksums_key" "$checksums_file"
 
 # Serialize the stable DMG + latest.json pair. If a run stops after claiming,
 # only the same tag/source may resume until latest.json reaches that version.
@@ -468,7 +505,7 @@ publish_optional_platform() {
   local signature="$updater.sig"
   local platform_prefix="$platform_name/$tag" platform_manifest_key="$platform_name/latest/latest.json"
   local installer_key="$platform_prefix/$installer_name" updater_key="$platform_prefix/$updater_name"
-  local signature_key="$updater_key.sig" current_manifest="$work_dir/$platform_name-latest-before.json"
+  local signature_key="$updater_key.sig" checksums_key="$platform_prefix/SHA256SUMS.txt" current_manifest="$work_dir/$platform_name-latest-before.json"
   local authenticated_current="$work_dir/$platform_name-latest-authenticated-before.json"
   local candidate_manifest="$work_dir/$platform_name-latest-candidate.json"
   local authenticated_after="$work_dir/$platform_name-latest-authenticated-after.json"
@@ -512,8 +549,10 @@ NODE
 
   upload_immutable "$installer_key" "$installer" "$installer_content_type" "$installer_name" "$immutable_cache"
   upload_immutable "$signature_key" "$signature" "text/plain; charset=utf-8" "$updater_name.sig" "$immutable_cache"
+  upload_immutable "$checksums_key" "$platform_dir/SHA256SUMS.txt" "text/plain; charset=utf-8" "SHA256SUMS.txt" "$immutable_cache"
   verify_public_copy "$installer_key" "$installer"
   verify_public_copy "$signature_key" "$signature"
+  verify_public_copy "$checksums_key" "$platform_dir/SHA256SUMS.txt"
 
   if [[ "$platform_resuming" == true ]]; then
     echo "Verified exact $platform_name R2 resume for $tag."

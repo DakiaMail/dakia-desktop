@@ -589,8 +589,27 @@ for (const {
     },
   },
   {
-    name: "the publication-state create",
+    name: "the fourth immutable conditional create",
     moveAt: "5",
+    verify: (harness) => {
+      assert.equal(
+        existsSync(
+          objectPath(
+            harness.store,
+            "macos/v0.4.1/Dakia-aarch64.app.tar.gz.sig",
+          ),
+        ),
+        true,
+      );
+      assert.equal(
+        existsSync(objectPath(harness.store, "macos/v0.4.1/SHA256SUMS.txt")),
+        false,
+      );
+    },
+  },
+  {
+    name: "the publication-state create",
+    moveAt: "6",
     verify: (harness) => {
       assert.equal(
         existsSync(objectPath(harness.store, "macos/latest/publication.json")),
@@ -600,7 +619,7 @@ for (const {
   },
   {
     name: "the publication-state CAS",
-    moveAt: "5",
+    moveAt: "6",
     before: (harness) => {
       putInitial(
         harness.store,
@@ -620,7 +639,7 @@ for (const {
   },
   {
     name: "the normal stable-DMG copy",
-    moveAt: "6",
+    moveAt: "7",
     verify: (harness) => {
       assert.equal(
         readFileSync(
@@ -633,7 +652,7 @@ for (const {
   },
   {
     name: "the final latest.json CAS",
-    moveAt: "7",
+    moveAt: "8",
     verify: (harness) => {
       assert.equal(currentVersion(harness.store), "0.4.0");
       assert.equal(
@@ -675,7 +694,7 @@ test("a call-indexed live-main drift blocks the winner-repair stable-DMG copy", 
     writeFileSync(winnerManifest, manifest("0.4.2"));
     writeFileSync(winnerDmg, "dmg-0.4.2\n");
     const result = run(harness, release, "different-candidate-wins", {
-      MOCK_LIVE_MAIN_MOVES_AT: "8",
+      MOCK_LIVE_MAIN_MOVES_AT: "9",
       MOCK_WINNER_DMG: winnerDmg,
       MOCK_WINNER_MANIFEST: winnerManifest,
     });

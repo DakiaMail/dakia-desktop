@@ -22,6 +22,18 @@ test("R2 publisher remains valid Bash", () => {
   assert.equal(result.status, 0, result.stderr);
 });
 
+test("non-macOS publication requires an exact macOS builder verification record", () => {
+  const script = source();
+  assert.match(script, /DAKIA_MACOS_CI_VERIFICATION/);
+  assert.match(
+    script,
+    /record\.verification !== "scripts\/build-local-macos-release\.sh completed"/,
+  );
+  assert.match(script, /record\.tag !== tag/);
+  assert.match(script, /record\.source_commit !== sourceCommit/);
+  assert.match(script, /record\.checksums_sha256 !== checksumsSha256/);
+});
+
 test("R2 publisher fails closed on tracked notes and exact checksums", () => {
   const script = source();
 
@@ -114,6 +126,14 @@ test("R2 publisher keeps latest last and repairs a CAS loser's stable alias to i
     /verify_public_copy "\$apple_signature_key" "\$apple_signature"/,
   );
   assert.match(script, /verify_public_copy "\$apple_dmg_key" "\$apple_dmg"/);
+  assert.match(
+    script,
+    /upload_immutable "\$apple_checksums_key" "\$checksums_file"/,
+  );
+  assert.match(
+    script,
+    /verify_public_copy "\$apple_checksums_key" "\$checksums_file"/,
+  );
   assert.match(script, /verify_public_copy "\$stable_dmg_key" "\$apple_dmg"/);
   assert.match(script, /for attempt in 1 2 3 4 5/);
   assert.match(script, /cmp -s "\$authoritative" "\$public_copy"/);
@@ -267,6 +287,14 @@ test("R2 publisher gates optional Linux and Windows feeds behind immutable artif
     'verify_public_copy "$signature_key"',
     optionalFunction,
   );
+  const uploadChecksums = script.indexOf(
+    'upload_immutable "$checksums_key" "$platform_dir/SHA256SUMS.txt"',
+    optionalFunction,
+  );
+  const verifyChecksums = script.indexOf(
+    'verify_public_copy "$checksums_key" "$platform_dir/SHA256SUMS.txt"',
+    optionalFunction,
+  );
   const createManifest = script.indexOf(
     'updater-manifest.mjs" create --platform "$platform"',
     optionalFunction,
@@ -275,7 +303,9 @@ test("R2 publisher gates optional Linux and Windows feeds behind immutable artif
     'aws s3api put-object --bucket "$bucket" --key "$platform_manifest_key" --body "$candidate_manifest"',
     optionalFunction,
   );
-  assert.ok(immutableInstaller < verifySignature);
-  assert.ok(verifySignature < createManifest);
+  assert.ok(immutableInstaller < uploadChecksums);
+  assert.ok(uploadChecksums < verifySignature);
+  assert.ok(verifySignature < verifyChecksums);
+  assert.ok(verifyChecksums < createManifest);
   assert.ok(createManifest < writeManifest);
 });
