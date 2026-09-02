@@ -78,7 +78,7 @@ jobs:
           public_version="$(node - "$public_manifest" <<'NODE'
           const { readFileSync } = require('node:fs');
           const version = JSON.parse(readFileSync(process.argv[2], 'utf8')).version;
-          if (typeof version !== 'string' || !/^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$/.test(version)) {
+          if (typeof version !== 'string' || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(version)) {
             throw new Error(`Invalid public updater version: ${String(version)}`);
           }
           process.stdout.write(version);
@@ -552,7 +552,7 @@ jobs:
           # signature last even when no Windows certificate is configured.
           ./node_modules/.bin/tauri signer sign "$output/$expected"
           test -s "$output/$expected.sig"
-          (cd "$output" && shasum -a 256 "$expected" "$expected.sig" > SHA256SUMS.txt)
+          (cd "$output" && sha256sum "$expected" "$expected.sig" > SHA256SUMS.txt)
           node scripts/verify-updater-signature.mjs "$output/$expected" "$output/$expected.sig" apps/desktop/src-tauri/tauri.conf.json
       - name: Verify macOS release asset set
         if: matrix.platform == 'macos'
