@@ -62,6 +62,7 @@ function createHarness({
   releaseState = "draft",
   manifestNotes = "Release notes",
   gitScenario = "valid",
+  optionalPlatforms = false,
 } = {}) {
   const fixtureRoot = mkdtempSync(
     join(tmpdir(), "dakia-github-release-behavior-"),
@@ -97,6 +98,42 @@ function createHarness({
       .join("\n") + "\n",
   );
 
+  const optionalAssets = optionalPlatforms
+    ? [
+        ["linux", `Dakia_${version}_amd64.AppImage`, "linux updater bytes\n"],
+        [
+          "windows",
+          `Dakia_${version}_x64-setup.exe`,
+          "windows updater bytes\n",
+        ],
+      ]
+    : [];
+  for (const [platform, installer, bytes] of optionalAssets) {
+    const platformDir = join(assets, platform);
+    mkdirSync(platformDir);
+    writeFileSync(join(platformDir, installer), bytes);
+    writeFileSync(join(platformDir, `${installer}.sig`), updaterSignature());
+    writeFileSync(
+      join(platformDir, "SHA256SUMS.txt"),
+      [installer, `${installer}.sig`]
+        .map(
+          (filename) =>
+            `${sha256(readFileSync(join(platformDir, filename)))}  ${filename}`,
+        )
+        .join("\n") + "\n",
+    );
+  }
+  const releaseAssetNames = [
+    filenames.dmg,
+    filenames.update,
+    filenames.signature,
+    filenames.checksums,
+    ...optionalAssets.flatMap(([, installer]) => [
+      installer,
+      `${installer}.sig`,
+    ]),
+  ];
+
   const manifest = {
     version,
     pub_date: "2026-08-27T00:00:00Z",
@@ -106,15 +143,57 @@ function createHarness({
         url: `https://downloads.dakiamail.com/macos/${tag}/${filenames.update}`,
         signature: content[filenames.signature].toString().trim(),
       },
+      ...(optionalPlatforms
+        ? {
+            "linux-x86_64": {
+              url: `https://downloads.dakiamail.com/linux/${tag}/Dakia_${version}_amd64.AppImage`,
+              signature: updaterSignature().toString().trim(),
+            },
+            "windows-x86_64": {
+              url: `https://downloads.dakiamail.com/windows/${tag}/Dakia_${version}_x64-setup.exe`,
+              signature: updaterSignature().toString().trim(),
+            },
+          }
+        : {}),
     },
   };
   const manifestPath = join(fixtureRoot, "latest.json");
+  const linuxManifestPath = join(fixtureRoot, "linux-latest.json");
+  const windowsManifestPath = join(fixtureRoot, "windows-latest.json");
   const statePath = join(fixtureRoot, "release-state");
   const editLog = join(fixtureRoot, "edit.log");
   const liveMainCalls = join(fixtureRoot, "live-main-calls");
   const allowedSigners = join(fixtureRoot, "allowed-signers");
   const signingKey = join(fixtureRoot, "release-signing-key.pub");
-  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  writeFileSync(
+    manifestPath,
+    `${JSON.stringify(
+      {
+        ...manifest,
+        platforms: { "darwin-aarch64": manifest.platforms["darwin-aarch64"] },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  if (optionalPlatforms) {
+    for (const [platform, platformKey, destination] of [
+      ["linux", "linux-x86_64", linuxManifestPath],
+      ["windows", "windows-x86_64", windowsManifestPath],
+    ]) {
+      writeFileSync(
+        destination,
+        `${JSON.stringify(
+          {
+            ...manifest,
+            platforms: { [platformKey]: manifest.platforms[platformKey] },
+          },
+          null,
+          2,
+        )}\n`,
+      );
+    }
+  }
   writeFileSync(liveMainCalls, "0");
   writeFileSync(statePath, `${releaseState}\n`);
   writeFileSync(allowedSigners, "release@example.test ssh-ed25519 AAAA\n");
@@ -186,6 +265,29 @@ printf '%s\n' '256 SHA256:kN9R3QFJZbrE5i2HjEpp+ns5ZNxBTuFySvFx8Ldf/gE release@ex
   );
 
   writeExecutable(
+    join(bin, "jq"),
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+const values = {};
+for (let index = 0; index < args.length; index += 1) {
+  if (args[index] === "--arg") values[args[index + 1]] = args[index + 2];
+}
+const filter = args.find((value) => value.startsWith(".")) ?? "";
+const file = args.find((value) => value.startsWith("/") && fs.existsSync(value));
+const data = JSON.parse(file ? fs.readFileSync(file, "utf8") : fs.readFileSync(0, "utf8"));
+if (args.includes("-e")) {
+  const platform = values.platform ?? "darwin-aarch64";
+  const entry = data.platforms?.[platform];
+  process.exit(data.version === values.version && data.notes === values.notes && entry?.url === values.url && entry?.signature === values.signature ? 0 : 1);
+}
+if (filter === ".assets[].name") process.stdout.write(data.assets.map((asset) => asset.name).join("\\n") + "\\n");
+else if (filter === ".body") process.stdout.write(data.body);
+else process.stdout.write(String(data[filter.slice(1)]) + "\\n");
+`,
+  );
+
+  writeExecutable(
     join(bin, "gh"),
     `#!/bin/bash
 set -euo pipefail
@@ -198,12 +300,7 @@ case "\${1:-} \${2:-}" in
 const fs = require("node:fs");
 const path = require("node:path");
 const draft = process.argv[2] === "true";
-const names = [
-  "Dakia_${version}_aarch64.dmg",
-  "Dakia-aarch64.app.tar.gz",
-  "Dakia-aarch64.app.tar.gz.sig",
-  "SHA256SUMS.txt",
-];
+const names = ${JSON.stringify(releaseAssetNames)};
 process.stdout.write(JSON.stringify({
   tagName: "${tag}",
   targetCommitish: "${commit}",
@@ -224,7 +321,10 @@ NODE
         *) shift ;;
       esac
     done
-    cp "\${MOCK_ASSET_DIR}/\$pattern" "\$destination/\$pattern"
+    source="\${MOCK_ASSET_DIR}/\$pattern"
+    [[ -e "\$source" ]] || source="\${MOCK_ASSET_DIR}/linux/\$pattern"
+    [[ -e "\$source" ]] || source="\${MOCK_ASSET_DIR}/windows/\$pattern"
+    cp "\$source" "\$destination/\$pattern"
     ;;
   'release edit')
     printf 'edit\n' >> "\${MOCK_EDIT_LOG}"
@@ -251,9 +351,16 @@ while [[ "\$#" -gt 0 ]]; do
 done
 if [[ "\$url" == *'/macos/latest/latest.json?'* ]]; then
   cp "\${MOCK_MANIFEST}" "\$output"
+elif [[ "\$url" == *'/linux/latest/latest.json?'* ]]; then
+  cp "\${MOCK_LINUX_MANIFEST}" "\$output"
+elif [[ "\$url" == *'/windows/latest/latest.json?'* ]]; then
+  cp "\${MOCK_WINDOWS_MANIFEST}" "\$output"
 else
   artifact="\${url##*/}"
-  cp "\${MOCK_ASSET_DIR}/\$artifact" "\$output"
+  source="\${MOCK_ASSET_DIR}/\$artifact"
+  [[ -e "\$source" ]] || source="\${MOCK_ASSET_DIR}/linux/\$artifact"
+  [[ -e "\$source" ]] || source="\${MOCK_ASSET_DIR}/windows/\$artifact"
+  cp "\$source" "\$output"
 fi
 printf '200'
 `,
@@ -268,8 +375,10 @@ printf '200'
     MOCK_GIT_SCENARIO: gitScenario,
     MOCK_LIVE_MAIN_CALLS: liveMainCalls,
     MOCK_MANIFEST: manifestPath,
+    MOCK_LINUX_MANIFEST: linuxManifestPath,
     MOCK_RELEASE_STATE: statePath,
     MOCK_SIGNING_KEY: signingKey,
+    MOCK_WINDOWS_MANIFEST: windowsManifestPath,
   };
   return { fixtureRoot, assets, editLog, env };
 }
@@ -328,6 +437,23 @@ test("an already-public exact release is verified without another edit", () => {
   }
 });
 
+test("Linux and Windows installers and signatures are byte-verified before publication", () => {
+  const harness = runHarness({ optionalPlatforms: true });
+  try {
+    assert.equal(
+      harness.result.status,
+      0,
+      JSON.stringify({
+        stdout: harness.result.stdout,
+        stderr: harness.result.stderr,
+      }),
+    );
+    assert.equal(harness.edits, 1);
+  } finally {
+    rmSync(harness.fixtureRoot, { recursive: true, force: true });
+  }
+});
+
 test("wrong public R2 notes fail before GitHub publication", () => {
   const harness = runHarness({ manifestNotes: "Stale release notes" });
   try {
@@ -355,7 +481,10 @@ test("a live origin/main mismatch fails before GitHub publication", () => {
   try {
     assert.notEqual(harness.result.status, 0);
     assert.equal(harness.edits, 0);
-    assert.match(harness.result.stderr, /HEAD, cached origin\/main, and live origin\/main must all match/);
+    assert.match(
+      harness.result.stderr,
+      /HEAD, cached origin\/main, and live origin\/main must all match/,
+    );
   } finally {
     rmSync(harness.fixtureRoot, { recursive: true, force: true });
   }
@@ -366,7 +495,10 @@ test("a moved live origin/main stops GitHub publication immediately before edit"
   try {
     assert.notEqual(harness.result.status, 0);
     assert.equal(harness.edits, 0);
-    assert.match(harness.result.stderr, /HEAD, cached origin\/main, and live origin\/main must all match/);
+    assert.match(
+      harness.result.stderr,
+      /HEAD, cached origin\/main, and live origin\/main must all match/,
+    );
   } finally {
     rmSync(harness.fixtureRoot, { recursive: true, force: true });
   }

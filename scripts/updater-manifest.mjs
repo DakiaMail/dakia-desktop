@@ -5,7 +5,26 @@ import { pathToFileURL } from "node:url";
 
 const SEMVER =
   /^(?:v)?(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
-const PLATFORM = "darwin-aarch64";
+const DEFAULT_PLATFORM = "darwin-aarch64";
+
+// Tauri v2 updater bundle naming used by both manifest validation and the R2
+// publisher. macOS retains its historical fixed archive name. With this repo's
+// `createUpdaterArtifacts: true`, Tauri v2 signs the installers themselves:
+// `Dakia_<version>_amd64.AppImage` and `Dakia_<version>_x64-setup.exe`.
+export const PLATFORM_ARTIFACTS = Object.freeze({
+  "darwin-aarch64": {
+    directory: "macos",
+    updaterPattern: /^Dakia-aarch64\.app\.tar\.gz$/,
+  },
+  "linux-x86_64": {
+    directory: "linux",
+    updaterPattern: /^Dakia_(.+)_amd64\.AppImage$/,
+  },
+  "windows-x86_64": {
+    directory: "windows",
+    updaterPattern: /^Dakia_(.+)_x64-setup\.exe$/,
+  },
+});
 
 function isTauriMinisignSignature(value) {
   if (
@@ -63,7 +82,11 @@ function minisignKeyId(value, label, marker, recordLength, lineCount) {
   return key.subarray(2, 10).toString("hex");
 }
 
-export function validateManifest(manifest, updaterPublicKey) {
+export function validateManifest(
+  manifest,
+  updaterPublicKey,
+  platform = DEFAULT_PLATFORM,
+) {
   if (!manifest || typeof manifest !== "object") {
     throw new Error("Updater manifest must be a JSON object.");
   }
@@ -91,29 +114,51 @@ export function validateManifest(manifest, updaterPublicKey) {
     throw new Error("Updater notes must be a string.");
   }
 
+  if (!Object.hasOwn(PLATFORM_ARTIFACTS, platform)) {
+    throw new Error(`Unsupported updater platform: ${platform}.`);
+  }
   const keys = Object.keys(manifest.platforms);
-  if (keys.length !== 1 || keys[0] !== PLATFORM) {
-    throw new Error(`Updater platforms must contain only ${PLATFORM}.`);
+  if (keys.length !== 1 || keys[0] !== platform) {
+    throw new Error(`Updater platforms must contain only ${platform}.`);
   }
 
-  const entry = manifest.platforms[PLATFORM];
+  const entry = manifest.platforms[platform];
   if (!entry || typeof entry !== "object") {
-    throw new Error(`Missing updater platform ${PLATFORM}.`);
+    throw new Error(`Missing updater platform ${platform}.`);
   }
   if (!isTauriMinisignSignature(entry.signature?.trim())) {
-    throw new Error(`Invalid updater signature for ${PLATFORM}.`);
+    throw new Error(`Invalid updater signature for ${platform}.`);
   }
   let url;
   try {
     url = new URL(entry.url);
   } catch {
-    throw new Error(`Invalid updater URL for ${PLATFORM}.`);
+    throw new Error(`Invalid updater URL for ${platform}.`);
   }
   if (url.protocol !== "https:") {
-    throw new Error(`Updater URL for ${PLATFORM} must use HTTPS.`);
+    throw new Error(`Updater URL for ${platform} must use HTTPS.`);
   }
-  if (!url.pathname.endsWith("/Dakia-aarch64.app.tar.gz")) {
-    throw new Error(`Updater URL architecture mismatch for ${PLATFORM}.`);
+  const artifact = PLATFORM_ARTIFACTS[platform];
+  const manifestVersion = manifest.version.replace(/^v/, "");
+  const pathMatch =
+    platform === DEFAULT_PLATFORM
+      ? url.pathname.endsWith("/Dakia-aarch64.app.tar.gz")
+      : url.origin === "https://downloads.dakiamail.com" &&
+        url.pathname.match(
+          new RegExp(
+            `^/${artifact.directory}/v([^/]+)/(${artifact.updaterPattern.source.slice(1, -1)})$`,
+          ),
+        );
+  const artifactVersion = Array.isArray(pathMatch)
+    ? pathMatch[2]?.match(artifact.updaterPattern)?.[1]
+    : undefined;
+  if (
+    !pathMatch ||
+    (Array.isArray(pathMatch) &&
+      (pathMatch[1] !== manifestVersion ||
+        (artifactVersion !== undefined && artifactVersion !== manifestVersion)))
+  ) {
+    throw new Error(`Updater URL architecture mismatch for ${platform}.`);
   }
   if (
     updaterPublicKey !== undefined &&
@@ -128,27 +173,39 @@ export function validateManifest(manifest, updaterPublicKey) {
   return manifest;
 }
 
-export function buildManifest({
-  version,
-  pubDate,
-  notes,
-  aarch64Url,
-  aarch64Signature,
-  updaterPublicKey,
-}) {
+export function buildManifest(options) {
+  const {
+    version,
+    pubDate,
+    notes,
+    aarch64Url,
+    aarch64Signature,
+    platform = DEFAULT_PLATFORM,
+    url,
+    signature,
+    updaterPublicKey,
+  } = options;
+  const explicitPlatform = Object.hasOwn(options, "platform");
+  const entryUrl =
+    platform === DEFAULT_PLATFORM && !explicitPlatform ? aarch64Url : url;
+  const entrySignature =
+    platform === DEFAULT_PLATFORM && !explicitPlatform
+      ? aarch64Signature
+      : signature;
   return validateManifest(
     {
       version,
       pub_date: pubDate,
       notes,
       platforms: {
-        "darwin-aarch64": {
-          url: aarch64Url,
-          signature: aarch64Signature.trim(),
+        [platform]: {
+          url: entryUrl,
+          signature: entrySignature.trim(),
         },
       },
     },
     updaterPublicKey,
+    platform,
   );
 }
 
@@ -173,7 +230,11 @@ async function main() {
     const tauriConfig = options["tauri-config"]
       ? JSON.parse(await readFile(options["tauri-config"], "utf8"))
       : undefined;
-    validateManifest(manifest, tauriConfig?.plugins?.updater?.pubkey);
+    validateManifest(
+      manifest,
+      tauriConfig?.plugins?.updater?.pubkey,
+      options.platform ?? DEFAULT_PLATFORM,
+    );
     process.stdout.write(`Valid updater manifest: ${options.manifest}\n`);
     return;
   }
@@ -192,7 +253,14 @@ async function main() {
     pubDate: options["pub-date"],
     notes,
     aarch64Url: options["aarch64-url"],
-    aarch64Signature: await readFile(options["aarch64-signature-file"], "utf8"),
+    aarch64Signature: options["aarch64-signature-file"]
+      ? await readFile(options["aarch64-signature-file"], "utf8")
+      : undefined,
+    ...(options.platform ? { platform: options.platform } : {}),
+    url: options.url,
+    signature: options["signature-file"]
+      ? await readFile(options["signature-file"], "utf8")
+      : undefined,
     updaterPublicKey: tauriConfig?.plugins?.updater?.pubkey,
   });
   await writeFile(options.output, `${JSON.stringify(manifest, null, 2)}\n`);

@@ -1,0 +1,821 @@
+name: Production release
+
+on:
+  schedule:
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: Optional reason for this production release run
+        required: false
+        type: string
+      force:
+        description: Release even when no commits have landed since the public release
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: dakia-production-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  NODE_VERSION: 20.19.0
+  RUST_VERSION: 1.89.0
+  SCCACHE_VERSION: 0.17.0
+  SCCACHE_BUCKET: dakia-sccache
+  SCCACHE_ENDPOINT: https://b225fd2027198472b627795dd126aa15.r2.cloudflarestorage.com
+  SCCACHE_REGION: auto
+  RELEASE_ORIGIN: https://github.com/DakiaMail/dakia-desktop.git
+  DOWNLOAD_ORIGIN: https://downloads.dakiamail.com
+
+jobs:
+  decide:
+    name: Decide whether a release is eligible
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      should_release: ${{ steps.decide.outputs.should_release }}
+      public_version: ${{ steps.decide.outputs.public_version }}
+      version: ${{ steps.decide.outputs.version }}
+      tag: ${{ steps.decide.outputs.tag }}
+      release_commit: ${{ steps.decide.outputs.release_commit }}
+      bump_needed: ${{ steps.decide.outputs.bump_needed }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          lfs: false
+      - id: decide
+        name: Read public release and calculate candidate
+        env:
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          git fetch --force origin main --tags
+          live_main="$(git ls-remote --exit-code origin refs/heads/main | awk '{print $1}')"
+          cached_main="$(git rev-parse refs/remotes/origin/main)"
+          head="$(git rev-parse HEAD)"
+          if [[ "$head" != "$live_main" || "$cached_main" != "$live_main" ]]; then
+            echo "Workflow checkout is not the exact live origin/main state." >&2
+            exit 1
+          fi
+
+          public_manifest="$RUNNER_TEMP/public-latest.json"
+          curl --fail --silent --show-error --location --proto '=https' \
+            --connect-timeout 15 --max-time 90 --retry 3 \
+            "$DOWNLOAD_ORIGIN/macos/latest/latest.json" --output "$public_manifest"
+          public_version="$(node - "$public_manifest" <<'NODE'
+          const { readFileSync } = require('node:fs');
+          const version = JSON.parse(readFileSync(process.argv[2], 'utf8')).version;
+          if (typeof version !== 'string' || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(version)) {
+            throw new Error(`Invalid public updater version: ${String(version)}`);
+          }
+          process.stdout.write(version);
+          NODE
+          )"
+          public_tag="v${public_version}"
+          if release_commit="$(git rev-parse --verify "${public_tag}^{commit}" 2>/dev/null)"; then
+            :
+          else
+            release_commit="$(git log -1 --format=%H -- "docs/releases/${public_tag}.md")"
+            if [[ -z "$release_commit" ]]; then
+              echo "Cannot locate the source commit for public release ${public_tag}." >&2
+              exit 1
+            fi
+          fi
+
+          commits_since="$(git rev-list --count "${release_commit}..HEAD")"
+          eligible=false
+          if [[ "$commits_since" -gt 0 || "$FORCE" == "true" ]]; then
+            eligible=true
+          fi
+          package_version="$(node -p "require('./package.json').version")"
+          bump_needed=false
+          version="$package_version"
+          tag="v${version}"
+
+          if [[ "$eligible" == true && "$package_version" == "$public_version" ]]; then
+            candidate="$(node scripts/prepare-nightly-release.mjs "$release_commit" --dry-run)"
+            tag="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).tag)' "$candidate")"
+            version="${tag#v}"
+            # Parsing notes here proves the dry-run took the normal note-generation path.
+            node -e 'const value=JSON.parse(process.argv[1]); if (!value.notes?.trim()) throw new Error("Release notes are empty")' "$candidate"
+            bump_needed=true
+          elif [[ "$eligible" == true ]]; then
+            if [[ ! -s "docs/releases/${tag}.md" ]]; then
+              echo "Prepared release ${tag} is missing non-empty tracked release notes." >&2
+              exit 1
+            fi
+          fi
+
+          {
+            echo "should_release=$eligible"
+            echo "public_version=$public_version"
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "release_commit=$release_commit"
+            echo "bump_needed=$bump_needed"
+          } >> "$GITHUB_OUTPUT"
+          if [[ "$eligible" == false ]]; then
+            echo "No commits since ${public_tag}; production release is a no-op."
+          fi
+
+  prepare:
+    name: Prepare next patch release
+    needs: decide
+    if: needs.decide.outputs.should_release == 'true' && needs.decide.outputs.bump_needed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      pushed_head: ${{ steps.push.outputs.pushed_head }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          fetch-depth: 0
+          lfs: false
+      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4
+        with:
+          node-version: 20.19.0
+      - name: Verify the live main tip before mutation
+        run: |
+          set -euo pipefail
+          git remote set-url origin "$RELEASE_ORIGIN"
+          git fetch --force origin main --tags
+          git switch -C main HEAD
+          live_main="$(git ls-remote --exit-code origin refs/heads/main | awk '{print $1}')"
+          test "$(git rev-parse HEAD)" = "$live_main"
+          test "$(git rev-parse refs/remotes/origin/main)" = "$live_main"
+          test "$(git branch --show-current)" = main
+      - name: Generate release version and notes
+        run: |
+          generated="$(node scripts/prepare-nightly-release.mjs "${{ needs.decide.outputs.release_commit }}")"
+          test "$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).tag)' "$generated")" = "${{ needs.decide.outputs.tag }}"
+          test "$(node -p "require('./package.json').version")" = "${{ needs.decide.outputs.version }}"
+          test -s "docs/releases/${{ needs.decide.outputs.tag }}.md"
+      - name: Check generated release metadata
+        run: |
+          git diff --check
+          node --test scripts/prepare-nightly-release.node-test.mjs scripts/updater-manifest.node-test.mjs
+      - id: push
+        name: Commit and push prepared main
+        run: |
+          set -euo pipefail
+          git config user.name 'Dakia release bot'
+          git config user.email 'release-bot@dakiamail.com'
+          git add package.json package-lock.json Cargo.toml Cargo.lock \
+            apps/desktop/src-tauri/tauri.conf.json "docs/releases/${{ needs.decide.outputs.tag }}.md"
+          git commit -m "Prepare Dakia ${{ needs.decide.outputs.tag }} nightly release"
+          # A normal push is deliberately used: a concurrent main update is a hard stop.
+          git push origin HEAD:refs/heads/main
+          pushed_head="$(git rev-parse HEAD)"
+          live_main="$(git ls-remote --exit-code origin refs/heads/main | awk '{print $1}')"
+          test "$pushed_head" = "$live_main"
+          echo "pushed_head=$pushed_head" >> "$GITHUB_OUTPUT"
+
+  validate:
+    name: Full source suite before packaging
+    needs: [decide, prepare]
+    if: >-
+      always() && needs.decide.outputs.should_release == 'true' &&
+      (needs.prepare.result == 'success' || needs.prepare.result == 'skipped')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: sccache-r2
+    permissions:
+      contents: read
+    outputs:
+      validated_commit: ${{ steps.commit.outputs.validated_commit }}
+      tag: ${{ needs.decide.outputs.tag }}
+      version: ${{ needs.decide.outputs.version }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.decide.outputs.bump_needed == 'true' && needs.prepare.outputs.pushed_head || 'main' }}
+          fetch-depth: 0
+          lfs: false
+      - name: Attach the exact release checkout to main
+        run: |
+          set -euo pipefail
+          git remote set-url origin "$RELEASE_ORIGIN"
+          git fetch --force origin main
+          git switch -C main HEAD
+          live_main="$(git ls-remote --exit-code origin refs/heads/main | awk '{print $1}')"
+          test "$(git rev-parse HEAD)" = "$live_main"
+          test "$(git rev-parse refs/remotes/origin/main)" = "$live_main"
+      - id: commit
+        run: echo "validated_commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4
+        with:
+          node-version: 20.19.0
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ runner.arch }}-node-20.19.0-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-${{ runner.arch }}-node-20.19.0-
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.89.0 --profile minimal --component rustfmt --component clippy
+          echo 'RUSTUP_TOOLCHAIN=1.89.0' >> "$GITHUB_ENV"
+      - name: Install verified Rust compiler cache
+        run: |
+          archive="$RUNNER_TEMP/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz"
+          install_dir="$RUNNER_TEMP/sccache-bin"
+          curl --fail --location --retry 3 --silent --show-error https://github.com/mozilla/sccache/releases/download/v0.17.0/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz --output "$archive"
+          printf '%s  %s\n' '67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006' "$archive" | sha256sum --check -
+          mkdir -p "$install_dir"
+          tar -xzf "$archive" --strip-components=1 -C "$install_dir"
+          echo "$install_dir" >> "$GITHUB_PATH"
+          "$install_dir/sccache" --version
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-deps-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-deps-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-
+      - name: Start private R2 compiler cache
+        env:
+          SCCACHE_S3_KEY_PREFIX: dakia/linux-x64/rust-1.89.0/
+          SCCACHE_S3_RW_MODE: READ_WRITE
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_SCCACHE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SCCACHE_SECRET_ACCESS_KEY }}
+        run: |
+          test -n "$AWS_ACCESS_KEY_ID"
+          test -n "$AWS_SECRET_ACCESS_KEY"
+          sccache --start-server
+      - name: Install Linux dependencies for workspace tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+      - run: npm ci --ignore-scripts
+      - run: git lfs pull --include='apps/desktop/src-tauri/resources/email-classifier-v2/model.onnx,apps/desktop/src-tauri/resources/email-classifier-v2/tokenizer.json'
+      - name: Run full source suite with private R2 compiler cache
+        env:
+          RUSTC_WRAPPER: sccache
+          CARGO_INCREMENTAL: 0
+        run: |
+          npm run bundle:cli:dev
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace
+          npm run typecheck
+          npm run format:check
+          npm run test -- --maxWorkers=1
+          npm run test:release-scripts
+          npm run build:web
+      - name: Report Rust compiler cache statistics
+        if: always()
+        run: sccache --show-stats
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: [decide, validate]
+    if: needs.decide.outputs.should_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS Apple Silicon
+            runner: macos-15
+            platform: macos
+            updater_platform: darwin-aarch64
+            endpoint: https://downloads.dakiamail.com/macos/latest/latest.json
+            arch: aarch64
+            target: aarch64-apple-darwin
+            bundles: dmg
+            cache_prefix: dakia/macos-arm64/rust-1.89.0/
+            sccache_archive: sccache-v0.17.0-aarch64-apple-darwin.tar.gz
+            sccache_sha256: 0c560bfba31aef5bdfb4fb3d2677f6e61d71c5c00952f2a83344f47aa31f00f1
+          - name: Linux x64
+            runner: ubuntu-24.04
+            platform: linux
+            updater_platform: linux-x86_64
+            endpoint: https://downloads.dakiamail.com/linux/latest/latest.json
+            arch: x86_64
+            target: x86_64-unknown-linux-gnu
+            bundles: appimage
+            cache_prefix: dakia/linux-x64/rust-1.89.0/
+            sccache_archive: sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz
+            sccache_sha256: 67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006
+          - name: Windows x64
+            runner: windows-2025
+            platform: windows
+            updater_platform: windows-x86_64
+            endpoint: https://downloads.dakiamail.com/windows/latest/latest.json
+            arch: x86_64
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+            cache_prefix: dakia/windows-x64/rust-1.89.0/
+            sccache_archive: sccache-v0.17.0-x86_64-pc-windows-msvc.tar.gz
+            sccache_sha256: caf1932d76a909c909b7a2e41443cdfe3c79a49a380da1a22fa422e1d00d3ca7
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    # A GitHub job can bind one deployment environment. This one is limited to
+    # the shared compiler-cache credentials; production signing secrets must
+    # therefore be repository/org scoped. The publish job owns production-release.
+    environment: sccache-r2
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.validate.outputs.validated_commit }}
+          fetch-depth: 0
+          lfs: true
+      - name: Attach the validated source to main and prove it remains live
+        run: |
+          set -euo pipefail
+          git remote set-url origin "$RELEASE_ORIGIN"
+          git fetch --force origin main
+          git switch -C main HEAD
+          live_main="$(git ls-remote --exit-code origin refs/heads/main | awk '{print $1}')"
+          test "$(git rev-parse HEAD)" = "${{ needs.validate.outputs.validated_commit }}"
+          test "$(git rev-parse HEAD)" = "$live_main"
+          test "$(git rev-parse refs/remotes/origin/main)" = "$live_main"
+      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4
+        with:
+          node-version: 20.19.0
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ runner.arch }}-node-20.19.0-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-${{ runner.arch }}-node-20.19.0-
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.89.0 --profile minimal${{ matrix.platform != 'windows' && ' --component rustfmt --component clippy' || '' }}
+          rustup default 1.89.0
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-deps-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-deps-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        if: matrix.platform == 'macos'
+        with:
+          path: apps/desktop/src-tauri/frameworks
+          key: onnx-runtime-macos-arm64-${{ hashFiles('scripts/prepare-onnx-runtime.sh', 'apps/desktop/src-tauri/Cargo.lock', 'Cargo.lock') }}
+      - name: Install verified Rust compiler cache
+        run: |
+          archive="$RUNNER_TEMP/${{ matrix.sccache_archive }}"
+          install_dir="$RUNNER_TEMP/sccache-bin"
+          curl --fail --location --retry 3 --silent --show-error "https://github.com/mozilla/sccache/releases/download/v0.17.0/${{ matrix.sccache_archive }}" --output "$archive"
+          if [[ "${{ matrix.platform }}" == macos ]]; then
+            printf '%s  %s\n' '${{ matrix.sccache_sha256 }}' "$archive" | shasum -a 256 -c -
+          else
+            printf '%s  %s\n' '${{ matrix.sccache_sha256 }}' "$archive" | sha256sum --check -
+          fi
+          mkdir -p "$install_dir"
+          tar -xzf "$archive" --strip-components=1 -C "$install_dir"
+          echo "$install_dir" >> "$GITHUB_PATH"
+          "$install_dir/sccache" --version
+      - name: Start private R2 compiler cache
+        env:
+          SCCACHE_S3_KEY_PREFIX: ${{ matrix.cache_prefix }}
+          SCCACHE_S3_RW_MODE: READ_WRITE
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_SCCACHE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SCCACHE_SECRET_ACCESS_KEY }}
+        run: |
+          test -n "$AWS_ACCESS_KEY_ID"
+          test -n "$AWS_SECRET_ACCESS_KEY"
+          sccache --start-server
+      - name: Install Linux packaging dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+      - run: npm ci --ignore-scripts
+      - name: Prepare packaged assets
+        run: bash ./scripts/prepare-desktop-assets.sh
+      - name: Build target-specific CLI sidecar
+        env:
+          TAURI_ENV_PLATFORM: ${{ matrix.platform }}
+          TAURI_ENV_ARCH: ${{ matrix.arch }}
+          RUSTC_WRAPPER: sccache
+          CARGO_INCREMENTAL: 0
+        run: |
+          if [[ "${{ matrix.platform }}" == macos ]]; then
+            export ORT_LIB_LOCATION="$GITHUB_WORKSPACE/apps/desktop/src-tauri/frameworks"
+            export ORT_PREFER_DYNAMIC_LINK=1
+          else
+            unset ORT_LIB_LOCATION ORT_PREFER_DYNAMIC_LINK
+          fi
+          bash ./scripts/bundle-cli.sh release
+      - name: Build the web frontend
+        run: npm run build:web
+      - name: Configure macOS signing and notarization
+        if: matrix.platform == 'macos'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_ISSUER_ID: ${{ secrets.APPLE_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_CERTIFICATE"; test -n "$APPLE_CERTIFICATE_PASSWORD"
+          test -n "$APPLE_API_KEY"; test -n "$APPLE_API_KEY_ID"; test -n "$APPLE_ISSUER_ID"
+          keychain="$RUNNER_TEMP/dakia-release.keychain-db"
+          certificate="$RUNNER_TEMP/dakia-release.p12"
+          api_key="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate"
+          printf '%s' "$APPLE_API_KEY" | base64 --decode > "$api_key"
+          security create-keychain -p '' "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p '' "$keychain"
+          security import "$certificate" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k '' "$keychain"
+          security list-keychain -d user -s "$keychain"
+          security default-keychain -d user -s "$keychain"
+          xcrun notarytool store-credentials dakia-notary --key "$api_key" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_ISSUER_ID"
+      - name: Build signed and notarized macOS release assets
+        if: matrix.platform == 'macos'
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_NOTARY_PROFILE: dakia-notary
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          DAKIA_GOOGLE_CLIENT_ID: ${{ secrets.DAKIA_GOOGLE_CLIENT_ID }}
+          DAKIA_GOOGLE_CLIENT_SECRET: ${{ secrets.DAKIA_GOOGLE_CLIENT_SECRET }}
+          RUSTC_WRAPPER: sccache
+          CARGO_INCREMENTAL: 0
+        run: |
+          test -n "$APPLE_SIGNING_IDENTITY"; test -n "$TAURI_SIGNING_PRIVATE_KEY"
+          test -n "$DAKIA_GOOGLE_CLIENT_ID"; test -n "$DAKIA_GOOGLE_CLIENT_SECRET"
+          npm run release:build -- "${{ needs.validate.outputs.tag }}"
+      - name: Write platform updater endpoint overlay
+        if: matrix.platform != 'macos'
+        run: |
+          printf '{"build":{"beforeBuildCommand":""},"plugins":{"updater":{"endpoints":["%s"]}}}\n' \
+            '${{ matrix.endpoint }}' > "$RUNNER_TEMP/tauri-production-overlay.json"
+      - name: Build Linux updater AppImage
+        if: matrix.platform == 'linux'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          DAKIA_GOOGLE_CLIENT_ID: ${{ secrets.DAKIA_GOOGLE_CLIENT_ID }}
+          DAKIA_GOOGLE_CLIENT_SECRET: ${{ secrets.DAKIA_GOOGLE_CLIENT_SECRET }}
+          RUSTC_WRAPPER: sccache
+          CARGO_INCREMENTAL: 0
+        run: |
+          source scripts/local-release-env.sh
+          dakia_require_google_oauth_environment
+          dakia_prepare_google_oauth_compiler_environment
+          trap 'dakia_clear_google_oauth_compiler_environment' EXIT HUP INT TERM
+          ./node_modules/.bin/tauri build --target x86_64-unknown-linux-gnu --bundles appimage \
+            --config apps/desktop/src-tauri/tauri.conf.json --config "$RUNNER_TEMP/tauri-production-overlay.json" -- --locked
+      - name: Build Windows updater installer
+        if: matrix.platform == 'windows'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          DAKIA_GOOGLE_CLIENT_ID: ${{ secrets.DAKIA_GOOGLE_CLIENT_ID }}
+          DAKIA_GOOGLE_CLIENT_SECRET: ${{ secrets.DAKIA_GOOGLE_CLIENT_SECRET }}
+          RUSTC_WRAPPER: sccache
+          CARGO_INCREMENTAL: 0
+        run: |
+          source scripts/local-release-env.sh
+          dakia_require_google_oauth_environment
+          dakia_prepare_google_oauth_compiler_environment
+          trap 'dakia_clear_google_oauth_compiler_environment' EXIT HUP INT TERM
+          ./node_modules/.bin/tauri build --target x86_64-pc-windows-msvc --bundles nsis \
+            --config apps/desktop/src-tauri/tauri.conf.json --config "$RUNNER_TEMP/tauri-production-overlay.json" -- --locked
+      - name: Assemble and verify Linux release assets
+        if: matrix.platform == 'linux'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          version='${{ needs.validate.outputs.version }}'
+          tag='${{ needs.validate.outputs.tag }}'
+          output="release-assets/$tag/linux"
+          expected="Dakia_${version}_amd64.AppImage"
+          mkdir -p "$output"
+          built=(target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage)
+          test "${#built[@]}" = 1
+          if [[ "$(basename "${built[0]}")" != "$expected" ]]; then
+            mv "${built[0]}" "$output/$expected"
+            ./node_modules/.bin/tauri signer sign "$output/$expected"
+          else
+            cp "${built[0]}" "$output/$expected"
+            ./node_modules/.bin/tauri signer sign "$output/$expected"
+          fi
+          test -s "$output/$expected"; test -s "$output/$expected.sig"
+          (cd "$output" && shasum -a 256 "$expected" "$expected.sig" > SHA256SUMS.txt)
+          node scripts/verify-updater-signature.mjs "$output/$expected" "$output/$expected.sig" apps/desktop/src-tauri/tauri.conf.json
+          "$output/$expected" --appimage-extract >/dev/null
+      - name: Sign and assemble Windows release assets
+        if: matrix.platform == 'windows'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          version='${{ needs.validate.outputs.version }}'
+          tag='${{ needs.validate.outputs.tag }}'
+          output="release-assets/$tag/windows"
+          expected="Dakia_${version}_x64-setup.exe"
+          mkdir -p "$output"
+          built=(target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe)
+          test "${#built[@]}" = 1
+          cp "${built[0]}" "$output/$expected"
+          if [[ -n "$WINDOWS_CERT_PFX" || -n "$WINDOWS_CERT_PASSWORD" ]]; then
+            test -n "$WINDOWS_CERT_PFX"; test -n "$WINDOWS_CERT_PASSWORD"
+            pfx="$RUNNER_TEMP/dakia-windows-signing.pfx"
+            printf '%s' "$WINDOWS_CERT_PFX" | base64 --decode > "$pfx"
+            signtool.exe sign /fd SHA256 /f "$pfx" /p "$WINDOWS_CERT_PASSWORD" /tr http://timestamp.digicert.com /td SHA256 "$output/$expected"
+            signtool.exe verify /pa /v "$output/$expected"
+          fi
+          # Authenticode signing changes the installer bytes, so write the updater
+          # signature last even when no Windows certificate is configured.
+          ./node_modules/.bin/tauri signer sign "$output/$expected"
+          test -s "$output/$expected.sig"
+          (cd "$output" && sha256sum "$expected" "$expected.sig" > SHA256SUMS.txt)
+          node scripts/verify-updater-signature.mjs "$output/$expected" "$output/$expected.sig" apps/desktop/src-tauri/tauri.conf.json
+      - name: Verify macOS release asset set
+        if: matrix.platform == 'macos'
+        run: |
+          assets="release-assets/${{ needs.validate.outputs.tag }}"
+          test -s "$assets/Dakia_${{ needs.validate.outputs.version }}_aarch64.dmg"
+          test -s "$assets/Dakia-aarch64.app.tar.gz"
+          test -s "$assets/Dakia-aarch64.app.tar.gz.sig"
+          test -s "$assets/SHA256SUMS.txt"
+          node - "$assets" "${{ needs.validate.outputs.tag }}" "${{ needs.validate.outputs.validated_commit }}" <<'NODE'
+          const { createHash } = require('node:crypto');
+          const { readFileSync, writeFileSync } = require('node:fs');
+          const { join } = require('node:path');
+          const [assets, tag, commit] = process.argv.slice(2);
+          const checksumFile = join(assets, 'SHA256SUMS.txt');
+          writeFileSync(join(assets, 'macos-ci-verification.json'), `${JSON.stringify({
+            tag,
+            source_commit: commit,
+            checksums_sha256: createHash('sha256').update(readFileSync(checksumFile)).digest('hex'),
+            verification: 'scripts/build-local-macos-release.sh completed',
+          }, null, 2)}\n`);
+          NODE
+      - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: release-${{ matrix.platform }}
+          path: release-assets/${{ needs.validate.outputs.tag }}/**
+          if-no-files-found: error
+          retention-days: 7
+      - name: Report Rust compiler cache statistics
+        if: always()
+        run: sccache --show-stats
+
+  publish:
+    name: Publish signed release
+    needs: [decide, validate, build]
+    if: needs.decide.outputs.should_release == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: production-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.validate.outputs.validated_commit }}
+          fetch-depth: 0
+          lfs: false
+      - name: Attach the validated source to live main
+        run: |
+          set -euo pipefail
+          git remote set-url origin "$RELEASE_ORIGIN"
+          git fetch --force origin main --tags
+          git switch -C main HEAD
+          live_main="$(git ls-remote --exit-code origin refs/heads/main | awk '{print $1}')"
+          test "$(git rev-parse HEAD)" = "${{ needs.validate.outputs.validated_commit }}"
+          test "$(git rev-parse HEAD)" = "$live_main"
+          test "$(git rev-parse refs/remotes/origin/main)" = "$live_main"
+      - name: Install AWS CLI v2
+        run: |
+          archive="$RUNNER_TEMP/awscliv2.zip"
+          curl --fail --silent --show-error --location https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip --output "$archive"
+          unzip -q "$archive" -d "$RUNNER_TEMP"
+          sudo "$RUNNER_TEMP/aws/install" --update
+          aws --version
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-macos
+          path: release-assets/${{ needs.validate.outputs.tag }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-linux
+          path: release-assets/${{ needs.validate.outputs.tag }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-windows
+          path: release-assets/${{ needs.validate.outputs.tag }}
+      - name: Verify downloaded updater artifacts before publishing
+        run: |
+          assets="release-assets/${{ needs.validate.outputs.tag }}"
+          node scripts/verify-updater-signature.mjs "$assets/Dakia-aarch64.app.tar.gz" "$assets/Dakia-aarch64.app.tar.gz.sig" apps/desktop/src-tauri/tauri.conf.json
+          node scripts/verify-updater-signature.mjs "$assets/linux/Dakia_${{ needs.validate.outputs.version }}_amd64.AppImage" "$assets/linux/Dakia_${{ needs.validate.outputs.version }}_amd64.AppImage.sig" apps/desktop/src-tauri/tauri.conf.json
+          node scripts/verify-updater-signature.mjs "$assets/windows/Dakia_${{ needs.validate.outputs.version }}_x64-setup.exe" "$assets/windows/Dakia_${{ needs.validate.outputs.version }}_x64-setup.exe.sig" apps/desktop/src-tauri/tauri.conf.json
+      - name: Create or verify the exact SSH-signed source tag
+        env:
+          DAKIA_SSH_SIGNING_KEY: ${{ secrets.DAKIA_SSH_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          tag='${{ needs.validate.outputs.tag }}'
+          expected='${{ needs.validate.outputs.validated_commit }}'
+          if [[ -z "${DAKIA_SSH_SIGNING_KEY//[[:space:]]/}" ]]; then
+            echo 'DAKIA_SSH_SIGNING_KEY is required; refusing to create or trust an unsigned source tag.' >&2
+            exit 1
+          fi
+          key="$RUNNER_TEMP/dakia-release-signing-key"
+          allowed="$RUNNER_TEMP/dakia-release-allowed-signers"
+          umask 077
+          printf '%s\n' "$DAKIA_SSH_SIGNING_KEY" > "$key"
+          ssh-keygen -y -f "$key" > "$allowed.pub"
+          printf 'dakia-release %s\n' "$(<"$allowed.pub")" > "$allowed"
+          git config gpg.format ssh
+          git config user.signingkey "$key"
+          git config gpg.ssh.allowedSignersFile "$allowed"
+          git config commit.gpgsign false
+          git config tag.gpgSign true
+          git config user.name 'Dakia release bot'
+          git config user.email 'release-bot@dakiamail.com'
+          require_live_main() {
+            local live_main cached_main head
+            live_main="$(git ls-remote --exit-code origin refs/heads/main | awk '{print $1}')"
+            cached_main="$(git rev-parse refs/remotes/origin/main)"
+            head="$(git rev-parse HEAD)"
+            test "$head" = "$expected"
+            test "$cached_main" = "$expected"
+            test "$live_main" = "$expected"
+          }
+          remote_refs="$(git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}")"
+          remote_commit="$(awk -v tag="$tag" '$2 == "refs/tags/" tag "^{}" { print $1 }' <<<"$remote_refs")"
+          if [[ -n "$remote_commit" ]]; then
+            test "$remote_commit" = "$expected"
+            git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
+          else
+            require_live_main
+            git tag -s "$tag" -m "Dakia $tag"
+            require_live_main
+            git push origin "refs/tags/$tag"
+            require_live_main
+          fi
+          test "$(git rev-parse "$tag^{commit}")" = "$expected"
+          git verify-tag "$tag"
+          local_tag_object="$(git rev-parse "refs/tags/$tag")"
+          remote_refs="$(git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}")"
+          remote_tag_object="$(awk -v tag="$tag" '$2 == "refs/tags/" tag { print $1 }' <<<"$remote_refs")"
+          remote_tag_commit="$(awk -v tag="$tag" '$2 == "refs/tags/" tag "^{}" { print $1 }' <<<"$remote_refs")"
+          test "$remote_tag_object" = "$local_tag_object"
+          test "$remote_tag_commit" = "$expected"
+      - name: Stage, publish to R2, then publish GitHub Release
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          GH_TOKEN: ${{ github.token }}
+          DAKIA_MACOS_CI_VERIFICATION: release-assets/${{ needs.validate.outputs.tag }}/macos-ci-verification.json
+        run: |
+          set -euo pipefail
+          test -n "$R2_ACCESS_KEY_ID"; test -n "$R2_SECRET_ACCESS_KEY"; test -n "$CLOUDFLARE_ACCOUNT_ID"
+          assets="release-assets/${{ needs.validate.outputs.tag }}"
+          scripts/prepare-github-release-draft.sh '${{ needs.validate.outputs.tag }}' "$assets"
+          scripts/publish-release-to-r2.sh '${{ needs.validate.outputs.tag }}' "$assets"
+          scripts/publish-github-release.sh '${{ needs.validate.outputs.tag }}' "$assets"
+
+  verify-public:
+    name: Verify anonymous public release
+    needs: [decide, validate, publish]
+    if: needs.decide.outputs.should_release == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.validate.outputs.validated_commit }}
+          fetch-depth: 0
+          lfs: false
+          persist-credentials: false
+      - name: Verify public feeds, immutable artifacts, provenance, and GitHub Release
+        run: |
+          set -Eeuo pipefail
+          tag='${{ needs.validate.outputs.tag }}'
+          version='${{ needs.validate.outputs.version }}'
+          previous='${{ needs.decide.outputs.public_version }}'
+          commit='${{ needs.validate.outputs.validated_commit }}'
+          work="$RUNNER_TEMP/public-release"
+          mkdir -p "$work"
+          trap 'status=$?; { echo "### FAIL: public verification for '"$tag"' exited with status $status"; echo "Checked feeds under '$DOWNLOAD_ORIGIN' and GitHub Release $tag."; } | tee -a "$GITHUB_STEP_SUMMARY"; exit $status' ERR
+          curl_args=(--fail --silent --show-error --location --proto '=https' --connect-timeout 15 --max-time 90 --retry 3)
+          for platform in macos linux windows; do
+            curl "${curl_args[@]}" "$DOWNLOAD_ORIGIN/$platform/latest/latest.json" --output "$work/$platform-latest.json"
+          done
+          node scripts/updater-manifest.mjs validate --platform darwin-aarch64 --manifest "$work/macos-latest.json" --tauri-config apps/desktop/src-tauri/tauri.conf.json
+          node scripts/updater-manifest.mjs validate --platform linux-x86_64 --manifest "$work/linux-latest.json" --tauri-config apps/desktop/src-tauri/tauri.conf.json
+          node scripts/updater-manifest.mjs validate --platform windows-x86_64 --manifest "$work/windows-latest.json" --tauri-config apps/desktop/src-tauri/tauri.conf.json
+          node - "$work" "$version" "$previous" <<'NODE'
+          const { readFileSync } = require('node:fs');
+          const [dir, version, previous] = process.argv.slice(2);
+          const versions = ['macos', 'linux', 'windows'].map((p) => JSON.parse(readFileSync(`${dir}/${p}-latest.json`, 'utf8')).version);
+          if (!versions.every((value) => value === version)) throw new Error(`Feeds disagree or do not contain ${version}: ${versions.join(', ')}`);
+          const parse = (value) => value.split(/[.+-]/).slice(0, 3).map(Number);
+          const [a,b,c] = parse(version), [x,y,z] = parse(previous);
+          if (a < x || (a === x && b < y) || (a === x && b === y && c <= z)) throw new Error(`Release ${version} is not newer than ${previous}`);
+          NODE
+          curl "${curl_args[@]}" "$DOWNLOAD_ORIGIN/macos/$tag/Dakia-Apple-Silicon.dmg" --output "$work/Dakia-Apple-Silicon.dmg"
+          curl "${curl_args[@]}" "$DOWNLOAD_ORIGIN/macos/$tag/Dakia-aarch64.app.tar.gz" --output "$work/Dakia-aarch64.app.tar.gz"
+          curl "${curl_args[@]}" "$DOWNLOAD_ORIGIN/macos/$tag/Dakia-aarch64.app.tar.gz.sig" --output "$work/Dakia-aarch64.app.tar.gz.sig"
+          curl "${curl_args[@]}" "$DOWNLOAD_ORIGIN/macos/$tag/SHA256SUMS.txt" --output "$work/macos-SHA256SUMS.txt"
+          curl "${curl_args[@]}" "$DOWNLOAD_ORIGIN/linux/$tag/Dakia_${version}_amd64.AppImage" --output "$work/Dakia_${version}_amd64.AppImage"
+          curl "${curl_args[@]}" "$DOWNLOAD_ORIGIN/linux/$tag/Dakia_${version}_amd64.AppImage.sig" --output "$work/Dakia_${version}_amd64.AppImage.sig"
+          curl "${curl_args[@]}" "$DOWNLOAD_ORIGIN/linux/$tag/SHA256SUMS.txt" --output "$work/linux-SHA256SUMS.txt"
+          curl "${curl_args[@]}" "$DOWNLOAD_ORIGIN/windows/$tag/Dakia_${version}_x64-setup.exe" --output "$work/Dakia_${version}_x64-setup.exe"
+          curl "${curl_args[@]}" "$DOWNLOAD_ORIGIN/windows/$tag/Dakia_${version}_x64-setup.exe.sig" --output "$work/Dakia_${version}_x64-setup.exe.sig"
+          curl "${curl_args[@]}" "$DOWNLOAD_ORIGIN/windows/$tag/SHA256SUMS.txt" --output "$work/windows-SHA256SUMS.txt"
+          node - "$work" "$version" <<'NODE'
+          const { createHash } = require('node:crypto');
+          const { readFileSync } = require('node:fs');
+          const { join } = require('node:path');
+          const [dir, version] = process.argv.slice(2);
+          const digest = (file) => createHash('sha256').update(readFileSync(join(dir, file))).digest('hex');
+          const entries = (file) => new Map(readFileSync(join(dir, file), 'utf8').trim().split('\n').map((line) => {
+            const match = /^([0-9a-f]{64})  (.+)$/.exec(line);
+            if (!match) throw new Error(`Invalid checksum record in ${file}: ${line}`);
+            return [match[2], match[1]];
+          }));
+          const assert = (checksums, checksumName, localName) => {
+            if (checksums.get(checksumName) !== digest(localName)) throw new Error(`Checksum mismatch for ${localName} against ${checksumName}`);
+          };
+          const macos = entries('macos-SHA256SUMS.txt');
+          if (macos.size !== 3) throw new Error('macOS SHA256SUMS.txt must contain exactly three records');
+          assert(macos, `Dakia_${version}_aarch64.dmg`, 'Dakia-Apple-Silicon.dmg');
+          assert(macos, 'Dakia-aarch64.app.tar.gz', 'Dakia-aarch64.app.tar.gz');
+          assert(macos, 'Dakia-aarch64.app.tar.gz.sig', 'Dakia-aarch64.app.tar.gz.sig');
+          const linux = entries('linux-SHA256SUMS.txt');
+          if (linux.size !== 2) throw new Error('Linux SHA256SUMS.txt must contain exactly two records');
+          assert(linux, `Dakia_${version}_amd64.AppImage`, `Dakia_${version}_amd64.AppImage`);
+          assert(linux, `Dakia_${version}_amd64.AppImage.sig`, `Dakia_${version}_amd64.AppImage.sig`);
+          const windows = entries('windows-SHA256SUMS.txt');
+          if (windows.size !== 2) throw new Error('Windows SHA256SUMS.txt must contain exactly two records');
+          assert(windows, `Dakia_${version}_x64-setup.exe`, `Dakia_${version}_x64-setup.exe`);
+          assert(windows, `Dakia_${version}_x64-setup.exe.sig`, `Dakia_${version}_x64-setup.exe.sig`);
+          NODE
+          node scripts/verify-updater-signature.mjs "$work/Dakia-aarch64.app.tar.gz" "$work/Dakia-aarch64.app.tar.gz.sig" apps/desktop/src-tauri/tauri.conf.json
+          node scripts/verify-updater-signature.mjs "$work/Dakia_${version}_amd64.AppImage" "$work/Dakia_${version}_amd64.AppImage.sig" apps/desktop/src-tauri/tauri.conf.json
+          node scripts/verify-updater-signature.mjs "$work/Dakia_${version}_x64-setup.exe" "$work/Dakia_${version}_x64-setup.exe.sig" apps/desktop/src-tauri/tauri.conf.json
+          remote_tag="$(git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}" | awk -v tag="$tag" '$2 == "refs/tags/" tag "^{}" { print $1 }')"
+          test "$remote_tag" = "$commit"
+          git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
+          git rev-parse --verify "$tag^{tag}" >/dev/null
+          test "$(git rev-parse "$tag^{commit}")" = "$commit"
+          github_api="https://api.github.com/repos/DakiaMail/dakia-desktop/releases/tags/$tag"
+          github_download="https://github.com/DakiaMail/dakia-desktop/releases/download/$tag"
+          release="$(curl "${curl_args[@]}" "$github_api")"
+          node - "$release" "$tag" "$commit" "$version" <<'NODE'
+          const [release, tag, commit, version] = process.argv.slice(2);
+          const value = JSON.parse(release);
+          const expected = [`Dakia_${version}_aarch64.dmg`, 'Dakia-aarch64.app.tar.gz', 'Dakia-aarch64.app.tar.gz.sig', 'SHA256SUMS.txt', `Dakia_${version}_amd64.AppImage`, `Dakia_${version}_amd64.AppImage.sig`, `Dakia_${version}_x64-setup.exe`, `Dakia_${version}_x64-setup.exe.sig`].sort();
+          const actual = value.assets.map((asset) => asset.name).sort();
+          if (value.tag_name !== tag || value.target_commitish !== commit || value.draft || actual.join('\n') !== expected.join('\n')) throw new Error('GitHub Release metadata or exact asset set is invalid.');
+          NODE
+          mkdir -p "$work/github"
+          curl "${curl_args[@]}" "$github_download/SHA256SUMS.txt" --output "$work/github/SHA256SUMS.txt"
+          cmp -s "$work/macos-SHA256SUMS.txt" "$work/github/SHA256SUMS.txt"
+          curl "${curl_args[@]}" "$github_download/Dakia-aarch64.app.tar.gz" --output "$work/github/Dakia-aarch64.app.tar.gz"
+          cmp -s "$work/Dakia-aarch64.app.tar.gz" "$work/github/Dakia-aarch64.app.tar.gz"
+          curl "${curl_args[@]}" "$github_download/Dakia_${version}_amd64.AppImage" --output "$work/github/Dakia_${version}_amd64.AppImage"
+          cmp -s "$work/Dakia_${version}_amd64.AppImage" "$work/github/Dakia_${version}_amd64.AppImage"
+          {
+            echo "### PASS: production release $tag"
+            echo "- $DOWNLOAD_ORIGIN/macos/$tag/Dakia-Apple-Silicon.dmg $(sha256sum "$work/Dakia-Apple-Silicon.dmg" | awk '{print $1}')"
+            echo "- $DOWNLOAD_ORIGIN/macos/$tag/Dakia-aarch64.app.tar.gz $(sha256sum "$work/Dakia-aarch64.app.tar.gz" | awk '{print $1}')"
+            echo "- $DOWNLOAD_ORIGIN/macos/$tag/Dakia-aarch64.app.tar.gz.sig $(sha256sum "$work/Dakia-aarch64.app.tar.gz.sig" | awk '{print $1}')"
+            echo "- $DOWNLOAD_ORIGIN/linux/$tag/Dakia_${version}_amd64.AppImage $(sha256sum "$work/Dakia_${version}_amd64.AppImage" | awk '{print $1}')"
+            echo "- $DOWNLOAD_ORIGIN/linux/$tag/Dakia_${version}_amd64.AppImage.sig $(sha256sum "$work/Dakia_${version}_amd64.AppImage.sig" | awk '{print $1}')"
+            echo "- $DOWNLOAD_ORIGIN/windows/$tag/Dakia_${version}_x64-setup.exe $(sha256sum "$work/Dakia_${version}_x64-setup.exe" | awk '{print $1}')"
+            echo "- $DOWNLOAD_ORIGIN/windows/$tag/Dakia_${version}_x64-setup.exe.sig $(sha256sum "$work/Dakia_${version}_x64-setup.exe.sig" | awk '{print $1}')"
+            echo "- $DOWNLOAD_ORIGIN/{macos,linux,windows}/latest/latest.json"
+            echo "- $github_api and $github_download/{SHA256SUMS.txt,Dakia-aarch64.app.tar.gz,Dakia_${version}_amd64.AppImage}"
+          } | tee -a "$GITHUB_STEP_SUMMARY"

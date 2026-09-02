@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
-import { buildManifest, validateManifest } from "./updater-manifest.mjs";
+import {
+  buildManifest,
+  PLATFORM_ARTIFACTS,
+  validateManifest,
+} from "./updater-manifest.mjs";
 
 const keyId = Buffer.from("0123456789abcdef", "hex");
 const signatureRecord = Buffer.concat([
@@ -41,6 +46,18 @@ test("builds the Apple Silicon updater platform entry", () => {
     encodedSignature,
   );
   assert.deepEqual(Object.keys(manifest.platforms), ["darwin-aarch64"]);
+});
+
+test("accepts explicit Darwin with generic platform fields", () => {
+  const manifest = buildManifest({
+    version: input.version,
+    pubDate: input.pubDate,
+    notes: input.notes,
+    platform: "darwin-aarch64",
+    url: input.aarch64Url,
+    signature: input.aarch64Signature,
+  });
+  assert.equal(manifest.platforms["darwin-aarch64"].url, input.aarch64Url);
 });
 
 test("rejects architecture swaps", () => {
@@ -127,5 +144,131 @@ test("rejects truncated or mistyped minisign records", () => {
   assert.throws(
     () => buildManifest({ ...input, updaterPublicKey: mistypedPublicKey }),
     /Invalid updater public key/,
+  );
+});
+
+test("accepts Linux and Windows single-platform updater entries", () => {
+  for (const [platform, url] of [
+    [
+      "linux-x86_64",
+      "https://downloads.dakiamail.com/linux/v0.2.7/Dakia_0.2.7_amd64.AppImage",
+    ],
+    [
+      "windows-x86_64",
+      "https://downloads.dakiamail.com/windows/v0.2.7/Dakia_0.2.7_x64-setup.exe",
+    ],
+  ]) {
+    const manifest = buildManifest({
+      ...input,
+      platform,
+      url,
+      signature: encodedSignature,
+      updaterPublicKey: matchingPublicKey,
+    });
+    assert.deepEqual(Object.keys(manifest.platforms), [platform]);
+    assert.doesNotThrow(() =>
+      validateManifest(manifest, matchingPublicKey, platform),
+    );
+  }
+});
+
+test("rejects cross-platform and foreign updater artifact URLs", () => {
+  const darwinManifest = buildManifest(input);
+  darwinManifest.platforms["darwin-aarch64"].url =
+    "https://downloads.dakiamail.com/linux/v0.2.7/Dakia_0.2.7_amd64.AppImage";
+  assert.throws(
+    () => validateManifest(darwinManifest),
+    /architecture mismatch for darwin-aarch64/,
+  );
+
+  const linuxManifest = buildManifest({
+    ...input,
+    platform: "linux-x86_64",
+    url: "https://downloads.dakiamail.com/linux/v0.2.7/Dakia_0.2.7_amd64.AppImage",
+    signature: encodedSignature,
+  });
+  linuxManifest.platforms["linux-x86_64"].url =
+    "https://downloads.dakiamail.com/macos/v0.2.7/Dakia-aarch64.app.tar.gz";
+  assert.throws(
+    () => validateManifest(linuxManifest, undefined, "linux-x86_64"),
+    /architecture mismatch for linux-x86_64/,
+  );
+
+  for (const [platform, url] of [
+    [
+      "linux-x86_64",
+      "https://downloads.dakiamail.com/linux/v0.2.7/Dakia_0.2.7_amd64.deb",
+    ],
+    [
+      "windows-x86_64",
+      "https://downloads.dakiamail.com/windows/v0.2.7/Dakia_0.2.7_x64.msi",
+    ],
+    [
+      "linux-x86_64",
+      "https://example.com/linux/v0.2.7/Dakia_0.2.7_amd64.AppImage",
+    ],
+  ]) {
+    assert.throws(
+      () =>
+        buildManifest({
+          ...input,
+          platform,
+          url,
+          signature: encodedSignature,
+        }),
+      new RegExp(`architecture mismatch for ${platform}`),
+    );
+  }
+});
+
+test("verifies signatures against the embedded key for every platform", () => {
+  const differentRecord = Buffer.from(publicKeyRecord, "base64");
+  differentRecord[2] ^= 1;
+  const differentPublicKey = Buffer.from(
+    [
+      "untrusted comment: minisign public key",
+      differentRecord.toString("base64"),
+    ].join("\n"),
+  ).toString("base64");
+
+  for (const [platform, url] of [
+    [
+      "linux-x86_64",
+      "https://downloads.dakiamail.com/linux/v0.2.7/Dakia_0.2.7_amd64.AppImage",
+    ],
+    [
+      "windows-x86_64",
+      "https://downloads.dakiamail.com/windows/v0.2.7/Dakia_0.2.7_x64-setup.exe",
+    ],
+  ]) {
+    assert.throws(
+      () =>
+        buildManifest({
+          ...input,
+          platform,
+          url,
+          signature: encodedSignature,
+          updaterPublicKey: differentPublicKey,
+        }),
+      /does not match the embedded public key/,
+    );
+  }
+});
+
+test("hosted updater names match the configured Tauri v2 artifact mode", () => {
+  const tauriConfig = JSON.parse(
+    readFileSync(
+      new URL("../apps/desktop/src-tauri/tauri.conf.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.equal(tauriConfig.bundle.createUpdaterArtifacts, true);
+  assert.match(
+    "Dakia_0.2.7_amd64.AppImage",
+    PLATFORM_ARTIFACTS["linux-x86_64"].updaterPattern,
+  );
+  assert.match(
+    "Dakia_0.2.7_x64-setup.exe",
+    PLATFORM_ARTIFACTS["windows-x86_64"].updaterPattern,
   );
 });

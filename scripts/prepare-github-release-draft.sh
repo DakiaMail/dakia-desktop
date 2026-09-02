@@ -32,7 +32,53 @@ apple_signature="Dakia-aarch64.app.tar.gz.sig"
 checksums="SHA256SUMS.txt"
 notes="release-notes.md"
 source_marker="source-commit.txt"
-expected_assets="$(printf '%s\n' "$apple_dmg" "$apple_update" "$apple_signature" "$checksums" | LC_ALL=C sort)"
+github_asset_names=("$apple_dmg" "$apple_update" "$apple_signature" "$checksums")
+github_asset_paths=("$asset_dir/$apple_dmg" "$asset_dir/$apple_update" "$asset_dir/$apple_signature" "$asset_dir/$checksums")
+
+# GitHub Release assets have a flat namespace, so the per-platform
+# SHA256SUMS.txt files remain in their platform directories/R2. The installer
+# and its detached updater signature are mirrored here alongside the Apple
+# release assets.
+add_optional_platform_assets() {
+  local platform_name="$1" platform_dir="$2" updater_name="$3"
+  local signature_name="$updater_name.sig" platform_checksums="$platform_dir/SHA256SUMS.txt"
+  local checksum_names expected_names artifact
+
+  [[ -d "$platform_dir" ]] || return 0
+  for artifact in "$platform_dir/$updater_name" "$platform_dir/$signature_name" "$platform_checksums"; do
+    [[ -s "$artifact" ]] || die "Missing or empty $platform_name release input: $artifact"
+  done
+  if find "$platform_dir" -mindepth 1 -maxdepth 1 ! -type f | grep -q . || \
+    find "$platform_dir" -mindepth 1 -maxdepth 1 -type f ! -name "$updater_name" ! -name "$signature_name" ! -name SHA256SUMS.txt | grep -q .; then
+    die "$platform_dir contains files outside the expected $platform_name release allowlist."
+  fi
+  [[ "$(wc -l <"$platform_checksums" | tr -d ' ')" == "2" ]] ||
+    die "$platform_name/SHA256SUMS.txt must contain exactly the installer and signature checksums."
+  awk 'NF != 2 { exit 1 }' "$platform_checksums" ||
+    die "$platform_name/SHA256SUMS.txt contains an invalid checksum record."
+  checksum_names="$(awk '{ print $2 }' "$platform_checksums" | LC_ALL=C sort)"
+  expected_names="$(printf '%s\n' "$updater_name" "$signature_name" | LC_ALL=C sort)"
+  [[ "$checksum_names" == "$expected_names" ]] ||
+    die "$platform_name/SHA256SUMS.txt must cover exactly the GitHub distributable artifacts."
+  (cd "$platform_dir" && shasum -a 256 -c SHA256SUMS.txt) >/dev/null ||
+    die "$platform_name/SHA256SUMS.txt does not match the local release artifacts."
+  github_asset_names+=("$updater_name" "$signature_name")
+  github_asset_paths+=("$platform_dir/$updater_name" "$platform_dir/$signature_name")
+}
+
+add_optional_platform_assets "linux" "$asset_dir/linux" "Dakia_${version}_amd64.AppImage"
+add_optional_platform_assets "windows" "$asset_dir/windows" "Dakia_${version}_x64-setup.exe"
+expected_assets="$(printf '%s\n' "${github_asset_names[@]}" | LC_ALL=C sort)"
+
+github_asset_local_path() {
+  local artifact="$1"
+  case "$artifact" in
+    "$apple_dmg"|"$apple_update"|"$apple_signature"|"$checksums") printf '%s\n' "$asset_dir/$artifact" ;;
+    "Dakia_${version}_amd64.AppImage"|"Dakia_${version}_amd64.AppImage.sig") printf '%s\n' "$asset_dir/linux/$artifact" ;;
+    "Dakia_${version}_x64-setup.exe"|"Dakia_${version}_x64-setup.exe.sig") printf '%s\n' "$asset_dir/windows/$artifact" ;;
+    *) die "Unexpected GitHub Release asset: $artifact" ;;
+  esac
+}
 
 require_main_provenance() {
   local status
@@ -71,6 +117,52 @@ require_exact_public_r2_resume() {
     "$download_origin/macos/$tag/Dakia-aarch64.app.tar.gz|$asset_dir/$apple_update|updater archive" \
     "$download_origin/macos/$tag/Dakia-aarch64.app.tar.gz.sig|$asset_dir/$apple_signature|updater signature" \
     "$download_origin/macos/$tag/Dakia-Apple-Silicon.dmg|$asset_dir/$apple_dmg|Apple Silicon DMG"; do
+    IFS='|' read -r url local_file label <<<"$artifact"
+    if ! status="$(curl --silent --show-error --location --proto '=https' --connect-timeout 15 --max-time 90 \
+      --output "$resume_dir/$(basename "$url")" --write-out '%{http_code}' "$url")" || \
+      [[ "$status" != "200" ]] || \
+      ! cmp -s "$local_file" "$resume_dir/$(basename "$url")"; then
+      rm -rf "$resume_dir"
+      die "Public R2 resume $label is missing or differs from the local release artifact."
+    fi
+  done
+  rm -rf "$resume_dir"
+  require_exact_optional_public_r2_resume "linux" "linux-x86_64" "$asset_dir/linux" "Dakia_${version}_amd64.AppImage"
+  require_exact_optional_public_r2_resume "windows" "windows-x86_64" "$asset_dir/windows" "Dakia_${version}_x64-setup.exe"
+}
+
+require_exact_optional_public_r2_resume() {
+  local platform_name="$1" platform="$2" platform_dir="$3" updater_name="$4"
+  local signature_name="$updater_name.sig" manifest resume_dir status expected_url expected_signature expected_notes artifact
+  [[ -d "$platform_dir" ]] || return 0
+  manifest="$(mktemp)" || die "Could not create a temporary $platform_name updater-manifest file."
+  if ! status="$(curl --silent --show-error --location --proto '=https' --connect-timeout 15 --max-time 90 \
+    --output "$manifest" --write-out '%{http_code}' "$download_origin/$platform_name/latest/latest.json?release-gate=$tag")"; then
+    rm -f "$manifest"
+    die "Could not read the public $platform_name updater manifest while checking an existing GitHub Release."
+  fi
+  if [[ "$status" != "200" ]]; then
+    rm -f "$manifest"
+    die "Existing GitHub Release may resume only when public $platform_name latest.json is reachable (HTTP $status)."
+  fi
+  node "$root_dir/scripts/updater-manifest.mjs" validate --platform "$platform" --manifest "$manifest" \
+    --tauri-config "$root_dir/apps/desktop/src-tauri/tauri.conf.json" >/dev/null || {
+      rm -f "$manifest"; die "Existing GitHub Release may resume only with a valid public $platform_name updater manifest.";
+    }
+  expected_url="$download_origin/$platform_name/$tag/$updater_name"
+  expected_signature="$(node -e 'process.stdout.write(require("node:fs").readFileSync(process.argv[1], "utf8").trim())' "$platform_dir/$signature_name")"
+  expected_notes="$(node -e 'process.stdout.write(require("node:fs").readFileSync(process.argv[1], "utf8").trim())' "$asset_dir/$notes")"
+  if ! jq -e --arg version "$version" --arg url "$expected_url" --arg signature "$expected_signature" --arg notes "$expected_notes" --arg platform "$platform" \
+    '.version == $version and .notes == $notes and .platforms[$platform].url == $url and .platforms[$platform].signature == $signature' \
+    "$manifest" >/dev/null; then
+    rm -f "$manifest"
+    die "Existing GitHub Release is public while public $platform_name latest.json is not the exact R2 resume candidate."
+  fi
+  rm -f "$manifest"
+  resume_dir="$(mktemp -d)" || die "Could not create a temporary public $platform_name artifact directory."
+  for artifact in \
+    "$download_origin/$platform_name/$tag/$updater_name|$platform_dir/$updater_name|$platform_name updater" \
+    "$download_origin/$platform_name/$tag/$signature_name|$platform_dir/$signature_name|$platform_name updater signature"; do
     IFS='|' read -r url local_file label <<<"$artifact"
     if ! status="$(curl --silent --show-error --location --proto '=https' --connect-timeout 15 --max-time 90 \
       --output "$resume_dir/$(basename "$url")" --write-out '%{http_code}' "$url")" || \
@@ -141,7 +233,7 @@ verify_local_assets() {
 }
 
 verify_release() {
-  local expected_draft="$1" release_json actual_assets actual_tag actual_target actual_title actual_draft actual_prerelease verify_dir artifact
+  local expected_draft="$1" release_json actual_assets actual_tag actual_target actual_title actual_draft actual_prerelease verify_dir artifact local_file
   release_json="$(gh release view "$tag" --repo "$release_repo" --json tagName,targetCommitish,name,body,isDraft,isPrerelease,assets)" ||
     return 1
   actual_tag="$(jq -r '.tagName' <<<"$release_json")"
@@ -161,7 +253,7 @@ verify_release() {
   fi
   actual_assets="$(jq -r '.assets[].name' <<<"$release_json" | LC_ALL=C sort)"
   [[ "$actual_assets" == "$expected_assets" ]] ||
-    die "GitHub Release assets do not exactly match the expected four-file allowlist."
+    die "GitHub Release assets do not exactly match the expected allowlist."
   jq -j '.body' <<<"$release_json" >"$asset_dir/.github-release-body.$$"
   if ! cmp -s "$asset_dir/$notes" "$asset_dir/.github-release-body.$$"; then
     rm -f "$asset_dir/.github-release-body.$$"
@@ -170,9 +262,10 @@ verify_release() {
   rm -f "$asset_dir/.github-release-body.$$"
   verify_dir="$(mktemp -d)"
   trap 'rm -rf "$verify_dir"' RETURN
-  for artifact in "$apple_dmg" "$apple_update" "$apple_signature" "$checksums"; do
+  for artifact in "${github_asset_names[@]}"; do
+    local_file="$(github_asset_local_path "$artifact")"
     gh release download "$tag" --repo "$release_repo" --dir "$verify_dir" --pattern "$artifact"
-    cmp -s "$asset_dir/$artifact" "$verify_dir/$artifact" ||
+    cmp -s "$local_file" "$verify_dir/$artifact" ||
       die "GitHub Release asset bytes do not match local $artifact."
   done
   (cd "$verify_dir" && shasum -a 256 -c "$checksums") >/dev/null ||
@@ -207,10 +300,7 @@ if ! gh release create "$tag" \
   --target "$(git -C "$root_dir" rev-parse HEAD)" \
   --title "Dakia $tag" \
   --notes-file "$asset_dir/$notes" \
-  "$asset_dir/$apple_dmg" \
-  "$asset_dir/$apple_update" \
-  "$asset_dir/$apple_signature" \
-  "$asset_dir/$checksums"; then
+  "${github_asset_paths[@]}"; then
   verify_release true || die "GitHub draft creation failed without an exact matching draft."
 fi
 verify_release true || die "Created GitHub draft did not pass exact verification."
