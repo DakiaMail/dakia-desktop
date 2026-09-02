@@ -5054,6 +5054,53 @@ fn parse_first_address(value: &str) -> (Option<String>, String) {
     }
 }
 
+pub(crate) fn parsed_header_mailboxes(value: &str) -> Vec<String> {
+    let raw = format!("To: {value}\r\n\r\n");
+    let Some(parsed) = parse_header_block(raw.as_bytes()).ok() else {
+        return Vec::new();
+    };
+    match parsed
+        .header(HeaderName::To)
+        .and_then(HeaderValue::as_address)
+    {
+        Some(ParsedAddress::List(addresses)) => addresses
+            .iter()
+            .filter_map(|address| address.address.as_deref())
+            .filter(|address| is_bounded_mailbox_address(address))
+            .map(ToString::to_string)
+            .collect(),
+        Some(ParsedAddress::Group(groups)) => groups
+            .iter()
+            .flat_map(|group| group.addresses.iter())
+            .filter_map(|address| address.address.as_deref())
+            .filter(|address| is_bounded_mailbox_address(address))
+            .map(ToString::to_string)
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+fn is_bounded_mailbox_address(value: &str) -> bool {
+    if value.is_empty() || value.len() > 320 {
+        return false;
+    }
+    let Some((local, domain)) = value.split_once('@') else {
+        return false;
+    };
+    !local.is_empty()
+        && !domain.is_empty()
+        && !domain.contains('@')
+        && !local.starts_with('.')
+        && !local.ends_with('.')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+        && value.chars().all(|character| {
+            !character.is_whitespace()
+                && !character.is_control()
+                && !matches!(character, '<' | '>' | ',' | ';' | ':' | '"' | '(' | ')')
+        })
+}
+
 #[derive(Default)]
 struct BodySelection {
     plain: Vec<String>,
@@ -10785,5 +10832,20 @@ For you, Alex =E2=80=94 related to your saved topic."
 
         assert!(signals.contains("Gmail category: Promotions"));
         assert!(!signals.contains("\\Inbox"));
+    }
+
+    #[test]
+    fn sent_correspondents_use_rfc_mailboxes_not_display_name_text() {
+        assert_eq!(
+            parsed_header_mailboxes(
+                "\"victim@example.com\" <actual@example.net>, Friends: Aino <aino@example.test>, Qazi <qazi@rauha.co>;"
+            ),
+            vec![
+                "actual@example.net".to_string(),
+                "aino@example.test".to_string(),
+                "qazi@rauha.co".to_string(),
+            ]
+        );
+        assert!(parsed_header_mailboxes("victim@example.com in prose").is_empty());
     }
 }
