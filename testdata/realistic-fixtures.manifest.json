@@ -195,7 +195,7 @@
     {
       "id": "mime.filename-parameters-and-encodings",
       "path": "crates/dakia-core/testdata/mime/filename-parameters-and-encodings.eml",
-      "sha256": "e0e71d12dbeec09ec8c833d7b98f363366963edf5d00641b893249fba97b7a0e",
+      "sha256": "77095fc2d7516b0ab1c62782778579112749ea2dc802fea5e4e7fb591dae5b5e",
       "provenance": {
         "kind": "synthetic",
         "detail": "Synthetic RFC 2231, RFC 2047, malformed, and hostile filename parameters."
@@ -213,7 +213,13 @@
         "error": "Malformed filename parameters must not cause a message parse failure.",
         "resourceLimit": "No resource-limit error is expected for this bounded fixture."
       },
-      "applicablePaths": ["complete-rfc822", "catalogue", "header"],
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header",
+        "selective-bodystructure",
+        "storage-round-trip"
+      ],
       "redaction": {
         "reviewer": "Dakia maintainers",
         "reviewedOn": "2026-07-30",
@@ -224,6 +230,11 @@
           "domain": "rust.mail.parse-paths",
           "source": "crates/dakia-core/src/mail.rs",
           "id": "every_mime_corpus_fixture_uses_all_publication_parse_paths"
+        },
+        {
+          "domain": "rust.mail.selective-bodystructure",
+          "source": "crates/dakia-core/src/mail.rs",
+          "id": "realistic_selective_bodystructure_fixtures_match_complete_parser_and_starred_storage"
         }
       ]
     },
