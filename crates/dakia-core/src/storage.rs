@@ -34,11 +34,13 @@ const VAULT_NONCE_LEN: usize = 12;
 const MESSAGE_CONTENT_CACHE_MAX_BYTES: i64 = 512 * 1024 * 1024;
 const MESSAGE_CONTENT_CACHE_RECENT_WINDOW_DAYS: i64 = 30;
 /// Attachment presentation and opaque IDs change when the selected HTML/MIME
-/// branch changes. Version 2 invalidates IDs written by the full-message
+/// branch changes. Version 3 invalidates IDs written by the full-message
 /// parser, whose downloadable-only numbering can otherwise select a different
-/// part when interpreted by the sectioned MIME planner.
-const ATTACHMENT_PRESENTATION_CACHE_VERSION: &str = "2";
-const ATTACHMENT_PRESENTATION_VERSION: i64 = 2;
+/// part when interpreted by the sectioned MIME planner, and cached attachment
+/// names written before selective BODYSTRUCTURE decoding handled RFC 2047
+/// parameters.
+const ATTACHMENT_PRESENTATION_CACHE_VERSION: &str = "3";
+const ATTACHMENT_PRESENTATION_VERSION: i64 = 3;
 /// Classification policy is versioned independently from the bundled model.
 /// A policy change must re-run model-owned classifications while preserving
 /// categories the user chose explicitly.
@@ -5213,6 +5215,122 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(attachment_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn attachment_filename_cache_migration_discards_stale_foreground_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("filename-cache-migration.sqlite");
+        let store = Store::open(&database).await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let mut cached_message = message("Filename migration", "preview");
+        cached_message.account_id = account_id.to_string();
+        let id = cached_message.id.clone();
+        store.upsert_messages(&[cached_message]).await.unwrap();
+        store
+            .cache_message_content(
+                &id,
+                false,
+                CachedMessageContent {
+                    body_text: "cached body".into(),
+                    body_html: None,
+                    unsubscribe_kind: None,
+                    attachments: vec![Attachment {
+                        id: "stale-filename".into(),
+                        message_id: id.clone(),
+                        filename: "=UTF-8QPr=C3=BCgimaja_plaan.pdf=".into(),
+                        mime_type: "application/pdf".into(),
+                        size_bytes: 42,
+                        is_inline: false,
+                        presentation: AttachmentPresentation::Downloadable,
+                        is_potentially_unsafe: false,
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+        assert!(store.cached_message_content(&id).await.unwrap().is_some());
+
+        let mut starred = message("Starred filename migration", "preview");
+        starred.account_id = account_id.to_string();
+        starred.uid = 2;
+        starred.is_flagged = true;
+        starred.has_attachments = true;
+        let starred_id = starred.id.clone();
+        store.upsert_messages(&[starred]).await.unwrap();
+        assert!(store
+            .cache_starred_message_content(
+                &starred_id,
+                CachedMessageContent {
+                    body_text: "starred cached body".into(),
+                    body_html: None,
+                    unsubscribe_kind: None,
+                    attachments: vec![Attachment {
+                        id: "stale-starred-filename".into(),
+                        message_id: starred_id.clone(),
+                        filename: "=UTF-8QPr=C3=BCgimaja_plaan.pdf=".into(),
+                        mime_type: "application/pdf".into(),
+                        size_bytes: 42,
+                        is_inline: false,
+                        presentation: AttachmentPresentation::Downloadable,
+                        is_potentially_unsafe: false,
+                    }],
+                },
+            )
+            .await
+            .unwrap());
+        assert_eq!(
+            store
+                .starred_attachment_metadata(&starred_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Version 2 predates selective RFC 2047 filename decoding. Reopening
+        // takes the production migration path and forces the authoritative
+        // provider fetch instead of showing a cached transport artifact.
+        sqlx::query(
+            "UPDATE app_meta SET value = '2' WHERE key = 'attachment_presentation_cache_version'",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE starred_message_bodies SET attachment_presentation_version = 2 WHERE message_id = ?",
+        )
+        .bind(&starred_id)
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        store.pool.close().await;
+
+        let store = Store::open(&database).await.unwrap();
+        assert!(store.cached_message_content(&id).await.unwrap().is_none());
+        let cached_rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM message_content_cache WHERE message_id = ?")
+                .bind(&id)
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(cached_rows, 0);
+        assert!(!store.message(&id).await.unwrap().unwrap().has_attachments);
+        assert!(store.starred_body(&starred_id).await.unwrap().is_none());
+        assert!(store
+            .starred_attachment_metadata(&starred_id)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(
+            !store
+                .message(&starred_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .has_attachments
+        );
     }
 
     #[tokio::test]

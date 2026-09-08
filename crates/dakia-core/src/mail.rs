@@ -91,6 +91,7 @@ const MAX_IMAP_RESPONSE_LITERALS: usize = 64;
 const MAX_IMAP_RESPONSE_LITERAL_BYTES: usize = 100 * 1024 * 1024;
 const MAX_ATTACHMENT_COUNT: usize = 50;
 const MIME_CONTENT_UNDECODABLE: &str = "mime_content_undecodable";
+const INVALID_FILENAME_PARAMETER_MARKER: &str = "x-dakia-invalid-filename";
 const MAX_OUTBOUND_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 const MAX_OUTBOUND_ATTACHMENT_TOTAL_BYTES: usize = 50 * 1024 * 1024;
 /// Existing databases are enriched gradually during ordinary catalogue syncs.
@@ -2801,7 +2802,14 @@ impl MimePart {
     fn is_attachment_candidate(&self) -> bool {
         self.is_explicit_attachment()
             || self.filename().is_some()
+            || self.has_invalid_filename_parameter()
             || (self.is_leaf() && !self.is_text_body())
+    }
+    fn has_invalid_filename_parameter(&self) -> bool {
+        self.params.contains_key(INVALID_FILENAME_PARAMETER_MARKER)
+            || self
+                .disposition_params
+                .contains_key(INVALID_FILENAME_PARAMETER_MARKER)
     }
     fn is_attached_container(&self) -> bool {
         !self.is_leaf() && self.is_attachment_candidate()
@@ -3016,7 +3024,7 @@ fn bodystructure_params(value: Option<&[ImapBodyValue]>) -> BTreeMap<String, Str
         }
     }
     // BODYSTRUCTURE exposes RFC 2231 extended parameters verbatim on many
-    // providers.  Normalize the common single-value form so targeted
+    // providers. Normalize the common single-value form so targeted
     // attachment metadata agrees with the complete MIME parser.
     for (extended, plain) in [("filename*", "filename"), ("name*", "name")] {
         let Some(value) = params.get(extended) else {
@@ -3034,7 +3042,131 @@ fn bodystructure_params(value: Option<&[ImapBodyValue]>) -> BTreeMap<String, Str
             }
         }
     }
+    // RFC 2047 encoded words are nonstandard in MIME parameters, but common
+    // in IMAP BODYSTRUCTURE responses. Decode validated encoded-word values,
+    // including safe literal suffixes, before the filename is selected and
+    // sanitized.
+    for parameter in ["filename", "name"] {
+        normalize_bodystructure_rfc2047_parameter(&mut params, parameter);
+    }
     params
+}
+
+fn normalize_bodystructure_rfc2047_parameter(
+    params: &mut BTreeMap<String, String>,
+    parameter: &str,
+) {
+    let Some(value) = params.get(parameter).cloned() else {
+        return;
+    };
+    if !value.contains("=?") {
+        return;
+    }
+    if let Some(decoded) = decode_rfc2047_filename(&value) {
+        params.insert(parameter.to_owned(), decoded);
+    } else {
+        // Do not expose malformed transport syntax as a plausible filename.
+        // Keep separate evidence that a filename was supplied so a named
+        // text/plain leaf cannot become a message body. MimePart::filename
+        // will use the next valid parameter or the safe attachment fallback.
+        params.remove(parameter);
+        params.insert(INVALID_FILENAME_PARAMETER_MARKER.into(), "1".into());
+    }
+}
+
+fn decode_rfc2047_filename(value: &str) -> Option<String> {
+    if !is_safe_rfc2047_filename(value) {
+        return None;
+    }
+    // Use the same pinned parser and MIME-parameter path as complete message
+    // parsing, so mixed encoded-word/literal values keep identical spacing.
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    let header = format!("Content-Disposition: attachment; filename=\"{escaped}\"\r\n\r\n");
+    let parsed = configured_message_parser().parse_headers(header.as_bytes())?;
+    let part = parsed.part(0)?;
+    let decoded = part
+        .content_disposition()
+        .and_then(|disposition| mime_attribute(disposition, "filename"))?
+        .to_owned();
+    (decoded != value
+        && !decoded.trim().is_empty()
+        && !decoded.contains("=?")
+        && !decoded.contains("?=")
+        && !decoded.chars().any(char::is_control))
+    .then_some(decoded)
+}
+
+fn is_safe_rfc2047_filename(value: &str) -> bool {
+    if value.len() > MAX_MIME_HEADER_BYTES || value.chars().any(char::is_control) {
+        return false;
+    }
+    let mut remaining = value;
+    let mut found_encoded_word = false;
+    while let Some(offset) = remaining.find("=?") {
+        let literal = &remaining[..offset];
+        if literal.contains("?=") {
+            return false;
+        }
+        let word = &remaining[offset + 2..];
+        let Some((word, rest)) = word.split_once("?=") else {
+            return false;
+        };
+        let mut fields = word.split('?');
+        let (Some(charset), Some(encoding), Some(encoded), None) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            return false;
+        };
+        if charset.is_empty()
+            || encoded.is_empty()
+            || !matches!(encoding, "Q" | "q" | "B" | "b")
+            || !charset.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'*')
+            })
+            || !rfc2047_charset_is_supported(charset)
+            || !encoded
+                .bytes()
+                .all(|byte| (33..=126).contains(&byte) && byte != b'?')
+            || !rfc2047_encoded_text_is_valid(encoding, encoded)
+        {
+            return false;
+        }
+        found_encoded_word = true;
+        remaining = rest;
+    }
+    found_encoded_word && !remaining.contains("?=")
+}
+
+fn rfc2047_charset_is_supported(charset: &str) -> bool {
+    let charset = charset
+        .split_once('*')
+        .map_or(charset, |(charset, _)| charset);
+    !charset.is_empty()
+        && (charset.eq_ignore_ascii_case("utf-8") || charset_decoder(charset.as_bytes()).is_some())
+}
+
+fn rfc2047_encoded_text_is_valid(encoding: &str, encoded: &str) -> bool {
+    match encoding {
+        "B" | "b" => STANDARD.decode(encoded).is_ok(),
+        "Q" | "q" => {
+            let bytes = encoded.as_bytes();
+            let mut index = 0;
+            while index < bytes.len() {
+                if bytes[index] == b'=' {
+                    if !bytes.get(index + 1).is_some_and(u8::is_ascii_hexdigit)
+                        || !bytes.get(index + 2).is_some_and(u8::is_ascii_hexdigit)
+                    {
+                        return false;
+                    }
+                    index += 3;
+                } else {
+                    index += 1;
+                }
+            }
+            true
+        }
+        _ => false,
+    }
 }
 
 fn bodystructure_disposition(values: &[ImapBodyValue]) -> Option<&[ImapBodyValue]> {
@@ -7302,6 +7434,23 @@ mod tests {
         })
     }
 
+    fn filename_parameters_bodystructure() -> &'static str {
+        // This is deliberately a raw IMAP BODYSTRUCTURE representation, not a
+        // value generated from mail-parser's decoded attributes. Gmail-like
+        // servers can return the RFC 2047 encoded word verbatim here.
+        concat!(
+            "((\"TEXT\" \"PLAIN\" (\"CHARSET\" \"utf-8\") NIL NIL \"7BIT\" 29 1 NIL NIL NIL) ",
+            "(\"APPLICATION\" \"PDF\" (\"NAME\" \"fallback.pdf\") NIL NIL \"BASE64\" 10 0 (\"ATTACHMENT\" (\"FILENAME*\" \"utf-8''quarterly%20report%20final.pdf\")) NIL NIL) ",
+            "(\"APPLICATION\" \"OCTET-STREAM\" (\"NAME\" \"=?UTF-8?B?cmVwb3J0LXRlc3QudHh0?=\") NIL NIL \"BASE64\" 12 0 (\"ATTACHMENT\" (\"FILENAME\" \"=?UTF-8?B?cmVwb3J0LXRlc3QudHh0?=\")) NIL NIL) ",
+            "(\"APPLICATION\" \"OCTET-STREAM\" (\"NAME\" \"=?UTF-8?Q?Pr=C3=BCgimaja_plaan_vaated_31.08.pdf?=\") NIL NIL \"BASE64\" 12 0 (\"ATTACHMENT\" (\"FILENAME\" \"=?UTF-8?Q?Pr=C3=BCgimaja_plaan_vaated_31.08.pdf?=\")) NIL NIL) ",
+            "(\"APPLICATION\" \"OCTET-STREAM\" (\"NAME\" \"=?UTF-8?Q?Pr=C3=BCgimaja?=_31.08.pdf\") NIL NIL \"BASE64\" 12 0 (\"ATTACHMENT\" (\"FILENAME\" \"=?UTF-8?Q?Pr=C3=BCgimaja?=_31.08.pdf\")) NIL NIL) ",
+            "(\"APPLICATION\" \"OCTET-STREAM\" NIL NIL NIL \"BASE64\" 12 0 (\"ATTACHMENT\" (\"FILENAME\" \"=?UTF-8*et?Q?Pr=C3=BCgimaja.pdf?=\")) NIL NIL) ",
+            "(\"APPLICATION\" \"OCTET-STREAM\" (\"NAME\" \"safe-name.txt\") NIL NIL \"BASE64\" 12 0 (\"ATTACHMENT\" (\"FILENAME\" \"../../invoice;final.pdf\")) NIL NIL) ",
+            "(\"APPLICATION\" \"OCTET-STREAM\" NIL NIL NIL \"BASE64\" 12 0 (\"ATTACHMENT\" (\"FILENAME\" \"invoice\u{202e}gpj.exe\")) NIL NIL) ",
+            "(\"APPLICATION\" \"OCTET-STREAM\" NIL NIL NIL \"BASE64\" 12 0 (\"ATTACHMENT\" (\"FILENAME\" \"broken%ZZname.pdf\")) NIL NIL) \"MIXED\")"
+        )
+    }
+
     fn fixture_bodystructure_part(
         message: &ParsedMessage<'_>,
         part_id: u32,
@@ -7623,6 +7772,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(filenames.contains(&"quarterly report final.pdf"));
         assert!(filenames.contains(&"report-test.txt"));
+        assert!(filenames.contains(&"Prügimaja plaan vaated 31.08.pdf"));
+        assert!(filenames.contains(&"Prügimaja_31.08.pdf"));
+        assert!(filenames.contains(&"Prügimaja.pdf"));
         assert!(filenames.contains(&"invoice;final.pdf"));
         assert!(filenames
             .iter()
@@ -7796,6 +7948,7 @@ mod tests {
         // sections generated from its actual raw RFC822 representation.
         let cases = [
             "attached-message-rfc822",
+            "filename-parameters-and-encodings",
             "format-flowed-delsp",
             "linkedin-inline-content-id",
             "multipart-attachment-container",
@@ -7837,7 +7990,7 @@ mod tests {
             "* 1 FETCH (UID 1 FLAGS (\\Seen \\Flagged) INTERNALDATE \"21-Jul-2026 10:00:00 +0000\")"
                 .to_owned(),
         ];
-        let mut complete_messages = Vec::new();
+        let mut selective_messages = Vec::new();
 
         for (index, name) in cases.iter().enumerate() {
             let raw = if *name == "provider-signature-inline" {
@@ -7851,9 +8004,13 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{name} complete parse failed: {error}"));
             let fixture = fixture_imap_message(raw)
                 .unwrap_or_else(|error| panic!("{name} fixture IMAP derivation failed: {error}"));
+            let bodystructure = if *name == "filename-parameters-and-encodings" {
+                filename_parameters_bodystructure().to_owned()
+            } else {
+                fixture.bodystructure.clone()
+            };
             let structure = parse_bodystructure(&[format!(
-                "* 1 FETCH (UID {uid} BODYSTRUCTURE {})",
-                fixture.bodystructure
+                "* 1 FETCH (UID {uid} BODYSTRUCTURE {bodystructure})"
             )])
             .unwrap_or_else(|error| {
                 panic!("{name} generated BODYSTRUCTURE failed to parse: {error}")
@@ -7897,36 +8054,58 @@ mod tests {
                 selective_user_visible_semantics(&complete),
                 "{name} complete and selective user-visible content diverged"
             );
-            complete_messages.push(complete);
+            if *name == "filename-parameters-and-encodings" {
+                assert!(selective.attachments.iter().any(|attachment| {
+                    attachment.attachment.filename == "Prügimaja plaan vaated 31.08.pdf"
+                }));
+                for expected in ["Prügimaja_31.08.pdf", "Prügimaja.pdf"] {
+                    assert!(complete
+                        .attachments
+                        .iter()
+                        .any(|attachment| attachment.attachment.filename == expected));
+                    assert!(selective
+                        .attachments
+                        .iter()
+                        .any(|attachment| attachment.attachment.filename == expected));
+                }
+            }
+            selective_messages.push(selective);
         }
 
         let directory = tempfile::tempdir().unwrap();
         let database = directory.path().join("selective-fixtures.sqlite");
         let store = Store::open(&database).await.unwrap();
         store.save_account(&account).await.unwrap();
-        store.upsert_messages(&complete_messages).await.unwrap();
+        store.upsert_messages(&selective_messages).await.unwrap();
         drop(store);
 
         let reopened = Store::open(&database).await.unwrap();
-        for complete in &complete_messages {
-            let stored = reopened.message(&complete.id).await.unwrap().unwrap();
-            assert_eq!(stored.body_text, complete.body_text, "{}", complete.id);
-            assert_eq!(stored.body_html, complete.body_html, "{}", complete.id);
-            assert_eq!(stored.snippet, complete.snippet, "{}", complete.id);
+        for selective in &selective_messages {
+            let stored = reopened.message(&selective.id).await.unwrap().unwrap();
+            assert_eq!(stored.body_text, selective.body_text, "{}", selective.id);
+            assert_eq!(stored.body_html, selective.body_html, "{}", selective.id);
+            assert_eq!(stored.snippet, selective.snippet, "{}", selective.id);
             let metadata = reopened
-                .starred_attachment_metadata(&complete.id)
+                .starred_attachment_metadata(&selective.id)
                 .await
                 .unwrap();
             assert_eq!(
                 metadata.len(),
-                complete
+                selective
                     .attachments
                     .iter()
                     .filter(|attachment| attachment.attachment.presentation.is_downloadable())
                     .count(),
                 "{}",
-                complete.id
+                selective.id
             );
+            if selective.attachments.iter().any(|attachment| {
+                attachment.attachment.filename == "Prügimaja plaan vaated 31.08.pdf"
+            }) {
+                assert!(metadata.iter().any(|attachment| {
+                    attachment.filename == "Prügimaja plaan vaated 31.08.pdf"
+                }));
+            }
         }
     }
 
@@ -8827,6 +9006,33 @@ mod tests {
     }
 
     #[test]
+    fn targeted_fetch_attachment_keeps_bodystructure_and_mime_header_filenames_in_sync() {
+        let structure = parse_bodystructure(&[concat!(
+            "* 1 FETCH (BODYSTRUCTURE (\"APPLICATION\" \"PDF\" NIL NIL NIL \"BASE64\" 4 NIL ",
+            "(\"ATTACHMENT\" (\"FILENAME\" \"=?UTF-8?Q?Pr=C3=BCgimaja_plaan.pdf?=\"))))"
+        )
+        .into()])
+        .unwrap();
+        let plan = selective_plan(&structure).unwrap();
+        let display =
+            attachment_data_from_part(&plan.attachments[0], "message-42", &[], None, false)
+                .unwrap();
+        let downloaded = attachment_data_from_part(
+            &plan.attachments[0],
+            "message-42",
+            b"Content-Type: application/pdf\r\nContent-Transfer-Encoding: base64\r\nContent-Disposition: attachment; filename=\"=?UTF-8?Q?Pr=C3=BCgimaja_plaan.pdf?=\"\r\n",
+            Some(b"cGRm".to_vec()),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(display.attachment.id, downloaded.attachment.id);
+        assert_eq!(display.attachment.filename, "Prügimaja plaan.pdf");
+        assert_eq!(downloaded.attachment.filename, display.attachment.filename);
+        assert_eq!(downloaded.bytes, b"pdf");
+    }
+
+    #[test]
     fn selective_image_only_messages_do_not_require_a_text_part() {
         let structure = parse_bodystructure(&[concat!(
             "* 1 FETCH (BODYSTRUCTURE (\"IMAGE\" \"PNG\" (\"NAME\" \"logo.png\") \"<logo@example>\" NIL \"BASE64\" 8 NIL ",
@@ -9167,6 +9373,99 @@ mod tests {
         .into()])
         .unwrap();
         assert_eq!(structure.filename(), Some("café.pdf"));
+    }
+
+    #[test]
+    fn selective_bodystructure_decodes_rfc2047_filenames_and_keeps_valid_fallbacks() {
+        let structure = parse_bodystructure(&[concat!(
+            "* 1 FETCH (BODYSTRUCTURE ((\"APPLICATION\" \"PDF\" NIL NIL NIL \"BASE64\" 4 0 ",
+            "(\"ATTACHMENT\" (\"FILENAME\" \"=?UTF-8?Q?Pr=C3=BCgimaja_plaan.pdf?=\")) NIL NIL) ",
+            "(\"APPLICATION\" \"PDF\" NIL NIL NIL \"BASE64\" 4 0 ",
+            "(\"ATTACHMENT\" (\"FILENAME\" \"=?UTF-8?B?cmVwb3J0LXRlc3QudHh0?=\")) NIL NIL) ",
+            "(\"APPLICATION\" \"PDF\" (\"NAME\" \"fallback.pdf\") NIL NIL \"BASE64\" 4 0 ",
+            "(\"ATTACHMENT\" (\"FILENAME\" \"=?UTF-8?Q?broken=ZZ?=\")) NIL NIL) \"MIXED\"))"
+        )
+        .into()])
+        .unwrap();
+        let plan = selective_plan(&structure).unwrap();
+        let filenames = plan
+            .attachments
+            .iter()
+            .map(|attachment| attachment.part.filename())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            filenames,
+            vec![
+                Some("Prügimaja plaan.pdf"),
+                Some("report-test.txt"),
+                Some("fallback.pdf"),
+            ]
+        );
+    }
+
+    #[test]
+    fn selective_filename_decoding_covers_encoded_word_and_safety_boundaries() {
+        let structure = parse_bodystructure(&[concat!(
+            "* 1 FETCH (BODYSTRUCTURE ((\"APPLICATION\" \"PDF\" NIL NIL NIL \"BASE64\" 4 0 ",
+            "(\"ATTACHMENT\" (\"FILENAME\" \"=?UTF-8?Q?Pr=C3=BC?= =?UTF-8?Q?gimaja.pdf?=\")) NIL NIL) ",
+            "(\"APPLICATION\" \"PDF\" (\"NAME\" \"base64-fallback.pdf\") NIL NIL \"BASE64\" 4 0 ",
+            "(\"ATTACHMENT\" (\"FILENAME\" \"=?UTF-8?B?%%%?=\")) NIL NIL) ",
+            "(\"APPLICATION\" \"PDF\" (\"NAME\" \"terminator-fallback.pdf\") NIL NIL \"BASE64\" 4 0 ",
+            "(\"ATTACHMENT\" (\"FILENAME\" \"=?UTF-8?Q?broken\")) NIL NIL) ",
+            "(\"APPLICATION\" \"PDF\" (\"NAME\" \"name-fallback.pdf\") NIL NIL \"BASE64\" 4 0 ",
+            "(\"ATTACHMENT\" (\"FILENAME*\" \"utf-8''preferred%20name.pdf\")) NIL NIL) ",
+            "(\"APPLICATION\" \"PDF\" NIL NIL NIL \"BASE64\" 4 0 ",
+            "(\"ATTACHMENT\" (\"FILENAME\" \"=?UTF-8?Q?../../Pr=C3=BCgimaja.pdf?=\")) NIL NIL) ",
+            "(\"APPLICATION\" \"PDF\" NIL NIL NIL \"BASE64\" 4 0 ",
+            "(\"ATTACHMENT\" (\"FILENAME\" \"=?UTF-8?Q?invoice=E2=80=AEgpj.exe?=\")) NIL NIL) ",
+            "(\"APPLICATION\" \"PDF\" (\"NAME\" \"charset-fallback.pdf\") NIL NIL \"BASE64\" 4 0 ",
+            "(\"ATTACHMENT\" (\"FILENAME\" \"=?x-unknown?Q?ignored.pdf?=\")) NIL NIL) ",
+            "(\"APPLICATION\" \"PDF\" NIL NIL NIL \"BASE64\" 4 0 ",
+            "(\"ATTACHMENT\" (\"FILENAME\" \"=?UTF-8*et?Q?Pr=C3=BCgimaja.pdf?=\")) NIL NIL) \"MIXED\"))"
+        )
+        .into()])
+        .unwrap();
+        let filenames = selective_plan(&structure)
+            .unwrap()
+            .attachments
+            .iter()
+            .map(|attachment| {
+                attachment_data_from_part(attachment, "message-1", &[], None, false)
+                    .unwrap()
+                    .attachment
+                    .filename
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            filenames,
+            vec![
+                "Prü gimaja.pdf",
+                "base64-fallback.pdf",
+                "terminator-fallback.pdf",
+                "preferred name.pdf",
+                "Prügimaja.pdf",
+                "invoicegpj.exe",
+                "charset-fallback.pdf",
+                "Prügimaja.pdf",
+            ]
+        );
+    }
+
+    #[test]
+    fn selective_malformed_text_filename_remains_an_attachment_not_a_body() {
+        let structure = parse_bodystructure(&[concat!(
+            "* 1 FETCH (BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"NAME\" ",
+            "\"=?UTF-8?Q?broken=ZZ?=\") NIL NIL \"7BIT\" 4 1 NIL NIL NIL))"
+        )
+        .into()])
+        .unwrap();
+        let plan = selective_plan(&structure).unwrap();
+
+        assert!(plan.text_parts.is_empty());
+        assert_eq!(plan.attachments.len(), 1);
+        let attachment =
+            attachment_data_from_part(&plan.attachments[0], "message-1", &[], None, false).unwrap();
+        assert_eq!(attachment.attachment.filename, "attachment");
     }
 
     #[test]
