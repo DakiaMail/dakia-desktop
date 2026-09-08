@@ -1614,6 +1614,12 @@ textarea {
   color: var(--mantine-color-ember-7);
   font-size: 12px;
 }
+
+.compose-attachment-status {
+  margin: 0 24px 8px;
+  color: var(--dakia-muted);
+  font-size: 12px;
+}
 .compose-attachment-input {
   display: none;
 }

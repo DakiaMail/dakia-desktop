@@ -257,6 +257,22 @@ export const en = {
       attachmentLimit:
         "Attachments are limited to 50 files, 25 MB each, and 50 MB per message.",
       attachmentReadError: "Could not read one of the selected files.",
+      imageReduceTitle: "Reduce image size?",
+      imageReducePrompt_one:
+        "{{filename}} is larger than 2 MB. Reduce it to make this message smaller? It will be limited to 1600 px and may lose some detail.",
+      imageReducePrompt_other:
+        "{{count}} attached images are larger than 2 MB. Reduce them to make this message smaller? They will be limited to 1600 px and may lose some detail.",
+      reduceImages: "Reduce size",
+      keepOriginals: "Keep originals",
+      reducingImages: "Reducing images…",
+      imageReductionIncomplete_one:
+        "{{filename}} could not be made smaller. The original was kept.",
+      imageReductionIncomplete_other:
+        "{{count}} images could not be made smaller. Their originals were kept: {{filenames}}.",
+      imageInspectionFailed_one:
+        "Could not check {{filename}} for image reduction. The original was kept.",
+      imageInspectionFailed_other:
+        "Could not check {{count}} attachments for image reduction. Their originals were kept: {{filenames}}.",
       loading: "Preparing a new message…",
       sending: "Sending…",
       sent: "Message sent",
