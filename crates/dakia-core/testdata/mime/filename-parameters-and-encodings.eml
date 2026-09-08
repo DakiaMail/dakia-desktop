@@ -23,6 +23,24 @@ Content-Transfer-Encoding: base64
 
 cmVkYWN0ZWQ=
 --files
+Content-Type: application/octet-stream; name="=?UTF-8?Q?Pr=C3=BCgimaja_plaan_vaated_31.08.pdf?="
+Content-Disposition: attachment; filename="=?UTF-8?Q?Pr=C3=BCgimaja_plaan_vaated_31.08.pdf?="
+Content-Transfer-Encoding: base64
+
+cmVkYWN0ZWQ=
+--files
+Content-Type: application/octet-stream; name="=?UTF-8?Q?Pr=C3=BCgimaja?=_31.08.pdf"
+Content-Disposition: attachment; filename="=?UTF-8?Q?Pr=C3=BCgimaja?=_31.08.pdf"
+Content-Transfer-Encoding: base64
+
+cmVkYWN0ZWQ=
+--files
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename="=?UTF-8*et?Q?Pr=C3=BCgimaja.pdf?="
+Content-Transfer-Encoding: base64
+
+cmVkYWN0ZWQ=
+--files
 Content-Type: application/octet-stream; name="safe-name.txt"
 Content-Disposition: attachment; filename="../../invoice;final.pdf"
 Content-Transfer-Encoding: base64
