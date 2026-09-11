@@ -11,12 +11,12 @@ use base64::{
 use dakia_core::storage::{ConversationTarget, MessageContentFetchAcquire};
 use dakia_core::{
     ai::{AiConfig, AiProvider, AiService},
-    mailbox_action_destination, provider, Account, AccountAuth, AccountDraft, Attachment,
-    CachedMessageContent, ComposeMessage, EmailClassificationInput, LocalEmailClassifier,
-    MailConversation, MailConversationPage, MailRebuildJob, MailService, MailSummary,
-    MailboxAction, ModelClassificationUpdate, OAuthFlow, OAuthProviderConfig, ProviderPreset,
-    SearchQuery, SmartInboxPage, SmartInboxQuery, Store, SyncProgress, SyncResult,
-    UnsubscribeOutcome,
+    mailbox_action_destination, normalize_sender_address, provider, Account, AccountAuth,
+    AccountDraft, Attachment, CachedMessageContent, ComposeMessage, EmailClassificationInput,
+    LocalEmailClassifier, MailConversation, MailConversationPage, MailRebuildJob, MailService,
+    MailSummary, MailboxAction, ModelClassificationUpdate, OAuthFlow, OAuthProviderConfig,
+    ProviderPreset, SearchQuery, SenderTrashResult, SmartInboxPage, SmartInboxQuery, Store,
+    SyncProgress, SyncResult, UnsubscribeOutcome,
 };
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -1510,12 +1510,47 @@ struct AiInput {
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum UnsubscribeResult {
-    Completed,
-    OpenedWeb,
+    Completed {
+        #[serde(rename = "cleanupTarget")]
+        cleanup_target: Option<SenderCleanupTarget>,
+    },
+    OpenedWeb {
+        #[serde(rename = "cleanupTarget")]
+        cleanup_target: Option<SenderCleanupTarget>,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SenderCleanupTarget {
+    account_id: Uuid,
+    sender_name: Option<String>,
+    sender_address: String,
 }
 
 fn error(error: impl std::fmt::Display) -> String {
     error.to_string()
+}
+
+fn sender_cleanup_target(message: &MailSummary, account_id: Uuid) -> Option<SenderCleanupTarget> {
+    let sender_address = normalize_sender_address(&message.from_address)?;
+    let sender_name = message
+        .from_name
+        .as_deref()
+        .map(|name| {
+            name.chars()
+                .filter(|character| !character.is_control())
+                .take(256)
+                .collect::<String>()
+                .trim()
+                .to_owned()
+        })
+        .filter(|name| !name.is_empty());
+    Some(SenderCleanupTarget {
+        account_id,
+        sender_name,
+        sender_address,
+    })
 }
 
 fn unsubscribe_email(
@@ -1598,6 +1633,40 @@ mod unsubscribe_email_tests {
             "x".repeat(64 * 1024 + 1),
         )
         .is_err());
+    }
+
+    #[test]
+    fn unsubscribe_result_exposes_an_immutable_sender_cleanup_target() {
+        let result = UnsubscribeResult::OpenedWeb {
+            cleanup_target: Some(SenderCleanupTarget {
+                account_id: Uuid::nil(),
+                sender_name: Some("Newsletter".into()),
+                sender_address: "news@example.test".into(),
+            }),
+        };
+        assert_eq!(
+            serde_json::to_value(result).unwrap(),
+            serde_json::json!({
+                "kind": "opened_web",
+                "cleanupTarget": {
+                    "accountId": Uuid::nil(),
+                    "senderName": "Newsletter",
+                    "senderAddress": "news@example.test"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn malformed_sender_does_not_block_the_unsubscribe_result() {
+        assert!(normalize_sender_address("not a mailbox").is_none());
+        assert_eq!(
+            serde_json::to_value(UnsubscribeResult::Completed {
+                cleanup_target: None,
+            })
+            .unwrap(),
+            serde_json::json!({ "kind": "completed", "cleanupTarget": null })
+        );
     }
 }
 
@@ -4956,6 +5025,7 @@ async fn unsubscribe_message(
         .map_err(error)?
         .ok_or_else(|| "Message not found".to_owned())?;
     let account_id = Uuid::parse_str(&message.account_id).map_err(error)?;
+    let mut cleanup_target = sender_cleanup_target(&message, account_id);
     let _operation = state.account_operations.acquire(account_id).await;
     let account = enabled_account_for_operation(state.inner(), account_id).await?;
     let service = MailService::new(state.store.clone());
@@ -4967,15 +5037,16 @@ async fn unsubscribe_message(
         // Never retry a one-click POST: its failure may be ambiguous.
         Err(_) if message.unsubscribe_kind.as_deref() != Some("one_click") => {
             let refreshed = fetch_remote_message(state.inner(), &message_id).await?;
+            cleanup_target = sender_cleanup_target(&refreshed, account_id);
             service.unsubscribe(&refreshed).await.map_err(error)?
         }
         Err(failure) => return Err(error(failure)),
     };
     match outcome {
-        UnsubscribeOutcome::Completed => Ok(UnsubscribeResult::Completed),
+        UnsubscribeOutcome::Completed => Ok(UnsubscribeResult::Completed { cleanup_target }),
         UnsubscribeOutcome::Web(url) => {
             open_external_url(app, url)?;
-            Ok(UnsubscribeResult::OpenedWeb)
+            Ok(UnsubscribeResult::OpenedWeb { cleanup_target })
         }
         UnsubscribeOutcome::Mailto { to, subject, body } => {
             let draft = unsubscribe_email(account_id, to, subject, body)?;
@@ -4983,9 +5054,23 @@ async fn unsubscribe_message(
                 .send(&account, &draft)
                 .await
                 .map_err(error)?;
-            Ok(UnsubscribeResult::Completed)
+            Ok(UnsubscribeResult::Completed { cleanup_target })
         }
     }
+}
+
+#[tauri::command]
+async fn trash_messages_from_sender(
+    state: State<'_, Arc<AppState>>,
+    account_id: Uuid,
+    sender_address: String,
+) -> Result<SenderTrashResult, String> {
+    let _operation = state.account_operations.acquire(account_id).await;
+    let account = enabled_account_for_operation(state.inner(), account_id).await?;
+    MailService::new(state.store.clone())
+        .trash_messages_from_sender(&account, &sender_address)
+        .await
+        .map_err(error)
 }
 
 #[tauri::command]
@@ -5473,6 +5558,7 @@ pub fn run() {
             send_message,
             apply_mailbox_action,
             unsubscribe_message,
+            trash_messages_from_sender,
             ai_summarize,
             ai_draft,
             ai_available,

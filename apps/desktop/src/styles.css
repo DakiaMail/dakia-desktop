@@ -1796,6 +1796,41 @@ textarea {
   flex: none;
   color: light-dark(#39705f, #83b9a7);
 }
+.action-status-action,
+.action-status-dismiss {
+  flex: none;
+  border: 0;
+  border-radius: 6px;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.action-status-action {
+  margin-left: auto;
+  padding: 5px 7px;
+  color: light-dark(#24594a, #a9d6c6);
+  background: light-dark(#e6f2ed, #2d4a40);
+}
+.action-status-action:hover:not(:disabled) {
+  background: light-dark(#d8ebe3, #39584d);
+}
+.action-status-action:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.action-status-dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px;
+  background: transparent;
+}
+.action-status-dismiss:hover {
+  background: light-dark(#ecece8, #3a3e3b);
+}
+.action-status-dismiss svg {
+  color: currentColor;
+}
 .action-status[data-tone="error"] svg {
   color: var(--dakia-ember-deep);
 }

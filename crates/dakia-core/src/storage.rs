@@ -2012,24 +2012,21 @@ impl Store {
         .await?)
     }
 
-    /// Returns the local catalogue mailbox or mailboxes backed by a provider
-    /// mailbox. A provider can expose the same special-use mailbox under more
-    /// than one catalogue entry, so callers must still choose one locator.
-    pub async fn mailbox_catalog_storages_for_remote(
+    /// Returns every local catalogue state backed by a provider mailbox. One
+    /// provider mailbox can have multiple local locators, all of which need a
+    /// tombstone when a remote move succeeds.
+    pub async fn mailbox_catalog_states_for_remote(
         &self,
         account_id: AccountId,
         remote_name: &str,
-    ) -> Result<Vec<String>> {
-        Ok(sqlx::query_as::<_, (String,)>(
-            "SELECT mailbox FROM mailbox_catalog_state WHERE account_id = ? AND LOWER(remote_name) = LOWER(?) ORDER BY CASE mailbox WHEN 'INBOX' THEN 0 WHEN 'Archive' THEN 1 WHEN 'Spam' THEN 2 ELSE 3 END, mailbox",
+    ) -> Result<Vec<MailboxCatalogState>> {
+        Ok(sqlx::query_as::<_, MailboxCatalogState>(
+            "SELECT account_id, mailbox, remote_name, uid_validity, remote_total, historical_complete, uid_next, highest_modseq FROM mailbox_catalog_state WHERE account_id = ? AND LOWER(remote_name) = LOWER(?) ORDER BY CASE mailbox WHEN 'INBOX' THEN 0 WHEN 'Archive' THEN 1 WHEN 'Spam' THEN 2 ELSE 3 END, mailbox",
         )
         .bind(account_id.to_string())
         .bind(remote_name)
         .fetch_all(&self.pool)
-        .await?
-        .into_iter()
-        .map(|(mailbox,)| mailbox)
-        .collect())
+        .await?)
     }
 
     pub async fn save_mailbox_catalog_state(
@@ -3112,6 +3109,123 @@ impl Store {
             .bind(&account_key)
             .bind(source_mailbox)
             .bind(source_uid)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Reconciles one provider move that represented several local catalogue
+    /// locators. The whole operation is one transaction so a missing duplicate
+    /// cannot delete a Trash row created from an earlier existing source.
+    pub async fn move_messages_to_destination(
+        &self,
+        account_id: AccountId,
+        sources: &[(String, u32)],
+        destination_mailbox: &str,
+        destination_uid: Option<u32>,
+    ) -> Result<()> {
+        let account_key = account_id.to_string();
+        let mut unique_sources = Vec::new();
+        let mut seen = HashSet::new();
+        for (mailbox, uid) in sources {
+            if seen.insert((mailbox.clone(), *uid)) {
+                unique_sources.push((mailbox, *uid));
+            }
+        }
+        if unique_sources.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.pool.begin().await?;
+        for (mailbox, uid) in &unique_sources {
+            sqlx::query("INSERT OR REPLACE INTO mailbox_action_tombstones(account_id, mailbox, uid, created_at) VALUES (?, ?, ?, ?)")
+                .bind(&account_key)
+                .bind(mailbox)
+                .bind(uid)
+                .bind(Utc::now())
+                .execute(&mut *tx)
+                .await?;
+        }
+        let Some(destination_uid) = destination_uid else {
+            for (mailbox, uid) in &unique_sources {
+                sqlx::query(
+                    "DELETE FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?",
+                )
+                .bind(&account_key)
+                .bind(mailbox)
+                .bind(uid)
+                .execute(&mut *tx)
+                .await?;
+            }
+            tx.commit().await?;
+            return Ok(());
+        };
+
+        let mut chosen = None;
+        for (mailbox, uid) in &unique_sources {
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?)",
+            )
+            .bind(&account_key)
+            .bind(mailbox)
+            .bind(uid)
+            .fetch_one(&mut *tx)
+            .await?;
+            if exists && chosen.is_none() {
+                chosen = Some(((*mailbox).clone(), *uid));
+            }
+        }
+        let Some((chosen_mailbox, chosen_uid)) = chosen else {
+            tx.commit().await?;
+            return Ok(());
+        };
+
+        for (mailbox, uid) in &unique_sources {
+            for table in [
+                "message_content_cache",
+                "starred_attachment_metadata",
+                "starred_message_bodies",
+                "message_content_fetches",
+            ] {
+                let query = format!(
+                    "DELETE FROM {table} WHERE message_id IN (SELECT id FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?)"
+                );
+                sqlx::query(&query)
+                    .bind(&account_key)
+                    .bind(mailbox)
+                    .bind(uid)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+        // Delete a pre-existing destination only after we know an existing
+        // source will replace it. This is what protects a destination from a
+        // later absent alias in the same provider move.
+        sqlx::query("DELETE FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?")
+            .bind(&account_key)
+            .bind(destination_mailbox)
+            .bind(destination_uid)
+            .execute(&mut *tx)
+            .await?;
+        for (mailbox, uid) in &unique_sources {
+            if mailbox.as_str() != chosen_mailbox || *uid != chosen_uid {
+                sqlx::query(
+                    "DELETE FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?",
+                )
+                .bind(&account_key)
+                .bind(mailbox)
+                .bind(uid)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+        sqlx::query("UPDATE messages SET id = ?, mailbox = ?, uid = ? WHERE account_id = ? AND mailbox = ? AND uid = ?")
+            .bind(stable_message_id(account_id, destination_mailbox, destination_uid))
+            .bind(destination_mailbox)
+            .bind(destination_uid)
+            .bind(&account_key)
+            .bind(&chosen_mailbox)
+            .bind(chosen_uid)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -7962,6 +8076,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn batch_move_preserves_destination_when_a_later_source_locator_is_absent() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let mut inbox = message("Newsletter", "Sender cleanup source");
+        inbox.id = stable_message_id(account_id, "INBOX", 41);
+        inbox.account_id = account_id.to_string();
+        inbox.mailbox = "INBOX".into();
+        inbox.uid = 41;
+        store.upsert_messages(&[inbox.clone()]).await.unwrap();
+
+        store
+            .move_messages_to_destination(
+                account_id,
+                &[("INBOX".into(), 41), ("Archive".into(), 99)],
+                "Trash",
+                Some(7),
+            )
+            .await
+            .unwrap();
+
+        assert!(store
+            .message_by_locator(account_id, "INBOX", 41)
+            .await
+            .unwrap()
+            .is_none());
+        let trash = store
+            .message_by_locator(account_id, "Trash", 7)
+            .await
+            .unwrap()
+            .expect("the existing source must become the Trash row");
+        assert_eq!(trash.subject, inbox.subject);
+
+        let mut stale_archive = inbox.clone();
+        stale_archive.id = stable_message_id(account_id, "Archive", 99);
+        stale_archive.mailbox = "Archive".into();
+        stale_archive.uid = 99;
+        store
+            .save_synced_messages(account_id, "INBOX", &[inbox])
+            .await
+            .unwrap();
+        store
+            .save_synced_messages(account_id, "Archive", &[stale_archive])
+            .await
+            .unwrap();
+        assert!(store
+            .message_by_locator(account_id, "INBOX", 41)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .message_by_locator(account_id, "Archive", 99)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .message_by_locator(account_id, "Trash", 7)
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
     async fn permanent_delete_tombstones_only_the_exact_locator_and_preserves_other_rows() {
         let store = Store::in_memory().await.unwrap();
         let account_id = uuid::Uuid::new_v4();
@@ -10255,6 +10432,39 @@ mod tests {
         let restored = store.account(account.id).await.unwrap().unwrap();
         assert_eq!(restored.account_name, restored.email);
     }
+
+    #[tokio::test]
+    async fn looks_up_all_catalogue_states_by_provider_mailbox_case_insensitively() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        store
+            .save_mailbox_catalog_state(account_id, "Archive", "[Gmail]/All Mail", 7, 0, true)
+            .await
+            .unwrap();
+        store
+            .save_mailbox_catalog_state(account_id, "INBOX", "[Gmail]/All Mail", 7, 0, true)
+            .await
+            .unwrap();
+
+        let states = store
+            .mailbox_catalog_states_for_remote(account_id, "[gmail]/all mail")
+            .await
+            .unwrap();
+        assert_eq!(
+            states
+                .iter()
+                .map(|state| state.mailbox.as_str())
+                .collect::<Vec<_>>(),
+            vec!["INBOX", "Archive"]
+        );
+        assert!(states.iter().all(|state| state.uid_validity == 7));
+        assert!(store
+            .mailbox_catalog_states_for_remote(account_id, "Projects")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
     #[tokio::test]
     async fn synced_message_above_a_gap_does_not_advance_the_contiguous_watermark() {
         let store = Store::in_memory().await.unwrap();

@@ -7,6 +7,7 @@ import {
 } from "@testing-library/react";
 import { MantineProvider } from "@mantine/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ReaderWindowSeed } from "./readerWindow";
 import type { MailSummary, MailThread } from "./types";
 
 const mocks = vi.hoisted(() => ({
@@ -21,6 +22,7 @@ const mocks = vi.hoisted(() => ({
     showEmailAddressContextMenu: vi.fn(),
     summarize: vi.fn(),
     unsubscribe: vi.fn(),
+    trashMessagesFromSender: vi.fn(),
   },
   closeReaderWindow: vi.fn(),
   notifyReaderWindowMutated: vi.fn(),
@@ -61,6 +63,7 @@ vi.mock("./components/Reader", () => ({
     onAddressContextMenu,
     onPermanentDelete,
     onSendAgain,
+    onUnsubscribe,
   }: {
     message?: MailSummary;
     messages?: MailSummary[];
@@ -69,6 +72,7 @@ vi.mock("./components/Reader", () => ({
     onAddressContextMenu: (message: MailSummary, address: string) => void;
     onPermanentDelete: (message: MailSummary) => void;
     onSendAgain: (message: MailSummary) => void;
+    onUnsubscribe: (message: MailSummary) => void;
   }) => (
     <div>
       <span data-testid="focused-message">{message?.id}</span>
@@ -100,6 +104,9 @@ vi.mock("./components/Reader", () => ({
         onClick={() => message && onPermanentDelete(message)}
       >
         Permanently delete
+      </button>
+      <button type="button" onClick={() => message && onUnsubscribe(message)}>
+        Unsubscribe
       </button>
     </div>
   ),
@@ -181,6 +188,19 @@ describe("ReaderWindowApp", () => {
     mocks.api.action.mockResolvedValue(undefined);
     mocks.api.setRead.mockResolvedValue(undefined);
     mocks.api.showEmailAddressContextMenu.mockResolvedValue(undefined);
+    mocks.api.unsubscribe.mockResolvedValue({
+      kind: "completed",
+      cleanupTarget: {
+        accountId: "account-1",
+        senderName: "Mara",
+        senderAddress: "mara@example.com",
+      },
+    });
+    mocks.api.trashMessagesFromSender.mockResolvedValue({
+      matched: 1,
+      moved: 1,
+      failed: 0,
+    });
     mocks.onReaderTarget.mockResolvedValue(() => undefined);
     mocks.notifyReaderWindowMutated.mockResolvedValue(undefined);
   });
@@ -257,6 +277,201 @@ describe("ReaderWindowApp", () => {
       messageIds: ["message-1"],
       mutation: "archive",
     });
+  });
+
+  it("offers sender cleanup, preserves mixed-sender mail, and refreshes main", async () => {
+    const remainingThread = {
+      ...thread,
+      messages: [messages[1]],
+      sourceMessages: [messages[1]],
+      latest: messages[1],
+      unread: true,
+    };
+    mocks.api.conversationForTarget
+      .mockResolvedValueOnce(thread)
+      .mockResolvedValueOnce(remainingThread);
+    const { ReaderWindowApp } = await import("./ReaderWindowApp");
+    render(
+      <MantineProvider>
+        <ReaderWindowApp />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Unsubscribe" }));
+    expect(
+      await screen.findByText("feedback.unsubscribeSuccess"),
+    ).toBeVisible();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "feedback.unsubscribeCleanupAction",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(mocks.api.trashMessagesFromSender).toHaveBeenCalledWith(
+        "account-1",
+        "mara@example.com",
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("conversation-count")).toHaveTextContent("1"),
+    );
+    expect(mocks.notifyReaderWindowMutated).toHaveBeenLastCalledWith({
+      accountId: "account-1",
+      threadId: "thread-1",
+      messageIds: ["message-1"],
+      mutation: "trash",
+    });
+  });
+
+  it("does not replace a new reader target when an old sender cleanup finishes", async () => {
+    let readerTargetHandler: (seed: ReaderWindowSeed) => void = () => undefined;
+    let resolveCleanup: (
+      result: import("./api").TrashMessagesFromSenderResult,
+    ) => void = () => undefined;
+    const messageB: MailSummary = {
+      ...messages[1],
+      id: "message-b",
+      account_id: "account-2",
+      thread_id: "thread-b",
+      subject: "Target B",
+    };
+    const threadB: MailThread = {
+      ...thread,
+      id: "account-2:thread-b",
+      accountId: "account-2",
+      threadId: "thread-b",
+      messages: [messageB],
+      latest: messageB,
+    };
+    const seedB: ReaderWindowSeed = {
+      target: {
+        accountId: "account-2",
+        threadId: "thread-b",
+        localMessageId: "message-b",
+      },
+      focusedMessageId: "message-b",
+    };
+    mocks.onReaderTarget.mockImplementationOnce(async (handler) => {
+      readerTargetHandler = handler;
+      return () => undefined;
+    });
+    mocks.api.accounts.mockResolvedValue([
+      { id: "account-1", email: "alex@example.com" },
+      { id: "account-2", email: "sam@example.com" },
+    ]);
+    mocks.api.conversationForTarget.mockImplementation(async (target) =>
+      target.accountId === "account-2" ? threadB : thread,
+    );
+    mocks.api.trashMessagesFromSender.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveCleanup = resolve;
+        }),
+    );
+    const { ReaderWindowApp } = await import("./ReaderWindowApp");
+    render(
+      <MantineProvider>
+        <ReaderWindowApp />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Unsubscribe" }));
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "feedback.unsubscribeCleanupAction",
+      }),
+    );
+    await waitFor(() =>
+      expect(mocks.api.trashMessagesFromSender).toHaveBeenCalledOnce(),
+    );
+
+    act(() => readerTargetHandler(seedB));
+    expect(await screen.findByTestId("focused-message")).toHaveTextContent(
+      "message-b",
+    );
+
+    await act(async () => resolveCleanup({ matched: 1, moved: 1, failed: 0 }));
+    await waitFor(() =>
+      expect(mocks.api.conversationForTarget.mock.calls.length).toBeGreaterThan(
+        2,
+      ),
+    );
+    expect(screen.getByTestId("focused-message")).toHaveTextContent(
+      "message-b",
+    );
+  });
+
+  it("restores the reader snapshot when partial cleanup cannot reconcile", async () => {
+    mocks.api.conversationForTarget
+      .mockResolvedValueOnce(thread)
+      .mockRejectedValueOnce(new Error("catalogue unavailable"));
+    mocks.api.trashMessagesFromSender.mockResolvedValueOnce({
+      matched: 2,
+      moved: 1,
+      failed: 1,
+    });
+    const { ReaderWindowApp } = await import("./ReaderWindowApp");
+    render(
+      <MantineProvider>
+        <ReaderWindowApp />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Unsubscribe" }));
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "feedback.unsubscribeCleanupAction",
+      }),
+    );
+
+    expect(
+      await screen.findByText("feedback.unsubscribeCleanupPartial"),
+    ).toBeVisible();
+    expect(screen.getByTestId("conversation-count")).toHaveTextContent("2");
+    expect(mocks.closeReaderWindow).not.toHaveBeenCalled();
+  });
+
+  it("closes an empty reader even when notifying the main window fails", async () => {
+    const senderOnlyThread: MailThread = {
+      ...thread,
+      messages: [messages[0]],
+      latest: messages[0],
+      unread: false,
+    };
+    mocks.readReaderSeed.mockReturnValue({
+      target: {
+        accountId: "account-1",
+        threadId: "thread-1",
+        localMessageId: "message-1",
+      },
+      focusedMessageId: "message-1",
+    });
+    mocks.api.conversationForTarget
+      .mockResolvedValueOnce(senderOnlyThread)
+      .mockResolvedValueOnce(null);
+    mocks.notifyReaderWindowMutated
+      .mockRejectedValueOnce(new Error("main window unavailable"))
+      .mockRejectedValueOnce(new Error("main window unavailable"));
+    const { ReaderWindowApp } = await import("./ReaderWindowApp");
+    render(
+      <MantineProvider>
+        <ReaderWindowApp />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Unsubscribe" }));
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "feedback.unsubscribeCleanupAction",
+      }),
+    );
+
+    await waitFor(() => expect(mocks.closeReaderWindow).toHaveBeenCalledOnce());
+    expect(mocks.api.trashMessagesFromSender).toHaveBeenCalledWith(
+      "account-1",
+      "mara@example.com",
+    );
   });
 
   it("routes a native archive command to the visible reader conversation", async () => {
