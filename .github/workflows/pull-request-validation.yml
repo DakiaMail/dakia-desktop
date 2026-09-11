@@ -116,6 +116,12 @@ jobs:
         name: Validate Rust core scope
         if: needs.classify.outputs.rust_core == 'true'
         run: |
+          feature_tree="$(cargo tree --locked --target x86_64-pc-windows-msvc -p dakia-cli -e features -i esaxx-rs)"
+          printf '%s\n' "$feature_tree"
+          if grep -Fq 'esaxx-rs feature "cpp"' <<<"$feature_tree"; then
+            echo 'esaxx-rs/cpp forces the static MSVC runtime and conflicts with ONNX Runtime.' >&2
+            exit 1
+          fi
           cargo fmt --all -- --check
           cargo clippy -p dakia-core --all-targets -- -D warnings
           cargo test -p dakia-core -- \
