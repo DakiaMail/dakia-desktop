@@ -21,7 +21,6 @@ pub struct ProviderPreset {
     pub smtp_security: Security,
     pub archive_mailbox: &'static str,
     pub spam_mailbox: &'static str,
-    pub oauth: bool,
     pub app_password_help: Option<&'static str>,
 }
 
@@ -38,10 +37,6 @@ const PRESETS: &[ProviderPreset] = &[
         smtp_security: Security::Tls,
         archive_mailbox: "[Gmail]/All Mail",
         spam_mailbox: "[Gmail]/Spam",
-        // Google must still approve the restricted Gmail scope before this is
-        // suitable for broad release, but the configured desktop client can
-        // use the standard OAuth + PKCE flow locally.
-        oauth: true,
         app_password_help: Some("https://support.google.com/accounts/answer/185833"),
     },
     ProviderPreset {
@@ -56,9 +51,6 @@ const PRESETS: &[ProviderPreset] = &[
         smtp_security: Security::StartTls,
         archive_mailbox: "Archive",
         spam_mailbox: "Junk",
-        // Outlook OAuth is intentionally unavailable until Dakia has a Microsoft Entra
-        // application registration. The password path supports Outlook.com app passwords.
-        oauth: false,
         app_password_help: Some(
             "https://support.microsoft.com/en-us/office/add-your-outlook-com-account-in-outlook-for-windows-642c1902-bdd7-4dc3-abe7-76d60b148b23",
         ),
@@ -75,7 +67,6 @@ const PRESETS: &[ProviderPreset] = &[
         smtp_security: Security::Tls,
         archive_mailbox: "Archive",
         spam_mailbox: "Spam",
-        oauth: false,
         app_password_help: Some("https://www.fastmail.help/hc/en-us/articles/360058752854"),
     },
     ProviderPreset {
@@ -90,7 +81,6 @@ const PRESETS: &[ProviderPreset] = &[
         smtp_security: Security::Tls,
         archive_mailbox: "Archive",
         spam_mailbox: "Spam",
-        oauth: false,
         app_password_help: Some(
             "https://www.zoho.com/mail/help/adminconsole/two-factor-authentication.html#alink6",
         ),
@@ -107,7 +97,6 @@ const PRESETS: &[ProviderPreset] = &[
         smtp_security: Security::Tls,
         archive_mailbox: "Archive",
         spam_mailbox: "Junk",
-        oauth: false,
         app_password_help: None,
     },
     ProviderPreset {
@@ -122,7 +111,6 @@ const PRESETS: &[ProviderPreset] = &[
         smtp_security: Security::StartTls,
         archive_mailbox: "Archive",
         spam_mailbox: "Junk",
-        oauth: false,
         app_password_help: Some("https://support.apple.com/102654"),
     },
     ProviderPreset {
@@ -137,7 +125,6 @@ const PRESETS: &[ProviderPreset] = &[
         smtp_security: Security::Tls,
         archive_mailbox: "Archive",
         spam_mailbox: "Bulk Mail",
-        oauth: false,
         app_password_help: Some(
             "https://help.yahoo.com/kb/generate-manage-third-party-passwords-sln15241.html",
         ),
@@ -154,7 +141,6 @@ const PRESETS: &[ProviderPreset] = &[
         smtp_security: Security::Tls,
         archive_mailbox: "Archive",
         spam_mailbox: "Spam",
-        oauth: false,
         app_password_help: None,
     },
 ];
@@ -192,9 +178,8 @@ mod tests {
     }
 
     #[test]
-    fn outlook_uses_the_app_password_preset_until_oauth_is_configured() {
+    fn outlook_uses_the_app_password_preset() {
         let outlook = by_id("outlook").expect("outlook preset");
-        assert!(!outlook.oauth);
         assert_eq!(outlook.imap_host, "outlook.office365.com");
         assert_eq!(outlook.smtp_host, "smtp-mail.outlook.com");
         assert_eq!(outlook.smtp_security, Security::StartTls);
@@ -202,9 +187,8 @@ mod tests {
     }
 
     #[test]
-    fn gmail_enables_the_configured_oauth_flow() {
+    fn gmail_uses_an_app_password_preset() {
         let gmail = by_id("gmail").expect("gmail preset");
-        assert!(gmail.oauth);
         assert_eq!(gmail.imap_host, "imap.gmail.com");
         assert_eq!(gmail.smtp_host, "smtp.gmail.com");
         assert!(gmail.app_password_help.is_some());

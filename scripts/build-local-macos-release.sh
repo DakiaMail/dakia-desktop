@@ -81,7 +81,6 @@ if [[ "$(uname -m)" != "arm64" ]]; then
   exit 1
 fi
 
-dakia_require_google_oauth_environment
 dakia_require_signing_environment
 
 outputs=(
@@ -101,14 +100,6 @@ mkdir -p "$output_dir"
 cd "$root_dir"
 npm run setup:worktree
 npm run prepare:desktop-assets
-# Run every JavaScript preparation step without OAuth material. Tauri normally
-# invokes this from its beforeBuildCommand, so the release-only override below
-# prevents the secret-bearing compiler invocation from re-running it.
-npm run build:desktop-web
-release_tauri_config="$(mktemp "${TMPDIR:-/tmp}/dakia-release-tauri-config.XXXXXX")"
-printf '%s\n' '{"build":{"beforeBuildCommand":""}}' >"$release_tauri_config"
-dakia_prepare_google_oauth_compiler_environment
-trap 'dakia_clear_google_oauth_compiler_environment; rm -f "$release_tauri_config"' EXIT HUP INT TERM
 
 ORT_LIB_LOCATION="$root_dir/apps/desktop/src-tauri/frameworks" \
 ORT_PREFER_DYNAMIC_LINK=1 \
@@ -116,17 +107,11 @@ TAURI_ENV_ARCH=aarch64 \
 TAURI_ENV_PLATFORM=macos \
   npm run bundle:cli
 
-# Cargo cannot observe changes to the release-only secret file consumed by the
-# compiler wrapper. Rebuild the desktop package so the current credential is
-# always compiled into the artifact that the release verifier exercises.
-cargo clean -p dakia-desktop --target aarch64-apple-darwin
-
 ORT_LIB_LOCATION="$root_dir/apps/desktop/src-tauri/frameworks" \
 ORT_PREFER_DYNAMIC_LINK=1 \
   "$root_dir/node_modules/.bin/tauri" build \
     --target aarch64-apple-darwin \
-    --config apps/desktop/src-tauri/tauri.conf.json \
-    --config "$release_tauri_config"
+    --config apps/desktop/src-tauri/tauri.conf.json
 
 app="$root_dir/target/aarch64-apple-darwin/release/bundle/macos/Dakia.app"
 "$root_dir/scripts/thin-macos-onnx-runtime.sh" "$app"
@@ -135,7 +120,7 @@ app="$root_dir/target/aarch64-apple-darwin/release/bundle/macos/Dakia.app"
 
 notary_dir="$(mktemp -d "${TMPDIR:-/tmp}/dakia-app-notary.XXXXXX")"
 app_zip="$notary_dir/Dakia-aarch64.zip"
-trap 'dakia_clear_google_oauth_compiler_environment; rm -f "$release_tauri_config"; rm -rf "$notary_dir"' EXIT HUP INT TERM
+trap 'rm -rf "$notary_dir"' EXIT HUP INT TERM
 ditto -c -k --sequesterRsrc --keepParent "$app" "$app_zip"
 xcrun notarytool submit "$app_zip" --keychain-profile "$APPLE_NOTARY_PROFILE" --wait
 rm -rf "$notary_dir"

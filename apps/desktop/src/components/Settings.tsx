@@ -202,6 +202,7 @@ export function Settings({
               removing={accountRemoving}
               fullSyncing={accountFullSyncing}
               fullSyncProgress={accountFullSyncProgress}
+              realtimeStatuses={realtimeStatuses}
               onAdd={onAddAccount}
               selectedAccountId={selectedAccountId}
               onSave={onSaveAccount}

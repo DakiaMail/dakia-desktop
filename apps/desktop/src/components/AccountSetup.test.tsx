@@ -1,9 +1,23 @@
 import { MantineProvider } from "@mantine/core";
-import { act, fireEvent, render, screen } from "@testing-library/react";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import "../i18n";
 import type { Provider } from "../types";
 import { AccountSetup } from "./AccountSetup";
+
+const mocks = vi.hoisted(() => ({
+  openExternal: vi.fn(),
+}));
+
+vi.mock("../api", () => ({
+  api: { openExternal: mocks.openExternal },
+}));
 
 const gmail: Provider = {
   id: "gmail",
@@ -17,8 +31,6 @@ const gmail: Provider = {
   smtp_security: "tls",
   archive_mailbox: "[Gmail]/All Mail",
   spam_mailbox: "[Gmail]/Spam",
-  oauth: true,
-  app_password_help: "https://support.google.com/accounts/answer/185833",
 };
 
 const fastmail: Provider = {
@@ -33,7 +45,6 @@ const fastmail: Provider = {
   smtp_security: "tls",
   archive_mailbox: "Archive",
   spam_mailbox: "Spam",
-  oauth: false,
 };
 
 async function settleComboboxUpdates() {
@@ -46,70 +57,137 @@ beforeAll(() => {
   Element.prototype.scrollIntoView = vi.fn();
 });
 
-describe("AccountSetup provider guidance", () => {
-  it("shows the temporary verification notice for detected Gmail accounts", async () => {
+beforeEach(() => {
+  vi.clearAllMocks();
+});
+
+describe("AccountSetup Gmail app passwords", () => {
+  it("guides Gmail accounts to Google app passwords and never renders OAuth controls", async () => {
     render(
       <MantineProvider>
         <AccountSetup
           providers={[gmail, fastmail]}
           saving={false}
           onSave={vi.fn()}
-          onOAuth={vi.fn()}
         />
       </MantineProvider>,
     );
 
-    const email = screen.getByRole("textbox", { name: "Email address" });
-    fireEvent.change(email, { target: { value: "person@gmail.com" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Email address" }), {
+      target: { value: "person@gmail.com" },
+    });
 
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "Dakia’s app is awaiting Google verification, so you may see an “unverified app” warning during sign-in. This should be resolved soon; use an app password in the meantime.",
+    expect(
+      screen.getByText("Enable Google 2-Step Verification."),
+    ).toBeVisible();
+    fireEvent.click(
+      screen.getByRole("button", { name: "official app-password guide" }),
     );
+    expect(mocks.openExternal).toHaveBeenCalledWith(
+      "https://support.google.com/accounts/answer/185833?hl=en",
+    );
+    expect(
+      screen.getByText("Paste that app password into Dakia."),
+    ).toBeVisible();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Do not use your personal Gmail or regular Google Account password in Dakia.",
+    );
+    expect(
+      screen.getByText(
+        "Managed Google Workspace accounts or Advanced Protection may prevent app-password creation. In that case, the account cannot currently connect to Dakia.",
+      ),
+    ).toBeVisible();
+    expect(screen.getByLabelText("Google app password")).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: /Continue with Gmail/i }),
+    ).not.toBeInTheDocument();
 
     await settleComboboxUpdates();
   });
 
-  it("follows a manual provider override instead of the email domain", async () => {
+  it("requires and submits a Google app password through the normal account command", async () => {
+    const onSave = vi.fn();
     render(
       <MantineProvider>
-        <AccountSetup
-          providers={[gmail, fastmail]}
-          saving={false}
-          onSave={vi.fn()}
-          onOAuth={vi.fn()}
-        />
+        <AccountSetup providers={[gmail]} saving={false} onSave={onSave} />
       </MantineProvider>,
     );
 
-    const email = screen.getByRole("textbox", { name: "Email address" });
-    fireEvent.change(email, { target: { value: "person@gmail.com" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Email address" }), {
+      target: { value: "person@gmail.com" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "Your name" }), {
+      target: { value: "Person" },
+    });
+    const submit = screen.getByRole("button", { name: "Add account" });
+    expect(submit).toBeDisabled();
 
-    fireEvent.click(screen.getByRole("textbox", { name: "Provider" }));
-    fireEvent.click(await screen.findByRole("option", { name: "Fastmail" }));
+    fireEvent.change(screen.getByLabelText("Google app password"), {
+      target: { value: "   " },
+    });
+    expect(submit).toBeDisabled();
 
-    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Google app password"), {
+      target: { value: "abcd efgh ijkl mnop" },
+    });
+    expect(submit).toBeEnabled();
+    fireEvent.click(submit);
 
-    await settleComboboxUpdates();
+    await waitFor(() =>
+      expect(onSave).toHaveBeenCalledWith(
+        expect.objectContaining({
+          email: "person@gmail.com",
+          display_name: "Person",
+          provider_id: "gmail",
+        }),
+        "abcd efgh ijkl mnop",
+      ),
+    );
   });
 
-  it("shows the notice when Gmail is chosen for a custom-domain account", async () => {
+  it("shows Gmail guidance when Gmail is manually selected", async () => {
     render(
       <MantineProvider>
         <AccountSetup
           providers={[gmail, fastmail]}
           saving={false}
           onSave={vi.fn()}
-          onOAuth={vi.fn()}
         />
       </MantineProvider>,
     );
 
-    const email = screen.getByRole("textbox", { name: "Email address" });
-    fireEvent.change(email, { target: { value: "person@company.example" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Email address" }), {
+      target: { value: "person@company.example" },
+    });
     fireEvent.click(screen.getByRole("textbox", { name: "Provider" }));
     fireEvent.click(await screen.findByRole("option", { name: "Gmail" }));
 
-    expect(screen.getByRole("status")).toBeVisible();
+    expect(
+      screen.getByText("Connect Gmail with an app password"),
+    ).toBeVisible();
+  });
+
+  it("removes Gmail-specific guidance after a manual provider override", async () => {
+    render(
+      <MantineProvider>
+        <AccountSetup
+          providers={[gmail, fastmail]}
+          saving={false}
+          onSave={vi.fn()}
+        />
+      </MantineProvider>,
+    );
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Email address" }), {
+      target: { value: "person@gmail.com" },
+    });
+    fireEvent.click(screen.getByRole("textbox", { name: "Provider" }));
+    fireEvent.click(await screen.findByRole("option", { name: "Fastmail" }));
+
+    expect(
+      screen.queryByText("Connect Gmail with an app password"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Password or app password")).toBeVisible();
 
     await settleComboboxUpdates();
   });

@@ -1539,6 +1539,81 @@ impl Store {
         Ok(())
     }
 
+    /// Replaces an account and its encrypted credential in one SQLite commit.
+    /// This keeps persisted auth metadata and credential contents consistent
+    /// across crashes while an account changes authentication schemes.
+    pub async fn save_account_with_secret(
+        &self,
+        account: &Account,
+        secret_name: &str,
+        secret: &str,
+    ) -> Result<()> {
+        let nonce = random_bytes::<VAULT_NONCE_LEN>()?;
+        let ciphertext = encrypt_secret(&self.vault_key, nonce, secret_name, secret)?;
+        let mut tx = self.pool.begin().await?;
+        let deleted: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM deleted_account_tombstones WHERE account_id = ?)",
+        )
+        .bind(account.id.to_string())
+        .fetch_one(&mut *tx)
+        .await?;
+        if deleted {
+            tx.rollback().await?;
+            return Err(anyhow!("account was removed"));
+        }
+        sqlx::query("INSERT INTO credentials(name, nonce, ciphertext, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET nonce=excluded.nonce, ciphertext=excluded.ciphertext, updated_at=excluded.updated_at")
+            .bind(secret_name)
+            .bind(nonce.as_slice())
+            .bind(ciphertext)
+            .bind(Utc::now())
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT INTO accounts(id, email, data, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET email=excluded.email, data=excluded.data")
+            .bind(account.id.to_string())
+            .bind(&account.email)
+            .bind(serde_json::to_string(account)?)
+            .bind(account.created_at)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Stores refreshed OAuth credentials only while the durable account still
+    /// uses OAuth. A stale watcher cannot overwrite a newly saved app password.
+    pub async fn set_oauth_secret_if_current(
+        &self,
+        account_id: AccountId,
+        secret_name: &str,
+        secret: &str,
+    ) -> Result<bool> {
+        let nonce = random_bytes::<VAULT_NONCE_LEN>()?;
+        let ciphertext = encrypt_secret(&self.vault_key, nonce, secret_name, secret)?;
+        let mut tx = self.pool.begin().await?;
+        let data: Option<String> = sqlx::query_scalar("SELECT data FROM accounts WHERE id = ?")
+            .bind(account_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await?;
+        let still_oauth = data
+            .as_deref()
+            .map(deserialize_account)
+            .transpose()?
+            .is_some_and(|account| matches!(account.auth, AccountAuth::OAuth2 { .. }));
+        if !still_oauth {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        sqlx::query("INSERT INTO credentials(name, nonce, ciphertext, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET nonce=excluded.nonce, ciphertext=excluded.ciphertext, updated_at=excluded.updated_at")
+            .bind(secret_name)
+            .bind(nonce.as_slice())
+            .bind(ciphertext)
+            .bind(Utc::now())
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
     pub async fn accounts(&self) -> Result<Vec<Account>> {
         let rows: Vec<(String,)> = sqlx::query_as("SELECT data FROM accounts ORDER BY created_at")
             .fetch_all(&self.pool)
@@ -5142,6 +5217,108 @@ mod tests {
         assert!(!is_sqlite_migration_race(&anyhow!(
             "no such column: indexed_at"
         )));
+    }
+
+    fn legacy_oauth_account(id: uuid::Uuid) -> Account {
+        let mut account = account_with_id(id, "legacy@gmail.com");
+        account.provider_id = "gmail".into();
+        account.auth = AccountAuth::OAuth2 {
+            username: "legacy@gmail.com".into(),
+            provider: "gmail".into(),
+            access_token_expires_at: None,
+        };
+        account
+    }
+
+    #[tokio::test]
+    async fn account_and_credential_conversion_commits_together_or_not_at_all() {
+        let store = Store::in_memory().await.unwrap();
+        let original = legacy_oauth_account(uuid::Uuid::new_v4());
+        let secret_name = format!(
+            "dev.dakia.mail:{}:{}",
+            original.id,
+            original.auth.username()
+        );
+        store
+            .save_account_with_secret(&original, &secret_name, "legacy-token-json")
+            .await
+            .unwrap();
+
+        let mut converted = original.clone();
+        converted.auth = AccountAuth::Password {
+            username: original.auth.username().into(),
+        };
+        store
+            .save_account_with_secret(&converted, &secret_name, "new-app-password")
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.account(original.id).await.unwrap().unwrap().auth,
+            AccountAuth::Password { .. }
+        ));
+        assert_eq!(
+            store.secret(&secret_name).await.unwrap().as_deref(),
+            Some("new-app-password")
+        );
+
+        let mut rollback_candidate = converted.clone();
+        rollback_candidate.auth = AccountAuth::OAuth2 {
+            username: original.auth.username().into(),
+            provider: "gmail".into(),
+            access_token_expires_at: None,
+        };
+        sqlx::query(
+            "CREATE TRIGGER reject_account_update BEFORE UPDATE ON accounts BEGIN SELECT RAISE(ABORT, 'forced account update failure'); END",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        let error = store
+            .save_account_with_secret(&rollback_candidate, &secret_name, "replacement-token-json")
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("forced account update failure"));
+        assert!(matches!(
+            store.account(original.id).await.unwrap().unwrap().auth,
+            AccountAuth::Password { .. }
+        ));
+        assert_eq!(
+            store.secret(&secret_name).await.unwrap().as_deref(),
+            Some("new-app-password")
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_oauth_refresh_cannot_replace_a_converted_app_password() {
+        let store = Store::in_memory().await.unwrap();
+        let original = legacy_oauth_account(uuid::Uuid::new_v4());
+        let secret_name = format!(
+            "dev.dakia.mail:{}:{}",
+            original.id,
+            original.auth.username()
+        );
+        store
+            .save_account_with_secret(&original, &secret_name, "legacy-token-json")
+            .await
+            .unwrap();
+        let mut converted = original.clone();
+        converted.auth = AccountAuth::Password {
+            username: original.auth.username().into(),
+        };
+        store
+            .save_account_with_secret(&converted, &secret_name, "new-app-password")
+            .await
+            .unwrap();
+
+        assert!(!store
+            .set_oauth_secret_if_current(original.id, &secret_name, "stale-refreshed-token")
+            .await
+            .unwrap());
+        assert_eq!(
+            store.secret(&secret_name).await.unwrap().as_deref(),
+            Some("new-app-password")
+        );
     }
 
     #[test]
