@@ -29,7 +29,7 @@ sqlx.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
-tokenizers = "=0.22.2"
+tokenizers = "=0.23.1"
 tracing.workspace = true
 url.workspace = true
 uuid.workspace = true
