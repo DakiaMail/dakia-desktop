@@ -172,8 +172,8 @@ describe("Reader unsubscribe action", () => {
       const surface = documentRole.shadowRoot?.firstElementChild as
         HTMLElement | undefined;
       const nextAnchor = surface?.shadowRoot?.querySelector("a");
-      expect(nextAnchor).not.toBeNull();
-      return nextAnchor!;
+      expect(nextAnchor).toBeInstanceOf(HTMLAnchorElement);
+      return nextAnchor as HTMLAnchorElement;
     });
     fireEvent.click(anchor);
 
