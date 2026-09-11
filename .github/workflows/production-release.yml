@@ -2,7 +2,7 @@ name: Production release
 
 on:
   schedule:
-    - cron: '17 2 * * *'
+    - cron: "17 2 * * *"
   workflow_dispatch:
     inputs:
       reason:
@@ -286,7 +286,10 @@ jobs:
   build:
     name: Build ${{ matrix.name }}
     needs: [decide, validate]
-    if: needs.decide.outputs.should_release == 'true'
+    if: >-
+      always() && needs.decide.result == 'success' &&
+      needs.validate.result == 'success' &&
+      needs.decide.outputs.should_release == 'true'
     strategy:
       fail-fast: false
       matrix:
