@@ -21,6 +21,10 @@ export type Account = {
   spam_mailbox: string;
   enabled: boolean;
 };
+export type AccountConnection = {
+  account: Account;
+  reusedExistingAccount: boolean;
+};
 export type Provider = {
   id: string;
   name: string;
@@ -167,6 +171,10 @@ export type SyncStatus = SyncProgress & {
 };
 export type MailRebuildProgress = SyncProgress & {
   accountId: string;
+};
+export type MailRebuildFinished = {
+  accountId: string;
+  outcome: "completed" | "failed" | "cancelled";
 };
 export type SyncResult = {
   syncedCount: number;

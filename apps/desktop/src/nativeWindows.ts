@@ -6,10 +6,12 @@ import {
 } from "@tauri-apps/api/webviewWindow";
 import type {
   Account,
+  AccountConnection,
   AiSettings,
   MailArrival,
   MailHydrated,
   MailRebuildProgress,
+  MailRebuildFinished,
   NotificationSettings,
   NotificationAction,
   RealtimeSyncStatus,
@@ -111,10 +113,10 @@ export function onNativeMenuAction(
 }
 
 export function onAccountConnected(
-  handler: (account: Account) => void,
+  handler: (connection: AccountConnection) => void,
 ): Promise<UnlistenFn> {
   if (!isTauri()) return Promise.resolve(() => undefined);
-  return listen<Account>("account-connected", (event) =>
+  return listen<AccountConnection>("account-connected", (event) =>
     handler(event.payload),
   );
 }
@@ -213,6 +215,15 @@ export function onMailRebuildProgress(
   );
 }
 
+export function onMailRebuildFinished(
+  handler: (result: MailRebuildFinished) => void,
+): Promise<UnlistenFn> {
+  if (!isTauri()) return Promise.resolve(() => undefined);
+  return listen<MailRebuildFinished>("mail-rebuild-finished", (event) =>
+    handler(event.payload),
+  );
+}
+
 export function onMailSyncState(
   handler: (status: RealtimeSyncStatus) => void,
 ): Promise<UnlistenFn> {
@@ -222,11 +233,11 @@ export function onMailSyncState(
   );
 }
 
-export async function notifyAccountConnected(account: Account) {
+export async function notifyAccountConnected(connection: AccountConnection) {
   if (isTauri()) {
     await Promise.allSettled([
-      emitTo("main", "account-connected", account),
-      emitTo("settings", "account-connected", account),
+      emitTo("main", "account-connected", connection),
+      emitTo("settings", "account-connected", connection),
     ]);
   }
 }

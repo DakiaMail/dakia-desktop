@@ -3,6 +3,7 @@ import { mailboxFamily } from "./mailActions";
 import { groupMessages } from "./threads";
 import type {
   Account,
+  AccountConnection,
   Attachment,
   AiSettings,
   ComposeAttachment,
@@ -92,9 +93,9 @@ const desktopApi = {
   removeAccount: (accountId: string) =>
     invoke<void>("remove_account", { accountId }),
   addAccount: (draft: Record<string, unknown>, password: string) =>
-    invoke<Account>("add_account", { input: { draft, password } }),
+    invoke<AccountConnection>("add_account", { input: { draft, password } }),
   addOAuthAccount: (draft: Record<string, unknown>) =>
-    invoke<Account>("add_oauth_account", { draft }),
+    invoke<AccountConnection>("add_oauth_account", { draft }),
   search: (
     text = "",
     accountIds: string[] = [],
@@ -476,8 +477,14 @@ const demoApi: typeof desktopApi = {
       ? desktopApi.showEmailAddressContextMenu(...args)
       : Promise.resolve(),
   removeAccount: async () => undefined,
-  addAccount: async () => demoAccount,
-  addOAuthAccount: async () => demoAccount,
+  addAccount: async () => ({
+    account: demoAccount,
+    reusedExistingAccount: false,
+  }),
+  addOAuthAccount: async () => ({
+    account: demoAccount,
+    reusedExistingAccount: false,
+  }),
   search: async (
     text,
     accountIds,

@@ -84,7 +84,22 @@ const MAX_TARGETED_ATTACHMENT_ENCODED_BYTES: usize = 36 * 1024 * 1024;
 /// Do not let a malicious BODYSTRUCTURE response grow an unbounded String
 /// before the MIME parser has a chance to enforce its structural limits.
 const MAX_IMAP_RESPONSE_TRANSCRIPT_BYTES: usize = MAX_MIME_HEADER_BYTES;
+/// Keep response work bounded independently from the byte limit. Catalogue
+/// discovery deliberately uses smaller pages, so a provider that emits an
+/// unreasonable number of untagged responses is treated as non-authoritative.
+const MAX_IMAP_RESPONSE_LINES: usize = 2_048;
 const MAX_IMAP_RESPONSE_LITERALS: usize = 64;
+const MAX_IMAP_COMMAND_BYTES: usize = 8 * 1024;
+const MAX_METADATA_FETCH_UIDS: usize = 25;
+/// Realtime remains responsive even when a mailbox has accumulated a large
+/// durable repair queue. Full rebuilds drain the complete queue separately.
+const REALTIME_FAILED_UID_RETRY_LIMIT: usize = 25;
+/// Sequence-number pages bound each flag response without imposing a global
+/// limit on the size of a mailbox.
+const MAILBOX_SNAPSHOT_PAGE_SIZE: u32 = 500;
+/// Dakia supports catalogues well beyond the six-figure mailbox acceptance
+/// case, but rejects implausible SELECT counts before allocating page work.
+const MAX_SUPPORTED_MAILBOX_MESSAGES: u32 = 1_000_000;
 /// Explicit raw export/full-forward operations may need transport encoding
 /// overhead beyond decoded attachment limits, but never receive an unbounded
 /// server response.
@@ -353,28 +368,17 @@ impl MailService {
         client.authenticate(account, &secret).await?;
         let capabilities = client.command("CAPABILITY").await?;
         let supports_idle = supports_idle(&capabilities);
-        let select = client.command("SELECT INBOX").await?;
-        let uid_validity = parse_uid_validity(&select);
+        client.command("SELECT INBOX").await?;
         let mut detected_at = Some(Utc::now());
         let mut new_messages = self
-            .fetch_new_inbox_headers(
-                &mut client,
-                account,
-                max_messages,
-                uid_validity.map(u64::from),
-            )
+            .fetch_new_inbox_headers(&mut client, account, max_messages)
             .await?;
         if new_messages.is_empty() && supports_idle {
             match client.idle_until_change(cancel).await? {
                 IdleOutcome::Changed => {
                     detected_at = Some(Utc::now());
                     new_messages = self
-                        .fetch_new_inbox_headers(
-                            &mut client,
-                            account,
-                            max_messages,
-                            uid_validity.map(u64::from),
-                        )
+                        .fetch_new_inbox_headers(&mut client, account, max_messages)
                         .await?;
                 }
                 IdleOutcome::Cancelled => {
@@ -389,12 +393,7 @@ impl MailService {
                 IdleOutcome::Renewed => {
                     detected_at = Some(Utc::now());
                     new_messages = self
-                        .fetch_new_inbox_headers(
-                            &mut client,
-                            account,
-                            max_messages,
-                            uid_validity.map(u64::from),
-                        )
+                        .fetch_new_inbox_headers(&mut client, account, max_messages)
                         .await?;
                 }
             }
@@ -419,33 +418,94 @@ impl MailService {
         })
     }
 
-    async fn fetch_new_inbox_headers(
+    async fn fetch_new_inbox_headers<S>(
         &self,
-        client: &mut ImapClient,
+        client: &mut ImapClient<S>,
         account: &Account,
         max_messages: u32,
-        uid_validity: Option<u64>,
-    ) -> Result<Vec<MailSummary>> {
+    ) -> Result<Vec<MailSummary>>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let selected = client.command("SELECT INBOX").await?;
+        let snapshot_identity = parse_mailbox_identity(&selected)?;
         let state = self
             .store
-            .prepare_mailbox_sync(account.id, "INBOX", uid_validity)
+            .prepare_mailbox_sync(
+                account.id,
+                "INBOX",
+                Some(u64::from(snapshot_identity.uid_validity)),
+            )
             .await?;
-        // Realtime sync must observe removals as well as arrivals. Searching
-        // only above the durable watermark leaves an archived UID in the
-        // local Inbox forever: the row can reappear after the optimistic UI
-        // update, but hydrating it then fails because the provider no longer
-        // has that UID in INBOX.
-        let search = client.command("UID SEARCH ALL").await?;
-        let remote_uids = parse_search_uids(&search);
-        let remote_set = remote_uids.iter().copied().collect();
-        self.store
-            .reconcile_mailbox_uids(account.id, "INBOX", &remote_set)
+        let snapshot_generation = self
+            .store
+            .begin_mailbox_snapshot(
+                account.id,
+                "INBOX",
+                "INBOX",
+                snapshot_identity.uid_validity,
+                snapshot_identity.exists,
+                snapshot_identity.uid_next,
+                snapshot_identity.highest_modseq,
+            )
             .await?;
-        let mut uids = sync_uids(remote_uids, state.highest_uid, max_messages);
-        let mut scheduled = uids
+        for (start, end) in mailbox_snapshot_page_ranges(snapshot_identity.exists) {
+            let page = fetch_mailbox_snapshot_range(client, start, end, None).await?;
+            let flags = page
+                .iter()
+                .map(|item| (item.uid, item.is_read, item.is_flagged))
+                .collect::<Vec<_>>();
+            self.store
+                .stage_mailbox_snapshot_page(account.id, "INBOX", &snapshot_generation, &flags)
+                .await?;
+        }
+        let mut remote_uids = self
+            .store
+            .staged_mailbox_snapshot_uids(account.id, "INBOX", &snapshot_generation)
+            .await?;
+        remote_uids.sort_unstable();
+        if remote_uids.len() != usize::try_from(snapshot_identity.exists)? {
+            bail!("IMAP mailbox snapshot repeated a UID across pages");
+        }
+        let remote_set: std::collections::HashSet<u32> = remote_uids.iter().copied().collect();
+        let local_uids = self.store.mailbox_uids(account.id, "INBOX").await?;
+        let mut durable_failures = self
+            .store
+            .mailbox_sync_failure_uids(account.id, "INBOX")
+            .await?;
+        durable_failures.retain(|uid| remote_set.contains(uid));
+        durable_failures.truncate(REALTIME_FAILED_UID_RETRY_LIMIT);
+        let force_replacement = state.uid_validity_changed;
+        let mut scheduled = durable_failures
             .iter()
             .copied()
             .collect::<std::collections::HashSet<_>>();
+        let limit = max_messages as usize;
+        let incremental_uids = if let Some(highest_uid) = state.highest_uid {
+            remote_uids
+                .iter()
+                .copied()
+                .filter(|uid| *uid > highest_uid)
+                .filter(|uid| !local_uids.contains(uid))
+                .filter(|uid| scheduled.insert(*uid))
+                .take(limit)
+                .collect::<Vec<_>>()
+        } else {
+            let mut newest = remote_uids
+                .iter()
+                .rev()
+                .copied()
+                .filter(|uid| force_replacement || !local_uids.contains(uid))
+                .filter(|uid| scheduled.insert(*uid))
+                .take(if force_replacement { usize::MAX } else { limit })
+                .collect::<Vec<_>>();
+            newest.reverse();
+            newest
+        };
+        // New unseen mail goes first. A known oversized or truncated UID may
+        // abort the connection again, but must not starve later arrivals.
+        let mut uids = incremental_uids.clone();
+        uids.extend(durable_failures.iter().copied());
         for uid in self
             .store
             .unscanned_recipient_header_uids(account.id, "INBOX", RECIPIENT_HEADER_BACKFILL_BATCH)
@@ -455,37 +515,255 @@ impl MailService {
                 uids.push(uid);
             }
         }
-        let mut messages = Vec::with_capacity(uids.len());
-        let highest_processed_uid = uids.iter().copied().max();
-        for uid in uids {
-            let fields = "FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES CONTENT-TYPE LIST-ID PRECEDENCE AUTO-SUBMITTED)]";
-            let mut response = client
-                .command_with_literal_limited(
-                    &format!("UID FETCH {uid} ({fields})"),
-                    MAX_MIME_HEADER_BYTES,
+        if force_replacement {
+            uids = self
+                .store
+                .staged_mailbox_snapshot_uids_without_replacement_outcome(
+                    account.id,
+                    "INBOX",
+                    &snapshot_generation,
                 )
                 .await?;
-            if let Some(raw) = response.take_header_literal_for(uid) {
-                match parse_header_message(account, "INBOX", uid, &response.lines, &raw) {
-                    Ok(message) => messages.push(message),
-                    Err(error) => {
-                        eprintln!("Dakia rejected INBOX UID {uid} before persistence: {error}")
+        }
+        let mut messages: Vec<MailSummary> =
+            Vec::with_capacity(if force_replacement { 0 } else { uids.len() });
+        let mut replacement_successful = std::collections::HashSet::new();
+        let mut failed_uids = Vec::new();
+        let fields = "FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES CONTENT-TYPE LIST-ID PRECEDENCE AUTO-SUBMITTED)]";
+        if force_replacement {
+            for uid_batch in uids.chunks(MAX_METADATA_FETCH_UIDS) {
+                let mut fetch =
+                    fetch_uid_data_batched(client, uid_batch, fields, MAX_MIME_HEADER_BYTES).await;
+                for (uid, error) in &fetch.failures {
+                    self.store
+                        .record_mailbox_sync_failure(account.id, "INBOX", *uid, "metadata", error)
+                        .await?;
+                    failed_uids.push((*uid, error.clone()));
+                }
+                let mut replacement_page = Vec::with_capacity(uid_batch.len());
+                for (uid, mut response) in fetch.responses.drain(..) {
+                    if let Some(raw) = response.take_header_literal_for(uid) {
+                        match parse_header_message(account, "INBOX", uid, &response.lines, &raw) {
+                            Ok(message) => {
+                                replacement_successful.insert(uid);
+                                replacement_page.push(message);
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                    "Dakia rejected INBOX UID {uid} before persistence: {error}"
+                                );
+                                failed_uids.push((uid, error.to_string()));
+                            }
+                        }
+                    } else {
+                        failed_uids.push((
+                            uid,
+                            "IMAP server omitted the requested header literal".into(),
+                        ));
                     }
+                }
+                self.store
+                    .stage_mailbox_snapshot_message_page(
+                        account.id,
+                        "INBOX",
+                        &snapshot_generation,
+                        &replacement_page,
+                    )
+                    .await?;
+                if let Some(error) = fetch.fatal {
+                    return Err(error).context("could not fetch replacement INBOX metadata");
+                }
+            }
+        } else {
+            for uid in uids {
+                let mut response = match client
+                    .command_with_literal_limited(
+                        &format!("UID FETCH {uid} ({fields})"),
+                        MAX_MIME_HEADER_BYTES,
+                    )
+                    .await
+                {
+                    Ok(response) => response,
+                    Err(error) => {
+                        let successful = messages
+                            .iter()
+                            .map(|message| u32::try_from(message.uid))
+                            .collect::<std::result::Result<std::collections::HashSet<_>, _>>()?;
+                        if !force_replacement && !messages.is_empty() {
+                            let mut unresolved = durable_failures
+                                .iter()
+                                .copied()
+                                .collect::<std::collections::HashSet<_>>();
+                            unresolved.insert(uid);
+                            for successful_uid in &successful {
+                                unresolved.remove(successful_uid);
+                            }
+                            let mut persisted = local_uids.clone();
+                            persisted.extend(successful.iter().copied());
+                            let watermark = state.highest_uid.map(|highest_uid| {
+                                remote_uids
+                                    .iter()
+                                    .copied()
+                                    .filter(|candidate| *candidate > highest_uid)
+                                    .take_while(|candidate| {
+                                        !unresolved.contains(candidate)
+                                            && persisted.contains(candidate)
+                                    })
+                                    .last()
+                                    .unwrap_or(highest_uid)
+                            });
+                            self.store
+                                .save_synced_messages_through(
+                                    account.id, "INBOX", &messages, watermark,
+                                )
+                                .await?;
+                            for successful_uid in successful {
+                                self.store
+                                    .clear_mailbox_sync_failure(account.id, "INBOX", successful_uid)
+                                    .await?;
+                            }
+                        }
+                        self.store
+                            .record_mailbox_sync_failure(
+                                account.id,
+                                "INBOX",
+                                uid,
+                                "metadata",
+                                &error.to_string(),
+                            )
+                            .await?;
+                        self.store
+                            .discard_mailbox_snapshot(account.id, "INBOX", &snapshot_generation)
+                            .await?;
+                        return Err(error).context(format!("could not fetch INBOX UID {uid}"));
+                    }
+                };
+                if let Some(raw) = response.take_header_literal_for(uid) {
+                    match parse_header_message(account, "INBOX", uid, &response.lines, &raw) {
+                        Ok(message) => messages.push(message),
+                        Err(error) => {
+                            eprintln!("Dakia rejected INBOX UID {uid} before persistence: {error}");
+                            failed_uids.push((uid, error.to_string()));
+                        }
+                    }
+                } else {
+                    failed_uids.push((
+                        uid,
+                        "IMAP server omitted the requested header literal".into(),
+                    ));
                 }
             }
         }
-        let new_messages = self
-            .store
-            .save_synced_messages(account.id, "INBOX", &messages)
-            .await?;
-        if let Some(uid) = highest_processed_uid {
+        let mut successful = messages
+            .iter()
+            .map(|message| u32::try_from(message.uid))
+            .collect::<std::result::Result<std::collections::HashSet<_>, _>>()?;
+        successful.extend(replacement_successful);
+        let current_failures = failed_uids
+            .iter()
+            .map(|(uid, _)| *uid)
+            .collect::<std::collections::HashSet<_>>();
+        let mut unresolved_failures = durable_failures
+            .into_iter()
+            .chain(current_failures.iter().copied())
+            .collect::<std::collections::HashSet<_>>();
+        for uid in &successful {
+            unresolved_failures.remove(uid);
+        }
+        let mut persisted_uids = local_uids;
+        persisted_uids.extend(successful.iter().copied());
+        let contiguous_watermark = if force_replacement {
+            remote_uids.last().copied()
+        } else if let Some(highest_uid) = state.highest_uid {
+            let mut contiguous = Some(highest_uid);
+            for uid in remote_uids.iter().copied().filter(|uid| *uid > highest_uid) {
+                if unresolved_failures.contains(&uid) || !persisted_uids.contains(&uid) {
+                    break;
+                }
+                contiguous = Some(uid);
+            }
+            contiguous
+        } else {
+            let mut contiguous = None;
+            for uid in &incremental_uids {
+                if current_failures.contains(uid) || !successful.contains(uid) {
+                    break;
+                }
+                contiguous = Some(*uid);
+            }
+            contiguous
+        };
+        let new_messages = if force_replacement {
+            Vec::new()
+        } else {
             self.store
-                .advance_mailbox_sync_watermark(account.id, "INBOX", uid)
+                .save_synced_messages_through(account.id, "INBOX", &messages, contiguous_watermark)
+                .await?
+        };
+        for (uid, error) in &failed_uids {
+            self.store
+                .record_mailbox_sync_failure(account.id, "INBOX", *uid, "metadata", error)
                 .await?;
         }
-        self.store
-            .set_mailbox_uid_validity(account.id, "INBOX", uid_validity)
-            .await?;
+        for uid in &successful {
+            self.store
+                .clear_mailbox_sync_failure(account.id, "INBOX", *uid)
+                .await?;
+        }
+        if !failed_uids.is_empty() {
+            if !force_replacement {
+                self.store
+                    .discard_mailbox_snapshot(account.id, "INBOX", &snapshot_generation)
+                    .await?;
+            }
+            bail!("IMAP metadata remained incomplete for one or more messages");
+        }
+        let selected = client.command("SELECT INBOX").await?;
+        let final_identity = parse_mailbox_identity(&selected)?;
+        match verify_mailbox_snapshot_membership(
+            client,
+            &snapshot_identity,
+            &final_identity,
+            &remote_uids,
+        )
+        .await
+        {
+            Ok(Some(second)) => {
+                let flags = second
+                    .iter()
+                    .map(|item| (item.uid, item.is_read, item.is_flagged))
+                    .collect::<Vec<_>>();
+                self.store
+                    .stage_mailbox_snapshot_page(account.id, "INBOX", &snapshot_generation, &flags)
+                    .await?;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                self.store
+                    .discard_mailbox_snapshot(account.id, "INBOX", &snapshot_generation)
+                    .await?;
+                return Err(error).context("IMAP inbox membership was not stable");
+            }
+        }
+        if force_replacement {
+            self.store
+                .finalize_mailbox_snapshot_with_staged_replacements_and_watermark(
+                    account.id,
+                    "INBOX",
+                    &snapshot_generation,
+                    contiguous_watermark,
+                )
+                .await?;
+        } else {
+            self.store
+                .finalize_mailbox_snapshot_with_watermark(
+                    account.id,
+                    "INBOX",
+                    &snapshot_generation,
+                    contiguous_watermark,
+                )
+                .await?;
+        }
         Ok(new_messages)
     }
 
@@ -661,11 +939,10 @@ impl MailService {
             completed: 0,
             total: None,
         });
-        let select = client.command("SELECT INBOX").await?;
-        let uid_validity = parse_uid_validity(&select).map(u64::from);
+        client.command("SELECT INBOX").await?;
         let before = self.store.mailbox_uids(account.id, "INBOX").await?;
         let new_messages = self
-            .fetch_new_inbox_headers(&mut client, account, max_messages, uid_validity)
+            .fetch_new_inbox_headers(&mut client, account, max_messages)
             .await?;
         let after = self.store.mailbox_uids(account.id, "INBOX").await?;
         let _ = client.command("LOGOUT").await;
@@ -737,15 +1014,31 @@ impl MailService {
         });
         let secret = self.credentials.secret(account).await?;
         client.authenticate(account, &secret).await?;
-        let listing = client.command("LIST \"\" \"*\"").await.unwrap_or_default();
+        let capabilities = client.command("CAPABILITY").await?;
+        let condstore = supports_condstore(&capabilities);
+        let requested_families = plans
+            .iter()
+            .filter_map(|plan| special_mailbox_family(plan.local))
+            .collect::<std::collections::HashSet<_>>();
+        let (listing, listing_authoritative) = match client.command("LIST \"\" \"*\"").await {
+            Ok(listing) => match validate_list_response(&listing) {
+                Ok(()) => (listing, true),
+                Err(error) if reset_before_sync => {
+                    return Err(error).context(
+                        "cannot replace mailbox families without a complete LIST response",
+                    );
+                }
+                Err(_) => (listing, false),
+            },
+            Err(error) if reset_before_sync => {
+                return Err(error)
+                    .context("cannot replace mailbox families because LIST discovery failed");
+            }
+            Err(_) => (Vec::new(), false),
+        };
         let plans = resolve_special_mailboxes(plans, &listing);
-        if reset_before_sync {
-            client
-                .command("SELECT INBOX")
-                .await
-                .context("cannot rebuild because the provider inbox is unavailable")?;
-            self.store.reset_account_mail_index(account.id).await?;
-        }
+        let mut family_keep = std::collections::HashMap::<&'static str, Vec<String>>::new();
+        let mut incomplete_families = std::collections::HashSet::<&'static str>::new();
         on_progress(SyncProgress {
             phase: "finding",
             completed: 0,
@@ -753,46 +1046,212 @@ impl MailService {
         });
         let mut work = Vec::new();
         for plan in plans {
-            let selected = match client
-                .command(&format!("SELECT {}", quote_imap(&plan.remote)))
-                .await
-            {
+            let mut mailbox_condstore = condstore;
+            let mut select_command = if mailbox_condstore {
+                format!("SELECT {} (CONDSTORE)", quote_imap(&plan.remote))
+            } else {
+                format!("SELECT {}", quote_imap(&plan.remote))
+            };
+            let selected = match client.command(&select_command).await {
                 Ok(selected) => selected,
-                Err(_) => {
+                Err(error)
+                    if mailbox_condstore
+                        && error.to_string().starts_with("IMAP command failed:") =>
+                {
+                    mailbox_condstore = false;
+                    select_command = format!("SELECT {}", quote_imap(&plan.remote));
+                    match client.command(&select_command).await {
+                        Ok(selected) => selected,
+                        Err(error) => {
+                            if plan.local == "INBOX" {
+                                return Err(error).context("IMAP server does not expose an inbox");
+                            }
+                            if reset_before_sync {
+                                if imap_error_confirms_nonexistent(&error) {
+                                    continue;
+                                }
+                                return Err(error).context(format!(
+                                    "cannot replace optional mailbox {} because SELECT failed",
+                                    plan.storage
+                                ));
+                            }
+                            if let Some(family) = special_mailbox_family(plan.local) {
+                                incomplete_families.insert(family);
+                            }
+                            continue;
+                        }
+                    }
+                }
+                Err(error) => {
                     if plan.local == "INBOX" {
-                        bail!("IMAP server does not expose an inbox");
+                        return Err(error).context("IMAP server does not expose an inbox");
+                    }
+                    if reset_before_sync {
+                        if imap_error_confirms_nonexistent(&error) {
+                            continue;
+                        }
+                        return Err(error).context(format!(
+                            "cannot replace optional mailbox {} because SELECT failed",
+                            plan.storage
+                        ));
+                    }
+                    if let Some(family) = special_mailbox_family(plan.local) {
+                        incomplete_families.insert(family);
                     }
                     continue;
                 }
             };
-            let uid_validity = parse_uid_validity(&selected)
-                .context("IMAP server omitted UIDVALIDITY after SELECT")?;
-            let previous_state = self
+            if let Some(family) = special_mailbox_family(plan.local) {
+                family_keep
+                    .entry(family)
+                    .or_default()
+                    .push(plan.storage.clone());
+            }
+            let mut snapshot_identity = parse_mailbox_identity(&selected)?;
+            let uid_validity = snapshot_identity.uid_validity;
+            let mut previous_state = self
                 .store
                 .mailbox_catalog_state(account.id, &plan.storage)
                 .await?;
-            if previous_state
+            let uid_validity_changed = previous_state
                 .as_ref()
-                .is_some_and(|state| state.uid_validity != i64::from(uid_validity))
+                .is_some_and(|state| state.uid_validity != i64::from(uid_validity));
+            if uid_validity_changed {
+                previous_state = None;
+            }
+            let has_pending_repairs = !self
+                .store
+                .mailbox_sync_failure_uids(account.id, &plan.storage)
+                .await?
+                .is_empty()
+                || !self
+                    .store
+                    .mime_encoded_snippet_uids(account.id, &plan.storage)
+                    .await?
+                    .is_empty()
+                || !self
+                    .store
+                    .unscanned_recipient_header_uids(
+                        account.id,
+                        &plan.storage,
+                        RECIPIENT_HEADER_BACKFILL_BATCH,
+                    )
+                    .await?
+                    .is_empty();
+            let saved_modseq = previous_state
+                .as_ref()
+                .filter(|_| !reset_before_sync)
+                .filter(|_| snapshot_identity.highest_modseq.is_some())
+                .filter(|state| state.historical_complete)
+                .filter(|state| state.remote_total == i64::from(snapshot_identity.exists))
+                .filter(|state| {
+                    state.uid_next.is_some()
+                        && state.uid_next == snapshot_identity.uid_next.map(i64::from)
+                })
+                .and_then(|state| state.highest_modseq.as_deref())
+                .and_then(|value| value.parse::<u64>().ok());
+            if let Some(saved_modseq) = saved_modseq
+                .filter(|_| mailbox_condstore)
+                .filter(|_| !has_pending_repairs)
             {
+                let mut delta = Vec::new();
+                let mut delta_rejected = false;
+                for (start, end) in mailbox_snapshot_page_ranges(snapshot_identity.exists) {
+                    match fetch_mailbox_snapshot_range(client, start, end, Some(saved_modseq)).await
+                    {
+                        Ok(page) => delta.extend(page),
+                        Err(error) if error.to_string().starts_with("IMAP command failed:") => {
+                            delta_rejected = true;
+                            break;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                if !delta_rejected {
+                    let selected = client.command(&select_command).await?;
+                    let final_identity = parse_mailbox_identity(&selected)?;
+                    if mailbox_identity_is_stable(&snapshot_identity, &final_identity) {
+                        let flags = delta
+                            .iter()
+                            .map(|item| (item.uid, item.is_read, item.is_flagged))
+                            .collect::<Vec<_>>();
+                        self.store
+                            .apply_complete_mailbox_changed_since_flags(
+                                account.id,
+                                &plan.storage,
+                                &plan.remote,
+                                final_identity.uid_validity,
+                                usize::try_from(final_identity.exists)?,
+                                final_identity.uid_next,
+                                final_identity.highest_modseq,
+                                &flags,
+                            )
+                            .await?;
+                        continue;
+                    }
+                    // A concurrent flag change or mailbox mutation invalidates
+                    // the delta but the final SELECT provides a fresh identity
+                    // for the complete bounded snapshot below.
+                    snapshot_identity = final_identity;
+                }
+            }
+            let snapshot_generation = self
+                .store
+                .begin_mailbox_snapshot(
+                    account.id,
+                    &plan.storage,
+                    &plan.remote,
+                    snapshot_identity.uid_validity,
+                    snapshot_identity.exists,
+                    snapshot_identity.uid_next,
+                    snapshot_identity.highest_modseq,
+                )
+                .await?;
+            for (start, end) in mailbox_snapshot_page_ranges(snapshot_identity.exists) {
+                let page = fetch_mailbox_snapshot_range(client, start, end, None).await?;
+                let flags = page
+                    .iter()
+                    .map(|item| (item.uid, item.is_read, item.is_flagged))
+                    .collect::<Vec<_>>();
                 self.store
-                    .reset_mailbox_catalog(account.id, &plan.storage)
+                    .stage_mailbox_snapshot_page(
+                        account.id,
+                        &plan.storage,
+                        &snapshot_generation,
+                        &flags,
+                    )
                     .await?;
             }
-            let search = client.command("UID SEARCH ALL").await?;
-            let mut remote_uids = parse_search_uids(&search);
+            let mut remote_uids = self
+                .store
+                .staged_mailbox_snapshot_uids(account.id, &plan.storage, &snapshot_generation)
+                .await?;
             remote_uids.sort_unstable();
-            let current_flags = client.command("UID FETCH 1:* (UID FLAGS)").await?;
-            self.store
-                .update_mailbox_flags(account.id, &plan.storage, &parse_uid_flags(&current_flags))
-                .await?;
-            let remote_set = remote_uids.iter().copied().collect();
-            self.store
-                .reconcile_mailbox_uids(account.id, &plan.storage, &remote_set)
-                .await?;
-            let local_uids = self.store.mailbox_uids(account.id, &plan.storage).await?;
+            if remote_uids.len() != usize::try_from(snapshot_identity.exists)? {
+                bail!("IMAP mailbox snapshot repeated a UID across pages");
+            }
+            let remote_set: std::collections::HashSet<u32> = remote_uids.iter().copied().collect();
+            let local_uids = if reset_before_sync || uid_validity_changed {
+                std::collections::HashSet::new()
+            } else {
+                self.store.mailbox_uids(account.id, &plan.storage).await?
+            };
             let previous_highest = local_uids.iter().copied().max();
-            let mut missing = missing_uids_newest_first(&remote_uids, &local_uids);
+            let durable_failures = self
+                .store
+                .mailbox_sync_failure_uids(account.id, &plan.storage)
+                .await?
+                .into_iter()
+                .filter(|uid| remote_set.contains(uid))
+                .collect::<Vec<_>>();
+            let durable_failure_set = durable_failures
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>();
+            let mut missing = missing_uids_newest_first(&remote_uids, &local_uids)
+                .into_iter()
+                .filter(|uid| !durable_failure_set.contains(uid))
+                .collect::<Vec<_>>();
             let mut scheduled: std::collections::HashSet<_> = missing.iter().copied().collect();
             for uid in self
                 .store
@@ -816,27 +1275,35 @@ impl MailService {
                     missing.push(uid);
                 }
             }
-            // Newest-first means the useful end of every mailbox appears
-            // immediately. Every committed batch is resumable because the
-            // remaining work is derived from the catalogue on reconnect.
-            self.store
-                .save_mailbox_catalog_state(
-                    account.id,
-                    &plan.storage,
-                    &plan.remote,
-                    uid_validity,
-                    remote_uids.len(),
-                    missing.is_empty(),
-                )
-                .await?;
+            for uid in durable_failures {
+                if scheduled.insert(uid) {
+                    missing.push(uid);
+                }
+            }
+            let replace_namespace = reset_before_sync || uid_validity_changed;
+            if replace_namespace {
+                missing = self
+                    .store
+                    .staged_mailbox_snapshot_uids_without_replacement_outcome(
+                        account.id,
+                        &plan.storage,
+                        &snapshot_generation,
+                    )
+                    .await?;
+            }
             work.push(MailboxSyncWork {
                 plan,
-                uid_validity,
-                remote_total: remote_uids.len(),
-                initialized: previous_state.is_some(),
+                snapshot_generation,
+                snapshot_identity,
+                condstore: mailbox_condstore,
+                replace_namespace,
+                initialized: previous_state.is_some() && !reset_before_sync,
                 previous_highest,
+                inventory_uids: remote_uids,
                 uids: missing,
+                retry_uids: durable_failure_set,
                 offset: 0,
+                failed_uids: Vec::new(),
             });
         }
         let total = work.iter().map(|item| item.uids.len()).sum();
@@ -859,52 +1326,142 @@ impl MailService {
                 client
                     .command(&format!("SELECT {}", quote_imap(&item.plan.remote)))
                     .await?;
-                let end = (item.offset + batch_size).min(item.uids.len());
+                let end = if item.retry_uids.contains(&item.uids[item.offset]) {
+                    item.offset + 1
+                } else {
+                    let next_retry = item.uids[item.offset..]
+                        .iter()
+                        .position(|uid| item.retry_uids.contains(uid))
+                        .map(|position| item.offset + position)
+                        .unwrap_or(item.uids.len());
+                    (item.offset + batch_size).min(next_retry)
+                };
                 let batch = &item.uids[item.offset..end];
                 let mut messages = Vec::with_capacity(batch.len());
-                for uid in batch {
-                    let fields = if account.provider_id == "gmail" {
-                        "FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE X-GM-LABELS BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)]"
-                    } else {
-                        "FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)]"
-                    };
-                    let mut response = client
-                        .command_with_literal_limited(
-                            &format!("UID FETCH {uid} ({fields})"),
-                            MAX_MIME_HEADER_BYTES,
+                let fields = if account.provider_id == "gmail" {
+                    "FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE X-GM-LABELS BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)]"
+                } else {
+                    "FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)]"
+                };
+                let mut header_fetch =
+                    fetch_uid_data_batched(client, batch, fields, MAX_MIME_HEADER_BYTES).await;
+                for (uid, error) in &header_fetch.failures {
+                    self.store
+                        .record_mailbox_sync_failure(
+                            account.id,
+                            &item.plan.storage,
+                            *uid,
+                            "metadata",
+                            error,
                         )
                         .await?;
-                    if let Some(headers) = response.take_header_literal_for(*uid) {
+                    item.failed_uids.push(*uid);
+                }
+                let mut metadata = Vec::new();
+                let mut excluded_uids = Vec::new();
+                for (uid, mut response) in header_fetch.responses.drain(..) {
+                    if let Some(headers) = response.take_header_literal_for(uid) {
                         if !item.plan.skip_gmail_system_labels
                             || gmail_all_mail_is_archive(&response.lines)
                         {
-                            let snippet = client
-                                .command_with_literal(&format!(
-                                    "UID FETCH {uid} (BODY.PEEK[]<0.8192>)"
-                                ))
-                                .await
-                                .ok()
-                                .and_then(|mut response| {
-                                    response.take_body_literal_for(*uid, "TEXT")
-                                })
-                                .map(|raw| snippet_from_partial(&raw))
-                                .unwrap_or_default();
-                            match parse_catalog_message(
-                                account,
+                            metadata.push((uid, response.lines, headers));
+                        } else if item.replace_namespace {
+                            excluded_uids.push(uid);
+                        }
+                    } else {
+                        let error = "IMAP server omitted the requested header literal";
+                        self.store
+                            .record_mailbox_sync_failure(
+                                account.id,
                                 &item.plan.storage,
-                                *uid,
-                                &response.lines,
-                                &headers,
-                                snippet,
-                            ) {
-                                Ok(message) => messages.push(message),
-                                Err(error) => eprintln!(
-                                    "Dakia rejected {} UID {} before persistence: {error}",
-                                    item.plan.storage, uid
-                                ),
-                            }
+                                uid,
+                                "metadata",
+                                error,
+                            )
+                            .await?;
+                        item.failed_uids.push(uid);
+                    }
+                }
+                if !excluded_uids.is_empty() {
+                    self.store
+                        .stage_mailbox_snapshot_excluded_uids(
+                            account.id,
+                            &item.plan.storage,
+                            &item.snapshot_generation,
+                            &excluded_uids,
+                        )
+                        .await?;
+                }
+                let snippet_uids = metadata.iter().map(|(uid, _, _)| *uid).collect::<Vec<_>>();
+                let mut snippet_fetch =
+                    fetch_uid_data_batched(client, &snippet_uids, "BODY.PEEK[]<0.8192>", 8_192)
+                        .await;
+                let mut snippets = std::collections::HashMap::new();
+                for (uid, mut response) in snippet_fetch.responses.drain(..) {
+                    if let Some(raw) = response.take_body_literal_for(uid, "") {
+                        snippets.insert(uid, snippet_from_partial(&raw));
+                    } else {
+                        let error = "IMAP server omitted the requested snippet literal";
+                        self.store
+                            .record_mailbox_sync_failure(
+                                account.id,
+                                &item.plan.storage,
+                                uid,
+                                "snippet",
+                                error,
+                            )
+                            .await?;
+                        item.failed_uids.push(uid);
+                    }
+                }
+                for (uid, error) in &snippet_fetch.failures {
+                    self.store
+                        .record_mailbox_sync_failure(
+                            account.id,
+                            &item.plan.storage,
+                            *uid,
+                            "snippet",
+                            error,
+                        )
+                        .await?;
+                    item.failed_uids.push(*uid);
+                }
+                for (uid, lines, headers) in metadata {
+                    let Some(snippet) = snippets.remove(&uid) else {
+                        // Missing, rejected, or truncated snippet data leaves
+                        // this UID retryable. An explicit zero-length literal
+                        // is present in the map and remains a valid empty
+                        // snippet.
+                        continue;
+                    };
+                    match parse_catalog_message(
+                        account,
+                        &item.plan.storage,
+                        uid,
+                        &lines,
+                        &headers,
+                        snippet,
+                    ) {
+                        Ok(message) => messages.push(message),
+                        Err(error) => {
+                            eprintln!(
+                                "Dakia rejected {} UID {} before persistence: {error}",
+                                item.plan.storage, uid
+                            );
+                            self.store
+                                .record_mailbox_sync_failure(
+                                    account.id,
+                                    &item.plan.storage,
+                                    uid,
+                                    "metadata",
+                                    &error.to_string(),
+                                )
+                                .await?;
+                            item.failed_uids.push(uid);
                         }
                     }
+                }
+                for _ in batch {
                     completed += 1;
                     on_progress(SyncProgress {
                         phase: "downloading",
@@ -912,7 +1469,32 @@ impl MailService {
                         total: Some(total),
                     });
                 }
-                self.store.upsert_catalog_messages(&messages).await?;
+                if item.replace_namespace {
+                    self.store
+                        .stage_mailbox_snapshot_message_page(
+                            account.id,
+                            &item.plan.storage,
+                            &item.snapshot_generation,
+                            &messages,
+                        )
+                        .await?;
+                } else {
+                    self.store.upsert_catalog_messages(&messages).await?;
+                }
+                for message in &messages {
+                    let uid = u32::try_from(message.uid)?;
+                    if !item.failed_uids.contains(&uid) {
+                        self.store
+                            .clear_mailbox_sync_failure(account.id, &item.plan.storage, uid)
+                            .await?;
+                    }
+                }
+                if let Some(error) = header_fetch.fatal.or(snippet_fetch.fatal) {
+                    return Err(error).context(format!(
+                        "could not fetch {} metadata batch",
+                        item.plan.storage
+                    ));
+                }
                 if item.initialized && item.plan.local == "INBOX" {
                     new_messages.extend(
                         messages
@@ -938,21 +1520,107 @@ impl MailService {
                     total: Some(total),
                 });
                 item.offset = end;
-                if item.offset == item.uids.len() {
+            }
+            if !published {
+                break;
+            }
+        }
+        if work.iter().any(|item| !item.failed_uids.is_empty()) {
+            for item in &work {
+                if !item.replace_namespace {
                     self.store
-                        .save_mailbox_catalog_state(
+                        .discard_mailbox_snapshot(
                             account.id,
                             &item.plan.storage,
-                            &item.plan.remote,
-                            item.uid_validity,
-                            item.remote_total,
-                            true,
+                            &item.snapshot_generation,
                         )
                         .await?;
                 }
             }
-            if !published {
-                break;
+            let failed = work
+                .iter()
+                .flat_map(|item| item.failed_uids.iter().copied())
+                .collect::<Vec<_>>();
+            bail!("IMAP metadata remained incomplete for UIDs {failed:?}");
+        }
+        // SELECT is intentionally repeated after metadata downloads because
+        // sequence numbers can shift while the catalogue is being built. Each
+        // mailbox is finalized immediately after its identity check to keep
+        // the unavoidable remote-to-local race window as small as possible.
+        for (index, item) in work.iter().enumerate() {
+            let select_command = if item.condstore {
+                format!("SELECT {} (CONDSTORE)", quote_imap(&item.plan.remote))
+            } else {
+                format!("SELECT {}", quote_imap(&item.plan.remote))
+            };
+            let selected = client.command(&select_command).await?;
+            let final_identity = parse_mailbox_identity(&selected)?;
+            match verify_mailbox_snapshot_membership(
+                client,
+                &item.snapshot_identity,
+                &final_identity,
+                &item.inventory_uids,
+            )
+            .await
+            {
+                Ok(Some(second)) => {
+                    let flags = second
+                        .iter()
+                        .map(|entry| (entry.uid, entry.is_read, entry.is_flagged))
+                        .collect::<Vec<_>>();
+                    self.store
+                        .stage_mailbox_snapshot_page(
+                            account.id,
+                            &item.plan.storage,
+                            &item.snapshot_generation,
+                            &flags,
+                        )
+                        .await?;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    for staged in &work[index..] {
+                        self.store
+                            .discard_mailbox_snapshot(
+                                account.id,
+                                &staged.plan.storage,
+                                &staged.snapshot_generation,
+                            )
+                            .await?;
+                    }
+                    return Err(error)
+                        .context("IMAP mailbox membership was not stable at finalization");
+                }
+            }
+            if item.replace_namespace {
+                self.store
+                    .finalize_mailbox_snapshot_with_staged_replacements(
+                        account.id,
+                        &item.plan.storage,
+                        &item.snapshot_generation,
+                    )
+                    .await?;
+            } else {
+                self.store
+                    .finalize_mailbox_snapshot(
+                        account.id,
+                        &item.plan.storage,
+                        &item.snapshot_generation,
+                    )
+                    .await?;
+            }
+        }
+        if listing_authoritative {
+            for family in requested_families {
+                if incomplete_families.contains(family) {
+                    continue;
+                }
+                let mut keep = family_keep.remove(family).unwrap_or_default();
+                keep.sort();
+                keep.dedup();
+                self.store
+                    .prune_obsolete_mailbox_family_namespaces(account.id, family, &keep)
+                    .await?;
             }
         }
         if synced > 0 {
@@ -1035,7 +1703,7 @@ impl MailService {
                 plan,
                 state,
                 uid_validity,
-                uids: recent_uids_newest_first(parse_search_uids(&search)),
+                uids: recent_uids_newest_first(parse_search_uids(&search)?),
                 selected_uids: Vec::new(),
             });
         }
@@ -1347,7 +2015,7 @@ impl MailService {
                     .command(&format!("UID SEARCH {text_criterion}"))
                     .await?
             };
-            let mut uids = parse_search_uids(&response);
+            let mut uids = parse_search_uids(&response)?;
             uids.sort_unstable_by(|left, right| right.cmp(left));
             for uid in uids {
                 if let Some(message) = self
@@ -2396,12 +3064,38 @@ struct MailboxPlan {
 
 struct MailboxSyncWork {
     plan: MailboxPlan,
-    uid_validity: u32,
-    remote_total: usize,
+    snapshot_generation: String,
+    snapshot_identity: MailboxIdentity,
+    condstore: bool,
+    replace_namespace: bool,
     initialized: bool,
     previous_highest: Option<u32>,
+    inventory_uids: Vec<u32>,
     uids: Vec<u32>,
+    retry_uids: std::collections::HashSet<u32>,
     offset: usize,
+    failed_uids: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MailboxIdentity {
+    exists: u32,
+    uid_validity: u32,
+    uid_next: Option<u32>,
+    highest_modseq: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MailboxSnapshotItem {
+    uid: u32,
+    is_read: bool,
+    is_flagged: bool,
+}
+
+struct BatchedUidFetch {
+    responses: Vec<(u32, ImapResponse)>,
+    failures: Vec<(u32, String)>,
+    fatal: Option<anyhow::Error>,
 }
 
 struct RecentRefreshWork {
@@ -2444,6 +3138,10 @@ impl MailboxPlan {
             skip_gmail_system_labels: self.skip_gmail_system_labels,
         }
     }
+}
+
+fn special_mailbox_family(local: &'static str) -> Option<&'static str> {
+    matches!(local, "Sent" | "Archive" | "Spam" | "Trash").then_some(local)
 }
 
 fn resolve_special_mailboxes(plans: Vec<MailboxPlan>, lines: &[String]) -> Vec<MailboxPlan> {
@@ -2490,17 +3188,42 @@ fn resolve_special_mailboxes(plans: Vec<MailboxPlan>, lines: &[String]) -> Vec<M
 }
 
 fn parse_list_mailbox(line: &str) -> Option<(Vec<String>, String)> {
-    let list = line.find("LIST (")? + "LIST ".len();
-    let attributes_end = line[list..].find(')')? + list;
-    let flags = line[list + 1..attributes_end]
+    let line = line.trim_start();
+    let prefix = "* LIST ";
+    if line.len() < prefix.len() || !line[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        return None;
+    }
+    let attributes = &line[prefix.len()..];
+    if !attributes.starts_with('(') {
+        return None;
+    }
+    let attributes_end = attributes.find(')')?;
+    let flags = attributes[1..attributes_end]
         .split_whitespace()
         .map(str::to_ascii_lowercase)
         .collect::<Vec<_>>();
-    let mut remainder = line[attributes_end + 1..].trim_start();
+    let mut remainder = attributes[attributes_end + 1..].trim_start();
     let (_, rest) = parse_imap_astring(remainder)?;
     remainder = rest.trim_start();
     let (mailbox, _) = parse_imap_astring(remainder)?;
     Some((flags, mailbox))
+}
+
+fn validate_list_response(lines: &[String]) -> Result<()> {
+    for line in lines {
+        let trimmed = line.trim_start();
+        let Some(first) = trimmed.split_whitespace().next() else {
+            continue;
+        };
+        if first != "*" {
+            continue;
+        }
+        let response_kind = trimmed.split_whitespace().nth(1).unwrap_or_default();
+        if response_kind.eq_ignore_ascii_case("LIST") && parse_list_mailbox(trimmed).is_none() {
+            bail!("IMAP LIST response is malformed");
+        }
+    }
+    Ok(())
 }
 
 fn parse_imap_astring(value: &str) -> Option<(String, &str)> {
@@ -2522,6 +3245,12 @@ fn parse_imap_astring(value: &str) -> Option<(String, &str)> {
         }
         None
     } else {
+        // LIST literals are valid IMAP, but command responses currently keep
+        // their bytes separate from the response line. Treating the marker as
+        // an atom could select or prune the wrong mailbox during a reset.
+        if value.starts_with('{') || value.starts_with("~{") {
+            return None;
+        }
         let end = value.find(char::is_whitespace).unwrap_or(value.len());
         (end > 0).then(|| (value[..end].to_owned(), &value[end..]))
     }
@@ -4000,20 +4729,17 @@ where
         self.reader.get_mut().flush().await?;
         let mut pending_change = false;
         loop {
-            let mut continuation = String::new();
-            let read = timeout(
+            let continuation = timeout(
                 IMAP_COMMAND_TIMEOUT,
-                self.reader.read_line(&mut continuation),
+                read_imap_line_limited(&mut self.reader, MAX_IMAP_RESPONSE_TRANSCRIPT_BYTES),
             )
             .await
-            .context("IMAP IDLE continuation timed out")??;
-            if read == 0 {
-                bail!("IMAP connection closed before IDLE continuation");
-            }
+            .context("IMAP IDLE continuation timed out")?
+            .context("IMAP connection closed before IDLE continuation")?;
             if continuation.starts_with('+') {
                 break;
             }
-            if continuation.to_ascii_uppercase().contains(" EXISTS") {
+            if is_idle_invalidation(&continuation) {
                 pending_change = true;
                 continue;
             }
@@ -4029,7 +4755,6 @@ where
             IdleOutcome::Changed
         } else {
             loop {
-                let mut line = String::new();
                 tokio::select! {
                     changed = cancel.changed() => {
                         if changed.is_err() || *cancel.borrow() {
@@ -4037,11 +4762,9 @@ where
                         }
                     }
                     _ = &mut renewal => break IdleOutcome::Renewed,
-                    read = self.reader.read_line(&mut line) => {
-                        if read? == 0 {
-                            bail!("IMAP connection closed while idling");
-                        }
-                        if line.to_ascii_uppercase().contains(" EXISTS") {
+                    read = read_imap_line_limited(&mut self.reader, MAX_IMAP_RESPONSE_TRANSCRIPT_BYTES) => {
+                        let line = read.context("IMAP connection closed while idling")?;
+                        if is_idle_invalidation(&line) {
                             break IdleOutcome::Changed;
                         }
                         if line.to_ascii_uppercase().starts_with("* BYE") {
@@ -4054,18 +4777,18 @@ where
         self.reader.get_mut().write_all(b"DONE\r\n").await?;
         self.reader.get_mut().flush().await?;
         loop {
-            let mut line = String::new();
-            let read = timeout(IMAP_COMMAND_TIMEOUT, self.reader.read_line(&mut line))
-                .await
-                .context("IMAP IDLE termination timed out")??;
-            if read == 0 {
-                bail!("IMAP connection closed during IDLE termination");
-            }
+            let line = timeout(
+                IMAP_COMMAND_TIMEOUT,
+                read_imap_line_limited(&mut self.reader, MAX_IMAP_RESPONSE_TRANSCRIPT_BYTES),
+            )
+            .await
+            .context("IMAP IDLE termination timed out")?
+            .context("IMAP connection closed during IDLE termination")?;
             if line.to_ascii_uppercase().starts_with("* BYE") {
                 bail!("IMAP server closed the connection during IDLE termination");
             }
             if line.starts_with(&tag) {
-                if !line[tag.len()..].trim_start().starts_with("OK") {
+                if !tagged_status_is_ok(&line[tag.len()..]) {
                     bail!("IMAP IDLE termination failed: {}", line.trim());
                 }
                 break;
@@ -4124,7 +4847,7 @@ where
                 bail!("IMAP connection closed during APPEND");
             }
             if line.starts_with(&tag) {
-                if !line[tag.len()..].trim_start().starts_with("OK") {
+                if !tagged_status_is_ok(&line[tag.len()..]) {
                     bail!("IMAP APPEND failed: {}", line.trim());
                 }
                 break;
@@ -4146,9 +4869,19 @@ where
         command: &str,
         max_literal_bytes: usize,
     ) -> Result<ImapResponse> {
+        self.command_with_literal_budgets(command, max_literal_bytes, max_literal_bytes)
+            .await
+    }
+
+    async fn command_with_literal_budgets(
+        &mut self,
+        command: &str,
+        max_literal_bytes: usize,
+        max_total_literal_bytes: usize,
+    ) -> Result<ImapResponse> {
         timeout(
             IMAP_COMMAND_TIMEOUT,
-            self.command_with_literal_inner(command, max_literal_bytes),
+            self.command_with_literal_inner(command, max_literal_bytes, max_total_literal_bytes),
         )
         .await
         .context("IMAP command timed out")?
@@ -4158,7 +4891,11 @@ where
         &mut self,
         command: &str,
         max_literal_bytes: usize,
+        max_total_literal_bytes: usize,
     ) -> Result<ImapResponse> {
+        if command.len() > MAX_IMAP_COMMAND_BYTES {
+            bail!("IMAP command exceeds safety limit");
+        }
         self.tag += 1;
         let tag = format!("D{:04}", self.tag);
         self.reader
@@ -4177,6 +4914,9 @@ where
         let mut current_fetch_uid = None;
         let mut pending_fetch_literals = Vec::new();
         loop {
+            if lines.len() >= MAX_IMAP_RESPONSE_LINES {
+                bail!("IMAP response contains too many lines");
+            }
             let line = self
                 .read_command_line_limited(MAX_IMAP_RESPONSE_TRANSCRIPT_BYTES)
                 .await?;
@@ -4209,8 +4949,11 @@ where
                     literals.len(),
                     literal_bytes,
                     length,
-                    max_literal_bytes,
+                    max_total_literal_bytes,
                 )?;
+                if length > max_literal_bytes {
+                    bail!("IMAP literal exceeds per-message safety limit");
+                }
                 let mut bytes = vec![0; length];
                 self.reader.read_exact(&mut bytes).await?;
                 literal_bytes += length;
@@ -4225,7 +4968,7 @@ where
                 }
             }
             if line.starts_with(&tag) {
-                if !line[tag.len()..].trim_start().starts_with("OK") {
+                if !tagged_status_is_ok(&line[tag.len()..]) {
                     bail!("IMAP command failed: {}", line.trim());
                 }
                 break;
@@ -4239,6 +4982,167 @@ where
             .await
             .context("IMAP connection closed during command")
     }
+}
+
+fn uid_fetch_command_batches(uids: &[u32], fields: &str) -> Vec<Vec<u32>> {
+    let fixed_bytes = "UID FETCH  ()".len() + fields.len();
+    let mut batches = Vec::new();
+    let mut current = Vec::new();
+    let mut bytes = fixed_bytes;
+    for uid in uids {
+        let encoded = uid.to_string();
+        let additional = encoded.len() + usize::from(!current.is_empty());
+        if !current.is_empty()
+            && (current.len() >= MAX_METADATA_FETCH_UIDS
+                || bytes + additional > MAX_IMAP_COMMAND_BYTES)
+        {
+            batches.push(std::mem::take(&mut current));
+            bytes = fixed_bytes;
+        }
+        current.push(*uid);
+        bytes += encoded.len() + usize::from(current.len() > 1);
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    batches
+}
+
+fn isolate_fetch_response_for_uid(response: &mut ImapResponse, uid: u32) -> ImapResponse {
+    let mut owner = None;
+    let mut lines = Vec::new();
+    for line in &response.lines {
+        if is_untagged_fetch_start(line) {
+            owner = fetch_uid_from_line(line);
+        } else if let Some(line_uid) = fetch_uid_from_line(line) {
+            owner = Some(line_uid);
+        }
+        if owner == Some(uid) {
+            lines.push(line.clone());
+        }
+    }
+    let mut literals = Vec::new();
+    let mut index = 0;
+    while index < response.literals.len() {
+        if response.literals[index].uid == Some(uid) {
+            literals.push(response.literals.remove(index));
+        } else {
+            index += 1;
+        }
+    }
+    ImapResponse { lines, literals }
+}
+
+async fn fetch_uid_data_batched<S>(
+    client: &mut ImapClient<S>,
+    uids: &[u32],
+    fields: &str,
+    literal_limit: usize,
+) -> BatchedUidFetch
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut pending = std::collections::VecDeque::from(uid_fetch_command_batches(uids, fields));
+    let mut result = BatchedUidFetch {
+        responses: Vec::new(),
+        failures: Vec::new(),
+        fatal: None,
+    };
+    while let Some(batch) = pending.pop_front() {
+        let uid_set = batch
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let command = format!("UID FETCH {uid_set} ({fields})");
+        match client
+            .command_with_literal_budgets(
+                &command,
+                literal_limit,
+                literal_limit.saturating_mul(batch.len()),
+            )
+            .await
+        {
+            Ok(mut response) => {
+                for uid in batch {
+                    result
+                        .responses
+                        .push((uid, isolate_fetch_response_for_uid(&mut response, uid)));
+                }
+            }
+            Err(error)
+                if error.to_string().starts_with("IMAP command failed:") && batch.len() > 1 =>
+            {
+                let midpoint = (batch.len() + 1) / 2;
+                let older = batch[midpoint..].to_vec();
+                let newer = batch[..midpoint].to_vec();
+                if !older.is_empty() {
+                    pending.push_front(older);
+                }
+                pending.push_front(newer);
+            }
+            Err(error) if error.to_string().starts_with("IMAP command failed:") => {
+                result.failures.push((batch[0], error.to_string()));
+            }
+            Err(error) => {
+                let description = error.to_string();
+                result
+                    .failures
+                    .extend(batch.into_iter().map(|uid| (uid, description.clone())));
+                result.fatal = Some(error);
+                break;
+            }
+        }
+    }
+    result
+}
+
+/// Fetches one bounded sequence-number range. Providers sometimes impose a
+/// smaller response or command-item limit than they advertise, so a tagged
+/// rejection is retried as two smaller ranges. Transport errors and malformed
+/// successful responses remain fatal because the connection or snapshot can
+/// no longer be considered authoritative.
+async fn fetch_mailbox_snapshot_range<S>(
+    client: &mut ImapClient<S>,
+    start: u32,
+    end: u32,
+    changed_since: Option<u64>,
+) -> Result<Vec<MailboxSnapshotItem>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut pending = std::collections::VecDeque::from([(start, end)]);
+    let mut items = Vec::new();
+    while let Some((range_start, range_end)) = pending.pop_front() {
+        let command = match changed_since {
+            Some(modseq) => format!(
+                "FETCH {range_start}:{range_end} (UID FLAGS MODSEQ) (CHANGEDSINCE {modseq})"
+            ),
+            None => format!("FETCH {range_start}:{range_end} (UID FLAGS)"),
+        };
+        match client.command(&command).await {
+            Ok(response) => {
+                let maximum_count = usize::try_from(range_end - range_start + 1)?;
+                let mut page = if changed_since.is_some() {
+                    parse_mailbox_delta_page(&response, maximum_count)?
+                } else {
+                    parse_mailbox_snapshot_page(&response, maximum_count)?
+                };
+                items.append(&mut page);
+            }
+            Err(error)
+                if error.to_string().starts_with("IMAP command failed:")
+                    && changed_since.is_none()
+                    && range_start < range_end =>
+            {
+                let midpoint = range_start + (range_end - range_start) / 2;
+                pending.push_front((range_start, midpoint));
+                pending.push_front((midpoint + 1, range_end));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(items)
 }
 
 async fn read_imap_line_limited<R>(reader: &mut R, max_bytes: usize) -> Result<String>
@@ -4411,25 +5315,138 @@ fn quote_imap(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-fn parse_search_uids(lines: &[String]) -> Vec<u32> {
-    lines
-        .iter()
-        .find_map(|line| line.strip_prefix("* SEARCH "))
-        .map(|value| {
-            value
-                .split_whitespace()
-                .filter_map(|uid| uid.parse().ok())
-                .collect()
+fn parse_search_uids(lines: &[String]) -> Result<Vec<u32>> {
+    let mut search_values = lines.iter().filter_map(|line| {
+        let trimmed = line.trim();
+        let prefix = "* SEARCH";
+        (trimmed.len() >= prefix.len()
+            && trimmed[..prefix.len()].eq_ignore_ascii_case(prefix)
+            && trimmed[prefix.len()..]
+                .chars()
+                .next()
+                .is_none_or(char::is_whitespace))
+        .then_some(trimmed[prefix.len()..].trim())
+    });
+    let value = search_values
+        .next()
+        .context("IMAP server omitted SEARCH results")?;
+    if search_values.next().is_some() {
+        bail!("IMAP server returned multiple SEARCH results");
+    }
+    value
+        .split_whitespace()
+        .map(|token| {
+            let uid = token
+                .parse::<u32>()
+                .with_context(|| format!("IMAP SEARCH returned malformed UID {token:?}"))?;
+            if uid == 0 {
+                bail!("IMAP SEARCH returned invalid UID 0");
+            }
+            Ok(uid)
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 fn parse_uid_validity(lines: &[String]) -> Option<u32> {
+    parse_imap_response_code_number(lines, "UIDVALIDITY")
+        .and_then(|value| u32::try_from(value).ok())
+}
+
+fn parse_mailbox_identity(lines: &[String]) -> Result<MailboxIdentity> {
+    let exists = lines
+        .iter()
+        .find_map(|line| {
+            let mut tokens = line.split_whitespace();
+            if tokens.next()? != "*" {
+                return None;
+            }
+            let count = tokens.next()?.parse::<u32>().ok()?;
+            tokens
+                .next()
+                .is_some_and(|token| token.eq_ignore_ascii_case("EXISTS"))
+                .then_some(count)
+        })
+        .context("IMAP server omitted EXISTS after SELECT")?;
+    if exists > MAX_SUPPORTED_MAILBOX_MESSAGES {
+        bail!(
+            "IMAP mailbox contains more than the supported {} messages",
+            MAX_SUPPORTED_MAILBOX_MESSAGES
+        );
+    }
+    let uid_validity =
+        parse_uid_validity(lines).context("IMAP server omitted UIDVALIDITY after SELECT")?;
+    Ok(MailboxIdentity {
+        exists,
+        uid_validity,
+        uid_next: parse_imap_response_code_number(lines, "UIDNEXT")
+            .and_then(|value| u32::try_from(value).ok()),
+        highest_modseq: parse_imap_response_code_number(lines, "HIGHESTMODSEQ"),
+    })
+}
+
+fn parse_imap_response_code_number(lines: &[String], code: &str) -> Option<u64> {
     lines.iter().find_map(|line| {
-        let start = line.find("[UIDVALIDITY ")? + "[UIDVALIDITY ".len();
-        let end = line[start..].find(']')? + start;
+        let upper = line.to_ascii_uppercase();
+        let marker = format!("[{code} ");
+        let start = upper.find(&marker)? + marker.len();
+        let end = upper[start..].find(']')? + start;
         line[start..end].trim().parse().ok()
     })
+}
+
+fn mailbox_identity_is_stable(initial: &MailboxIdentity, final_state: &MailboxIdentity) -> bool {
+    mailbox_membership_is_stable(initial, final_state)
+        && match (initial.highest_modseq, final_state.highest_modseq) {
+            (Some(initial), Some(final_state)) => initial == final_state,
+            _ => true,
+        }
+}
+
+fn mailbox_membership_is_stable(initial: &MailboxIdentity, final_state: &MailboxIdentity) -> bool {
+    initial.exists == final_state.exists
+        && initial.uid_validity == final_state.uid_validity
+        && matches!(
+            (initial.uid_next, final_state.uid_next),
+            (Some(initial), Some(final_state)) if initial == final_state
+        )
+}
+
+fn imap_error_confirms_nonexistent(error: &anyhow::Error) -> bool {
+    error
+        .to_string()
+        .to_ascii_uppercase()
+        .contains("[NONEXISTENT]")
+}
+
+async fn verify_mailbox_snapshot_membership<S>(
+    client: &mut ImapClient<S>,
+    initial: &MailboxIdentity,
+    final_state: &MailboxIdentity,
+    first_uids: &[u32],
+) -> Result<Option<Vec<MailboxSnapshotItem>>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if mailbox_membership_is_stable(initial, final_state) {
+        return Ok(None);
+    }
+    if initial.exists != final_state.exists || initial.uid_validity != final_state.uid_validity {
+        bail!("IMAP mailbox changed while its catalogue was being synchronized");
+    }
+    if initial.uid_next.is_some() && final_state.uid_next.is_some() {
+        bail!("IMAP mailbox changed while its catalogue was being synchronized");
+    }
+
+    let mut second = Vec::new();
+    for (start, end) in mailbox_snapshot_page_ranges(final_state.exists) {
+        second.extend(fetch_mailbox_snapshot_range(client, start, end, None).await?);
+    }
+    let mut second_uids = second.iter().map(|item| item.uid).collect::<Vec<_>>();
+    second_uids.sort_unstable();
+    if second_uids != first_uids {
+        bail!("IMAP mailbox membership changed between bounded inventories");
+    }
+    Ok(Some(second))
 }
 
 fn verify_mailbox_uid_validity(current: u32, catalogued: i64, action: &str) -> Result<()> {
@@ -4440,19 +5457,102 @@ fn verify_mailbox_uid_validity(current: u32, catalogued: i64, action: &str) -> R
 }
 
 fn parse_uid_flags(lines: &[String]) -> Vec<(u32, bool, bool)> {
-    lines
+    lines.iter().filter_map(parse_uid_flags_line).collect()
+}
+
+fn parse_uid_flags_line(line: &String) -> Option<(u32, bool, bool)> {
+    if !is_untagged_fetch_start(line) {
+        return None;
+    }
+    let uid = fetch_uid_from_line(line)?;
+    let upper = line.to_ascii_uppercase();
+    let marker = "FLAGS (";
+    let start = upper.find(marker)? + marker.len();
+    let end = upper[start..].find(')')? + start;
+    let flags = &upper[start..end];
+    Some((uid, flags.contains("\\SEEN"), flags.contains("\\FLAGGED")))
+}
+
+fn parse_mailbox_snapshot_page(
+    lines: &[String],
+    expected_count: usize,
+) -> Result<Vec<MailboxSnapshotItem>> {
+    let parsed = parse_uid_flags(lines);
+    if parsed.len() != expected_count {
+        bail!(
+            "IMAP mailbox snapshot page was incomplete: expected {expected_count} messages, received {}",
+            parsed.len()
+        );
+    }
+    let mut seen = std::collections::HashSet::with_capacity(parsed.len());
+    let mut items = Vec::with_capacity(parsed.len());
+    for (uid, is_read, is_flagged) in parsed {
+        if !seen.insert(uid) {
+            bail!("IMAP mailbox snapshot page repeated UID {uid}");
+        }
+        items.push(MailboxSnapshotItem {
+            uid,
+            is_read,
+            is_flagged,
+        });
+    }
+    Ok(items)
+}
+
+fn parse_mailbox_delta_page(
+    lines: &[String],
+    maximum_count: usize,
+) -> Result<Vec<MailboxSnapshotItem>> {
+    let fetch_count = lines
         .iter()
-        .filter_map(|line| {
-            let uid_start = line.find("UID ")? + "UID ".len();
-            let uid_end =
-                line[uid_start..].find(|character: char| !character.is_ascii_digit())? + uid_start;
-            let uid = line[uid_start..uid_end].parse().ok()?;
-            let flags_start = line.find("FLAGS (")? + "FLAGS (".len();
-            let flags_end = line[flags_start..].find(')')? + flags_start;
-            let flags = &line[flags_start..flags_end];
-            Some((uid, flags.contains("\\Seen"), flags.contains("\\Flagged")))
-        })
-        .collect()
+        .filter(|line| is_untagged_fetch_start(line))
+        .count();
+    let parsed = parse_uid_flags(lines);
+    if parsed.len() != fetch_count || parsed.len() > maximum_count {
+        bail!("IMAP CONDSTORE flag delta page was malformed");
+    }
+    let mut seen = std::collections::HashSet::with_capacity(parsed.len());
+    let mut items = Vec::with_capacity(parsed.len());
+    for (uid, is_read, is_flagged) in parsed {
+        if !seen.insert(uid) {
+            bail!("IMAP CONDSTORE flag delta repeated UID {uid}");
+        }
+        items.push(MailboxSnapshotItem {
+            uid,
+            is_read,
+            is_flagged,
+        });
+    }
+    Ok(items)
+}
+
+fn mailbox_snapshot_page_ranges(exists: u32) -> Vec<(u32, u32)> {
+    let mut ranges = Vec::new();
+    let mut end = exists;
+    while end > 0 {
+        let start = end.saturating_sub(MAILBOX_SNAPSHOT_PAGE_SIZE - 1).max(1);
+        ranges.push((start, end));
+        end = start - 1;
+    }
+    ranges
+}
+
+fn is_idle_invalidation(line: &str) -> bool {
+    let upper = line.trim_start().to_ascii_uppercase();
+    if !upper.starts_with('*') {
+        return false;
+    }
+    upper.contains(" EXISTS")
+        || upper.contains(" EXPUNGE")
+        || upper.contains(" FETCH ") && upper.contains("FLAGS")
+        || upper.starts_with("* VANISHED")
+}
+
+fn tagged_status_is_ok(suffix: &str) -> bool {
+    suffix
+        .split_whitespace()
+        .next()
+        .is_some_and(|status| status.eq_ignore_ascii_case("OK"))
 }
 
 fn missing_uids_newest_first(remote: &[u32], local: &std::collections::HashSet<u32>) -> Vec<u32> {
@@ -4470,6 +5570,14 @@ fn supports_idle(lines: &[String]) -> bool {
         line.to_ascii_uppercase()
             .split_whitespace()
             .any(|item| item == "IDLE")
+    })
+}
+
+fn supports_condstore(lines: &[String]) -> bool {
+    lines.iter().any(|line| {
+        line.to_ascii_uppercase()
+            .split_whitespace()
+            .any(|item| item == "CONDSTORE")
     })
 }
 
@@ -4671,22 +5779,6 @@ fn message_received_at(
     parse_internal_date(response_lines).context(
         "message has no valid Date header and the IMAP server omitted a valid INTERNALDATE",
     )
-}
-
-fn sync_uids(mut uids: Vec<u32>, highest_uid: Option<u32>, max_messages: u32) -> Vec<u32> {
-    uids.sort_unstable();
-    let limit = max_messages as usize;
-    if let Some(highest_uid) = highest_uid {
-        // Drain incremental batches from the oldest unseen UID so advancing
-        // the durable watermark cannot skip messages beyond this batch.
-        uids.retain(|uid| *uid > highest_uid);
-        uids.truncate(limit);
-        uids
-    } else {
-        // Initial sync remains silent and starts with the newest messages.
-        let offset = uids.len().saturating_sub(limit);
-        uids.split_off(offset)
-    }
 }
 
 fn parse_copy_uid(lines: &[String]) -> Option<u32> {
@@ -6329,7 +7421,7 @@ mod tests {
     use tokio::{
         io::{duplex, split, AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream},
         net::{TcpListener, TcpStream},
-        sync::watch,
+        sync::{oneshot, watch},
     };
     use tokio_rustls::{
         rustls::{
@@ -6365,6 +7457,369 @@ mod tests {
             },
             server,
         )
+    }
+
+    fn snapshot_test_message(account: &Account, uid: u32) -> MailSummary {
+        let headers = format!(
+            "Date: Wed, 30 Jul 2026 10:00:00 +0000\r\nFrom: Sender <sender@example.test>\r\nTo: Reader <reader@example.test>\r\nSubject: Snapshot {uid}\r\nMessage-ID: <{uid}@example.test>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"
+        );
+        parse_catalog_message(
+            account,
+            "INBOX",
+            uid,
+            &[format!(
+                "* 1 FETCH (UID {uid} FLAGS () INTERNALDATE \"30-Jul-2026 10:00:00 +0000\")\r\n"
+            )],
+            headers.as_bytes(),
+            String::new(),
+        )
+        .unwrap()
+    }
+
+    async fn seed_condstore_catalog(store: &Store, account: &Account) {
+        store.save_account(account).await.unwrap();
+        store
+            .upsert_catalog_messages(&[
+                snapshot_test_message(account, 1),
+                snapshot_test_message(account, 2),
+            ])
+            .await
+            .unwrap();
+        let generation = store
+            .begin_mailbox_snapshot(account.id, "INBOX", "INBOX", 77, 2, Some(3), Some(100))
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(
+                account.id,
+                "INBOX",
+                &generation,
+                &[(1, false, false), (2, false, true)],
+            )
+            .await
+            .unwrap();
+        store
+            .finalize_mailbox_snapshot(account.id, "INBOX", &generation)
+            .await
+            .unwrap();
+    }
+
+    #[derive(Clone, Copy)]
+    enum CondstoreScript {
+        StableDelta,
+        NoModseq,
+        UidNextDrift,
+        ExistsDrift,
+    }
+
+    async fn scripted_condstore_sync_server(
+        server: DuplexStream,
+        scenario: CondstoreScript,
+    ) -> Vec<String> {
+        let (read, mut write) = split(server);
+        let mut read = BufReader::new(read);
+        let mut transcript = Vec::new();
+
+        let tag = scripted_expect_command(
+            &mut read,
+            &mut transcript,
+            "LOGIN \"reader@example.test\" \"sync secret\"",
+        )
+        .await;
+        write
+            .write_all(format!("{tag} OK authenticated\r\n").as_bytes())
+            .await
+            .unwrap();
+
+        let tag = scripted_expect_command(&mut read, &mut transcript, "CAPABILITY").await;
+        write
+            .write_all(
+                format!("* CAPABILITY IMAP4rev1 CONDSTORE\r\n{tag} OK capability\r\n").as_bytes(),
+            )
+            .await
+            .unwrap();
+
+        let tag = scripted_expect_command(&mut read, &mut transcript, "LIST \"\" \"*\"").await;
+        write
+            .write_all(
+                format!("* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n{tag} OK listed\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+
+        let initial_identity = match scenario {
+            CondstoreScript::NoModseq => {
+                "* 2 EXISTS\r\n* OK [UIDVALIDITY 77] UIDs valid\r\n* OK [UIDNEXT 3] Predicted next UID\r\n* OK [NOMODSEQ] No persistent mod-sequences\r\n"
+            }
+            _ => {
+                "* 2 EXISTS\r\n* OK [UIDVALIDITY 77] UIDs valid\r\n* OK [UIDNEXT 3] Predicted next UID\r\n* OK [HIGHESTMODSEQ 200] Mod-sequence\r\n"
+            }
+        };
+        let tag =
+            scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\" (CONDSTORE)")
+                .await;
+        write
+            .write_all(format!("{initial_identity}{tag} OK selected\r\n").as_bytes())
+            .await
+            .unwrap();
+
+        if !matches!(scenario, CondstoreScript::NoModseq) {
+            let tag = scripted_expect_command(
+                &mut read,
+                &mut transcript,
+                "FETCH 1:2 (UID FLAGS MODSEQ) (CHANGEDSINCE 100)",
+            )
+            .await;
+            write
+                .write_all(
+                    format!("* 1 FETCH (UID 1 FLAGS (\\Seen) MODSEQ (200))\r\n{tag} OK delta\r\n")
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+
+            let delta_final_identity = match scenario {
+                CondstoreScript::StableDelta => initial_identity,
+                CondstoreScript::UidNextDrift => {
+                    "* 2 EXISTS\r\n* OK [UIDVALIDITY 77] UIDs valid\r\n* OK [UIDNEXT 4] Predicted next UID\r\n* OK [HIGHESTMODSEQ 201] Mod-sequence\r\n"
+                }
+                CondstoreScript::ExistsDrift => {
+                    "* 1 EXISTS\r\n* OK [UIDVALIDITY 77] UIDs valid\r\n* OK [UIDNEXT 2] Predicted next UID\r\n* OK [HIGHESTMODSEQ 201] Mod-sequence\r\n"
+                }
+                CondstoreScript::NoModseq => unreachable!(),
+            };
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\" (CONDSTORE)")
+                    .await;
+            write
+                .write_all(format!("{delta_final_identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+
+            if matches!(scenario, CondstoreScript::StableDelta) {
+                let tag = scripted_expect_command(&mut read, &mut transcript, "LOGOUT").await;
+                write
+                    .write_all(format!("* BYE done\r\n{tag} OK logout\r\n").as_bytes())
+                    .await
+                    .unwrap();
+                return transcript;
+            }
+        }
+
+        let (exists, final_identity) = match scenario {
+            CondstoreScript::NoModseq => (2, initial_identity),
+            CondstoreScript::UidNextDrift => (
+                2,
+                "* 2 EXISTS\r\n* OK [UIDVALIDITY 77] UIDs valid\r\n* OK [UIDNEXT 4] Predicted next UID\r\n* OK [HIGHESTMODSEQ 201] Mod-sequence\r\n",
+            ),
+            CondstoreScript::ExistsDrift => (
+                1,
+                "* 1 EXISTS\r\n* OK [UIDVALIDITY 77] UIDs valid\r\n* OK [UIDNEXT 2] Predicted next UID\r\n* OK [HIGHESTMODSEQ 201] Mod-sequence\r\n",
+            ),
+            CondstoreScript::StableDelta => unreachable!(),
+        };
+        let tag = scripted_expect_command(
+            &mut read,
+            &mut transcript,
+            &format!("FETCH 1:{exists} (UID FLAGS)"),
+        )
+        .await;
+        write
+            .write_all(b"* 1 FETCH (UID 1 FLAGS (\\Seen))\r\n")
+            .await
+            .unwrap();
+        if exists == 2 {
+            write
+                .write_all(b"* 2 FETCH (UID 2 FLAGS (\\Flagged))\r\n")
+                .await
+                .unwrap();
+        }
+        write
+            .write_all(format!("{tag} OK full snapshot\r\n").as_bytes())
+            .await
+            .unwrap();
+
+        let tag =
+            scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\" (CONDSTORE)")
+                .await;
+        write
+            .write_all(format!("{final_identity}{tag} OK selected\r\n").as_bytes())
+            .await
+            .unwrap();
+        let tag = scripted_expect_command(&mut read, &mut transcript, "LOGOUT").await;
+        write
+            .write_all(format!("* BYE done\r\n{tag} OK logout\r\n").as_bytes())
+            .await
+            .unwrap();
+        transcript
+    }
+
+    async fn scripted_realtime_gap_server(server: DuplexStream, fail_uid_100: bool) -> Vec<String> {
+        let (read, mut write) = split(server);
+        let mut read = BufReader::new(read);
+        let mut transcript = Vec::new();
+
+        let select_response = |tag: &str| {
+            format!(
+                "* 2 EXISTS\r\n* OK [UIDVALIDITY 77] UIDs valid\r\n* OK [UIDNEXT 102] Predicted next UID\r\n{tag} OK selected\r\n"
+            )
+        };
+        let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT INBOX").await;
+        write
+            .write_all(select_response(&tag).as_bytes())
+            .await
+            .unwrap();
+
+        let tag =
+            scripted_expect_command(&mut read, &mut transcript, "FETCH 1:2 (UID FLAGS)").await;
+        write
+            .write_all(
+                format!(
+                    "* 1 FETCH (UID 100 FLAGS ())\r\n* 2 FETCH (UID 101 FLAGS ())\r\n{tag} OK snapshot\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+
+        let metadata_uids: &[u32] = if fail_uid_100 { &[100, 101] } else { &[100] };
+        for uid in metadata_uids.iter().copied() {
+            let (tag, command) = scripted_command(&mut read).await;
+            transcript.push(command.clone());
+            assert!(
+                command.starts_with(&format!("UID FETCH {uid} (FLAGS INTERNALDATE ")),
+                "unexpected metadata command: {command}"
+            );
+            if uid == 100 && fail_uid_100 {
+                // Tagged success without the requested literal is a faithful
+                // provider failure that must leave this UID retryable.
+                write
+                    .write_all(
+                        format!("* 1 FETCH (UID 100 FLAGS ())\r\n{tag} OK incomplete\r\n")
+                            .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                continue;
+            }
+            let headers = format!(
+                "Date: Wed, 30 Jul 2026 10:00:00 +0000\r\nFrom: Sender <sender@example.test>\r\nTo: Reader <reader@example.test>\r\nSubject: Realtime {uid}\r\nMessage-ID: <{uid}@realtime.example.test>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"
+            );
+            write
+                .write_all(
+                    format!(
+                        "* 1 FETCH (UID {uid} FLAGS () INTERNALDATE \"30-Jul-2026 10:00:00 +0000\" BODY[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES CONTENT-TYPE LIST-ID PRECEDENCE AUTO-SUBMITTED)] {{{}}}\r\n",
+                        headers.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            write.write_all(headers.as_bytes()).await.unwrap();
+            write
+                .write_all(format!(")\r\n{tag} OK metadata\r\n").as_bytes())
+                .await
+                .unwrap();
+        }
+
+        if !fail_uid_100 {
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT INBOX").await;
+            write
+                .write_all(select_response(&tag).as_bytes())
+                .await
+                .unwrap();
+        }
+        transcript
+    }
+
+    async fn scripted_realtime_starvation_server(
+        server: DuplexStream,
+        metadata_uids: Vec<u32>,
+        fail_uid_100: bool,
+        oversize_uid_100: bool,
+    ) -> Vec<String> {
+        let (read, mut write) = split(server);
+        let mut read = BufReader::new(read);
+        let mut transcript = Vec::new();
+        let select_response = |tag: &str| {
+            format!(
+                "* 26 EXISTS\r\n* OK [UIDVALIDITY 77] UIDs valid\r\n* OK [UIDNEXT 126] Predicted next UID\r\n{tag} OK selected\r\n"
+            )
+        };
+
+        let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT INBOX").await;
+        write
+            .write_all(select_response(&tag).as_bytes())
+            .await
+            .unwrap();
+        let tag =
+            scripted_expect_command(&mut read, &mut transcript, "FETCH 1:26 (UID FLAGS)").await;
+        for (sequence, uid) in (100..=125).enumerate() {
+            write
+                .write_all(format!("* {} FETCH (UID {uid} FLAGS ())\r\n", sequence + 1).as_bytes())
+                .await
+                .unwrap();
+        }
+        write
+            .write_all(format!("{tag} OK snapshot\r\n").as_bytes())
+            .await
+            .unwrap();
+
+        for uid in metadata_uids {
+            let (tag, command) = scripted_command(&mut read).await;
+            transcript.push(command.clone());
+            assert!(command.starts_with(&format!("UID FETCH {uid} (FLAGS INTERNALDATE ")));
+            if uid == 100 && oversize_uid_100 {
+                write
+                    .write_all(
+                        format!(
+                            "* 1 FETCH (UID 100 FLAGS () BODY[HEADER.FIELDS (SUBJECT)] {{{}}}\r\n",
+                            MAX_MIME_HEADER_BYTES + 1
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                return transcript;
+            }
+            if uid == 100 && fail_uid_100 {
+                write
+                    .write_all(
+                        format!("* 1 FETCH (UID 100 FLAGS ())\r\n{tag} OK incomplete\r\n")
+                            .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                continue;
+            }
+            let headers = format!(
+                "Date: Wed, 30 Jul 2026 10:00:00 +0000\r\nFrom: Sender <sender@example.test>\r\nTo: Reader <reader@example.test>\r\nSubject: Realtime {uid}\r\nMessage-ID: <{uid}@realtime.example.test>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"
+            );
+            write
+                .write_all(
+                    format!(
+                        "* 1 FETCH (UID {uid} FLAGS () INTERNALDATE \"30-Jul-2026 10:00:00 +0000\" BODY[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES CONTENT-TYPE LIST-ID PRECEDENCE AUTO-SUBMITTED)] {{{}}}\r\n",
+                        headers.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            write.write_all(headers.as_bytes()).await.unwrap();
+            write
+                .write_all(format!(")\r\n{tag} OK metadata\r\n").as_bytes())
+                .await
+                .unwrap();
+        }
+        if !fail_uid_100 {
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT INBOX").await;
+            write
+                .write_all(select_response(&tag).as_bytes())
+                .await
+                .unwrap();
+        }
+        transcript
     }
 
     async fn scripted_command<R>(reader: &mut BufReader<R>) -> (String, String)
@@ -6420,43 +7875,43 @@ mod tests {
         let response = format!("{tag} OK authenticated\r\n");
         write.write_all(response.as_bytes()).await.unwrap();
 
+        let tag = scripted_expect_command(&mut read, &mut transcript, "CAPABILITY").await;
+        write
+            .write_all(format!("* CAPABILITY IMAP4rev1\r\n{tag} OK capability\r\n").as_bytes())
+            .await
+            .unwrap();
+
         let tag = scripted_expect_command(&mut read, &mut transcript, "LIST \"\" \"*\"").await;
         let response = format!("* LIST (\\\\HasNoChildren) \"/\" \"INBOX\"\r\n{tag} OK listed\r\n");
         write.write_all(response.as_bytes()).await.unwrap();
 
         let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
         let response = format!(
-            "* {} EXISTS\r\n* OK [UIDVALIDITY {uid_validity}] UIDs valid\r\n{tag} OK selected\r\n",
-            remote_uids.len()
+            "* {} EXISTS\r\n* OK [UIDVALIDITY {uid_validity}] UIDs valid\r\n* OK [UIDNEXT {}] next\r\n{tag} OK selected\r\n",
+            remote_uids.len(),
+            remote_uids.iter().copied().max().unwrap_or(0) + 1
         );
         write.write_all(response.as_bytes()).await.unwrap();
 
-        let tag = scripted_expect_command(&mut read, &mut transcript, "UID SEARCH ALL").await;
-        let response = format!(
-            "* SEARCH {}\r\n{tag} OK searched\r\n",
-            remote_uids
-                .iter()
-                .map(u32::to_string)
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
-        write.write_all(response.as_bytes()).await.unwrap();
-
-        // Keep this exact single exchange in the transcript: a duplicate
-        // flags request previously doubled the provider work before download.
-        let tag =
-            scripted_expect_command(&mut read, &mut transcript, "UID FETCH 1:* (UID FLAGS)").await;
+        let tag = scripted_expect_command(
+            &mut read,
+            &mut transcript,
+            &format!("FETCH 1:{} (UID FLAGS)", remote_uids.len()),
+        )
+        .await;
         let flags = remote_uids
             .iter()
-            .map(|uid| format!("* 1 FETCH (UID {uid} FLAGS ())\r\n"))
+            .enumerate()
+            .map(|(index, uid)| format!("* {} FETCH (UID {uid} FLAGS ())\r\n", index + 1))
             .collect::<String>();
         let response = format!("{flags}{tag} OK flags\r\n");
         write.write_all(response.as_bytes()).await.unwrap();
 
         let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
         let response = format!(
-            "* {} EXISTS\r\n* OK [UIDVALIDITY {uid_validity}] UIDs valid\r\n{tag} OK selected\r\n",
-            remote_uids.len()
+            "* {} EXISTS\r\n* OK [UIDVALIDITY {uid_validity}] UIDs valid\r\n* OK [UIDNEXT {}] next\r\n{tag} OK selected\r\n",
+            remote_uids.len(),
+            remote_uids.iter().copied().max().unwrap_or(0) + 1
         );
         write.write_all(response.as_bytes()).await.unwrap();
 
@@ -6487,6 +7942,14 @@ mod tests {
         .await;
         let response = format!(
             "* 1 FETCH (UID {fetched_uid} BODY[]<0> {{5}}\r\nhello)\r\n{tag} OK preview\r\n"
+        );
+        write.write_all(response.as_bytes()).await.unwrap();
+
+        let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+        let response = format!(
+            "* {} EXISTS\r\n* OK [UIDVALIDITY {uid_validity}] UIDs valid\r\n* OK [UIDNEXT {}] next\r\n{tag} OK selected\r\n",
+            remote_uids.len(),
+            remote_uids.iter().copied().max().unwrap_or(0) + 1
         );
         write.write_all(response.as_bytes()).await.unwrap();
 
@@ -6705,13 +8168,14 @@ mod tests {
             first_server.await.unwrap(),
             vec![
                 "LOGIN \"reader@example.test\" \"sync secret\"",
+                "CAPABILITY",
                 "LIST \"\" \"*\"",
                 "SELECT \"INBOX\"",
-                "UID SEARCH ALL",
-                "UID FETCH 1:* (UID FLAGS)",
+                "FETCH 1:1 (UID FLAGS)",
                 "SELECT \"INBOX\"",
                 "UID FETCH 42 (FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)])",
                 "UID FETCH 42 (BODY.PEEK[]<0.8192>)",
+                "SELECT \"INBOX\"",
                 "LOGOUT",
             ]
         );
@@ -6782,13 +8246,14 @@ mod tests {
             second_server.await.unwrap(),
             vec![
                 "LOGIN \"reader@example.test\" \"sync secret\"",
+                "CAPABILITY",
                 "LIST \"\" \"*\"",
                 "SELECT \"INBOX\"",
-                "UID SEARCH ALL",
-                "UID FETCH 1:* (UID FLAGS)",
+                "FETCH 1:2 (UID FLAGS)",
                 "SELECT \"INBOX\"",
                 "UID FETCH 43 (FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)])",
                 "UID FETCH 43 (BODY.PEEK[]<0.8192>)",
+                "SELECT \"INBOX\"",
                 "LOGOUT",
             ]
         );
@@ -6813,6 +8278,2979 @@ mod tests {
                 .unwrap()
                 .subject,
             "Incremental transcript message"
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_incomplete_snapshot_preserves_preexisting_mailbox_rows() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        let mut messages = vec![
+            snapshot_test_message(&account, 41),
+            snapshot_test_message(&account, 42),
+        ];
+        messages[1].is_flagged = true;
+        store.upsert_catalog_messages(&messages).await.unwrap();
+
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT INBOX").await;
+            write
+                .write_all(
+                    format!(
+                        "* 2 EXISTS\r\n* OK [UIDVALIDITY 77] UIDs valid\r\n* OK [UIDNEXT 43] Predicted next UID\r\n{tag} OK selected\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "FETCH 1:2 (UID FLAGS)").await;
+            // EXISTS promised two rows, but the tagged-successful page only
+            // contains one. UID 41 must not be inferred as remotely deleted.
+            write
+                .write_all(
+                    format!("* 2 FETCH (UID 42 FLAGS ())\r\n{tag} OK partial flags\r\n").as_bytes(),
+                )
+                .await
+                .unwrap();
+            transcript
+        });
+
+        let error = service
+            .fetch_new_inbox_headers(&mut client, &account, 50)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("snapshot page was incomplete"),
+            "{error:#}"
+        );
+        assert_eq!(
+            server.await.unwrap(),
+            vec!["SELECT INBOX", "FETCH 1:2 (UID FLAGS)"]
+        );
+        assert_eq!(
+            store.mailbox_uids(account.id, "INBOX").await.unwrap(),
+            [41, 42].into()
+        );
+        assert!(
+            store
+                .message_by_locator(account.id, "INBOX", 42)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_flagged
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_empty_snapshot_deletes_only_after_stable_final_identity() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        store
+            .upsert_catalog_messages(&[snapshot_test_message(&account, 41)])
+            .await
+            .unwrap();
+
+        let (mut client, server) = duplex_imap_client_and_server();
+        let (final_select_reached, final_select_wait) = oneshot::channel();
+        let (finish_final_select, finish_final_select_wait) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            let response = |tag: &str| {
+                format!(
+                    "* 0 EXISTS\r\n* OK [UIDVALIDITY 77] UIDs valid\r\n* OK [UIDNEXT 1] Predicted next UID\r\n{tag} OK selected\r\n"
+                )
+            };
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT INBOX").await;
+            write.write_all(response(&tag).as_bytes()).await.unwrap();
+
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT INBOX").await;
+            final_select_reached.send(()).unwrap();
+            finish_final_select_wait.await.unwrap();
+            write.write_all(response(&tag).as_bytes()).await.unwrap();
+            transcript
+        });
+
+        let synced_account = account.clone();
+        let sync = tokio::spawn(async move {
+            service
+                .fetch_new_inbox_headers(&mut client, &synced_account, 50)
+                .await
+        });
+        final_select_wait.await.unwrap();
+        assert_eq!(
+            store.mailbox_uids(account.id, "INBOX").await.unwrap(),
+            [41].into(),
+            "a staged empty page must not delete mail before final identity validation"
+        );
+        finish_final_select.send(()).unwrap();
+        assert!(sync.await.unwrap().unwrap().is_empty());
+        assert_eq!(server.await.unwrap(), vec!["SELECT INBOX", "SELECT INBOX"]);
+        assert!(store
+            .mailbox_uids(account.id, "INBOX")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    async fn assert_large_message_snapshot_is_bounded(message_count: u32) {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        service
+            .credentials()
+            .set_password(&account, "sync secret")
+            .await
+            .unwrap();
+
+        let template = snapshot_test_message(&account, 1);
+        let messages = (1..=message_count)
+            .map(|uid| {
+                let mut message = template.clone();
+                message.id = stable_message_id(account.id, "INBOX", uid);
+                message.thread_id = message.id.clone();
+                message.uid = i64::from(uid);
+                message.message_id = Some(format!("<{uid}@snapshot.example.test>"));
+                message.subject = format!("Snapshot {uid}");
+                message
+            })
+            .collect::<Vec<_>>();
+        store.upsert_catalog_messages(&messages).await.unwrap();
+
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+
+            let tag = scripted_expect_command(
+                &mut read,
+                &mut transcript,
+                "LOGIN \"reader@example.test\" \"sync secret\"",
+            )
+            .await;
+            write
+                .write_all(format!("{tag} OK authenticated\r\n").as_bytes())
+                .await
+                .unwrap();
+
+            let tag = scripted_expect_command(&mut read, &mut transcript, "CAPABILITY").await;
+            write
+                .write_all(format!("* CAPABILITY IMAP4rev1\r\n{tag} OK capability\r\n").as_bytes())
+                .await
+                .unwrap();
+
+            let tag = scripted_expect_command(&mut read, &mut transcript, "LIST \"\" \"*\"").await;
+            write
+                .write_all(
+                    format!("* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n{tag} OK listed\r\n")
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+
+            let select_response = |tag: &str| {
+                format!(
+                    "* {message_count} EXISTS\r\n* OK [UIDVALIDITY 77] UIDs valid\r\n* OK [UIDNEXT {}] Predicted next UID\r\n* OK [HIGHESTMODSEQ 900] Mod-sequence\r\n{tag} OK selected\r\n",
+                    message_count + 1
+                )
+            };
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+            write
+                .write_all(select_response(&tag).as_bytes())
+                .await
+                .unwrap();
+
+            for (start, end) in mailbox_snapshot_page_ranges(message_count) {
+                let tag = scripted_expect_command(
+                    &mut read,
+                    &mut transcript,
+                    &format!("FETCH {start}:{end} (UID FLAGS)"),
+                )
+                .await;
+                for sequence in start..=end {
+                    write
+                        .write_all(
+                            format!("* {sequence} FETCH (UID {sequence} FLAGS ())\r\n").as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                }
+                write
+                    .write_all(format!("{tag} OK page complete\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+            write
+                .write_all(select_response(&tag).as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "LOGOUT").await;
+            write
+                .write_all(format!("* BYE done\r\n{tag} OK logout\r\n").as_bytes())
+                .await
+                .unwrap();
+            transcript
+        });
+
+        let result = service
+            .sync_mailboxes_with_progress_on_client(
+                &mut client,
+                &account,
+                50,
+                vec![MailboxPlan::new("INBOX", "INBOX")],
+                false,
+                |_| {},
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.synced_count, 0, "the catalogue was already complete");
+
+        let transcript = server.await.unwrap();
+        let page_commands = transcript
+            .iter()
+            .filter(|command| command.starts_with("FETCH "))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            page_commands.len(),
+            usize::try_from(message_count.div_ceil(MAILBOX_SNAPSHOT_PAGE_SIZE)).unwrap()
+        );
+        assert_eq!(
+            page_commands.first().unwrap().as_str(),
+            format!(
+                "FETCH {}:{message_count} (UID FLAGS)",
+                message_count - MAILBOX_SNAPSHOT_PAGE_SIZE + 1
+            )
+        );
+        assert_eq!(
+            page_commands.last().unwrap().as_str(),
+            "FETCH 1:500 (UID FLAGS)"
+        );
+        assert!(!transcript.iter().any(|command| command == "UID SEARCH ALL"));
+        assert!(!transcript.iter().any(|command| command.contains("1:*")));
+        assert_eq!(
+            store.mailbox_uids(account.id, "INBOX").await.unwrap().len(),
+            message_count as usize
+        );
+        assert!(
+            store
+                .mailbox_catalog_state(account.id, "INBOX")
+                .await
+                .unwrap()
+                .unwrap()
+                .historical_complete
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_thirty_thousand_message_snapshot_uses_sixty_bounded_pages() {
+        assert_large_message_snapshot_is_bounded(30_000).await;
+    }
+
+    #[tokio::test]
+    async fn scripted_one_hundred_thousand_message_snapshot_uses_bounded_pages() {
+        assert_large_message_snapshot_is_bounded(100_000).await;
+    }
+
+    #[tokio::test]
+    async fn scripted_condstore_delta_updates_only_returned_uid_and_persists_modseq() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        seed_condstore_catalog(&store, &account).await;
+        service
+            .credentials()
+            .set_password(&account, "sync secret")
+            .await
+            .unwrap();
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(scripted_condstore_sync_server(
+            server,
+            CondstoreScript::StableDelta,
+        ));
+
+        let result = service
+            .sync_mailboxes_with_progress_on_client(
+                &mut client,
+                &account,
+                50,
+                vec![MailboxPlan::new("INBOX", "INBOX")],
+                false,
+                |_| {},
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.synced_count, 0);
+
+        let transcript = server.await.unwrap();
+        assert!(transcript
+            .iter()
+            .any(|command| command == "FETCH 1:2 (UID FLAGS MODSEQ) (CHANGEDSINCE 100)"));
+        assert!(!transcript
+            .iter()
+            .any(|command| command == "FETCH 1:2 (UID FLAGS)"));
+        assert!(!transcript.iter().any(|command| command == "UID SEARCH ALL"));
+        assert_eq!(
+            store.mailbox_uids(account.id, "INBOX").await.unwrap(),
+            [1, 2].into(),
+            "UIDs omitted from a CHANGEDSINCE result are not deletions"
+        );
+        let changed = store
+            .message_by_locator(account.id, "INBOX", 1)
+            .await
+            .unwrap()
+            .unwrap();
+        let omitted = store
+            .message_by_locator(account.id, "INBOX", 2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(changed.is_read);
+        assert!(!changed.is_flagged);
+        assert!(!omitted.is_read);
+        assert!(omitted.is_flagged);
+        let state = store
+            .mailbox_catalog_state(account.id, "INBOX")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.uid_next, Some(3));
+        assert_eq!(state.highest_modseq.as_deref(), Some("200"));
+    }
+
+    #[tokio::test]
+    async fn scripted_fresh_catalogue_batches_headers_and_snippets_by_uid_set() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        service
+            .credentials()
+            .set_password(&account, "sync secret")
+            .await
+            .unwrap();
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            for (expected, untagged) in [
+                ("LOGIN \"reader@example.test\" \"sync secret\"", ""),
+                ("CAPABILITY", "* CAPABILITY IMAP4rev1\r\n"),
+                (
+                    "LIST \"\" \"*\"",
+                    "* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n",
+                ),
+            ] {
+                let tag = scripted_expect_command(&mut read, &mut transcript, expected).await;
+                write
+                    .write_all(format!("{untagged}{tag} OK done\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            let identity = "* 3 EXISTS\r\n* OK [UIDVALIDITY 77] valid\r\n* OK [UIDNEXT 4] next\r\n";
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+            write
+                .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "FETCH 1:3 (UID FLAGS)").await;
+            write.write_all(format!("* 1 FETCH (UID 1 FLAGS ())\r\n* 2 FETCH (UID 2 FLAGS (\\Seen))\r\n* 3 FETCH (UID 3 FLAGS ())\r\n{tag} OK snapshot\r\n").as_bytes()).await.unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+            write
+                .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            let metadata_fields = "FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)]";
+            let tag = scripted_expect_command(
+                &mut read,
+                &mut transcript,
+                &format!("UID FETCH 3,2,1 ({metadata_fields})"),
+            )
+            .await;
+            for uid in [3, 2, 1] {
+                let headers = format!("Date: Wed, 30 Jul 2026 10:00:00 +0000\r\nFrom: Sender <sender@example.test>\r\nTo: Reader <reader@example.test>\r\nSubject: Batched {uid}\r\nMessage-ID: <batch-{uid}@example.test>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n");
+                write.write_all(format!("* {uid} FETCH (UID {uid} FLAGS () INTERNALDATE \"30-Jul-2026 10:00:00 +0000\" RFC822.SIZE 5 BODY[HEADER] {{{}}}\r\n", headers.len()).as_bytes()).await.unwrap();
+                write.write_all(headers.as_bytes()).await.unwrap();
+                write.write_all(b")\r\n").await.unwrap();
+            }
+            write
+                .write_all(format!("{tag} OK metadata\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(
+                &mut read,
+                &mut transcript,
+                "UID FETCH 3,2,1 (BODY.PEEK[]<0.8192>)",
+            )
+            .await;
+            for uid in [3, 2, 1] {
+                write
+                    .write_all(
+                        format!("* {uid} FETCH (UID {uid} BODY[]<0> {{5}}\r\nhello)\r\n")
+                            .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            write
+                .write_all(format!("{tag} OK snippets\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+            write
+                .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "LOGOUT").await;
+            write
+                .write_all(format!("{tag} OK logout\r\n").as_bytes())
+                .await
+                .unwrap();
+            transcript
+        });
+        let result = service
+            .sync_mailboxes_with_progress_on_client(
+                &mut client,
+                &account,
+                50,
+                vec![MailboxPlan::new("INBOX", "INBOX")],
+                false,
+                |_| {},
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.synced_count, 3);
+        let transcript = server.await.unwrap();
+        assert_eq!(
+            transcript
+                .iter()
+                .filter(
+                    |command| command.starts_with("UID FETCH") && command.contains("HEADER.FIELDS")
+                )
+                .count(),
+            1
+        );
+        assert_eq!(
+            transcript
+                .iter()
+                .filter(
+                    |command| command.starts_with("UID FETCH") && command.contains("BODY.PEEK[]<")
+                )
+                .count(),
+            1
+        );
+        assert_eq!(
+            store.mailbox_uids(account.id, "INBOX").await.unwrap(),
+            [1, 2, 3].into()
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_condstore_nomodseq_falls_back_to_complete_bounded_snapshot() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        seed_condstore_catalog(&store, &account).await;
+        service
+            .credentials()
+            .set_password(&account, "sync secret")
+            .await
+            .unwrap();
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(scripted_condstore_sync_server(
+            server,
+            CondstoreScript::NoModseq,
+        ));
+
+        service
+            .sync_mailboxes_with_progress_on_client(
+                &mut client,
+                &account,
+                50,
+                vec![MailboxPlan::new("INBOX", "INBOX")],
+                false,
+                |_| {},
+            )
+            .await
+            .unwrap();
+
+        let transcript = server.await.unwrap();
+        assert!(transcript
+            .iter()
+            .any(|command| command == "FETCH 1:2 (UID FLAGS)"));
+        assert!(!transcript
+            .iter()
+            .any(|command| command.contains("CHANGEDSINCE")));
+        assert_eq!(
+            store.mailbox_uids(account.id, "INBOX").await.unwrap(),
+            [1, 2].into()
+        );
+        let state = store
+            .mailbox_catalog_state(account.id, "INBOX")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.uid_next, Some(3));
+        assert_eq!(state.highest_modseq, None);
+    }
+
+    #[tokio::test]
+    async fn scripted_condstore_uidnext_drift_falls_back_without_deleting_omitted_delta_uids() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        seed_condstore_catalog(&store, &account).await;
+        service
+            .credentials()
+            .set_password(&account, "sync secret")
+            .await
+            .unwrap();
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(scripted_condstore_sync_server(
+            server,
+            CondstoreScript::UidNextDrift,
+        ));
+
+        service
+            .sync_mailboxes_with_progress_on_client(
+                &mut client,
+                &account,
+                50,
+                vec![MailboxPlan::new("INBOX", "INBOX")],
+                false,
+                |_| {},
+            )
+            .await
+            .unwrap();
+
+        let transcript = server.await.unwrap();
+        assert!(transcript
+            .iter()
+            .any(|command| command.contains("CHANGEDSINCE 100")));
+        assert!(transcript
+            .iter()
+            .any(|command| command == "FETCH 1:2 (UID FLAGS)"));
+        assert_eq!(
+            store.mailbox_uids(account.id, "INBOX").await.unwrap(),
+            [1, 2].into()
+        );
+        let omitted = store
+            .message_by_locator(account.id, "INBOX", 2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!omitted.is_read);
+        assert!(omitted.is_flagged);
+        let state = store
+            .mailbox_catalog_state(account.id, "INBOX")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.uid_next, Some(4));
+        assert_eq!(state.highest_modseq.as_deref(), Some("201"));
+    }
+
+    #[tokio::test]
+    async fn scripted_condstore_exists_drift_deletes_only_from_complete_fallback_snapshot() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        seed_condstore_catalog(&store, &account).await;
+        service
+            .credentials()
+            .set_password(&account, "sync secret")
+            .await
+            .unwrap();
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(scripted_condstore_sync_server(
+            server,
+            CondstoreScript::ExistsDrift,
+        ));
+
+        service
+            .sync_mailboxes_with_progress_on_client(
+                &mut client,
+                &account,
+                50,
+                vec![MailboxPlan::new("INBOX", "INBOX")],
+                false,
+                |_| {},
+            )
+            .await
+            .unwrap();
+
+        let transcript = server.await.unwrap();
+        let delta_index = transcript
+            .iter()
+            .position(|command| command.contains("CHANGEDSINCE 100"))
+            .unwrap();
+        let snapshot_index = transcript
+            .iter()
+            .position(|command| command == "FETCH 1:1 (UID FLAGS)")
+            .unwrap();
+        assert!(delta_index < snapshot_index);
+        assert_eq!(
+            store.mailbox_uids(account.id, "INBOX").await.unwrap(),
+            [1].into(),
+            "UID 2 is deleted only after the complete fallback snapshot omits it"
+        );
+        let state = store
+            .mailbox_catalog_state(account.id, "INBOX")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.remote_total, 1);
+        assert_eq!(state.uid_next, Some(2));
+        assert_eq!(state.highest_modseq.as_deref(), Some("201"));
+    }
+
+    #[tokio::test]
+    async fn scripted_condstore_select_rejection_retries_plain_full_snapshot() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        seed_condstore_catalog(&store, &account).await;
+        service
+            .credentials()
+            .set_password(&account, "sync secret")
+            .await
+            .unwrap();
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            for (expected, response) in [
+                (
+                    "LOGIN \"reader@example.test\" \"sync secret\"",
+                    "OK authenticated",
+                ),
+                ("CAPABILITY", "OK capability"),
+                ("LIST \"\" \"*\"", "OK listed"),
+            ] {
+                let tag = scripted_expect_command(&mut read, &mut transcript, expected).await;
+                let untagged = match expected {
+                    "CAPABILITY" => "* CAPABILITY IMAP4rev1 CONDSTORE\r\n",
+                    value if value.starts_with("LIST") => {
+                        "* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n"
+                    }
+                    _ => "",
+                };
+                write
+                    .write_all(format!("{untagged}{tag} {response}\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\" (CONDSTORE)")
+                    .await;
+            write
+                .write_all(format!("{tag} BAD unsupported select parameter\r\n").as_bytes())
+                .await
+                .unwrap();
+            let identity = "* 2 EXISTS\r\n* OK [UIDVALIDITY 77] valid\r\n* OK [UIDNEXT 3] next\r\n";
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+            write
+                .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "FETCH 1:2 (UID FLAGS)").await;
+            write
+                .write_all(
+                    format!(
+                        "* 1 FETCH (UID 1 FLAGS ())\r\n* 2 FETCH (UID 2 FLAGS (\\Flagged))\r\n{tag} OK snapshot\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+            write
+                .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "LOGOUT").await;
+            write
+                .write_all(format!("{tag} OK logout\r\n").as_bytes())
+                .await
+                .unwrap();
+            transcript
+        });
+
+        service
+            .sync_mailboxes_with_progress_on_client(
+                &mut client,
+                &account,
+                50,
+                vec![MailboxPlan::new("INBOX", "INBOX")],
+                false,
+                |_| {},
+            )
+            .await
+            .unwrap();
+        let transcript = server.await.unwrap();
+        assert_eq!(
+            transcript
+                .iter()
+                .filter(|command| command.starts_with("SELECT"))
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec![
+                "SELECT \"INBOX\" (CONDSTORE)",
+                "SELECT \"INBOX\"",
+                "SELECT \"INBOX\"",
+            ]
+        );
+        assert!(transcript
+            .iter()
+            .any(|command| command == "FETCH 1:2 (UID FLAGS)"));
+        assert!(!transcript
+            .iter()
+            .any(|command| command.contains("CHANGEDSINCE")));
+    }
+
+    #[tokio::test]
+    async fn scripted_changed_since_rejection_falls_back_without_recursive_splitting() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        seed_condstore_catalog(&store, &account).await;
+        service
+            .credentials()
+            .set_password(&account, "sync secret")
+            .await
+            .unwrap();
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            for (expected, untagged) in [
+                ("LOGIN \"reader@example.test\" \"sync secret\"", ""),
+                ("CAPABILITY", "* CAPABILITY IMAP4rev1 CONDSTORE\r\n"),
+                (
+                    "LIST \"\" \"*\"",
+                    "* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n",
+                ),
+            ] {
+                let tag = scripted_expect_command(&mut read, &mut transcript, expected).await;
+                write
+                    .write_all(format!("{untagged}{tag} OK done\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            let identity = "* 2 EXISTS\r\n* OK [UIDVALIDITY 77] valid\r\n* OK [UIDNEXT 3] next\r\n* OK [HIGHESTMODSEQ 200] modseq\r\n";
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\" (CONDSTORE)")
+                    .await;
+            write
+                .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(
+                &mut read,
+                &mut transcript,
+                "FETCH 1:2 (UID FLAGS MODSEQ) (CHANGEDSINCE 100)",
+            )
+            .await;
+            write
+                .write_all(format!("{tag} NO CHANGEDSINCE unsupported\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "FETCH 1:2 (UID FLAGS)").await;
+            write
+                .write_all(
+                    format!(
+                        "* 1 FETCH (UID 1 FLAGS ())\r\n* 2 FETCH (UID 2 FLAGS (\\Flagged))\r\n{tag} OK snapshot\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\" (CONDSTORE)")
+                    .await;
+            write
+                .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "LOGOUT").await;
+            write
+                .write_all(format!("{tag} OK logout\r\n").as_bytes())
+                .await
+                .unwrap();
+            transcript
+        });
+
+        service
+            .sync_mailboxes_with_progress_on_client(
+                &mut client,
+                &account,
+                50,
+                vec![MailboxPlan::new("INBOX", "INBOX")],
+                false,
+                |_| {},
+            )
+            .await
+            .unwrap();
+        let transcript = server.await.unwrap();
+        assert_eq!(
+            transcript
+                .iter()
+                .filter(|command| command.contains("CHANGEDSINCE"))
+                .count(),
+            1,
+            "delta rejection must not be recursively split"
+        );
+        assert!(transcript
+            .iter()
+            .any(|command| command == "FETCH 1:2 (UID FLAGS)"));
+    }
+
+    #[tokio::test]
+    async fn scripted_condstore_empty_delta_does_not_skip_pending_metadata_repair() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        seed_condstore_catalog(&store, &account).await;
+        store
+            .record_mailbox_sync_failure(account.id, "INBOX", 1, "metadata", "retry")
+            .await
+            .unwrap();
+        service
+            .credentials()
+            .set_password(&account, "sync secret")
+            .await
+            .unwrap();
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            for (expected, untagged) in [
+                ("LOGIN \"reader@example.test\" \"sync secret\"", ""),
+                ("CAPABILITY", "* CAPABILITY IMAP4rev1 CONDSTORE\r\n"),
+                (
+                    "LIST \"\" \"*\"",
+                    "* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n",
+                ),
+            ] {
+                let tag = scripted_expect_command(&mut read, &mut transcript, expected).await;
+                write
+                    .write_all(format!("{untagged}{tag} OK done\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            let identity = "* 2 EXISTS\r\n* OK [UIDVALIDITY 77] valid\r\n* OK [UIDNEXT 3] next\r\n* OK [HIGHESTMODSEQ 100] modseq\r\n";
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\" (CONDSTORE)")
+                    .await;
+            write
+                .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "FETCH 1:2 (UID FLAGS)").await;
+            write
+                .write_all(
+                    format!("* 1 FETCH (UID 1 FLAGS ())\r\n* 2 FETCH (UID 2 FLAGS (\\Flagged))\r\n{tag} OK snapshot\r\n").as_bytes(),
+                )
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+            write
+                .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            let (tag, command) = scripted_command(&mut read).await;
+            transcript.push(command.clone());
+            assert!(command.starts_with("UID FETCH 1 (FLAGS INTERNALDATE "));
+            let headers = "Date: Wed, 30 Jul 2026 10:00:00 +0000\r\nFrom: Sender <sender@example.test>\r\nTo: Reader <reader@example.test>\r\nSubject: Repaired\r\nMessage-ID: <1@example.test>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n";
+            write
+                .write_all(format!("* 1 FETCH (UID 1 FLAGS () INTERNALDATE \"30-Jul-2026 10:00:00 +0000\" RFC822.SIZE 5 BODY[HEADER] {{{}}}\r\n", headers.len()).as_bytes())
+                .await
+                .unwrap();
+            write.write_all(headers.as_bytes()).await.unwrap();
+            write
+                .write_all(format!(")\r\n{tag} OK metadata\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(
+                &mut read,
+                &mut transcript,
+                "UID FETCH 1 (BODY.PEEK[]<0.8192>)",
+            )
+            .await;
+            write
+                .write_all(
+                    format!("* 1 FETCH (UID 1 BODY[]<0> {{0}}\r\n)\r\n{tag} OK snippet\r\n")
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\" (CONDSTORE)")
+                    .await;
+            write
+                .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "LOGOUT").await;
+            write
+                .write_all(format!("{tag} OK logout\r\n").as_bytes())
+                .await
+                .unwrap();
+            transcript
+        });
+
+        service
+            .sync_mailboxes_with_progress_on_client(
+                &mut client,
+                &account,
+                50,
+                vec![MailboxPlan::new("INBOX", "INBOX")],
+                false,
+                |_| {},
+            )
+            .await
+            .unwrap();
+        let transcript = server.await.unwrap();
+        assert!(!transcript
+            .iter()
+            .any(|command| command.contains("CHANGEDSINCE")));
+        assert!(transcript
+            .iter()
+            .any(|command| command.starts_with("UID FETCH 1 (FLAGS INTERNALDATE ")));
+        assert!(store
+            .mailbox_sync_failure_uids(account.id, "INBOX")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn scripted_realtime_parse_gap_blocks_watermark_until_retry_succeeds() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        store
+            .save_synced_messages_through(account.id, "INBOX", &[], Some(99))
+            .await
+            .unwrap();
+
+        let (mut first_client, first_server) = duplex_imap_client_and_server();
+        let first_server = tokio::spawn(scripted_realtime_gap_server(first_server, true));
+        let error = service
+            .fetch_new_inbox_headers(&mut first_client, &account, 50)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("metadata remained incomplete"),
+            "{error:#}"
+        );
+        assert_eq!(
+            store
+                .highest_mailbox_uid(account.id, "INBOX")
+                .await
+                .unwrap(),
+            Some(99),
+            "UID 101 success must not move the watermark past failed UID 100"
+        );
+        assert_eq!(
+            store
+                .mailbox_sync_failure_uids(account.id, "INBOX")
+                .await
+                .unwrap(),
+            vec![100]
+        );
+        assert!(store
+            .message_by_locator(account.id, "INBOX", 100)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .message_by_locator(account.id, "INBOX", 101)
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            first_server.await.unwrap(),
+            vec![
+                "SELECT INBOX",
+                "FETCH 1:2 (UID FLAGS)",
+                "UID FETCH 100 (FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES CONTENT-TYPE LIST-ID PRECEDENCE AUTO-SUBMITTED)])",
+                "UID FETCH 101 (FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES CONTENT-TYPE LIST-ID PRECEDENCE AUTO-SUBMITTED)])",
+            ]
+        );
+
+        let (mut retry_client, retry_server) = duplex_imap_client_and_server();
+        let retry_server = tokio::spawn(scripted_realtime_gap_server(retry_server, false));
+        service
+            .fetch_new_inbox_headers(&mut retry_client, &account, 50)
+            .await
+            .unwrap();
+        retry_server.await.unwrap();
+        assert_eq!(
+            store
+                .highest_mailbox_uid(account.id, "INBOX")
+                .await
+                .unwrap(),
+            Some(101)
+        );
+        assert!(store
+            .mailbox_sync_failure_uids(account.id, "INBOX")
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store.mailbox_uids(account.id, "INBOX").await.unwrap(),
+            [100, 101].into()
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_realtime_failure_does_not_starve_new_mail_beyond_cycle_limit() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        store
+            .save_synced_messages_through(account.id, "INBOX", &[], Some(99))
+            .await
+            .unwrap();
+
+        let first_window = (100..=124).collect::<Vec<_>>();
+        let (mut first_client, first_server) = duplex_imap_client_and_server();
+        let first_server = tokio::spawn(scripted_realtime_starvation_server(
+            first_server,
+            first_window,
+            true,
+            false,
+        ));
+        service
+            .fetch_new_inbox_headers(&mut first_client, &account, 25)
+            .await
+            .unwrap_err();
+        first_server.await.unwrap();
+        assert_eq!(
+            store
+                .highest_mailbox_uid(account.id, "INBOX")
+                .await
+                .unwrap(),
+            Some(99)
+        );
+        assert_eq!(
+            store
+                .mailbox_sync_failure_uids(account.id, "INBOX")
+                .await
+                .unwrap(),
+            vec![100]
+        );
+        assert_eq!(
+            store.mailbox_uids(account.id, "INBOX").await.unwrap().len(),
+            24
+        );
+
+        let (mut retry_client, retry_server) = duplex_imap_client_and_server();
+        let retry_server = tokio::spawn(scripted_realtime_starvation_server(
+            retry_server,
+            vec![125, 100],
+            false,
+            false,
+        ));
+        service
+            .fetch_new_inbox_headers(&mut retry_client, &account, 25)
+            .await
+            .unwrap();
+        let retry_transcript = retry_server.await.unwrap();
+        let metadata_commands = retry_transcript
+            .iter()
+            .filter(|command| command.starts_with("UID FETCH"))
+            .collect::<Vec<_>>();
+        assert_eq!(metadata_commands.len(), 2);
+        assert!(metadata_commands[0].starts_with("UID FETCH 125 "));
+        assert!(metadata_commands[1].starts_with("UID FETCH 100 "));
+        assert_eq!(
+            store
+                .highest_mailbox_uid(account.id, "INBOX")
+                .await
+                .unwrap(),
+            Some(125),
+            "repairing UID 100 must advance through already-persisted UIDs 101-124 and new UID 125"
+        );
+        assert!(store
+            .mailbox_sync_failure_uids(account.id, "INBOX")
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store.mailbox_uids(account.id, "INBOX").await.unwrap().len(),
+            26
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_realtime_resource_error_persists_earlier_success_before_reconnect() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        store
+            .save_synced_messages_through(account.id, "INBOX", &[], Some(99))
+            .await
+            .unwrap();
+
+        let (mut first_client, first_server) = duplex_imap_client_and_server();
+        let first_server = tokio::spawn(scripted_realtime_starvation_server(
+            first_server,
+            (100..=124).collect(),
+            true,
+            false,
+        ));
+        service
+            .fetch_new_inbox_headers(&mut first_client, &account, 25)
+            .await
+            .unwrap_err();
+        first_server.await.unwrap();
+
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(scripted_realtime_starvation_server(
+            server,
+            vec![125, 100],
+            false,
+            true,
+        ));
+        let error = service
+            .fetch_new_inbox_headers(&mut client, &account, 25)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("UID 100"), "{error:#}");
+        server.await.unwrap();
+        assert!(store
+            .message_by_locator(account.id, "INBOX", 125)
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            store
+                .highest_mailbox_uid(account.id, "INBOX")
+                .await
+                .unwrap(),
+            Some(99),
+            "the durable UID 100 gap must still block the contiguous watermark"
+        );
+        assert_eq!(
+            store
+                .mailbox_sync_failure_uids(account.id, "INBOX")
+                .await
+                .unwrap(),
+            vec![100]
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_realtime_finalization_keeps_explicit_bounded_watermark() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        store
+            .save_synced_messages_through(account.id, "INBOX", &[], Some(99))
+            .await
+            .unwrap();
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            let identity =
+                "* 5 EXISTS\r\n* OK [UIDVALIDITY 77] valid\r\n* OK [UIDNEXT 105] next\r\n";
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT INBOX").await;
+            write
+                .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "FETCH 1:5 (UID FLAGS)").await;
+            for (sequence, uid) in (100..=104).enumerate() {
+                write
+                    .write_all(
+                        format!("* {} FETCH (UID {uid} FLAGS ())\r\n", sequence + 1).as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            write
+                .write_all(format!("{tag} OK snapshot\r\n").as_bytes())
+                .await
+                .unwrap();
+            for uid in [100, 101] {
+                let (tag, command) = scripted_command(&mut read).await;
+                transcript.push(command.clone());
+                assert!(command.starts_with(&format!("UID FETCH {uid} (FLAGS INTERNALDATE ")));
+                let headers = format!("Date: Wed, 30 Jul 2026 10:00:00 +0000\r\nFrom: Sender <sender@example.test>\r\nTo: Reader <reader@example.test>\r\nSubject: Bounded {uid}\r\nMessage-ID: <{uid}@bounded.example.test>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n");
+                write.write_all(format!("* 1 FETCH (UID {uid} FLAGS () INTERNALDATE \"30-Jul-2026 10:00:00 +0000\" BODY[HEADER] {{{}}}\r\n", headers.len()).as_bytes()).await.unwrap();
+                write.write_all(headers.as_bytes()).await.unwrap();
+                write
+                    .write_all(format!(")\r\n{tag} OK metadata\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT INBOX").await;
+            write
+                .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+        });
+        service
+            .fetch_new_inbox_headers(&mut client, &account, 2)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(
+            store
+                .highest_mailbox_uid(account.id, "INBOX")
+                .await
+                .unwrap(),
+            Some(101),
+            "staged but unfetched UIDs 102-104 must not advance the durable watermark"
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_realtime_bounds_oldest_failure_retries_without_reducing_new_mail_window() {
+        const FAILURE_COUNT: u32 = 30;
+        const NEW_MAIL_LIMIT: u32 = 2;
+
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        store
+            .save_synced_messages_through(account.id, "INBOX", &[], Some(FAILURE_COUNT))
+            .await
+            .unwrap();
+        for uid in 1..=FAILURE_COUNT {
+            store
+                .record_mailbox_sync_failure(account.id, "INBOX", uid, "metadata", "retry")
+                .await
+                .unwrap();
+        }
+
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            let remote_count = FAILURE_COUNT + NEW_MAIL_LIMIT;
+            let identity = format!(
+                "* {remote_count} EXISTS\r\n* OK [UIDVALIDITY 77] valid\r\n* OK [UIDNEXT {}] next\r\n",
+                remote_count + 1
+            );
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT INBOX").await;
+            write
+                .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(
+                &mut read,
+                &mut transcript,
+                &format!("FETCH 1:{remote_count} (UID FLAGS)"),
+            )
+            .await;
+            for uid in 1..=remote_count {
+                write
+                    .write_all(format!("* {uid} FETCH (UID {uid} FLAGS ())\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            write
+                .write_all(format!("{tag} OK snapshot\r\n").as_bytes())
+                .await
+                .unwrap();
+
+            let expected = (FAILURE_COUNT + 1..=remote_count)
+                .chain(1..=u32::try_from(REALTIME_FAILED_UID_RETRY_LIMIT).unwrap())
+                .collect::<Vec<_>>();
+            for uid in expected {
+                let (tag, command) = scripted_command(&mut read).await;
+                transcript.push(command.clone());
+                assert!(command.starts_with(&format!("UID FETCH {uid} (FLAGS INTERNALDATE ")));
+                let headers = format!(
+                    "Date: Wed, 30 Jul 2026 10:00:00 +0000\r\nFrom: Sender <sender@example.test>\r\nTo: Reader <reader@example.test>\r\nSubject: Retry {uid}\r\nMessage-ID: <{uid}@retry.example.test>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"
+                );
+                write
+                    .write_all(
+                        format!(
+                            "* 1 FETCH (UID {uid} FLAGS () INTERNALDATE \"30-Jul-2026 10:00:00 +0000\" BODY[HEADER] {{{}}}\r\n",
+                            headers.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                write.write_all(headers.as_bytes()).await.unwrap();
+                write
+                    .write_all(format!(")\r\n{tag} OK metadata\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT INBOX").await;
+            write
+                .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            transcript
+        });
+
+        service
+            .fetch_new_inbox_headers(&mut client, &account, NEW_MAIL_LIMIT)
+            .await
+            .unwrap();
+        let transcript = server.await.unwrap();
+        let metadata_uids = transcript
+            .iter()
+            .filter(|command| command.starts_with("UID FETCH"))
+            .map(|command| {
+                command
+                    .split_whitespace()
+                    .nth(2)
+                    .unwrap()
+                    .parse::<u32>()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &metadata_uids[..NEW_MAIL_LIMIT as usize],
+            &[FAILURE_COUNT + 1, FAILURE_COUNT + 2],
+            "durable repairs must not consume new-mail capacity"
+        );
+        assert_eq!(
+            metadata_uids.len(),
+            NEW_MAIL_LIMIT as usize + REALTIME_FAILED_UID_RETRY_LIMIT
+        );
+        assert_eq!(
+            &metadata_uids[NEW_MAIL_LIMIT as usize..],
+            &(1..=u32::try_from(REALTIME_FAILED_UID_RETRY_LIMIT).unwrap()).collect::<Vec<_>>(),
+            "only the oldest bounded retry subset should run this cycle"
+        );
+        assert_eq!(
+            store
+                .mailbox_sync_failure_uids(account.id, "INBOX")
+                .await
+                .unwrap(),
+            (REALTIME_FAILED_UID_RETRY_LIMIT as u32 + 1..=FAILURE_COUNT).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            store
+                .highest_mailbox_uid(account.id, "INBOX")
+                .await
+                .unwrap(),
+            Some(FAILURE_COUNT + NEW_MAIL_LIMIT)
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_realtime_uidvalidity_rollover_replaces_recycled_uid_only_after_metadata() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        let mut old = snapshot_test_message(&account, 1);
+        old.subject = "Old namespace subject".into();
+        store.upsert_catalog_messages(&[old]).await.unwrap();
+        let old_generation = store
+            .begin_mailbox_snapshot(account.id, "INBOX", "INBOX", 10, 1, Some(2), None)
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(account.id, "INBOX", &old_generation, &[(1, false, false)])
+            .await
+            .unwrap();
+        store
+            .finalize_mailbox_snapshot(account.id, "INBOX", &old_generation)
+            .await
+            .unwrap();
+
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            let identity = "* 1 EXISTS\r\n* OK [UIDVALIDITY 11] valid\r\n* OK [UIDNEXT 2] next\r\n";
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT INBOX").await;
+            write
+                .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "FETCH 1:1 (UID FLAGS)").await;
+            write
+                .write_all(
+                    format!("* 1 FETCH (UID 1 FLAGS ())\r\n{tag} OK snapshot\r\n").as_bytes(),
+                )
+                .await
+                .unwrap();
+            let (tag, command) = scripted_command(&mut read).await;
+            transcript.push(command.clone());
+            assert!(command.starts_with("UID FETCH 1 (FLAGS INTERNALDATE "));
+            let headers = "Date: Wed, 30 Jul 2026 10:00:00 +0000\r\nFrom: New <new@example.test>\r\nTo: Reader <reader@example.test>\r\nSubject: New namespace subject\r\nMessage-ID: <new-1@example.test>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n";
+            write
+                .write_all(
+                    format!(
+                        "* 1 FETCH (UID 1 FLAGS () INTERNALDATE \"30-Jul-2026 10:00:00 +0000\" BODY[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES CONTENT-TYPE LIST-ID PRECEDENCE AUTO-SUBMITTED)] {{{}}}\r\n",
+                        headers.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            write.write_all(headers.as_bytes()).await.unwrap();
+            write
+                .write_all(format!(")\r\n{tag} OK metadata\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT INBOX").await;
+            write
+                .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            transcript
+        });
+
+        service
+            .fetch_new_inbox_headers(&mut client, &account, 25)
+            .await
+            .unwrap();
+        let transcript = server.await.unwrap();
+        assert!(transcript
+            .iter()
+            .any(|command| command.starts_with("UID FETCH 1 ")));
+        let message = store
+            .message_by_locator(account.id, "INBOX", 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(message.subject, "New namespace subject");
+        let state = store
+            .mailbox_catalog_state(account.id, "INBOX")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.uid_validity, 11);
+    }
+
+    #[tokio::test]
+    async fn scripted_realtime_rollover_replaces_every_uid_beyond_normal_cycle_limit() {
+        const REMOTE_COUNT: u32 = 7;
+        const CYCLE_LIMIT: u32 = 3;
+
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        let old_messages = (1..=REMOTE_COUNT)
+            .map(|uid| {
+                let mut message = snapshot_test_message(&account, uid);
+                message.subject = format!("Old namespace {uid}");
+                message
+            })
+            .collect::<Vec<_>>();
+        store.upsert_catalog_messages(&old_messages).await.unwrap();
+        let old_generation = store
+            .begin_mailbox_snapshot(
+                account.id,
+                "INBOX",
+                "INBOX",
+                10,
+                REMOTE_COUNT,
+                Some(REMOTE_COUNT + 1),
+                None,
+            )
+            .await
+            .unwrap();
+        let old_flags = (1..=REMOTE_COUNT)
+            .map(|uid| (uid, false, false))
+            .collect::<Vec<_>>();
+        store
+            .stage_mailbox_snapshot_page(account.id, "INBOX", &old_generation, &old_flags)
+            .await
+            .unwrap();
+        store
+            .finalize_mailbox_snapshot(account.id, "INBOX", &old_generation)
+            .await
+            .unwrap();
+
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            let identity = format!(
+                "* {REMOTE_COUNT} EXISTS\r\n* OK [UIDVALIDITY 11] valid\r\n* OK [UIDNEXT {}] next\r\n",
+                REMOTE_COUNT + 1
+            );
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT INBOX").await;
+            write
+                .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(
+                &mut read,
+                &mut transcript,
+                &format!("FETCH 1:{REMOTE_COUNT} (UID FLAGS)"),
+            )
+            .await;
+            for uid in 1..=REMOTE_COUNT {
+                write
+                    .write_all(format!("* {uid} FETCH (UID {uid} FLAGS ())\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            write
+                .write_all(format!("{tag} OK snapshot\r\n").as_bytes())
+                .await
+                .unwrap();
+            let uid_set = (1..=REMOTE_COUNT)
+                .rev()
+                .map(|uid| uid.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let (tag, command) = scripted_command(&mut read).await;
+            transcript.push(command.clone());
+            assert!(command.starts_with(&format!("UID FETCH {uid_set} (FLAGS INTERNALDATE ")));
+            for uid in 1..=REMOTE_COUNT {
+                let headers = format!(
+                    "Date: Wed, 30 Jul 2026 10:00:00 +0000\r\nFrom: New <new@example.test>\r\nTo: Reader <reader@example.test>\r\nSubject: New namespace {uid}\r\nMessage-ID: <new-{uid}@example.test>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"
+                );
+                write
+                    .write_all(
+                        format!(
+                            "* {uid} FETCH (UID {uid} FLAGS () INTERNALDATE \"30-Jul-2026 10:00:00 +0000\" BODY[HEADER] {{{}}}\r\n",
+                            headers.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                write.write_all(headers.as_bytes()).await.unwrap();
+                write.write_all(b")\r\n").await.unwrap();
+            }
+            write
+                .write_all(format!("{tag} OK metadata\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT INBOX").await;
+            write
+                .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            transcript
+        });
+
+        service
+            .fetch_new_inbox_headers(&mut client, &account, CYCLE_LIMIT)
+            .await
+            .unwrap();
+        let transcript = server.await.unwrap();
+        assert_eq!(
+            transcript
+                .iter()
+                .filter(|command| command.starts_with("UID FETCH"))
+                .count(),
+            1,
+            "replacement metadata should remain batched"
+        );
+        for uid in 1..=REMOTE_COUNT {
+            assert_eq!(
+                store
+                    .message_by_locator(account.id, "INBOX", uid)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .subject,
+                format!("New namespace {uid}")
+            );
+        }
+        assert_eq!(
+            store
+                .highest_mailbox_uid(account.id, "INBOX")
+                .await
+                .unwrap(),
+            Some(REMOTE_COUNT)
+        );
+        assert_eq!(
+            store
+                .mailbox_catalog_state(account.id, "INBOX")
+                .await
+                .unwrap()
+                .unwrap()
+                .uid_validity,
+            11
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_realtime_rollover_resumes_only_uids_without_staged_outcomes() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        let old_messages = (1..=3)
+            .map(|uid| snapshot_test_message(&account, uid))
+            .collect::<Vec<_>>();
+        store.upsert_catalog_messages(&old_messages).await.unwrap();
+        let old_generation = store
+            .begin_mailbox_snapshot(account.id, "INBOX", "INBOX", 10, 3, Some(4), None)
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(
+                account.id,
+                "INBOX",
+                &old_generation,
+                &[(1, false, false), (2, false, false), (3, false, false)],
+            )
+            .await
+            .unwrap();
+        store
+            .finalize_mailbox_snapshot(account.id, "INBOX", &old_generation)
+            .await
+            .unwrap();
+
+        let spawn_server = |server: DuplexStream, retry: bool| {
+            tokio::spawn(async move {
+                let (read, mut write) = split(server);
+                let mut read = BufReader::new(read);
+                let mut transcript = Vec::new();
+                let identity =
+                    "* 3 EXISTS\r\n* OK [UIDVALIDITY 11] valid\r\n* OK [UIDNEXT 4] next\r\n";
+                let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT INBOX").await;
+                write
+                    .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                    .await
+                    .unwrap();
+                let tag =
+                    scripted_expect_command(&mut read, &mut transcript, "FETCH 1:3 (UID FLAGS)")
+                        .await;
+                write.write_all(format!("* 1 FETCH (UID 1 FLAGS ())\r\n* 2 FETCH (UID 2 FLAGS ())\r\n* 3 FETCH (UID 3 FLAGS ())\r\n{tag} OK snapshot\r\n").as_bytes()).await.unwrap();
+                let expected = if retry { "1" } else { "3,2,1" };
+                let (tag, command) = scripted_command(&mut read).await;
+                transcript.push(command.clone());
+                assert!(
+                    command.starts_with(&format!("UID FETCH {expected} (FLAGS INTERNALDATE ")),
+                    "unexpected metadata command: {command}"
+                );
+                let returned: &[u32] = if retry { &[1] } else { &[3, 2] };
+                for uid in returned {
+                    let headers = format!("Date: Wed, 30 Jul 2026 10:00:00 +0000\r\nFrom: New <new@example.test>\r\nTo: Reader <reader@example.test>\r\nSubject: Resumed {uid}\r\nMessage-ID: <resumed-{uid}@example.test>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n");
+                    write.write_all(format!("* {uid} FETCH (UID {uid} FLAGS () INTERNALDATE \"30-Jul-2026 10:00:00 +0000\" BODY[HEADER] {{{}}}\r\n", headers.len()).as_bytes()).await.unwrap();
+                    write.write_all(headers.as_bytes()).await.unwrap();
+                    write.write_all(b")\r\n").await.unwrap();
+                }
+                write
+                    .write_all(format!("{tag} OK metadata\r\n").as_bytes())
+                    .await
+                    .unwrap();
+                if retry {
+                    let tag =
+                        scripted_expect_command(&mut read, &mut transcript, "SELECT INBOX").await;
+                    write
+                        .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                        .await
+                        .unwrap();
+                }
+                transcript
+            })
+        };
+
+        let (mut first_client, first_server) = duplex_imap_client_and_server();
+        let first_server = spawn_server(first_server, false);
+        service
+            .fetch_new_inbox_headers(&mut first_client, &account, 1)
+            .await
+            .unwrap_err();
+        first_server.await.unwrap();
+        let resumed_generation = store
+            .begin_mailbox_snapshot(account.id, "INBOX", "INBOX", 11, 3, Some(4), None)
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(
+                account.id,
+                "INBOX",
+                &resumed_generation,
+                &[(1, false, false), (2, false, false), (3, false, false)],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .staged_mailbox_snapshot_uids_without_replacement_outcome(
+                    account.id,
+                    "INBOX",
+                    &resumed_generation,
+                )
+                .await
+                .unwrap(),
+            vec![1]
+        );
+        let (mut retry_client, retry_server) = duplex_imap_client_and_server();
+        let retry_server = spawn_server(retry_server, true);
+        service
+            .fetch_new_inbox_headers(&mut retry_client, &account, 1)
+            .await
+            .unwrap();
+        let retry_transcript = retry_server.await.unwrap();
+        assert_eq!(
+            retry_transcript
+                .iter()
+                .filter(|command| command.starts_with("UID FETCH"))
+                .count(),
+            1
+        );
+        for uid in 1..=3 {
+            assert_eq!(
+                store
+                    .message_by_locator(account.id, "INBOX", uid)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .subject,
+                format!("Resumed {uid}")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn scripted_realtime_missing_uidnext_resume_prunes_old_inventory_and_reuses_outcomes() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        let old_messages = (1..=2)
+            .map(|uid| {
+                let mut message = snapshot_test_message(&account, uid);
+                message.subject = format!("Old namespace {uid}");
+                message
+            })
+            .collect::<Vec<_>>();
+        store.upsert_catalog_messages(&old_messages).await.unwrap();
+        let old_generation = store
+            .begin_mailbox_snapshot(account.id, "INBOX", "INBOX", 10, 2, Some(3), None)
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(
+                account.id,
+                "INBOX",
+                &old_generation,
+                &[(1, false, false), (2, false, false)],
+            )
+            .await
+            .unwrap();
+        store
+            .finalize_mailbox_snapshot(account.id, "INBOX", &old_generation)
+            .await
+            .unwrap();
+
+        let identity = "* 2 EXISTS\r\n* OK [UIDVALIDITY 11] valid\r\n";
+        let (mut first_client, first_server) = duplex_imap_client_and_server();
+        let first_server = tokio::spawn(async move {
+            let (read, mut write) = split(first_server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT INBOX").await;
+            write
+                .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "FETCH 1:2 (UID FLAGS)").await;
+            write.write_all(format!("* 1 FETCH (UID 1 FLAGS ())\r\n* 2 FETCH (UID 2 FLAGS ())\r\n{tag} OK snapshot\r\n").as_bytes()).await.unwrap();
+            let (tag, command) = scripted_command(&mut read).await;
+            transcript.push(command.clone());
+            assert!(
+                command.starts_with("UID FETCH 2,1 (FLAGS INTERNALDATE "),
+                "unexpected metadata command: {command}"
+            );
+            let headers = "Date: Wed, 30 Jul 2026 10:00:00 +0000\r\nFrom: New <new@example.test>\r\nTo: Reader <reader@example.test>\r\nSubject: Retained 2\r\nMessage-ID: <retained-2@example.test>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n";
+            write.write_all(format!("* 2 FETCH (UID 2 FLAGS () INTERNALDATE \"30-Jul-2026 10:00:00 +0000\" BODY[HEADER] {{{}}}\r\n", headers.len()).as_bytes()).await.unwrap();
+            write.write_all(headers.as_bytes()).await.unwrap();
+            write
+                .write_all(format!(")\r\n{tag} OK metadata\r\n").as_bytes())
+                .await
+                .unwrap();
+            transcript
+        });
+        service
+            .fetch_new_inbox_headers(&mut first_client, &account, 1)
+            .await
+            .unwrap_err();
+        first_server.await.unwrap();
+
+        let (mut retry_client, retry_server) = duplex_imap_client_and_server();
+        let retry_server = tokio::spawn(async move {
+            let (read, mut write) = split(retry_server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT INBOX").await;
+            write
+                .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "FETCH 1:2 (UID FLAGS)").await;
+            write.write_all(format!("* 1 FETCH (UID 2 FLAGS ())\r\n* 2 FETCH (UID 3 FLAGS ())\r\n{tag} OK snapshot\r\n").as_bytes()).await.unwrap();
+            let (tag, command) = scripted_command(&mut read).await;
+            transcript.push(command.clone());
+            assert!(
+                command.starts_with("UID FETCH 3 (FLAGS INTERNALDATE "),
+                "the retained UID 2 outcome must not be fetched again: {command}"
+            );
+            let headers = "Date: Wed, 30 Jul 2026 10:00:00 +0000\r\nFrom: New <new@example.test>\r\nTo: Reader <reader@example.test>\r\nSubject: New 3\r\nMessage-ID: <new-3@example.test>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n";
+            write.write_all(format!("* 2 FETCH (UID 3 FLAGS () INTERNALDATE \"30-Jul-2026 10:00:00 +0000\" BODY[HEADER] {{{}}}\r\n", headers.len()).as_bytes()).await.unwrap();
+            write.write_all(headers.as_bytes()).await.unwrap();
+            write
+                .write_all(format!(")\r\n{tag} OK metadata\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT INBOX").await;
+            write
+                .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "FETCH 1:2 (UID FLAGS)").await;
+            write.write_all(format!("* 1 FETCH (UID 2 FLAGS ())\r\n* 2 FETCH (UID 3 FLAGS ())\r\n{tag} OK verification snapshot\r\n").as_bytes()).await.unwrap();
+            transcript
+        });
+        service
+            .fetch_new_inbox_headers(&mut retry_client, &account, 1)
+            .await
+            .unwrap();
+        let retry_transcript = retry_server.await.unwrap();
+        assert_eq!(
+            retry_transcript
+                .iter()
+                .filter(|command| command.starts_with("UID FETCH"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            store.mailbox_uids(account.id, "INBOX").await.unwrap(),
+            [2, 3].into()
+        );
+        assert_eq!(
+            store
+                .message_by_locator(account.id, "INBOX", 2)
+                .await
+                .unwrap()
+                .unwrap()
+                .subject,
+            "Retained 2"
+        );
+        assert_eq!(
+            store
+                .message_by_locator(account.id, "INBOX", 3)
+                .await
+                .unwrap()
+                .unwrap()
+                .subject,
+            "New 3"
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_full_snapshot_without_final_uidnext_preserves_absent_rows() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        seed_condstore_catalog(&store, &account).await;
+        service
+            .credentials()
+            .set_password(&account, "sync secret")
+            .await
+            .unwrap();
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            for (expected, untagged) in [
+                ("LOGIN \"reader@example.test\" \"sync secret\"", ""),
+                ("CAPABILITY", "* CAPABILITY IMAP4rev1\r\n"),
+                (
+                    "LIST \"\" \"*\"",
+                    "* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n",
+                ),
+            ] {
+                let tag = scripted_expect_command(&mut read, &mut transcript, expected).await;
+                write
+                    .write_all(format!("{untagged}{tag} OK done\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            let initial = "* 1 EXISTS\r\n* OK [UIDVALIDITY 77] valid\r\n* OK [UIDNEXT 3] next\r\n";
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+            write
+                .write_all(format!("{initial}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "FETCH 1:1 (UID FLAGS)").await;
+            write
+                .write_all(
+                    format!("* 1 FETCH (UID 1 FLAGS ())\r\n{tag} OK snapshot\r\n").as_bytes(),
+                )
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+            write
+                .write_all(
+                    format!("* 1 EXISTS\r\n* OK [UIDVALIDITY 77] valid\r\n{tag} OK selected\r\n")
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "FETCH 1:1 (UID FLAGS)").await;
+            write
+                .write_all(
+                    format!("* 1 FETCH (UID 3 FLAGS ())\r\n{tag} OK replacement inventory\r\n")
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+            transcript
+        });
+
+        let error = service
+            .sync_mailboxes_with_progress_on_client(
+                &mut client,
+                &account,
+                50,
+                vec![MailboxPlan::new("INBOX", "INBOX")],
+                false,
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("membership changed"),
+            "{error:#}"
+        );
+        server.await.unwrap();
+        assert_eq!(
+            store.mailbox_uids(account.id, "INBOX").await.unwrap(),
+            [1, 2].into(),
+            "missing final UIDNEXT cannot authorize deleting UID 2"
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_stable_missing_uidnext_publishes_after_matching_second_inventory() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        seed_condstore_catalog(&store, &account).await;
+        service
+            .credentials()
+            .set_password(&account, "sync secret")
+            .await
+            .unwrap();
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            for (expected, untagged) in [
+                ("LOGIN \"reader@example.test\" \"sync secret\"", ""),
+                ("CAPABILITY", "* CAPABILITY IMAP4rev1\r\n"),
+                (
+                    "LIST \"\" \"*\"",
+                    "* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n",
+                ),
+            ] {
+                let tag = scripted_expect_command(&mut read, &mut transcript, expected).await;
+                write
+                    .write_all(format!("{untagged}{tag} OK done\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            let identity = "* 1 EXISTS\r\n* OK [UIDVALIDITY 77] valid\r\n";
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+            write
+                .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            for label in ["first", "second"] {
+                let tag =
+                    scripted_expect_command(&mut read, &mut transcript, "FETCH 1:1 (UID FLAGS)")
+                        .await;
+                write
+                    .write_all(
+                        format!("* 1 FETCH (UID 1 FLAGS ())\r\n{tag} OK {label} inventory\r\n")
+                            .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                if label == "first" {
+                    let tag =
+                        scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"")
+                            .await;
+                    write
+                        .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                        .await
+                        .unwrap();
+                }
+            }
+            let tag = scripted_expect_command(&mut read, &mut transcript, "LOGOUT").await;
+            write
+                .write_all(format!("{tag} OK logout\r\n").as_bytes())
+                .await
+                .unwrap();
+            transcript
+        });
+
+        service
+            .sync_mailboxes_with_progress_on_client(
+                &mut client,
+                &account,
+                50,
+                vec![MailboxPlan::new("INBOX", "INBOX")],
+                false,
+                |_| {},
+            )
+            .await
+            .unwrap();
+        let transcript = server.await.unwrap();
+        assert_eq!(
+            transcript
+                .iter()
+                .filter(|command| command.as_str() == "FETCH 1:1 (UID FLAGS)")
+                .count(),
+            2
+        );
+        assert_eq!(
+            store.mailbox_uids(account.id, "INBOX").await.unwrap(),
+            [1].into()
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_full_snapshot_allows_modseq_only_drift_and_keeps_earlier_generation() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        seed_condstore_catalog(&store, &account).await;
+        service
+            .credentials()
+            .set_password(&account, "sync secret")
+            .await
+            .unwrap();
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            for (expected, untagged) in [
+                ("LOGIN \"reader@example.test\" \"sync secret\"", ""),
+                ("CAPABILITY", "* CAPABILITY IMAP4rev1\r\n"),
+                (
+                    "LIST \"\" \"*\"",
+                    "* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n",
+                ),
+            ] {
+                let tag = scripted_expect_command(&mut read, &mut transcript, expected).await;
+                write
+                    .write_all(format!("{untagged}{tag} OK done\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+            write.write_all(format!("* 2 EXISTS\r\n* OK [UIDVALIDITY 77] valid\r\n* OK [UIDNEXT 3] next\r\n* OK [HIGHESTMODSEQ 200] modseq\r\n{tag} OK selected\r\n").as_bytes()).await.unwrap();
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "FETCH 1:2 (UID FLAGS)").await;
+            write.write_all(format!("* 1 FETCH (UID 1 FLAGS ())\r\n* 2 FETCH (UID 2 FLAGS (\\Flagged))\r\n{tag} OK snapshot\r\n").as_bytes()).await.unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+            write.write_all(format!("* 2 EXISTS\r\n* OK [UIDVALIDITY 77] valid\r\n* OK [UIDNEXT 3] next\r\n* OK [HIGHESTMODSEQ 201] modseq\r\n{tag} OK selected\r\n").as_bytes()).await.unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "LOGOUT").await;
+            write
+                .write_all(format!("{tag} OK logout\r\n").as_bytes())
+                .await
+                .unwrap();
+            transcript
+        });
+        service
+            .sync_mailboxes_with_progress_on_client(
+                &mut client,
+                &account,
+                50,
+                vec![MailboxPlan::new("INBOX", "INBOX")],
+                false,
+                |_| {},
+            )
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(
+            store.mailbox_uids(account.id, "INBOX").await.unwrap(),
+            [1, 2].into()
+        );
+        assert_eq!(
+            store
+                .mailbox_catalog_state(account.id, "INBOX")
+                .await
+                .unwrap()
+                .unwrap()
+                .highest_modseq
+                .as_deref(),
+            Some("200"),
+            "the next CHANGEDSINCE must start before the flag change observed during backfill"
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_oversized_exists_is_rejected_before_destructive_snapshot_work() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        seed_condstore_catalog(&store, &account).await;
+        service
+            .credentials()
+            .set_password(&account, "sync secret")
+            .await
+            .unwrap();
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            for (expected, untagged) in [
+                ("LOGIN \"reader@example.test\" \"sync secret\"", ""),
+                ("CAPABILITY", "* CAPABILITY IMAP4rev1\r\n"),
+                (
+                    "LIST \"\" \"*\"",
+                    "* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n",
+                ),
+            ] {
+                let tag = scripted_expect_command(&mut read, &mut transcript, expected).await;
+                write
+                    .write_all(format!("{untagged}{tag} OK done\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+            write.write_all(format!("* {} EXISTS\r\n* OK [UIDVALIDITY 77] valid\r\n* OK [UIDNEXT 3] next\r\n{tag} OK selected\r\n", MAX_SUPPORTED_MAILBOX_MESSAGES + 1).as_bytes()).await.unwrap();
+            transcript
+        });
+        let error = service
+            .sync_mailboxes_with_progress_on_client(
+                &mut client,
+                &account,
+                50,
+                vec![MailboxPlan::new("INBOX", "INBOX")],
+                true,
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("supported 1000000"), "{error:#}");
+        let transcript = server.await.unwrap();
+        assert!(!transcript
+            .iter()
+            .any(|command| command.starts_with("FETCH ")));
+        assert_eq!(
+            store.mailbox_uids(account.id, "INBOX").await.unwrap(),
+            [1, 2].into()
+        );
+    }
+
+    async fn seed_optional_archive_message(store: &Store, account: &Account) {
+        let mut message = snapshot_test_message(account, 9);
+        message.mailbox = "Archive".into();
+        message.id = stable_message_id(account.id, "Archive", 9);
+        message.thread_id = message.id.clone();
+        store.upsert_catalog_messages(&[message]).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn scripted_reset_clears_optional_namespace_only_after_nonexistent_response_code() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        seed_optional_archive_message(&store, &account).await;
+        service
+            .credentials()
+            .set_password(&account, "sync secret")
+            .await
+            .unwrap();
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            for (expected, untagged) in [
+                ("LOGIN \"reader@example.test\" \"sync secret\"", ""),
+                ("CAPABILITY", "* CAPABILITY IMAP4rev1\r\n"),
+                ("LIST \"\" \"*\"", ""),
+            ] {
+                let tag = scripted_expect_command(&mut read, &mut transcript, expected).await;
+                write
+                    .write_all(format!("{untagged}{tag} OK done\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "SELECT \"Archive\"").await;
+            write
+                .write_all(format!("{tag} NO [NONEXISTENT] mailbox is gone\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "LOGOUT").await;
+            write
+                .write_all(format!("{tag} OK logout\r\n").as_bytes())
+                .await
+                .unwrap();
+            transcript
+        });
+
+        service
+            .sync_mailboxes_with_progress_on_client(
+                &mut client,
+                &account,
+                50,
+                vec![MailboxPlan::new("Archive", "Archive")],
+                true,
+                |_| {},
+            )
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert!(store
+            .mailbox_uids(account.id, "Archive")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn scripted_reset_transient_optional_select_failure_preserves_namespace() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        seed_optional_archive_message(&store, &account).await;
+        service
+            .credentials()
+            .set_password(&account, "sync secret")
+            .await
+            .unwrap();
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            for expected in [
+                "LOGIN \"reader@example.test\" \"sync secret\"",
+                "CAPABILITY",
+                "LIST \"\" \"*\"",
+            ] {
+                let tag = scripted_expect_command(&mut read, &mut transcript, expected).await;
+                let untagged = if expected == "CAPABILITY" {
+                    "* CAPABILITY IMAP4rev1\r\n"
+                } else {
+                    ""
+                };
+                write
+                    .write_all(format!("{untagged}{tag} OK done\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "SELECT \"Archive\"").await;
+            write
+                .write_all(format!("{tag} NO temporary backend failure\r\n").as_bytes())
+                .await
+                .unwrap();
+            transcript
+        });
+
+        let error = service
+            .sync_mailboxes_with_progress_on_client(
+                &mut client,
+                &account,
+                50,
+                vec![MailboxPlan::new("Archive", "Archive")],
+                true,
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("cannot replace optional mailbox"));
+        server.await.unwrap();
+        assert_eq!(
+            store.mailbox_uids(account.id, "Archive").await.unwrap(),
+            [9].into()
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_reset_records_gmail_filtered_uids_as_completed_replacement_outcomes() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = AccountDraft {
+            email: "reader@example.test".into(),
+            display_name: "Reader".into(),
+            provider_id: Some("gmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("gmail").unwrap());
+        store.save_account(&account).await.unwrap();
+        service
+            .credentials()
+            .set_password(&account, "sync secret")
+            .await
+            .unwrap();
+        seed_optional_archive_message(&store, &account).await;
+
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            for (expected, untagged) in [
+                ("LOGIN \"reader@example.test\" \"sync secret\"", ""),
+                ("CAPABILITY", "* CAPABILITY IMAP4rev1\r\n"),
+                ("LIST \"\" \"*\"", ""),
+            ] {
+                let tag = scripted_expect_command(&mut read, &mut transcript, expected).await;
+                write
+                    .write_all(format!("{untagged}{tag} OK done\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            let identity = "* 1 EXISTS\r\n* OK [UIDVALIDITY 77] valid\r\n* OK [UIDNEXT 2] next\r\n";
+            let select = "SELECT \"[Gmail]/All Mail\"";
+            let tag = scripted_expect_command(&mut read, &mut transcript, select).await;
+            write
+                .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "FETCH 1:1 (UID FLAGS)").await;
+            write
+                .write_all(
+                    format!("* 1 FETCH (UID 1 FLAGS ())\r\n{tag} OK snapshot\r\n").as_bytes(),
+                )
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, select).await;
+            write
+                .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            let (tag, command) = scripted_command(&mut read).await;
+            transcript.push(command.clone());
+            assert!(command.starts_with(
+                "UID FETCH 1 (FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE X-GM-LABELS "
+            ));
+            let headers = "Date: Wed, 30 Jul 2026 10:00:00 +0000\r\nFrom: Sender <sender@example.test>\r\nTo: Reader <reader@example.test>\r\nSubject: Inbox copy\r\nMessage-ID: <gmail-filtered@example.test>\r\n\r\n";
+            write.write_all(format!("* 1 FETCH (UID 1 FLAGS () INTERNALDATE \"30-Jul-2026 10:00:00 +0000\" RFC822.SIZE 5 X-GM-LABELS (\\Inbox) BODY[HEADER] {{{}}}\r\n", headers.len()).as_bytes()).await.unwrap();
+            write.write_all(headers.as_bytes()).await.unwrap();
+            write
+                .write_all(format!(")\r\n{tag} OK metadata\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, select).await;
+            write
+                .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            transcript
+        });
+
+        service
+            .sync_mailboxes_with_progress_on_client(
+                &mut client,
+                &account,
+                50,
+                vec![MailboxPlan::gmail_archive("[Gmail]/All Mail")],
+                true,
+                |_| {},
+            )
+            .await
+            .unwrap();
+        let transcript = server.await.unwrap();
+        assert!(!transcript
+            .iter()
+            .any(|command| command.contains("BODY.PEEK[]<0.8192>")));
+        assert!(store
+            .mailbox_uids(account.id, "Archive")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn scripted_reset_prunes_stale_sent_key_after_two_discovered_siblings_finalize() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        service
+            .credentials()
+            .set_password(&account, "sync secret")
+            .await
+            .unwrap();
+        let mut stale = snapshot_test_message(&account, 9);
+        stale.mailbox = "Sent::Legacy".into();
+        stale.id = stable_message_id(account.id, "Sent::Legacy", 9);
+        stale.thread_id = stale.id.clone();
+        store.upsert_catalog_messages(&[stale]).await.unwrap();
+
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            for (expected, untagged) in [
+                ("LOGIN \"reader@example.test\" \"sync secret\"", ""),
+                ("CAPABILITY", "* CAPABILITY IMAP4rev1\r\n"),
+                (
+                    "LIST \"\" \"*\"",
+                    "* list (\\HasNoChildren \\Sent) \"/\" \"Sent Items\"\r\n* LIST (\\HasNoChildren \\Sent) \"/\" \"Sent Messages\"\r\n",
+                ),
+            ] {
+                let tag = scripted_expect_command(&mut read, &mut transcript, expected).await;
+                write
+                    .write_all(format!("{untagged}{tag} OK done\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            let identity = "* 0 EXISTS\r\n* OK [UIDVALIDITY 77] valid\r\n* OK [UIDNEXT 1] next\r\n";
+            for mailbox in ["Sent Items", "Sent Messages", "Sent Items", "Sent Messages"] {
+                let tag = scripted_expect_command(
+                    &mut read,
+                    &mut transcript,
+                    &format!("SELECT {}", quote_imap(mailbox)),
+                )
+                .await;
+                write
+                    .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            let tag = scripted_expect_command(&mut read, &mut transcript, "LOGOUT").await;
+            write
+                .write_all(format!("{tag} OK logout\r\n").as_bytes())
+                .await
+                .unwrap();
+            transcript
+        });
+
+        service
+            .sync_mailboxes_with_progress_on_client(
+                &mut client,
+                &account,
+                50,
+                vec![MailboxPlan::new("Sent", "Sent")],
+                true,
+                |_| {},
+            )
+            .await
+            .unwrap();
+        let transcript = server.await.unwrap();
+        assert!(transcript
+            .iter()
+            .any(|command| command == "SELECT \"Sent Items\""));
+        assert!(transcript
+            .iter()
+            .any(|command| command == "SELECT \"Sent Messages\""));
+        assert!(store
+            .mailbox_uids(account.id, "Sent::Legacy")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .mailbox_catalog_state(account.id, "Sent::Sent Items")
+            .await
+            .unwrap()
+            .is_some());
+        assert!(store
+            .mailbox_catalog_state(account.id, "Sent::Sent Messages")
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn scripted_reset_nonexistent_sent_sibling_does_not_clear_current_sibling() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        service
+            .credentials()
+            .set_password(&account, "sync secret")
+            .await
+            .unwrap();
+        let mut stale = snapshot_test_message(&account, 9);
+        stale.mailbox = "Sent::Legacy".into();
+        stale.id = stable_message_id(account.id, "Sent::Legacy", 9);
+        stale.thread_id = stale.id.clone();
+        store.upsert_catalog_messages(&[stale]).await.unwrap();
+
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            for (expected, untagged) in [
+                ("LOGIN \"reader@example.test\" \"sync secret\"", ""),
+                ("CAPABILITY", "* CAPABILITY IMAP4rev1\r\n"),
+                (
+                    "LIST \"\" \"*\"",
+                    "* LIST (\\Sent) \"/\" \"Sent Items\"\r\n* LIST (\\Sent) \"/\" \"Sent Messages\"\r\n",
+                ),
+            ] {
+                let tag = scripted_expect_command(&mut read, &mut transcript, expected).await;
+                write
+                    .write_all(format!("{untagged}{tag} OK done\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            let identity = "* 0 EXISTS\r\n* OK [UIDVALIDITY 77] valid\r\n* OK [UIDNEXT 1] next\r\n";
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "SELECT \"Sent Items\"").await;
+            write
+                .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "SELECT \"Sent Messages\"")
+                    .await;
+            write
+                .write_all(format!("{tag} NO [NONEXISTENT] removed\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "SELECT \"Sent Items\"").await;
+            write
+                .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "LOGOUT").await;
+            write
+                .write_all(format!("{tag} OK logout\r\n").as_bytes())
+                .await
+                .unwrap();
+        });
+
+        service
+            .sync_mailboxes_with_progress_on_client(
+                &mut client,
+                &account,
+                50,
+                vec![MailboxPlan::new("Sent", "Sent")],
+                true,
+                |_| {},
+            )
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert!(store
+            .mailbox_catalog_state(account.id, "Sent::Sent Items")
+            .await
+            .unwrap()
+            .is_some());
+        assert!(store
+            .mailbox_catalog_state(account.id, "Sent::Sent Messages")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .mailbox_uids(account.id, "Sent::Legacy")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn scripted_reset_malformed_list_cannot_clear_a_special_mailbox_family() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        service
+            .credentials()
+            .set_password(&account, "sync secret")
+            .await
+            .unwrap();
+        let mut stale = snapshot_test_message(&account, 9);
+        stale.mailbox = "Sent::Legacy".into();
+        stale.id = stable_message_id(account.id, "Sent::Legacy", 9);
+        stale.thread_id = stale.id.clone();
+        store.upsert_catalog_messages(&[stale]).await.unwrap();
+
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            for (expected, untagged) in [
+                ("LOGIN \"reader@example.test\" \"sync secret\"", ""),
+                ("CAPABILITY", "* CAPABILITY IMAP4rev1\r\n"),
+                ("LIST \"\" \"*\"", "* LIST \\Sent \"/\" \"Sent Items\"\r\n"),
+            ] {
+                let tag = scripted_expect_command(&mut read, &mut transcript, expected).await;
+                write
+                    .write_all(format!("{untagged}{tag} OK done\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            transcript
+        });
+        let error = service
+            .sync_mailboxes_with_progress_on_client(
+                &mut client,
+                &account,
+                50,
+                vec![MailboxPlan::new("Sent", "Sent")],
+                true,
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        assert!(format!("{error:#}").contains("LIST response is malformed"));
+        assert_eq!(
+            store
+                .mailbox_uids(account.id, "Sent::Legacy")
+                .await
+                .unwrap(),
+            [9].into()
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_reset_list_literal_mailbox_cannot_select_or_prune_a_family() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        service
+            .credentials()
+            .set_password(&account, "sync secret")
+            .await
+            .unwrap();
+        let mut stale = snapshot_test_message(&account, 9);
+        stale.mailbox = "Sent::Legacy".into();
+        stale.id = stable_message_id(account.id, "Sent::Legacy", 9);
+        stale.thread_id = stale.id.clone();
+        store.upsert_catalog_messages(&[stale]).await.unwrap();
+
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            for (expected, untagged) in [
+                ("LOGIN \"reader@example.test\" \"sync secret\"", ""),
+                ("CAPABILITY", "* CAPABILITY IMAP4rev1\r\n"),
+            ] {
+                let tag = scripted_expect_command(&mut read, &mut transcript, expected).await;
+                write
+                    .write_all(format!("{untagged}{tag} OK done\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            let tag = scripted_expect_command(&mut read, &mut transcript, "LIST \"\" \"*\"").await;
+            write
+                .write_all(b"* LIST (\\Sent) \"/\" {10}\r\nSent Items\r\n")
+                .await
+                .unwrap();
+            write
+                .write_all(format!("{tag} OK done\r\n").as_bytes())
+                .await
+                .unwrap();
+            transcript
+        });
+        let error = service
+            .sync_mailboxes_with_progress_on_client(
+                &mut client,
+                &account,
+                50,
+                vec![MailboxPlan::new("Sent", "Sent")],
+                true,
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+        let transcript = server.await.unwrap();
+        assert!(format!("{error:#}").contains("LIST response is malformed"));
+        assert!(!transcript
+            .iter()
+            .any(|command| command.starts_with("SELECT ")));
+        assert_eq!(
+            store
+                .mailbox_uids(account.id, "Sent::Legacy")
+                .await
+                .unwrap(),
+            [9].into()
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_reset_list_command_failure_preserves_special_mailbox_family() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        service
+            .credentials()
+            .set_password(&account, "sync secret")
+            .await
+            .unwrap();
+        let mut stale = snapshot_test_message(&account, 9);
+        stale.mailbox = "Sent::Legacy".into();
+        stale.id = stable_message_id(account.id, "Sent::Legacy", 9);
+        stale.thread_id = stale.id.clone();
+        store.upsert_catalog_messages(&[stale]).await.unwrap();
+
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            for (expected, untagged) in [
+                ("LOGIN \"reader@example.test\" \"sync secret\"", ""),
+                ("CAPABILITY", "* CAPABILITY IMAP4rev1\r\n"),
+            ] {
+                let tag = scripted_expect_command(&mut read, &mut transcript, expected).await;
+                write
+                    .write_all(format!("{untagged}{tag} OK done\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            let tag = scripted_expect_command(&mut read, &mut transcript, "LIST \"\" \"*\"").await;
+            write
+                .write_all(format!("{tag} NO discovery unavailable\r\n").as_bytes())
+                .await
+                .unwrap();
+            transcript
+        });
+        let error = service
+            .sync_mailboxes_with_progress_on_client(
+                &mut client,
+                &account,
+                50,
+                vec![MailboxPlan::new("Sent", "Sent")],
+                true,
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+        let transcript = server.await.unwrap();
+        assert!(format!("{error:#}").contains("LIST discovery failed"));
+        assert!(!transcript
+            .iter()
+            .any(|command| command.starts_with("SELECT ")));
+        assert_eq!(
+            store
+                .mailbox_uids(account.id, "Sent::Legacy")
+                .await
+                .unwrap(),
+            [9].into()
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_reset_missing_snippet_remains_retryable_until_literal_completes() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        service
+            .credentials()
+            .set_password(&account, "sync secret")
+            .await
+            .unwrap();
+        let mut old = snapshot_test_message(&account, 1);
+        old.subject = "Old committed subject".into();
+        store.upsert_catalog_messages(&[old]).await.unwrap();
+
+        let spawn_server = |server: DuplexStream, complete_snippet: bool| {
+            tokio::spawn(async move {
+                let (read, mut write) = split(server);
+                let mut read = BufReader::new(read);
+                let mut transcript = Vec::new();
+                for (expected, untagged) in [
+                    ("LOGIN \"reader@example.test\" \"sync secret\"", ""),
+                    ("CAPABILITY", "* CAPABILITY IMAP4rev1\r\n"),
+                    (
+                        "LIST \"\" \"*\"",
+                        "* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n",
+                    ),
+                ] {
+                    let tag = scripted_expect_command(&mut read, &mut transcript, expected).await;
+                    write
+                        .write_all(format!("{untagged}{tag} OK done\r\n").as_bytes())
+                        .await
+                        .unwrap();
+                }
+                let identity =
+                    "* 1 EXISTS\r\n* OK [UIDVALIDITY 77] valid\r\n* OK [UIDNEXT 2] next\r\n";
+                let tag =
+                    scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+                write
+                    .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                    .await
+                    .unwrap();
+                let tag =
+                    scripted_expect_command(&mut read, &mut transcript, "FETCH 1:1 (UID FLAGS)")
+                        .await;
+                write
+                    .write_all(
+                        format!("* 1 FETCH (UID 1 FLAGS ())\r\n{tag} OK snapshot\r\n").as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                let tag =
+                    scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+                write
+                    .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                    .await
+                    .unwrap();
+                let (tag, command) = scripted_command(&mut read).await;
+                transcript.push(command.clone());
+                assert!(command.starts_with("UID FETCH 1 (FLAGS INTERNALDATE "));
+                let headers = "Date: Wed, 30 Jul 2026 10:00:00 +0000\r\nFrom: New <new@example.test>\r\nTo: Reader <reader@example.test>\r\nSubject: Replacement subject\r\nMessage-ID: <replacement@example.test>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n";
+                write.write_all(format!("* 1 FETCH (UID 1 FLAGS () INTERNALDATE \"30-Jul-2026 10:00:00 +0000\" RFC822.SIZE 5 BODY[HEADER] {{{}}}\r\n", headers.len()).as_bytes()).await.unwrap();
+                write.write_all(headers.as_bytes()).await.unwrap();
+                write
+                    .write_all(format!(")\r\n{tag} OK metadata\r\n").as_bytes())
+                    .await
+                    .unwrap();
+                let tag = scripted_expect_command(
+                    &mut read,
+                    &mut transcript,
+                    "UID FETCH 1 (BODY.PEEK[]<0.8192>)",
+                )
+                .await;
+                if complete_snippet {
+                    write
+                        .write_all(
+                            format!(
+                                "* 1 FETCH (UID 1 BODY[]<0> {{0}}\r\n)\r\n{tag} OK snippet\r\n"
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    let tag =
+                        scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"")
+                            .await;
+                    write
+                        .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                        .await
+                        .unwrap();
+                    let tag = scripted_expect_command(&mut read, &mut transcript, "LOGOUT").await;
+                    write
+                        .write_all(format!("{tag} OK logout\r\n").as_bytes())
+                        .await
+                        .unwrap();
+                } else {
+                    write
+                        .write_all(format!("{tag} OK snippet omitted\r\n").as_bytes())
+                        .await
+                        .unwrap();
+                }
+                transcript
+            })
+        };
+
+        let (mut first_client, first_server) = duplex_imap_client_and_server();
+        let first_server = spawn_server(first_server, false);
+        service
+            .sync_mailboxes_with_progress_on_client(
+                &mut first_client,
+                &account,
+                50,
+                vec![MailboxPlan::new("INBOX", "INBOX")],
+                true,
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+        first_server.await.unwrap();
+        assert_eq!(
+            store
+                .message_by_locator(account.id, "INBOX", 1)
+                .await
+                .unwrap()
+                .unwrap()
+                .subject,
+            "Old committed subject"
+        );
+
+        let (mut retry_client, retry_server) = duplex_imap_client_and_server();
+        let retry_server = spawn_server(retry_server, true);
+        service
+            .sync_mailboxes_with_progress_on_client(
+                &mut retry_client,
+                &account,
+                50,
+                vec![MailboxPlan::new("INBOX", "INBOX")],
+                true,
+                |_| {},
+            )
+            .await
+            .unwrap();
+        let retry_transcript = retry_server.await.unwrap();
+        assert!(retry_transcript
+            .iter()
+            .any(|command| command.starts_with("UID FETCH 1 (FLAGS INTERNALDATE ")));
+        assert_eq!(
+            store
+                .message_by_locator(account.id, "INBOX", 1)
+                .await
+                .unwrap()
+                .unwrap()
+                .subject,
+            "Replacement subject"
         );
     }
 
@@ -8900,6 +13338,8 @@ mod tests {
             mailbox: "INBOX".into(),
             remote_name: "INBOX".into(),
             uid_validity: 1,
+            uid_next: None,
+            highest_modseq: None,
             remote_total: 4,
             historical_complete: false,
         };
@@ -9874,6 +14314,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scripted_imap_idle_rejects_oversized_lines_in_every_protocol_state() {
+        let oversized = vec![b'x'; MAX_IMAP_RESPONSE_TRANSCRIPT_BYTES + 1];
+
+        let (mut continuation_client, continuation_server) = plain_imap_client_and_server().await;
+        let continuation_server = tokio::spawn({
+            let oversized = oversized.clone();
+            async move {
+                let (read, mut write) = continuation_server.into_split();
+                let mut read = BufReader::new(read);
+                let (_, command) = scripted_command(&mut read).await;
+                assert_eq!(command, "IDLE");
+                write.write_all(&oversized).await.unwrap();
+                write.write_all(b"\r\n").await.unwrap();
+            }
+        });
+        let (_cancel, mut active) = watch::channel(false);
+        let error = continuation_client
+            .idle_until_change(&mut active)
+            .await
+            .unwrap_err();
+        continuation_server.await.unwrap();
+        assert!(format!("{error:#}").contains("response line exceeds MIME safety limit"));
+
+        let (mut active_client, active_server) = plain_imap_client_and_server().await;
+        let active_server = tokio::spawn({
+            let oversized = oversized.clone();
+            async move {
+                let (read, mut write) = active_server.into_split();
+                let mut read = BufReader::new(read);
+                let (_, command) = scripted_command(&mut read).await;
+                assert_eq!(command, "IDLE");
+                write.write_all(b"+ idling\r\n").await.unwrap();
+                write.write_all(&oversized).await.unwrap();
+                write.write_all(b"\r\n").await.unwrap();
+            }
+        });
+        let (_cancel, mut active) = watch::channel(false);
+        let error = active_client
+            .idle_until_change(&mut active)
+            .await
+            .unwrap_err();
+        active_server.await.unwrap();
+        assert!(format!("{error:#}").contains("response line exceeds MIME safety limit"));
+
+        let (mut termination_client, termination_server) = plain_imap_client_and_server().await;
+        let termination_server = tokio::spawn(async move {
+            let (read, mut write) = termination_server.into_split();
+            let mut read = BufReader::new(read);
+            let (_, command) = scripted_command(&mut read).await;
+            assert_eq!(command, "IDLE");
+            write
+                .write_all(b"+ idling\r\n* 1 EXISTS\r\n")
+                .await
+                .unwrap();
+            let mut done = String::new();
+            read.read_line(&mut done).await.unwrap();
+            assert_eq!(done, "DONE\r\n");
+            write.write_all(&oversized).await.unwrap();
+            write.write_all(b"\r\n").await.unwrap();
+        });
+        let (_cancel, mut active) = watch::channel(false);
+        let error = termination_client
+            .idle_until_change(&mut active)
+            .await
+            .unwrap_err();
+        termination_server.await.unwrap();
+        assert!(format!("{error:#}").contains("response line exceeds MIME safety limit"));
+    }
+
+    #[tokio::test]
     async fn authentication_distinguishes_rejection_from_retryable_bye() {
         let account = test_account();
 
@@ -10028,18 +14538,15 @@ mod tests {
     #[test]
     fn parses_search() {
         assert_eq!(
-            parse_search_uids(&["* SEARCH 4 8 15\r\n".into()]),
+            parse_search_uids(&["* SEARCH 4 8 15\r\n".into()]).unwrap(),
             vec![4, 8, 15]
         );
-    }
-
-    #[test]
-    fn realtime_snapshot_fetches_only_uids_above_the_watermark() {
-        // Realtime reconciliation searches the complete mailbox so it can
-        // remove archived UIDs. The fetch batch must still contain only new
-        // mail, even when SEARCH ALL returns older UIDs out of order.
-        assert_eq!(sync_uids(vec![12, 7, 11, 10], Some(10), 25), vec![11, 12]);
-        assert_eq!(sync_uids(vec![12, 7, 11, 10], Some(10), 1), vec![11]);
+        assert!(parse_search_uids(&["* sEaRcH\r\n".into()])
+            .unwrap()
+            .is_empty());
+        assert!(parse_search_uids(&["D0001 OK searched\r\n".into()]).is_err());
+        assert!(parse_search_uids(&["* SEARCH 4 broken 15\r\n".into()]).is_err());
+        assert!(parse_search_uids(&["* SEARCH 0\r\n".into()]).is_err());
     }
 
     #[test]
@@ -10055,6 +14562,383 @@ mod tests {
             ]),
             vec![(41, true, false), (42, false, true)]
         );
+    }
+
+    #[test]
+    fn mailbox_snapshot_ranges_are_bounded_and_descend_from_newest_sequences() {
+        assert!(mailbox_snapshot_page_ranges(0).is_empty());
+        assert_eq!(mailbox_snapshot_page_ranges(1), vec![(1, 1)]);
+        assert_eq!(mailbox_snapshot_page_ranges(500), vec![(1, 500)]);
+        assert_eq!(mailbox_snapshot_page_ranges(501), vec![(2, 501), (1, 1)]);
+        assert_eq!(
+            mailbox_snapshot_page_ranges(1_001),
+            vec![(502, 1_001), (2, 501), (1, 1)]
+        );
+        assert!(mailbox_snapshot_page_ranges(30_000)
+            .iter()
+            .all(|(start, end)| end - start + 1 <= MAILBOX_SNAPSHOT_PAGE_SIZE));
+    }
+
+    #[test]
+    fn mailbox_snapshot_page_parses_mixed_case_uid_and_flags_in_either_order() {
+        assert_eq!(
+            parse_mailbox_snapshot_page(
+                &[
+                    "* 9 fEtCh (fLaGs (\\sEeN custom) uId 401)\r\n".into(),
+                    "* 10 FeTcH (UiD 402 FlAgS (\\fLaGgEd))\r\n".into(),
+                ],
+                2,
+            )
+            .unwrap(),
+            vec![
+                MailboxSnapshotItem {
+                    uid: 401,
+                    is_read: true,
+                    is_flagged: false,
+                },
+                MailboxSnapshotItem {
+                    uid: 402,
+                    is_read: false,
+                    is_flagged: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn mailbox_snapshot_page_rejects_incomplete_and_duplicate_uid_sets() {
+        let incomplete =
+            parse_mailbox_snapshot_page(&["* 1 FETCH (UID 41 FLAGS ())\r\n".into()], 2)
+                .unwrap_err();
+        assert!(incomplete.to_string().contains("page was incomplete"));
+
+        let duplicate = parse_mailbox_snapshot_page(
+            &[
+                "* 1 FETCH (UID 41 FLAGS ())\r\n".into(),
+                "* 2 FETCH (FLAGS (\\Seen) UID 41)\r\n".into(),
+            ],
+            2,
+        )
+        .unwrap_err();
+        assert!(duplicate.to_string().contains("repeated UID 41"));
+    }
+
+    #[tokio::test]
+    async fn mailbox_snapshot_range_halves_tagged_rejections_newest_half_first() {
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "FETCH 1:4 (UID FLAGS)").await;
+            write
+                .write_all(format!("{tag} NO range too large\r\n").as_bytes())
+                .await
+                .unwrap();
+
+            for (start, end) in [(3, 4), (1, 2)] {
+                let tag = scripted_expect_command(
+                    &mut read,
+                    &mut transcript,
+                    &format!("FETCH {start}:{end} (UID FLAGS)"),
+                )
+                .await;
+                for uid in start..=end {
+                    write
+                        .write_all(format!("* {uid} FETCH (UID {uid} FLAGS ())\r\n").as_bytes())
+                        .await
+                        .unwrap();
+                }
+                write
+                    .write_all(format!("{tag} OK smaller range\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            transcript
+        });
+
+        let items = fetch_mailbox_snapshot_range(&mut client, 1, 4, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            items.iter().map(|item| item.uid).collect::<Vec<_>>(),
+            vec![3, 4, 1, 2]
+        );
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.uid)
+                .collect::<std::collections::HashSet<_>>(),
+            [1, 2, 3, 4].into()
+        );
+        assert_eq!(
+            server.await.unwrap(),
+            vec![
+                "FETCH 1:4 (UID FLAGS)",
+                "FETCH 3:4 (UID FLAGS)",
+                "FETCH 1:2 (UID FLAGS)",
+            ]
+        );
+    }
+
+    #[test]
+    fn metadata_uid_batches_obey_count_and_encoded_command_byte_limits() {
+        let uids = (1..=100).rev().collect::<Vec<_>>();
+        let batches = uid_fetch_command_batches(&uids, "FLAGS BODY.PEEK[HEADER]");
+        assert_eq!(batches.concat(), uids);
+        assert!(batches
+            .iter()
+            .all(|batch| batch.len() <= MAX_METADATA_FETCH_UIDS));
+        for batch in batches {
+            let uid_set = batch
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            assert!(
+                format!("UID FETCH {uid_set} (FLAGS BODY.PEEK[HEADER])").len()
+                    <= MAX_IMAP_COMMAND_BYTES
+            );
+        }
+
+        let nearly_full_fields = "X".repeat(MAX_IMAP_COMMAND_BYTES - "UID FETCH  ()".len() - 6);
+        let byte_bounded = uid_fetch_command_batches(&[100_000, 99_999], &nearly_full_fields);
+        assert_eq!(byte_bounded, vec![vec![100_000], vec![99_999]]);
+    }
+
+    #[tokio::test]
+    async fn metadata_batch_rejection_halves_newest_first_and_isolates_each_uid() {
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            let tag = scripted_expect_command(
+                &mut read,
+                &mut transcript,
+                "UID FETCH 4,3,2,1 (FLAGS X-GM-LABELS BODY.PEEK[HEADER])",
+            )
+            .await;
+            write
+                .write_all(format!("{tag} NO too many UIDs\r\n").as_bytes())
+                .await
+                .unwrap();
+            for uids in [[4, 3], [2, 1]] {
+                let set = uids
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let tag = scripted_expect_command(
+                    &mut read,
+                    &mut transcript,
+                    &format!("UID FETCH {set} (FLAGS X-GM-LABELS BODY.PEEK[HEADER])"),
+                )
+                .await;
+                for uid in uids {
+                    let header = format!("Subject: UID {uid}\r\n\r\n");
+                    let flags = if uid == 4 { "\\Seen" } else { "" };
+                    let label = if uid == 3 { "\\\\Inbox" } else { "Other" };
+                    write.write_all(format!("* {uid} FETCH (UID {uid} FLAGS ({flags}) X-GM-LABELS ({label}) BODY[HEADER] {{{}}}\r\n", header.len()).as_bytes()).await.unwrap();
+                    write.write_all(header.as_bytes()).await.unwrap();
+                    write.write_all(b")\r\n").await.unwrap();
+                }
+                write
+                    .write_all(format!("{tag} OK batch\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            transcript
+        });
+        let mut result = fetch_uid_data_batched(
+            &mut client,
+            &[4, 3, 2, 1],
+            "FLAGS X-GM-LABELS BODY.PEEK[HEADER]",
+            4096,
+        )
+        .await;
+        assert!(result.failures.is_empty());
+        assert!(result.fatal.is_none());
+        assert_eq!(
+            result
+                .responses
+                .iter()
+                .map(|(uid, _)| *uid)
+                .collect::<Vec<_>>(),
+            vec![4, 3, 2, 1]
+        );
+        for (uid, response) in &mut result.responses {
+            assert_eq!(
+                String::from_utf8(response.take_header_literal_for(*uid).unwrap()).unwrap(),
+                format!("Subject: UID {uid}\r\n\r\n")
+            );
+            assert!(response
+                .lines
+                .iter()
+                .filter_map(|line| fetch_uid_from_line(line))
+                .all(|line_uid| line_uid == *uid));
+        }
+        assert!(result.responses[0].1.lines.join("").contains("\\Seen"));
+        assert!(!result.responses[1].1.lines.join("").contains("\\Seen"));
+        assert!(result.responses[1].1.lines.join("").contains("\\\\Inbox"));
+        assert_eq!(
+            server.await.unwrap(),
+            vec![
+                "UID FETCH 4,3,2,1 (FLAGS X-GM-LABELS BODY.PEEK[HEADER])",
+                "UID FETCH 4,3 (FLAGS X-GM-LABELS BODY.PEEK[HEADER])",
+                "UID FETCH 2,1 (FLAGS X-GM-LABELS BODY.PEEK[HEADER])",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_batch_keeps_one_missing_uid_isolated_from_successes() {
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            let tag = scripted_expect_command(
+                &mut read,
+                &mut transcript,
+                "UID FETCH 3,2,1 (BODY.PEEK[HEADER])",
+            )
+            .await;
+            for uid in [3, 1] {
+                let header = format!("Subject: {uid}\r\n\r\n");
+                write
+                    .write_all(
+                        format!(
+                            "* {uid} FETCH (UID {uid} BODY[HEADER] {{{}}}\r\n",
+                            header.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                write.write_all(header.as_bytes()).await.unwrap();
+                write.write_all(b")\r\n").await.unwrap();
+            }
+            write
+                .write_all(format!("{tag} OK partial\r\n").as_bytes())
+                .await
+                .unwrap();
+        });
+        let mut result =
+            fetch_uid_data_batched(&mut client, &[3, 2, 1], "BODY.PEEK[HEADER]", 4096).await;
+        assert!(result
+            .responses
+            .iter_mut()
+            .find(|(uid, _)| *uid == 3)
+            .unwrap()
+            .1
+            .take_header_literal_for(3)
+            .is_some());
+        assert!(result
+            .responses
+            .iter_mut()
+            .find(|(uid, _)| *uid == 2)
+            .unwrap()
+            .1
+            .take_header_literal_for(2)
+            .is_none());
+        assert!(result
+            .responses
+            .iter_mut()
+            .find(|(uid, _)| *uid == 1)
+            .unwrap()
+            .1
+            .take_header_literal_for(1)
+            .is_some());
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn mailbox_identity_parses_mixed_case_response_codes() {
+        assert_eq!(
+            parse_mailbox_identity(&[
+                "* 42 eXiStS\r\n".into(),
+                "* oK [uIdVaLiDiTy 98765] UIDs valid\r\n".into(),
+                "* OK [uIdNeXt 54321] Predicted next UID\r\n".into(),
+                "* OK [hIgHeStMoDsEq 18446744073709551615] Mod-sequence\r\n".into(),
+            ])
+            .unwrap(),
+            MailboxIdentity {
+                exists: 42,
+                uid_validity: 98_765,
+                uid_next: Some(54_321),
+                highest_modseq: Some(u64::MAX),
+            }
+        );
+    }
+
+    #[test]
+    fn mailbox_identity_rejects_instability_in_each_authoritative_field() {
+        let initial = MailboxIdentity {
+            exists: 42,
+            uid_validity: 77,
+            uid_next: Some(100),
+            highest_modseq: Some(900),
+        };
+        assert!(mailbox_identity_is_stable(&initial, &initial));
+
+        for changed in [
+            MailboxIdentity {
+                exists: 43,
+                ..initial.clone()
+            },
+            MailboxIdentity {
+                uid_validity: 78,
+                ..initial.clone()
+            },
+            MailboxIdentity {
+                uid_next: Some(101),
+                ..initial.clone()
+            },
+            MailboxIdentity {
+                highest_modseq: Some(901),
+                ..initial.clone()
+            },
+        ] {
+            assert!(!mailbox_identity_is_stable(&initial, &changed));
+        }
+
+        assert!(!mailbox_membership_is_stable(
+            &initial,
+            &MailboxIdentity {
+                uid_next: None,
+                highest_modseq: Some(901),
+                ..initial.clone()
+            }
+        ));
+        assert!(mailbox_membership_is_stable(
+            &initial,
+            &MailboxIdentity {
+                highest_modseq: Some(901),
+                ..initial
+            }
+        ));
+    }
+
+    #[test]
+    fn idle_invalidates_for_arrivals_expunges_flag_fetches_and_vanished_uids() {
+        for response in [
+            "* 43 EXISTS\r\n",
+            "* 7 expunge\r\n",
+            "* 8 FeTcH (UID 42 fLaGs (\\Seen))\r\n",
+            "* VANISHED (EARLIER) 4:6\r\n",
+        ] {
+            assert!(is_idle_invalidation(response), "ignored {response:?}");
+        }
+        for response in [
+            "+ idling\r\n",
+            "* 8 FETCH (UID 42 BODY[TEXT] {5}\r\n",
+            "D0001 OK IDLE completed\r\n",
+        ] {
+            assert!(!is_idle_invalidation(response), "misread {response:?}");
+        }
     }
 
     #[test]

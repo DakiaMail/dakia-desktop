@@ -56,6 +56,7 @@ import {
   onMailChanged,
   onMailHydrated,
   onMailIndexRebuilt,
+  onMailRebuildFinished,
   onMailRebuildProgress,
   onMailSyncState,
   onDesktopNotificationAction,
@@ -639,6 +640,25 @@ export default function App() {
       if (classificationRequestedRef.current) void classifyPending();
     }
   }, [loadMessages]);
+  useEffect(() => {
+    let disposed = false;
+    let dispose: () => void = () => undefined;
+    void onMailRebuildFinished(() => {
+      // A cancelled or failed rebuild can occur after the finding phase has
+      // optimistically removed this account's old rows from the list.
+      setActive(undefined);
+      setActiveThreadSnapshot(undefined);
+      setSelected(new Set());
+      void loadMessages().finally(() => setSyncStatus(undefined));
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else dispose = unlisten;
+    });
+    return () => {
+      disposed = true;
+      dispose();
+    };
+  }, [loadMessages]);
   const loadMoreMessages = useCallback(async () => {
     if (loadingMoreRef.current || !hasMore) return;
     const currentView = currentViewRef.current;
@@ -761,7 +781,7 @@ export default function App() {
     let disposeAccount: () => void = () => undefined;
     let disposeSettings: () => void = () => undefined;
     let disposeNotifications: () => void = () => undefined;
-    void onAccountConnected((account) => {
+    void onAccountConnected(({ account }) => {
       accountStateGenerationRef.current += 1;
       setAccounts((current) => {
         const next = [
@@ -771,24 +791,19 @@ export default function App() {
         accountsRef.current = next;
         return next;
       });
-      void syncAccounts(
-        [account],
-        setSyncStatus,
-        () => void loadMessages(),
-        true,
-      )
-        .then(async () => {
-          markSynced();
-          await requestInitialNotificationAccess(notificationSettings);
-          await loadMessages(
+      // The native backend owns rebuild scheduling and execution. This event
+      // is best-effort across windows, so it only updates the visible account
+      // list; progress and terminal rebuild events drive the mail reload.
+      void requestInitialNotificationAccess(notificationSettings)
+        .then(() =>
+          loadMessages(
             selectedAccountId
               ? [selectedAccountId]
               : [...new Set([...activeAccounts, account.id])],
-          );
-          void classifyPending();
-        })
+          ),
+        )
         .catch(showError)
-        .finally(() => setSyncStatus(undefined));
+        .finally(() => void classifyPending());
     }).then((unlisten) => {
       if (disposed) unlisten();
       else disposeAccount = unlisten;

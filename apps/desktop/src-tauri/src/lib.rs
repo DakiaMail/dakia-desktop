@@ -22,7 +22,7 @@ use secrecy::SecretString;
 use serde::Deserialize;
 use serde::Serialize;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::OpenOptions,
     future::Future,
     io::{ErrorKind, Read, Write},
@@ -47,7 +47,7 @@ use tauri::{
 };
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_opener::OpenerExt;
-use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard, Semaphore};
+use tokio::sync::{watch, Mutex as AsyncMutex, Notify, OwnedMutexGuard, Semaphore};
 use url::Url;
 use uuid::Uuid;
 
@@ -74,6 +74,8 @@ struct AppState {
     realtime: RealtimeSyncManager,
     remote_operation_slots: Arc<Semaphore>,
     mail_rebuilds: Mutex<HashMap<Uuid, MailRebuildProgress>>,
+    mail_rebuild_running: Mutex<HashSet<Uuid>>,
+    mail_rebuild_cancellations: MailRebuildCancellations,
     account_operations: AccountOperationLocks,
     translation_downloads: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
@@ -124,6 +126,125 @@ impl AccountOperationLocks {
     }
 }
 
+/// Coordinates a rebuild cancellation across the brief interval before a
+/// queued rebuild obtains the per-account operation lock.
+#[derive(Default)]
+struct MailRebuildCancellations {
+    active: Mutex<HashMap<Uuid, MailRebuildCancellation>>,
+}
+
+struct MailRebuildCancellation {
+    sender: watch::Sender<MailRebuildCancellationDisposition>,
+    registrations: usize,
+    reserved: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MailRebuildCancellationDisposition {
+    None,
+    Retain,
+    Replace,
+    Remove,
+}
+
+impl MailRebuildCancellations {
+    fn reserve(&self, account_id: Uuid) {
+        let mut active = self
+            .active
+            .lock()
+            .expect("mail rebuild cancellation lock poisoned");
+        let cancellation = active.entry(account_id).or_insert_with(|| {
+            let (sender, _) = watch::channel(MailRebuildCancellationDisposition::None);
+            MailRebuildCancellation {
+                sender,
+                registrations: 0,
+                reserved: false,
+            }
+        });
+        cancellation.reserved = true;
+    }
+
+    fn register(&self, account_id: Uuid) -> watch::Receiver<MailRebuildCancellationDisposition> {
+        let mut active = self
+            .active
+            .lock()
+            .expect("mail rebuild cancellation lock poisoned");
+        let cancellation = active.entry(account_id).or_insert_with(|| {
+            let (sender, _) = watch::channel(MailRebuildCancellationDisposition::None);
+            MailRebuildCancellation {
+                sender,
+                registrations: 0,
+                reserved: false,
+            }
+        });
+        cancellation.registrations += 1;
+        cancellation.sender.subscribe()
+    }
+
+    fn request(&self, account_id: Uuid, disposition: MailRebuildCancellationDisposition) {
+        if let Some(sender) = self
+            .active
+            .lock()
+            .expect("mail rebuild cancellation lock poisoned")
+            .get(&account_id)
+            .map(|cancellation| cancellation.sender.clone())
+        {
+            let current = *sender.borrow();
+            let next = match (current, disposition) {
+                (MailRebuildCancellationDisposition::Remove, _)
+                | (_, MailRebuildCancellationDisposition::Remove) => {
+                    MailRebuildCancellationDisposition::Remove
+                }
+                (MailRebuildCancellationDisposition::Replace, _)
+                | (_, MailRebuildCancellationDisposition::Replace) => {
+                    MailRebuildCancellationDisposition::Replace
+                }
+                (MailRebuildCancellationDisposition::Retain, _)
+                | (_, MailRebuildCancellationDisposition::Retain) => {
+                    MailRebuildCancellationDisposition::Retain
+                }
+                _ => MailRebuildCancellationDisposition::None,
+            };
+            // `send` drops the update when a reservation has no subscribed
+            // task yet. `send_replace` records it for the later register.
+            sender.send_replace(next);
+        }
+    }
+
+    fn disposition(
+        &self,
+        receiver: &watch::Receiver<MailRebuildCancellationDisposition>,
+    ) -> MailRebuildCancellationDisposition {
+        *receiver.borrow()
+    }
+
+    fn clear(&self, account_id: Uuid) {
+        let mut active = self
+            .active
+            .lock()
+            .expect("mail rebuild cancellation lock poisoned");
+        if let Some(cancellation) = active.get_mut(&account_id) {
+            cancellation.registrations -= 1;
+            if cancellation.registrations == 0 && !cancellation.reserved {
+                active.remove(&account_id);
+            }
+        }
+    }
+
+    fn release_reservation(&self, account_id: Uuid) {
+        let mut active = self
+            .active
+            .lock()
+            .expect("mail rebuild cancellation lock poisoned");
+        if let Some(cancellation) = active.get_mut(&account_id) {
+            cancellation.reserved = false;
+            if cancellation.registrations == 0 {
+                active.remove(&account_id);
+            }
+        }
+    }
+}
+
 fn normalized_account_email(email: &str) -> String {
     email.trim().to_ascii_lowercase()
 }
@@ -132,10 +253,63 @@ fn matching_account_email(account: &Account, email: &str) -> bool {
     normalized_account_email(&account.email) == normalized_account_email(email)
 }
 
+fn same_mail_namespace(existing: &Account, candidate: &Account) -> bool {
+    existing.provider_id == candidate.provider_id
+        && match (&existing.auth, &candidate.auth) {
+            (
+                AccountAuth::Password {
+                    username: existing_username,
+                },
+                AccountAuth::Password {
+                    username: candidate_username,
+                },
+            ) => existing_username == candidate_username,
+            (
+                AccountAuth::OAuth2 {
+                    username: existing_username,
+                    provider: existing_provider,
+                    ..
+                },
+                AccountAuth::OAuth2 {
+                    username: candidate_username,
+                    provider: candidate_provider,
+                    ..
+                },
+            ) => existing_username == candidate_username && existing_provider == candidate_provider,
+            _ => false,
+        }
+        && existing
+            .imap_host
+            .trim()
+            .eq_ignore_ascii_case(candidate.imap_host.trim())
+        && existing.imap_port == candidate.imap_port
+        && existing.imap_security == candidate.imap_security
+        && existing.archive_mailbox == candidate.archive_mailbox
+        && existing.spam_mailbox == candidate.spam_mailbox
+}
+
+fn reuse_existing_account_record(existing: &Account, candidate: &mut Account) -> bool {
+    let can_resume_existing_index = same_mail_namespace(existing, candidate);
+    candidate.id = existing.id;
+    candidate.created_at = existing.created_at;
+    candidate.account_name = existing.account_name.clone();
+    can_resume_existing_index
+}
+
 fn credential_secret_name(account: &Account) -> String {
     // Keep this aligned with `dakia_core::mail::CredentialStore::key` so an
     // OAuth save failure can restore a credential it just replaced.
     format!("dev.dakia.mail:{}:{}", account.id, account.auth.username())
+}
+
+fn previous_credential_secret_name(
+    existing: Option<&Account>,
+    candidate: &Account,
+) -> Option<String> {
+    let current = credential_secret_name(candidate);
+    existing
+        .map(credential_secret_name)
+        .filter(|previous| previous != &current)
 }
 
 async fn enabled_account_for_operation(
@@ -195,6 +369,29 @@ fn complete_manual_sync_attempt<T>(
 mod account_operation_lock_tests {
     use super::*;
 
+    fn account() -> Account {
+        Account {
+            id: Uuid::new_v4(),
+            email: "reader@example.com".into(),
+            account_name: "Reader".into(),
+            display_name: "Reader".into(),
+            provider_id: "fastmail".into(),
+            auth: AccountAuth::Password {
+                username: "reader@example.com".into(),
+            },
+            imap_host: "imap.fastmail.com".into(),
+            imap_port: 993,
+            imap_security: dakia_core::provider::Security::Tls,
+            smtp_host: "smtp.fastmail.com".into(),
+            smtp_port: 465,
+            smtp_security: dakia_core::provider::Security::Tls,
+            archive_mailbox: "Archive".into(),
+            spam_mailbox: "Spam".into(),
+            enabled: true,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
     #[tokio::test]
     async fn serializes_the_same_account_without_blocking_the_lock_registry() {
         let locks = Arc::new(AccountOperationLocks::default());
@@ -239,11 +436,169 @@ mod account_operation_lock_tests {
         assert_eq!(error.to_string(), "restart failed");
     }
 
+    #[tokio::test]
+    async fn cancellation_reaches_a_rebuild_registered_while_waiting_for_its_account_lock() {
+        let cancellations = MailRebuildCancellations::default();
+        let account_id = Uuid::new_v4();
+        let locks = AccountOperationLocks::default();
+        let held_lock = locks.acquire(account_id).await;
+
+        let receiver = cancellations.register(account_id);
+        cancellations.request(account_id, MailRebuildCancellationDisposition::Retain);
+
+        assert_eq!(
+            cancellations.disposition(&receiver),
+            MailRebuildCancellationDisposition::Retain
+        );
+        drop(held_lock);
+        cancellations.clear(account_id);
+
+        // An account update with no registered rebuild must not turn into a
+        // stale cancellation for a later, unrelated full sync.
+        cancellations.request(account_id, MailRebuildCancellationDisposition::Retain);
+        let next_attempt = cancellations.register(account_id);
+        assert_eq!(
+            cancellations.disposition(&next_attempt),
+            MailRebuildCancellationDisposition::None
+        );
+    }
+
+    #[test]
+    fn cancellation_reaches_a_reserved_rebuild_before_its_task_registers() {
+        let cancellations = MailRebuildCancellations::default();
+        let account_id = Uuid::new_v4();
+
+        cancellations.reserve(account_id);
+        cancellations.request(account_id, MailRebuildCancellationDisposition::Retain);
+        let receiver = cancellations.register(account_id);
+
+        assert_eq!(
+            cancellations.disposition(&receiver),
+            MailRebuildCancellationDisposition::Retain
+        );
+        cancellations.clear(account_id);
+        cancellations.release_reservation(account_id);
+
+        // A later unrelated reservation gets a fresh channel, rather than a
+        // stale cancellation from a completed update.
+        cancellations.reserve(account_id);
+        let next = cancellations.register(account_id);
+        assert_eq!(
+            cancellations.disposition(&next),
+            MailRebuildCancellationDisposition::None
+        );
+    }
+
+    #[test]
+    fn durable_reset_intent_cannot_be_downgraded_by_a_queued_worker() {
+        assert!(effective_rebuild_reset(false, Some(true)));
+        assert!(effective_rebuild_reset(true, Some(false)));
+        assert!(!effective_rebuild_reset(false, Some(false)));
+    }
+
+    #[test]
+    fn initial_reset_jobs_survive_missing_or_rejected_credentials() {
+        assert!(!should_retain_mail_rebuild_job(
+            &anyhow::anyhow!("mail rebuild cancelled"),
+            MailRebuildCancellationDisposition::Remove,
+            true,
+        ));
+        assert!(!should_retain_mail_rebuild_job(
+            &anyhow::anyhow!("IMAP authentication rejected: invalid credentials"),
+            MailRebuildCancellationDisposition::None,
+            false,
+        ));
+        assert!(should_retain_mail_rebuild_job(
+            &anyhow::anyhow!("IMAP authentication rejected: invalid credentials"),
+            MailRebuildCancellationDisposition::None,
+            true,
+        ));
+        assert!(!should_retain_mail_rebuild_job(
+            &anyhow::anyhow!("credentials are not stored for this account"),
+            MailRebuildCancellationDisposition::None,
+            false,
+        ));
+        assert!(should_retain_mail_rebuild_job(
+            &anyhow::anyhow!("credentials are not stored for this account"),
+            MailRebuildCancellationDisposition::None,
+            true,
+        ));
+        assert!(should_retain_mail_rebuild_job(
+            &anyhow::anyhow!("IMAP connection closed during command"),
+            MailRebuildCancellationDisposition::None,
+            false,
+        ));
+    }
+
+    #[test]
+    fn cancellation_disposition_retains_replacement_but_removes_deleted_account_jobs() {
+        let transient = anyhow::anyhow!("IMAP connection closed during command");
+        let permanent = anyhow::anyhow!("IMAP authentication rejected");
+        assert!(should_retain_mail_rebuild_job(
+            &permanent,
+            MailRebuildCancellationDisposition::Retain,
+            false,
+        ));
+        assert!(should_retain_mail_rebuild_job(
+            &transient,
+            MailRebuildCancellationDisposition::Replace,
+            false,
+        ));
+        assert!(!should_retain_mail_rebuild_job(
+            &transient,
+            MailRebuildCancellationDisposition::Remove,
+            true,
+        ));
+    }
+
     #[test]
     fn normalizes_email_identity_for_account_reuse() {
         assert_eq!(
             normalized_account_email(" Existing@Example.Com "),
             "existing@example.com"
+        );
+    }
+
+    #[test]
+    fn reuses_an_index_only_for_the_same_remote_namespace() {
+        let existing = account();
+        let same_remote = existing.clone();
+        assert!(same_mail_namespace(&existing, &same_remote));
+
+        let mut different_provider = same_remote.clone();
+        different_provider.provider_id = "outlook".into();
+        assert!(!same_mail_namespace(&existing, &different_provider));
+
+        let mut different_host = same_remote.clone();
+        different_host.imap_host = "imap.other.example".into();
+        assert!(!same_mail_namespace(&existing, &different_host));
+
+        let mut different_username = same_remote.clone();
+        different_username.auth = AccountAuth::Password {
+            username: "other@example.com".into(),
+        };
+        assert!(!same_mail_namespace(&existing, &different_username));
+
+        let mut different_mailbox = same_remote;
+        different_mailbox.archive_mailbox = "All Mail".into();
+        assert!(!same_mail_namespace(&existing, &different_mailbox));
+    }
+
+    #[test]
+    fn reconnecting_with_a_new_login_selects_only_the_old_credential_key() {
+        let existing = account();
+        let mut reconnected = existing.clone();
+        reconnected.auth = AccountAuth::Password {
+            username: "new-login@example.com".into(),
+        };
+
+        assert_eq!(
+            previous_credential_secret_name(Some(&existing), &reconnected),
+            Some(credential_secret_name(&existing)),
+        );
+        assert_eq!(
+            previous_credential_secret_name(Some(&reconnected), &reconnected),
+            None,
         );
     }
 }
@@ -680,6 +1035,8 @@ struct MailRebuildProgress {
     phase: String,
     completed: usize,
     total: Option<usize>,
+    #[serde(skip)]
+    reset_before_sync: bool,
 }
 
 impl From<MailRebuildJob> for MailRebuildProgress {
@@ -689,6 +1046,7 @@ impl From<MailRebuildJob> for MailRebuildProgress {
             phase: job.phase,
             completed: job.completed,
             total: job.total,
+            reset_before_sync: job.reset_before_sync,
         }
     }
 }
@@ -1112,6 +1470,13 @@ struct AddAccountInput {
     password: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountConnection {
+    account: Account,
+    reused_existing_account: bool,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateAccountInput {
@@ -1438,6 +1803,8 @@ mod message_content_repair_tests {
             classification_owner: "message-content-test".into(),
             classification: Arc::new(ClassificationScheduler::default()),
             mail_rebuilds: Mutex::new(HashMap::new()),
+            mail_rebuild_running: Mutex::new(HashSet::new()),
+            mail_rebuild_cancellations: MailRebuildCancellations::default(),
             account_operations: AccountOperationLocks::default(),
             remote_operation_slots: Arc::new(Semaphore::new(MESSAGE_HYDRATION_CONCURRENCY)),
             translation_downloads: Mutex::new(HashMap::new()),
@@ -2841,6 +3208,14 @@ async fn update_account(
     if input.imap_host.trim().is_empty() || input.smtp_host.trim().is_empty() {
         return Err("IMAP and SMTP hosts are required".into());
     }
+    // Ask an existing rebuild to stop before waiting for its account lock. A
+    // normal settings or credential update retains the durable job so it can
+    // resume with the new connection details.
+    request_mail_rebuild_cancel(
+        state.inner(),
+        input.id,
+        MailRebuildCancellationDisposition::Retain,
+    );
     let _operation = state.account_operations.acquire(input.id).await;
     let mut account = state
         .store
@@ -2848,6 +3223,7 @@ async fn update_account(
         .await
         .map_err(error)?
         .ok_or_else(|| "Account not found".to_owned())?;
+    let previous_account = account.clone();
     account.account_name = input.account_name.trim().to_owned();
     account.display_name = input.display_name.trim().to_owned();
     account.imap_host = input.imap_host.trim().to_owned();
@@ -2858,18 +3234,78 @@ async fn update_account(
     account.smtp_security = input.smtp_security;
     account.archive_mailbox = input.archive_mailbox.trim().to_owned();
     account.spam_mailbox = input.spam_mailbox.trim().to_owned();
-    if let Some(password) = input.password.filter(|value| !value.is_empty()) {
-        if !matches!(account.auth, AccountAuth::Password { .. }) {
-            return Err("OAuth accounts must be reconnected through their provider".into());
+    let password_was_supplied = input
+        .password
+        .as_deref()
+        .is_some_and(|value| !value.is_empty());
+    if password_was_supplied && !matches!(account.auth, AccountAuth::Password { .. }) {
+        return Err("OAuth accounts must be reconnected through their provider".into());
+    }
+    let namespace_changed = !same_mail_namespace(&previous_account, &account);
+    if namespace_changed {
+        // Stop the old namespace watcher before committing a replacement.
+        state.realtime.stop_account(account.id).await;
+    }
+    let password_secret_name = credential_secret_name(&account);
+    let previous_password_credential = if password_was_supplied {
+        match state.store.secret(&password_secret_name).await {
+            Ok(credential) => credential,
+            Err(secret_error) => {
+                if namespace_changed {
+                    let _ = state.realtime.reconcile(app.clone()).await;
+                }
+                return Err(error(secret_error));
+            }
         }
-        MailService::new(state.store.clone())
+    } else {
+        None
+    };
+    if let Some(password) = input.password.filter(|value| !value.is_empty()) {
+        if let Err(set_error) = MailService::new(state.store.clone())
             .credentials()
             .set_password(&account, &password)
             .await
-            .map_err(error)?;
+        {
+            if namespace_changed {
+                let _ = state.realtime.reconcile(app.clone()).await;
+            }
+            return Err(error(set_error));
+        }
     }
-    state.store.save_account(&account).await.map_err(error)?;
-    state.realtime.reconcile(app).await.map_err(error)?;
+    if let Err(save_error) = save_account_with_rebuild_intent(
+        state.inner(),
+        &account,
+        namespace_changed,
+        None,
+        &password_secret_name,
+    )
+    .await
+    {
+        if password_was_supplied {
+            let rollback_mail = MailService::new(state.store.clone());
+            let credentials = rollback_mail.credentials();
+            let rollback = match previous_password_credential {
+                Some(previous) => {
+                    state
+                        .store
+                        .set_secret(&password_secret_name, &previous)
+                        .await
+                }
+                None => credentials.delete(&account).await,
+            };
+            if let Err(rollback_error) = rollback {
+                tracing::error!(account_id = %account.id, error = %rollback_error, "could not roll back password credentials after saving the account failed");
+            }
+        }
+        if namespace_changed {
+            let _ = state.realtime.reconcile(app.clone()).await;
+        }
+        return Err(error(save_error));
+    }
+    if !namespace_changed {
+        state.realtime.reconcile(app.clone()).await.map_err(error)?;
+    }
+    resume_scheduled_mail_rebuild(app, state.inner().clone(), account.clone()).await;
     Ok(account)
 }
 
@@ -3026,6 +3462,11 @@ async fn remove_account(
     state: State<'_, Arc<AppState>>,
     account_id: Uuid,
 ) -> Result<(), String> {
+    request_mail_rebuild_cancel(
+        state.inner(),
+        account_id,
+        MailRebuildCancellationDisposition::Remove,
+    );
     let _operation = state.account_operations.acquire(account_id).await;
     let account = state
         .store
@@ -3072,7 +3513,7 @@ async fn add_account(
     app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     input: AddAccountInput,
-) -> Result<Account, String> {
+) -> Result<AccountConnection, String> {
     let preset = input
         .draft
         .provider_id
@@ -3097,35 +3538,100 @@ async fn add_account(
     }
     let mut account = input.draft.into_account(preset);
     let stored_accounts = state.store.accounts().await.map_err(error)?;
-    let mut reused_existing_account = false;
+    let mut reuses_existing_account_record = false;
+    let mut can_resume_existing_index = false;
     if let Some(existing) = stored_accounts
         .into_iter()
         .find(|stored| matching_account_email(stored, &account.email))
     {
-        account.id = existing.id;
-        account.created_at = existing.created_at;
-        account.account_name = existing.account_name;
-        reused_existing_account = true;
+        can_resume_existing_index = reuse_existing_account_record(&existing, &mut account);
+        reuses_existing_account_record = true;
     }
+    if reuses_existing_account_record {
+        request_mail_rebuild_cancel(
+            state.inner(),
+            account.id,
+            MailRebuildCancellationDisposition::Retain,
+        );
+    }
+    let requires_reset = !can_resume_existing_index;
     let _operation = state.account_operations.acquire(account.id).await;
-    if reused_existing_account
-        && state
-            .store
-            .account(account.id)
-            .await
-            .map_err(error)?
-            .is_none()
-    {
+    let existing_account = if reuses_existing_account_record {
+        state.store.account(account.id).await.map_err(error)?
+    } else {
+        None
+    };
+    if reuses_existing_account_record && existing_account.is_none() {
         return Err("Account not found".into());
     }
+    if requires_reset {
+        state.realtime.stop_account(account.id).await;
+    }
     let mail = MailService::new(state.store.clone());
-    mail.credentials()
+    let password_secret_name = credential_secret_name(&account);
+    let previous_secret_name = previous_credential_secret_name(existing_account.as_ref(), &account);
+    let replaced_credential = if let Some(existing) = existing_account.as_ref() {
+        let existing_secret_name = credential_secret_name(&existing);
+        if existing_secret_name == password_secret_name {
+            state
+                .store
+                .secret(&existing_secret_name)
+                .await
+                .map_err(error)?
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if let Err(set_error) = mail
+        .credentials()
         .set_password(&account, &input.password)
         .await
-        .map_err(error)?;
-    state.store.save_account(&account).await.map_err(error)?;
-    state.realtime.reconcile(app).await.map_err(error)?;
-    Ok(account)
+    {
+        if requires_reset {
+            let _ = state.realtime.reconcile(app.clone()).await;
+        }
+        return Err(error(set_error));
+    }
+    if let Err(save_error) = save_account_with_rebuild_intent(
+        state.inner(),
+        &account,
+        requires_reset,
+        previous_secret_name.as_deref(),
+        &password_secret_name,
+    )
+    .await
+    {
+        let rollback = match replaced_credential {
+            Some(previous) => {
+                state
+                    .store
+                    .set_secret(&password_secret_name, &previous)
+                    .await
+            }
+            None => mail.credentials().delete(&account).await,
+        };
+        if let Err(rollback_error) = rollback {
+            tracing::error!(
+                account_id = %account.id,
+                error = %rollback_error,
+                "could not roll back password credentials after saving the account failed"
+            );
+        }
+        if requires_reset {
+            let _ = state.realtime.reconcile(app.clone()).await;
+        }
+        return Err(error(save_error));
+    }
+    if !requires_reset {
+        state.realtime.reconcile(app.clone()).await.map_err(error)?;
+    }
+    resume_scheduled_mail_rebuild(app, state.inner().clone(), account.clone()).await;
+    Ok(AccountConnection {
+        account,
+        reused_existing_account: can_resume_existing_index,
+    })
 }
 
 #[tauri::command]
@@ -3133,7 +3639,7 @@ async fn add_oauth_account(
     app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     draft: AccountDraft,
-) -> Result<Account, String> {
+) -> Result<AccountConnection, String> {
     let preset = draft
         .provider_id
         .as_deref()
@@ -3166,18 +3672,25 @@ async fn add_oauth_account(
         access_token_expires_at: tokens.expires_at,
     };
     let stored_accounts = state.store.accounts().await.map_err(error)?;
-    let mut reused_existing_account = false;
+    let mut reuses_existing_account_record = false;
+    let mut can_resume_existing_index = false;
     if let Some(existing) = stored_accounts
         .into_iter()
         .find(|stored| matching_account_email(stored, &account.email))
     {
-        account.id = existing.id;
-        account.created_at = existing.created_at;
-        account.account_name = existing.account_name;
-        reused_existing_account = true;
+        can_resume_existing_index = reuse_existing_account_record(&existing, &mut account);
+        reuses_existing_account_record = true;
     }
+    if reuses_existing_account_record {
+        request_mail_rebuild_cancel(
+            state.inner(),
+            account.id,
+            MailRebuildCancellationDisposition::Retain,
+        );
+    }
+    let requires_reset = !can_resume_existing_index;
     let _operation = state.account_operations.acquire(account.id).await;
-    let existing_account = if reused_existing_account {
+    let existing_account = if reuses_existing_account_record {
         Some(
             state
                 .store
@@ -3189,9 +3702,13 @@ async fn add_oauth_account(
     } else {
         None
     };
+    if requires_reset {
+        state.realtime.stop_account(account.id).await;
+    }
     let mail = MailService::new(state.store.clone());
     let oauth_secret_name = credential_secret_name(&account);
-    let replaced_credential = if let Some(existing) = existing_account {
+    let previous_secret_name = previous_credential_secret_name(existing_account.as_ref(), &account);
+    let replaced_credential = if let Some(existing) = existing_account.as_ref() {
         let existing_secret_name = credential_secret_name(&existing);
         if existing_secret_name == oauth_secret_name {
             state
@@ -3205,11 +3722,21 @@ async fn add_oauth_account(
     } else {
         None
     };
-    mail.credentials()
-        .set_oauth_tokens(&account, &tokens)
-        .await
-        .map_err(error)?;
-    if let Err(save_error) = state.store.save_account(&account).await {
+    if let Err(set_error) = mail.credentials().set_oauth_tokens(&account, &tokens).await {
+        if requires_reset {
+            let _ = state.realtime.reconcile(app.clone()).await;
+        }
+        return Err(error(set_error));
+    }
+    if let Err(save_error) = save_account_with_rebuild_intent(
+        state.inner(),
+        &account,
+        requires_reset,
+        previous_secret_name.as_deref(),
+        &oauth_secret_name,
+    )
+    .await
+    {
         let rollback = match replaced_credential {
             Some(previous_credential) => {
                 state
@@ -3226,10 +3753,19 @@ async fn add_oauth_account(
                 "could not roll back OAuth credentials after saving the account failed"
             );
         }
+        if requires_reset {
+            let _ = state.realtime.reconcile(app.clone()).await;
+        }
         return Err(error(save_error));
     }
-    state.realtime.reconcile(app.clone()).await.map_err(error)?;
-    Ok(account)
+    if !requires_reset {
+        state.realtime.reconcile(app.clone()).await.map_err(error)?;
+    }
+    resume_scheduled_mail_rebuild(app, state.inner().clone(), account.clone()).await;
+    Ok(AccountConnection {
+        account,
+        reused_existing_account: can_resume_existing_index,
+    })
 }
 
 const GOOGLE_DESKTOP_CLIENT_ID: &str =
@@ -3739,11 +4275,19 @@ fn publish_mail_rebuild_progress(
     account_id: Uuid,
     progress: SyncProgress,
 ) {
+    let reset_before_sync = state
+        .mail_rebuilds
+        .lock()
+        .expect("mail rebuild lock poisoned")
+        .get(&account_id)
+        .map(|job| job.reset_before_sync)
+        .unwrap_or(false);
     let update = MailRebuildProgress {
         account_id,
         phase: progress.phase.to_owned(),
         completed: progress.completed,
         total: progress.total,
+        reset_before_sync,
     };
     state
         .mail_rebuilds
@@ -3753,19 +4297,245 @@ fn publish_mail_rebuild_progress(
     let _ = app.emit("mail-rebuild-progress", &update);
 }
 
+fn request_mail_rebuild_cancel(
+    state: &Arc<AppState>,
+    account_id: Uuid,
+    disposition: MailRebuildCancellationDisposition,
+) {
+    state
+        .mail_rebuild_cancellations
+        .request(account_id, disposition);
+}
+
+fn reserve_mail_rebuild(state: &Arc<AppState>, account_id: Uuid) -> bool {
+    let reserved = state
+        .mail_rebuild_running
+        .lock()
+        .expect("mail rebuild reservation lock poisoned")
+        .insert(account_id);
+    if reserved {
+        // Register the cancellation channel with the reservation, before the
+        // spawned task can run. A namespace-changing update can now cancel a
+        // queued worker rather than missing the pre-registration window.
+        state.mail_rebuild_cancellations.reserve(account_id);
+    }
+    reserved
+}
+
+fn release_mail_rebuild(state: &Arc<AppState>, account_id: Uuid) {
+    let released = state
+        .mail_rebuild_running
+        .lock()
+        .expect("mail rebuild reservation lock poisoned")
+        .remove(&account_id);
+    if released {
+        state
+            .mail_rebuild_cancellations
+            .release_reservation(account_id);
+    }
+}
+
+async fn schedule_mail_rebuild(
+    state: &Arc<AppState>,
+    account_id: Uuid,
+    reset_before_sync: bool,
+) -> anyhow::Result<()> {
+    let job = MailRebuildJob {
+        account_id,
+        phase: "connecting".to_owned(),
+        completed: 0,
+        total: None,
+        reset_before_sync,
+    };
+    // Persistence comes first. A realtime reconcile must never win the race
+    // with the durable replacement intent.
+    state.store.save_mail_rebuild_job(&job).await?;
+    state
+        .mail_rebuilds
+        .lock()
+        .expect("mail rebuild lock poisoned")
+        .insert(account_id, job.into());
+    Ok(())
+}
+
+fn reset_mail_rebuild_job(account_id: Uuid) -> MailRebuildJob {
+    MailRebuildJob {
+        account_id,
+        phase: "connecting".to_owned(),
+        completed: 0,
+        total: None,
+        reset_before_sync: true,
+    }
+}
+
+async fn save_account_with_rebuild_intent(
+    state: &Arc<AppState>,
+    account: &Account,
+    reset_before_sync: bool,
+    previous_secret_name: Option<&str>,
+    current_secret_name: &str,
+) -> anyhow::Result<()> {
+    if !reset_before_sync {
+        return state.store.save_account(account).await;
+    }
+    let job = reset_mail_rebuild_job(account.id);
+    // The namespace replacement is indivisible: a reconnect can never leave
+    // a changed remote identity saved without its required reset job.
+    if let Some(previous_secret_name) = previous_secret_name {
+        state
+            .store
+            .save_account_with_reset_mail_rebuild_job_and_delete_previous_secret(
+                account,
+                &job,
+                Some(previous_secret_name),
+                current_secret_name,
+            )
+            .await?;
+    } else {
+        state
+            .store
+            .save_account_with_reset_mail_rebuild_job(account, &job)
+            .await?;
+    }
+    state
+        .mail_rebuilds
+        .lock()
+        .expect("mail rebuild lock poisoned")
+        .insert(account.id, job.into());
+    Ok(())
+}
+
+async fn resume_scheduled_mail_rebuild(
+    app: tauri::AppHandle,
+    state: Arc<AppState>,
+    account: Account,
+) {
+    let in_memory = {
+        state
+            .mail_rebuilds
+            .lock()
+            .expect("mail rebuild lock poisoned")
+            .get(&account.id)
+            .map(|job| job.reset_before_sync)
+    };
+    let reset_before_sync = match in_memory {
+        Some(reset_before_sync) => Some(reset_before_sync),
+        None => match state.store.mail_rebuild_jobs().await {
+            Ok(jobs) => jobs
+                .into_iter()
+                .find(|job| job.account_id == account.id)
+                .map(|job| job.reset_before_sync),
+            Err(error) => {
+                tracing::warn!(account_id = %account.id, error = %error, "could not load retained mail rebuild job");
+                None
+            }
+        },
+    };
+    let Some(reset_before_sync) = reset_before_sync else {
+        return;
+    };
+    if !reserve_mail_rebuild(&state, account.id) {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = run_mail_rebuild(app, state, account, reset_before_sync).await {
+            tracing::warn!(error = %error, "could not resume retained mail rebuild");
+        }
+    });
+}
+
+fn should_retain_mail_rebuild_job(
+    error: &anyhow::Error,
+    disposition: MailRebuildCancellationDisposition,
+    reset_before_sync: bool,
+) -> bool {
+    if matches!(
+        disposition,
+        MailRebuildCancellationDisposition::Retain | MailRebuildCancellationDisposition::Replace
+    ) {
+        return true;
+    }
+    if matches!(disposition, MailRebuildCancellationDisposition::Remove)
+        || error.to_string() == "mail rebuild cancelled"
+    {
+        return false;
+    }
+    // A first or replacement index has no trusted catalogue yet. Keep its
+    // reset intent even for a credential error so reconnecting the same
+    // namespace can finish the original replacement instead of silently
+    // downgrading to a normal incremental sync.
+    if reset_before_sync {
+        return true;
+    }
+    !error.chain().any(|cause| {
+        let message = cause.to_string().to_ascii_lowercase();
+        message.contains("imap authentication rejected")
+            || message.contains("credentials are not stored")
+            || message.contains("stored oauth credentials are invalid")
+    })
+}
+
+fn effective_rebuild_reset(requested_reset: bool, durable_reset: Option<bool>) -> bool {
+    requested_reset || durable_reset.unwrap_or(false)
+}
+
 async fn run_mail_rebuild(
     app: tauri::AppHandle,
     state: Arc<AppState>,
     account: Account,
     reset_before_sync: bool,
 ) -> anyhow::Result<SyncResult> {
+    // Register before waiting on the account lock. Update/remove can request
+    // cancellation while this rebuild is queued behind another operation.
+    let cancel_receiver = state.mail_rebuild_cancellations.register(account.id);
     let _operation = state.account_operations.acquire(account.id).await;
-    let account = state
-        .store
-        .account(account.id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("Account not found"))?;
-    run_mail_rebuild_locked(app, state, account, reset_before_sync).await
+    let current_account = match state.store.account(account.id).await {
+        Err(error) => {
+            state.mail_rebuild_cancellations.clear(account.id);
+            release_mail_rebuild(&state, account.id);
+            return Err(error.into());
+        }
+        Ok(Some(account)) => account,
+        Ok(None) => {
+            state
+                .mail_rebuilds
+                .lock()
+                .expect("mail rebuild lock poisoned")
+                .remove(&account.id);
+            state.mail_rebuild_cancellations.clear(account.id);
+            release_mail_rebuild(&state, account.id);
+            return Err(anyhow::anyhow!("Account not found"));
+        }
+    };
+    // The durable job is the source of truth while holding the account lock.
+    // A queued worker may have captured an older `false` before an update
+    // atomically replaced its job with `true`; never downgrade that reset.
+    let durable_reset = match state.store.mail_rebuild_jobs().await {
+        Ok(jobs) => jobs
+            .into_iter()
+            .find(|job| job.account_id == account.id)
+            .map(|job| job.reset_before_sync),
+        Err(error) => {
+            state.mail_rebuild_cancellations.clear(account.id);
+            release_mail_rebuild(&state, account.id);
+            return Err(error);
+        }
+    };
+    let reset_before_sync = effective_rebuild_reset(reset_before_sync, durable_reset);
+    let result = run_mail_rebuild_locked(
+        app,
+        state.clone(),
+        current_account,
+        reset_before_sync,
+        cancel_receiver,
+    )
+    .await;
+    // This is deliberately outside the worker body: database failures before
+    // the first checkpoint must not leave a queued cancellation or a stale
+    // duplicate-run reservation behind.
+    state.mail_rebuild_cancellations.clear(account.id);
+    release_mail_rebuild(&state, account.id);
+    result
 }
 
 async fn run_mail_rebuild_locked(
@@ -3773,58 +4543,134 @@ async fn run_mail_rebuild_locked(
     state: Arc<AppState>,
     account: Account,
     reset_before_sync: bool,
+    mut cancel_receiver: watch::Receiver<MailRebuildCancellationDisposition>,
 ) -> anyhow::Result<SyncResult> {
-    state.realtime.stop_account(account.id).await;
     let initial = MailRebuildJob {
         account_id: account.id,
         phase: "connecting".to_owned(),
         completed: 0,
         total: None,
+        reset_before_sync,
     };
-    state.store.save_mail_rebuild_job(&initial).await?;
-    state
-        .mail_rebuilds
-        .lock()
-        .expect("mail rebuild lock poisoned")
-        .insert(account.id, initial.into());
+    let mut stopped_realtime = false;
+    let result = async {
+        if state
+            .mail_rebuild_cancellations
+            .disposition(&cancel_receiver)
+            != MailRebuildCancellationDisposition::None
+        {
+            return Err(anyhow::anyhow!("mail rebuild cancelled"));
+        }
+        state.realtime.stop_account(account.id).await;
+        stopped_realtime = true;
+        state.store.save_mail_rebuild_job(&initial).await?;
+        state
+            .mail_rebuilds
+            .lock()
+            .expect("mail rebuild lock poisoned")
+            .insert(account.id, initial.clone().into());
 
-    let service = MailService::new(state.store.clone());
-    let progress_app = app.clone();
-    let progress_state = state.clone();
-    let account_id = account.id;
-    let result = if reset_before_sync {
-        service
-            .rebuild_all_with_progress(&account, 250, move |progress| {
-                publish_mail_rebuild_progress(&progress_app, &progress_state, account_id, progress);
-            })
-            .await
-    } else {
-        service
-            .resume_rebuild_all_with_progress(&account, 250, move |progress| {
-                publish_mail_rebuild_progress(&progress_app, &progress_state, account_id, progress);
-            })
-            .await
-    };
+        let service = MailService::new(state.store.clone());
+        let progress_app = app.clone();
+        let progress_state = state.clone();
+        let account_id = account.id;
+        let rebuild = async {
+            if reset_before_sync {
+                service
+                    .rebuild_all_with_progress(&account, 250, move |progress| {
+                        publish_mail_rebuild_progress(
+                            &progress_app,
+                            &progress_state,
+                            account_id,
+                            progress,
+                        );
+                    })
+                    .await
+            } else {
+                service
+                    .resume_rebuild_all_with_progress(&account, 250, move |progress| {
+                        publish_mail_rebuild_progress(
+                            &progress_app,
+                            &progress_state,
+                            account_id,
+                            progress,
+                        );
+                    })
+                    .await
+            }
+        };
+        tokio::pin!(rebuild);
+        tokio::select! {
+            result = &mut rebuild => result,
+            changed = cancel_receiver.changed() => {
+                match changed {
+                    Ok(()) if state.mail_rebuild_cancellations.disposition(&cancel_receiver)
+                        != MailRebuildCancellationDisposition::None =>
+                    {
+                        Err(anyhow::anyhow!("mail rebuild cancelled"))
+                    }
+                    _ => rebuild.await,
+                }
+            }
+        }
+    }
+    .await;
+    let disposition = state
+        .mail_rebuild_cancellations
+        .disposition(&cancel_receiver);
 
+    let mut result = result;
+    let retains_durable_job = result.as_ref().err().is_some_and(|failure| {
+        should_retain_mail_rebuild_job(failure, disposition, reset_before_sync)
+    });
     if result.is_ok() {
-        state.store.delete_mail_rebuild_job(account.id).await?;
+        if let Err(error) = state.store.delete_mail_rebuild_job(account.id).await {
+            result = Err(error.into());
+        }
         state
             .mail_rebuilds
             .lock()
             .expect("mail rebuild lock poisoned")
             .remove(&account.id);
-        let _ = app.emit(
-            "mail-index-rebuilt",
-            serde_json::json!({ "accountId": account.id }),
-        );
-        kick_classification(state.clone());
+        if result.is_ok() {
+            let _ = app.emit(
+                "mail-index-rebuilt",
+                serde_json::json!({ "accountId": account.id }),
+            );
+            kick_classification(state.clone());
+        }
+    } else if retains_durable_job {
+        // Leave the persisted job intact so application startup can resume
+        // this interrupted rebuild. Save the last published checkpoint before
+        // clearing the in-memory entry, so a restart resumes with truthful
+        // progress instead of the initial connecting state.
+        let latest = state
+            .mail_rebuilds
+            .lock()
+            .expect("mail rebuild lock poisoned")
+            .remove(&account.id);
+        if let Some(latest) = latest {
+            if let Err(error) = state
+                .store
+                .save_mail_rebuild_job(&MailRebuildJob {
+                    account_id: latest.account_id,
+                    phase: latest.phase,
+                    completed: latest.completed,
+                    total: latest.total,
+                    reset_before_sync: latest.reset_before_sync,
+                })
+                .await
+            {
+                tracing::warn!(
+                    account_id = %account.id,
+                    error = %error,
+                    "could not persist failed mail rebuild checkpoint"
+                );
+            }
+        }
     } else {
         if let Err(error) = state.store.delete_mail_rebuild_job(account.id).await {
-            tracing::warn!(
-                account_id = %account.id,
-                error = %error,
-                "could not clear failed mail rebuild job"
-            );
+            tracing::warn!(account_id = %account.id, error = %error, "could not delete abandoned mail rebuild job");
         }
         state
             .mail_rebuilds
@@ -3832,7 +4678,27 @@ async fn run_mail_rebuild_locked(
             .expect("mail rebuild lock poisoned")
             .remove(&account.id);
     }
-    restart_realtime_if_current(app, &state, account.id).await?;
+    let outcome = if result.is_ok() {
+        "completed"
+    } else if disposition != MailRebuildCancellationDisposition::None {
+        "cancelled"
+    } else {
+        "failed"
+    };
+    let _ = app.emit(
+        "mail-rebuild-finished",
+        serde_json::json!({ "accountId": account.id, "outcome": outcome }),
+    );
+    // Do not restart realtime into an old catalogue while a replacement reset
+    // remains reserved. The resumed rebuild owns restarting it on success.
+    if stopped_realtime && !(retains_durable_job && reset_before_sync) {
+        if let Err(error) = restart_realtime_if_current(app, &state, account.id).await {
+            if result.is_ok() {
+                return Err(error);
+            }
+            tracing::warn!(account_id = %account.id, error = %error, "could not restart realtime after mail rebuild");
+        }
+    }
     result
 }
 
@@ -3859,22 +4725,42 @@ async fn sync_account(
     on_progress: Channel<SyncProgress>,
 ) -> Result<SyncResult, String> {
     let result = if full.unwrap_or(false) {
-        let account = state
-            .store
-            .account(account_id)
-            .await
-            .map_err(error)?
-            .ok_or_else(|| "Account not found".to_owned())?;
-        if state
-            .mail_rebuilds
-            .lock()
-            .map_err(error)?
-            .contains_key(&account_id)
-        {
+        if !reserve_mail_rebuild(state.inner(), account_id) {
             return Err("A mail re-index is already running for this account".to_owned());
         }
-        let result =
-            run_mail_rebuild(app.clone(), state.inner().clone(), account.clone(), true).await;
+        let account = state.store.account(account_id).await.map_err(error);
+        let account = match account
+            .and_then(|account| account.ok_or_else(|| "Account not found".to_owned()))
+        {
+            Ok(account) => account,
+            Err(error) => {
+                release_mail_rebuild(state.inner(), account_id);
+                return Err(error);
+            }
+        };
+        let reset_before_sync = match state.mail_rebuilds.lock().map_err(error) {
+            Ok(rebuilds) => rebuilds
+                .get(&account_id)
+                .map(|job| job.reset_before_sync)
+                .unwrap_or(true),
+            Err(lock_error) => {
+                release_mail_rebuild(state.inner(), account_id);
+                return Err(lock_error);
+            }
+        };
+        if let Err(schedule_error) =
+            schedule_mail_rebuild(state.inner(), account_id, reset_before_sync).await
+        {
+            release_mail_rebuild(state.inner(), account_id);
+            return Err(error(schedule_error));
+        }
+        let result = run_mail_rebuild(
+            app.clone(),
+            state.inner().clone(),
+            account.clone(),
+            reset_before_sync,
+        )
+        .await;
         if result.is_ok() {
             let _ = on_progress.send(SyncProgress {
                 phase: "complete",
@@ -4465,6 +5351,8 @@ pub fn run() {
                     classification_owner: Uuid::new_v4().to_string(),
                     classification: Arc::new(ClassificationScheduler::default()),
                     mail_rebuilds: Mutex::new(mail_rebuilds),
+                    mail_rebuild_running: Mutex::new(HashSet::new()),
+                    mail_rebuild_cancellations: MailRebuildCancellations::default(),
                     account_operations: AccountOperationLocks::default(),
                     remote_operation_slots: Arc::new(Semaphore::new(MESSAGE_HYDRATION_CONCURRENCY)),
                     translation_downloads: Mutex::new(HashMap::new()),
@@ -4493,23 +5381,31 @@ pub fn run() {
             let realtime_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 kick_classification(state.clone());
-                let rebuilding: std::collections::HashSet<_> = state
+                let rebuilding: HashMap<_, _> = state
                     .mail_rebuilds
                     .lock()
                     .expect("mail rebuild lock poisoned")
-                    .keys()
-                    .copied()
+                    .iter()
+                    .map(|(account_id, job)| (*account_id, job.reset_before_sync))
                     .collect();
                 match state.store.accounts().await {
                     Ok(accounts) => {
                         for account in accounts {
-                            if rebuilding.contains(&account.id) {
+                            if let Some(reset_before_sync) = rebuilding.get(&account.id) {
                                 let rebuild_app = realtime_app.clone();
                                 let rebuild_state = state.clone();
+                                let reset_before_sync = *reset_before_sync;
+                                if !reserve_mail_rebuild(&rebuild_state, account.id) {
+                                    continue;
+                                }
                                 tauri::async_runtime::spawn(async move {
-                                    if let Err(error) =
-                                        run_mail_rebuild(rebuild_app, rebuild_state, account, false)
-                                            .await
+                                    if let Err(error) = run_mail_rebuild(
+                                        rebuild_app,
+                                        rebuild_state,
+                                        account,
+                                        reset_before_sync,
+                                    )
+                                    .await
                                     {
                                         tracing::error!(
                                             error = %error,

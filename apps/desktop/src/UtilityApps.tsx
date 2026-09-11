@@ -25,6 +25,7 @@ import {
   notifyAccountUpdated,
   onMailSyncState,
   onMailIndexRebuilt,
+  onMailRebuildFinished,
   onMailRebuildProgress,
   openAccountWindow,
 } from "./nativeWindows";
@@ -66,11 +67,11 @@ export function AccountWindowApp() {
   const save = async (draft: Record<string, unknown>, password?: string) => {
     setSaving(true);
     try {
-      const account =
+      const connection =
         password === undefined
           ? await api.addOAuthAccount(draft)
           : await api.addAccount(draft, password);
-      await notifyAccountConnected(account);
+      await notifyAccountConnected(connection);
       await closeNativeWindow();
     } catch (error) {
       showError(error, t("account.setupError"));
@@ -156,10 +157,11 @@ export function SettingsWindowApp() {
     let disposeSyncState: () => void = () => undefined;
     let disposeRebuildProgress: () => void = () => undefined;
     let disposeRebuilt: () => void = () => undefined;
+    let disposeRebuildFinished: () => void = () => undefined;
     void onNativeMenuAction((action) => {
       if (action === "close-window") void closeNativeWindow();
     }).then((unlisten) => (dispose = unlisten));
-    void onAccountConnected((account) => {
+    void onAccountConnected(({ account }) => {
       setAccounts((current) => [
         ...current.filter((item) => item.id !== account.id),
         account,
@@ -182,12 +184,17 @@ export function SettingsWindowApp() {
       setAccountFullSyncing(false);
       setAccountFullSyncProgress(undefined);
     }).then((unlisten) => (disposeRebuilt = unlisten));
+    void onMailRebuildFinished(() => {
+      setAccountFullSyncing(false);
+      setAccountFullSyncProgress(undefined);
+    }).then((unlisten) => (disposeRebuildFinished = unlisten));
     return () => {
       dispose();
       disposeAccount();
       disposeSelectedAccount();
       disposeSyncState();
       disposeRebuildProgress();
+      disposeRebuildFinished();
       disposeRebuilt();
     };
   }, [t]);
