@@ -17,6 +17,14 @@ const classifierManifest = JSON.parse(
   readFileSync(resolve(classifierDirectory, "MANIFEST.json"), "utf8"),
 );
 const gitAttributes = readFileSync(resolve(root, ".gitattributes"), "utf8");
+const pullRequestWorkflow = readFileSync(
+  resolve(root, ".github/workflows/pull-request-validation.yml"),
+  "utf8",
+);
+const coreManifest = readFileSync(
+  resolve(root, "crates/dakia-core/Cargo.toml"),
+  "utf8",
+);
 
 test("release builds run after the optional preparation job is skipped", () => {
   const buildJob = workflow.match(/\n  build:\n([\s\S]*?)\n  publish:\n/)?.[1];
@@ -42,7 +50,6 @@ test("normalizes Windows runner paths before extracting the compiler cache", () 
     /archive="\$RUNNER_TEMP\/\$\{\{ matrix\.sccache_archive \}\}"/,
   );
 });
-
 test("preserves the exact bytes of every pinned classifier asset", () => {
   const binaryPaths = new Set(
     gitAttributes
@@ -59,4 +66,19 @@ test("preserves the exact bytes of every pinned classifier asset", () => {
       `${file} must be exempt from checkout line-ending conversion`,
     );
   }
+});
+
+test("keeps the tokenizer C++ training accelerator out of release builds", () => {
+  assert.match(
+    coreManifest,
+    /^tokenizers = \{ version = "=0\.22\.2", default-features = false, features = \["onig"\] \}$/m,
+  );
+  assert.match(
+    pullRequestWorkflow,
+    /cargo tree --locked --target x86_64-pc-windows-msvc -p dakia-cli -e features -i esaxx-rs/,
+  );
+  assert.match(
+    pullRequestWorkflow,
+    /grep -Fq 'esaxx-rs feature "cpp"'/,
+  );
 });
