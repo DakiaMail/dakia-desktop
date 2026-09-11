@@ -232,8 +232,7 @@ if ! node -e '
   exit 1
 fi
 
-env -u DAKIA_GOOGLE_CLIENT_ID -u DAKIA_GOOGLE_CLIENT_SECRET \
-  DAKIA_RELEASE_SMOKE_TEST=1 \
+DAKIA_RELEASE_SMOKE_TEST=1 \
   DAKIA_RELEASE_SMOKE_DATA_DIR="$smoke_root/data" \
   RUST_BACKTRACE=1 \
   "$executable" >"$output" 2>&1 &
@@ -267,10 +266,4 @@ if ! grep -Fq "DAKIA_RELEASE_SMOKE_TEST_OK" "$output"; then
   cat "$output" >&2
   exit 1
 fi
-if ! grep -Fq "DAKIA_RELEASE_GOOGLE_OAUTH_CONFIG_OK" "$output"; then
-  echo "Packaged Dakia is missing its compiled Google OAuth configuration." >&2
-  cat "$output" >&2
-  exit 1
-fi
-
 echo "Packaged Dakia startup smoke test passed: $app"

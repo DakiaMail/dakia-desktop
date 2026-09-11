@@ -23,7 +23,7 @@ describe("account connection API bridge", () => {
     Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
   });
 
-  it("preserves whether an account connection reused an existing catalogue", async () => {
+  it("preserves the account connection response from password setup", async () => {
     const response = {
       account: { id: "account-1", email: "me@example.com" },
       reusedExistingAccount: true,
@@ -35,10 +35,8 @@ describe("account connection API bridge", () => {
     await expect(api.addAccount(draft, "app-password")).resolves.toEqual(
       response,
     );
-    await expect(api.addOAuthAccount(draft)).resolves.toEqual(response);
     expect(apiMocks.invoke.mock.calls).toEqual([
       ["add_account", { input: { draft, password: "app-password" } }],
-      ["add_oauth_account", { draft }],
     ]);
   });
 });

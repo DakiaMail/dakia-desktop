@@ -278,10 +278,6 @@ impl CredentialStore {
     pub async fn set_password(&self, account: &Account, password: &str) -> Result<()> {
         self.store_secret(account, password).await
     }
-    pub async fn set_oauth_tokens(&self, account: &Account, tokens: &OAuthTokens) -> Result<()> {
-        self.store_secret(account, &serde_json::to_string(tokens)?)
-            .await
-    }
     pub async fn delete(&self, account: &Account) -> Result<()> {
         self.store
             .delete_secret(&format!("{}:{}", self.service, self.key(account)))
@@ -294,14 +290,31 @@ impl CredentialStore {
         )) {
             return Ok(value);
         }
-        let stored = self.load_secret(account).await?;
+        let stored = if matches!(account.auth, AccountAuth::OAuth2 { .. }) {
+            self.load_secret(account)
+                .await
+                .context("OAuth authentication failed")?
+        } else {
+            self.load_secret(account).await?
+        };
         if matches!(account.auth, AccountAuth::OAuth2 { .. }) {
-            let mut tokens: OAuthTokens =
-                serde_json::from_str(&stored).context("stored OAuth credentials are invalid")?;
+            let mut tokens: OAuthTokens = serde_json::from_str(&stored)
+                .context("stored OAuth credentials are invalid")
+                .context("OAuth authentication failed")?;
             if tokens.should_refresh() {
                 tokens.refresh().await?;
-                self.store_secret(account, &serde_json::to_string(&tokens)?)
-                    .await?;
+                let name = format!("{}:{}", self.service, self.key(account));
+                if !self
+                    .store
+                    .set_oauth_secret_if_current(
+                        account.id,
+                        &name,
+                        &serde_json::to_string(&tokens)?,
+                    )
+                    .await?
+                {
+                    anyhow::bail!("OAuth authentication was replaced with an app password");
+                }
             }
             Ok(tokens.access_token)
         } else {
@@ -12335,6 +12348,47 @@ mod tests {
             spam_mailbox: None,
         }
         .into_account(provider::by_id("fastmail").unwrap())
+    }
+
+    #[tokio::test]
+    async fn legacy_oauth_credentials_continue_using_access_tokens_and_classify_bad_state() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let mut account = test_account();
+        account.auth = AccountAuth::OAuth2 {
+            username: account.email.clone(),
+            provider: "gmail".into(),
+            access_token_expires_at: None,
+        };
+        store.save_account(&account).await.unwrap();
+        let secret_name = format!("dev.dakia.mail:{}:{}", account.id, account.auth.username());
+        let valid_tokens = OAuthTokens {
+            access_token: "legacy-access-token".into(),
+            refresh_token: Some("legacy-refresh-token".into()),
+            expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
+            client_id: "legacy-client".into(),
+            client_secret: None,
+            token_url: Url::parse("https://oauth2.googleapis.com/token").unwrap(),
+        };
+        store
+            .set_secret(&secret_name, &serde_json::to_string(&valid_tokens).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            service.credentials().secret(&account).await.unwrap(),
+            "legacy-access-token"
+        );
+
+        store
+            .set_secret(&secret_name, "not oauth tokens")
+            .await
+            .unwrap();
+        let error = service.credentials().secret(&account).await.unwrap_err();
+        assert!(
+            error.to_string().contains("OAuth authentication failed"),
+            "{error:#}"
+        );
     }
 
     fn mime_corpus(name: &str) -> &'static [u8] {

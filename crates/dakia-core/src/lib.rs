@@ -4,7 +4,7 @@ pub mod classification;
 mod flowed;
 pub mod mail;
 pub mod mime_budget;
-pub mod oauth;
+mod oauth;
 pub mod provider;
 pub mod storage;
 
@@ -16,7 +16,6 @@ pub use mail::{
     MailService, MailboxAction, RealtimeCycle, RealtimeMode, SenderTrashResult, SyncProgress,
     SyncResult, UnsubscribeOutcome,
 };
-pub use oauth::{OAuthFlow, OAuthProviderConfig, OAuthTokens};
 pub use provider::{ProviderPreset, Security};
 pub use storage::{
     Attachment, AttachmentPresentation, CachedMessageContent, MailConversation,

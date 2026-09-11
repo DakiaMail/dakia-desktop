@@ -37,7 +37,6 @@ export type Provider = {
   smtp_security: Security;
   archive_mailbox: string;
   spam_mailbox: string;
-  oauth: boolean;
   app_password_help?: string;
 };
 export type MailSummary = {

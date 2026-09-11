@@ -64,13 +64,10 @@ export function AccountWindowApp() {
     void api.providers().then(setProviders).catch(showError);
   }, [t]);
 
-  const save = async (draft: Record<string, unknown>, password?: string) => {
+  const save = async (draft: Record<string, unknown>, password: string) => {
     setSaving(true);
     try {
-      const connection =
-        password === undefined
-          ? await api.addOAuthAccount(draft)
-          : await api.addAccount(draft, password);
+      const connection = await api.addAccount(draft, password);
       await notifyAccountConnected(connection);
       await closeNativeWindow();
     } catch (error) {
@@ -84,7 +81,6 @@ export function AccountWindowApp() {
       providers={providers}
       saving={saving}
       onSave={(draft, password) => void save(draft, password)}
-      onOAuth={(draft) => void save(draft)}
     />
   );
 
@@ -257,6 +253,21 @@ export function SettingsWindowApp() {
   };
 
   const saveAccount = async (input: Record<string, unknown>) => {
+    const previousAccounts = accounts;
+    const accountId = input.id as string;
+    const password = input.password;
+    if (typeof password === "string" && password) {
+      setAccounts((current) =>
+        current.map((account) =>
+          account.id === accountId && account.auth.type === "oauth2"
+            ? {
+                ...account,
+                auth: { type: "password", username: account.auth.username },
+              }
+            : account,
+        ),
+      );
+    }
     setAccountSaving(true);
     try {
       const updated = await api.updateAccount(input);
@@ -270,6 +281,11 @@ export function SettingsWindowApp() {
         t("settings.accountSavedBody"),
       );
     } catch (error) {
+      try {
+        setAccounts(await api.accounts());
+      } catch {
+        setAccounts(previousAccounts);
+      }
       showError(error, t("settings.accountSaveError"));
     } finally {
       setAccountSaving(false);

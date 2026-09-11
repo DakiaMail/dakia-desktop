@@ -8,19 +8,21 @@ import {
   Text,
   TextInput,
 } from "@mantine/core";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { api } from "../api";
 import type { Provider } from "../types";
 
 type Props = {
   providers: Provider[];
   saving: boolean;
   onSave: (draft: Record<string, unknown>, password: string) => void;
-  onOAuth: (draft: Record<string, unknown>) => void;
 };
 
-export function AccountSetup({ providers, saving, onSave, onOAuth }: Props) {
+const GOOGLE_APP_PASSWORD_URL =
+  "https://support.google.com/accounts/answer/185833?hl=en";
+
+export function AccountSetup({ providers, saving, onSave }: Props) {
   const { t } = useTranslation();
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
@@ -33,7 +35,6 @@ export function AccountSetup({ providers, saving, onSave, onOAuth }: Props) {
   const [smtpHost, setSmtpHost] = useState("");
   const [smtpPort, setSmtpPort] = useState("");
   const [smtpSecurity, setSmtpSecurity] = useState<"tls" | "start_tls">("tls");
-  const [authMode, setAuthMode] = useState<"oauth" | "password">("oauth");
   const detected = useMemo(
     () =>
       providers.find((item) =>
@@ -47,19 +48,21 @@ export function AccountSetup({ providers, saving, onSave, onOAuth }: Props) {
     if (!provider && detected) setProvider(detected.id);
   }, [detected, provider]);
   const chosen = providers.find((item) => item.id === provider);
-  const usesOAuth = Boolean(chosen?.oauth && authMode === "oauth");
+  const passwordLabel =
+    chosen?.id === "gmail"
+      ? t("account.googleAppPassword")
+      : t("account.password");
   useEffect(() => {
-    setAuthMode(chosen?.oauth ? "oauth" : "password");
     if (chosen) {
       setImapSecurity(chosen.imap_security);
       setSmtpSecurity(chosen.smtp_security);
     }
-  }, [chosen?.id, chosen?.oauth, chosen?.imap_security, chosen?.smtp_security]);
+  }, [chosen?.id, chosen?.imap_security, chosen?.smtp_security]);
   const valid =
     email.includes("@") &&
     name.trim() &&
     provider &&
-    (usesOAuth || password) &&
+    password.trim() &&
     (provider !== "custom" || (imapHost && smtpHost));
   const draft = () => ({
     email,
@@ -75,8 +78,7 @@ export function AccountSetup({ providers, saving, onSave, onOAuth }: Props) {
     archive_mailbox: null,
     spam_mailbox: null,
   });
-  const submit = () =>
-    usesOAuth ? onOAuth(draft()) : onSave(draft(), password);
+  const submit = () => onSave(draft(), password);
   return (
     <main className="utility-window account-window">
       <header className="utility-header" data-tauri-drag-region>
@@ -109,33 +111,51 @@ export function AccountSetup({ providers, saving, onSave, onOAuth }: Props) {
             required
           />
           {chosen?.id === "gmail" ? (
-            <Text role="status" size="xs" className="gmail-verification-notice">
-              {t("account.gmailVerificationNotice")}
-            </Text>
+            <section className="gmail-app-password-guidance">
+              <Text fw={650} size="sm">
+                {t("account.gmailAppPasswordTitle")}
+              </Text>
+              <ol>
+                <li>{t("account.gmailAppPasswordStepOne")}</li>
+                <li>
+                  {t("account.gmailAppPasswordStepTwoBefore")}{" "}
+                  <button
+                    type="button"
+                    className="native-link"
+                    onClick={() =>
+                      void api.openExternal(GOOGLE_APP_PASSWORD_URL)
+                    }
+                  >
+                    {t("account.gmailAppPasswordGuide")}
+                  </button>
+                  {t("account.gmailAppPasswordStepTwoAfter")}
+                </li>
+                <li>{t("account.gmailAppPasswordStepThree")}</li>
+              </ol>
+              <Text role="alert" size="sm" fw={600}>
+                {t("account.gmailAppPasswordWarning")}
+              </Text>
+              <Text size="xs" c="dimmed">
+                {t("account.gmailAppPasswordUnavailable")}
+              </Text>
+            </section>
           ) : null}
-          {usesOAuth ? (
-            <Text size="sm" c="dimmed">
-              {t("account.browserHint")}
-            </Text>
-          ) : (
-            <>
-              <PasswordInput
-                label={t("account.password")}
-                value={password}
-                onChange={(event) => setPassword(event.currentTarget.value)}
-                required
-              />
-              {chosen?.app_password_help ? (
-                <button
-                  type="button"
-                  className="native-link"
-                  onClick={() => void openUrl(chosen.app_password_help!)}
-                >
-                  {t("account.appPasswordHelp", { provider: chosen.name })}
-                </button>
-              ) : null}
-            </>
-          )}
+          <PasswordInput
+            label={passwordLabel}
+            aria-label={passwordLabel}
+            value={password}
+            onChange={(event) => setPassword(event.currentTarget.value)}
+            required
+          />
+          {chosen?.id !== "gmail" && chosen?.app_password_help ? (
+            <button
+              type="button"
+              className="native-link"
+              onClick={() => void api.openExternal(chosen.app_password_help!)}
+            >
+              {t("account.appPasswordHelp", { provider: chosen.name })}
+            </button>
+          ) : null}
           <Accordion variant="contained">
             <Accordion.Item value="advanced">
               <Accordion.Control>{t("account.advanced")}</Accordion.Control>
@@ -210,21 +230,8 @@ export function AccountSetup({ providers, saving, onSave, onOAuth }: Props) {
             </Accordion.Item>
           </Accordion>
           <Button onClick={submit} disabled={!valid} loading={saving}>
-            {usesOAuth
-              ? t("account.continueWith", { provider: chosen?.name })
-              : t("actions.addAccount")}
+            {t("actions.addAccount")}
           </Button>
-          {chosen?.oauth ? (
-            <Button
-              variant="subtle"
-              color="gray"
-              onClick={() => setAuthMode(usesOAuth ? "password" : "oauth")}
-            >
-              {usesOAuth
-                ? t("account.useAppPassword")
-                : t("account.useSecureSignIn")}
-            </Button>
-          ) : null}
         </Stack>
       </div>
     </main>

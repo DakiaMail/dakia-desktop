@@ -323,8 +323,7 @@ async fn run_watcher(
                 }
             }
             Err(error) => {
-                let message = error.to_string();
-                if message.to_ascii_lowercase().contains("authentication") {
+                if is_authentication_failure(&error) {
                     tracing::warn!(account_id = %account.id, provider = %account.provider_id, "real-time sync authentication paused");
                     publish_status(
                         &app,
@@ -368,6 +367,13 @@ async fn run_watcher(
     drop(arrival_sender);
     drop(maintenance_sender);
     let _ = hydration_handle.await;
+}
+
+fn is_authentication_failure(error: &anyhow::Error) -> bool {
+    error
+        .to_string()
+        .to_ascii_lowercase()
+        .contains("authentication")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1157,6 +1163,16 @@ mod tests {
         let id = Uuid::from_bytes([7; 16]);
         assert!(retry_delay(1, id) < Duration::from_secs(2));
         assert!(retry_delay(100, id) <= Duration::from_secs(66));
+    }
+
+    #[test]
+    fn legacy_oauth_authentication_failures_pause_while_token_service_failures_retry() {
+        assert!(is_authentication_failure(&anyhow::anyhow!(
+            "OAuth authentication failed (400 Bad Request): invalid_grant"
+        )));
+        assert!(!is_authentication_failure(&anyhow::anyhow!(
+            "OAuth token refresh failed (503 Service Unavailable)"
+        )));
     }
 
     #[test]

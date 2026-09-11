@@ -1909,13 +1909,28 @@ textarea {
   margin: 0 auto;
   padding: 22px 28px 30px;
 }
-.gmail-verification-notice {
+.gmail-app-password-guidance,
+.google-app-password-banner {
   padding: 8px 10px;
   border: 1px solid var(--dakia-divider);
   border-radius: 7px;
   color: light-dark(#5f625f, #b8bfbb);
   line-height: 1.45;
   background: light-dark(#f5f1ea, #282c29);
+}
+.gmail-app-password-guidance ol {
+  margin: 6px 0;
+  padding-left: 20px;
+}
+.gmail-app-password-guidance .native-link,
+.google-app-password-banner .native-link {
+  color: inherit;
+  text-decoration: underline;
+}
+.google-app-password-banner {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 6px;
 }
 .settings-tabs {
   min-height: 0;

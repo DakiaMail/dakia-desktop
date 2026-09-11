@@ -17,7 +17,13 @@ import {
 } from "@tabler/icons-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { Account, Security, SyncProgress } from "../types";
+import { api } from "../api";
+import type {
+  Account,
+  RealtimeSyncStatus,
+  Security,
+  SyncProgress,
+} from "../types";
 
 type Props = {
   accounts: Account[];
@@ -25,6 +31,7 @@ type Props = {
   removing: boolean;
   fullSyncing: boolean;
   fullSyncProgress?: SyncProgress;
+  realtimeStatuses: RealtimeSyncStatus[];
   onAdd: () => void;
   selectedAccountId?: string;
   onSave: (input: Record<string, unknown>) => void;
@@ -57,6 +64,7 @@ export function AccountsSettings({
   removing,
   fullSyncing,
   fullSyncProgress,
+  realtimeStatuses,
   onAdd,
   selectedAccountId,
   onSave,
@@ -90,10 +98,20 @@ export function AccountsSettings({
     }
     if (selected.id !== selectedId) setSelectedId(selected.id);
     setDraft(toDraft(selected));
-  }, [selected?.id]);
+  }, [selected?.id, selected?.auth.type]);
 
   const update = <K extends keyof Draft>(key: K, value: Draft[K]) =>
     setDraft((current) => (current ? { ...current, [key]: value } : current));
+  const needsGoogleAppPassword = Boolean(
+    selected?.provider_id === "gmail" &&
+    selected?.auth.type === "oauth2" &&
+    realtimeStatuses.some(
+      (status) =>
+        status.accountId === selected.id &&
+        status.state === "paused" &&
+        status.errorKind === "authentication",
+    ),
+  );
   const valid = Boolean(
     selected &&
     draft?.accountName.trim() &&
@@ -101,8 +119,12 @@ export function AccountsSettings({
     draft.imapHost.trim() &&
     Number(draft.imapPort) > 0 &&
     draft.smtpHost.trim() &&
-    Number(draft.smtpPort) > 0,
+    Number(draft.smtpPort) > 0 &&
+    (!needsGoogleAppPassword || draft.password.trim().length > 0),
   );
+  const passwordLabel = needsGoogleAppPassword
+    ? t("account.googleAppPassword")
+    : t("settings.newPassword");
 
   return (
     <div className="accounts-settings">
@@ -276,14 +298,43 @@ export function AccountsSettings({
               />
             </section>
 
-            {selected.auth.type === "password" ? (
+            {selected.auth.type === "password" || needsGoogleAppPassword ? (
               <section className="account-config-section">
                 <Text className="account-config-label">
                   {t("settings.credentials")}
                 </Text>
+                {needsGoogleAppPassword ? (
+                  <div className="google-app-password-banner" role="alert">
+                    <Text fw={650} size="sm">
+                      {t("settings.googleAppPasswordRequired")}
+                    </Text>
+                    <Text size="sm">
+                      {t("settings.googleAppPasswordRequiredBody")}
+                    </Text>
+                    <button
+                      type="button"
+                      className="native-link"
+                      onClick={() =>
+                        void api.openExternal(
+                          "https://support.google.com/accounts/answer/185833?hl=en",
+                        )
+                      }
+                    >
+                      {t("settings.googleAppPasswordGuide")}
+                    </button>
+                    <Text size="xs">
+                      {t("settings.googleAppPasswordUnavailable")}
+                    </Text>
+                  </div>
+                ) : null}
                 <PasswordInput
-                  label={t("settings.newPassword")}
-                  description={t("settings.passwordHint")}
+                  label={passwordLabel}
+                  aria-label={passwordLabel}
+                  description={
+                    needsGoogleAppPassword
+                      ? t("settings.googleAppPasswordWarning")
+                      : t("settings.passwordHint")
+                  }
                   value={draft.password}
                   onChange={(event) =>
                     update("password", event.currentTarget.value)

@@ -28,8 +28,7 @@ Apple Silicon Mac. It produces the macOS part of a release; the hosted
 workflow is the normal cross-platform producer. Start from a clean local
 `main` that exactly matches cached and live `origin/main` and has the required
 Developer ID identity, `dakia-notary` Keychain profile, updater signing key,
-Google Desktop OAuth values, R2 credentials, GitHub authentication, and the
-trusted SSH tag-signing key.
+R2 credentials, GitHub authentication, and the trusted SSH tag-signing key.
 
 ```bash
 npm run verify:local
