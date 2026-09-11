@@ -2223,7 +2223,7 @@ impl MailService {
     {
         let sender_address =
             normalize_sender_address(sender_address).context("sender address is invalid")?;
-        client.authenticate(account, &secret).await?;
+        client.authenticate(account, secret).await?;
         let listing = client.command("LIST \"\" \"*\"").await?;
         let mut candidates = Vec::new();
         let mut seen_mailboxes = BTreeSet::new();
