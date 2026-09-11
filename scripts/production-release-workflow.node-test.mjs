@@ -18,3 +18,19 @@ test("release builds run after the optional preparation job is skipped", () => {
   assert.match(buildJob, /needs\.validate\.result == 'success'/);
   assert.match(buildJob, /needs\.decide\.outputs\.should_release == 'true'/);
 });
+
+test("normalizes Windows runner paths before extracting the compiler cache", () => {
+  assert.match(
+    workflow,
+    /runner_temp="\$RUNNER_TEMP"\n\s+if \[\[ "\$\{\{ matrix\.platform \}\}" == windows \]\]; then\n\s+runner_temp="\$\(cygpath -u "\$runner_temp"\)"\n\s+fi/,
+  );
+  assert.match(
+    workflow,
+    /archive="\$runner_temp\/\$\{\{ matrix\.sccache_archive \}\}"/,
+  );
+  assert.match(workflow, /install_dir="\$runner_temp\/sccache-bin"/);
+  assert.doesNotMatch(
+    workflow,
+    /archive="\$RUNNER_TEMP\/\$\{\{ matrix\.sccache_archive \}\}"/,
+  );
+});

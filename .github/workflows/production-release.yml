@@ -379,8 +379,12 @@ jobs:
           key: onnx-runtime-macos-arm64-${{ hashFiles('scripts/prepare-onnx-runtime.sh', 'apps/desktop/src-tauri/Cargo.lock', 'Cargo.lock') }}
       - name: Install verified Rust compiler cache
         run: |
-          archive="$RUNNER_TEMP/${{ matrix.sccache_archive }}"
-          install_dir="$RUNNER_TEMP/sccache-bin"
+          runner_temp="$RUNNER_TEMP"
+          if [[ "${{ matrix.platform }}" == windows ]]; then
+            runner_temp="$(cygpath -u "$runner_temp")"
+          fi
+          archive="$runner_temp/${{ matrix.sccache_archive }}"
+          install_dir="$runner_temp/sccache-bin"
           curl --fail --location --retry 3 --silent --show-error "https://github.com/mozilla/sccache/releases/download/v0.17.0/${{ matrix.sccache_archive }}" --output "$archive"
           if [[ "${{ matrix.platform }}" == macos ]]; then
             printf '%s  %s\n' '${{ matrix.sccache_sha256 }}' "$archive" | shasum -a 256 -c -
