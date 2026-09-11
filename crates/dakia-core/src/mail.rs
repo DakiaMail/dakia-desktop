@@ -8,7 +8,10 @@ use crate::{
     },
     oauth::OAuthTokens,
     provider::Security,
-    storage::{stable_message_id, Attachment, AttachmentData, AttachmentPresentation, MailSummary},
+    storage::{
+        stable_message_id, Attachment, AttachmentData, AttachmentPresentation, MailSummary,
+        MailboxChangedSinceFlags, MailboxSnapshotIdentity,
+    },
     Account, AccountAuth, Store,
 };
 use anyhow::{bail, Context, Result};
@@ -442,11 +445,13 @@ impl MailService {
             .begin_mailbox_snapshot(
                 account.id,
                 "INBOX",
-                "INBOX",
-                snapshot_identity.uid_validity,
-                snapshot_identity.exists,
-                snapshot_identity.uid_next,
-                snapshot_identity.highest_modseq,
+                MailboxSnapshotIdentity::new(
+                    "INBOX",
+                    snapshot_identity.uid_validity,
+                    snapshot_identity.exists,
+                    snapshot_identity.uid_next,
+                    snapshot_identity.highest_modseq,
+                ),
             )
             .await?;
         for (start, end) in mailbox_snapshot_page_ranges(snapshot_identity.exists) {
@@ -1179,12 +1184,17 @@ impl MailService {
                             .apply_complete_mailbox_changed_since_flags(
                                 account.id,
                                 &plan.storage,
-                                &plan.remote,
-                                final_identity.uid_validity,
-                                usize::try_from(final_identity.exists)?,
-                                final_identity.uid_next,
-                                final_identity.highest_modseq,
-                                &flags,
+                                MailboxChangedSinceFlags {
+                                    identity: MailboxSnapshotIdentity::new(
+                                        &plan.remote,
+                                        final_identity.uid_validity,
+                                        final_identity.exists,
+                                        final_identity.uid_next,
+                                        final_identity.highest_modseq,
+                                    ),
+                                    remote_total: usize::try_from(final_identity.exists)?,
+                                    flags: &flags,
+                                },
                             )
                             .await?;
                         continue;
@@ -1200,11 +1210,13 @@ impl MailService {
                 .begin_mailbox_snapshot(
                     account.id,
                     &plan.storage,
-                    &plan.remote,
-                    snapshot_identity.uid_validity,
-                    snapshot_identity.exists,
-                    snapshot_identity.uid_next,
-                    snapshot_identity.highest_modseq,
+                    MailboxSnapshotIdentity::new(
+                        &plan.remote,
+                        snapshot_identity.uid_validity,
+                        snapshot_identity.exists,
+                        snapshot_identity.uid_next,
+                        snapshot_identity.highest_modseq,
+                    ),
                 )
                 .await?;
             for (start, end) in mailbox_snapshot_page_ranges(snapshot_identity.exists) {
@@ -5073,7 +5085,7 @@ where
             Err(error)
                 if error.to_string().starts_with("IMAP command failed:") && batch.len() > 1 =>
             {
-                let midpoint = (batch.len() + 1) / 2;
+                let midpoint = batch.len().div_ceil(2);
                 let older = batch[midpoint..].to_vec();
                 let newer = batch[..midpoint].to_vec();
                 if !older.is_empty() {
@@ -5457,10 +5469,13 @@ fn verify_mailbox_uid_validity(current: u32, catalogued: i64, action: &str) -> R
 }
 
 fn parse_uid_flags(lines: &[String]) -> Vec<(u32, bool, bool)> {
-    lines.iter().filter_map(parse_uid_flags_line).collect()
+    lines
+        .iter()
+        .filter_map(|line| parse_uid_flags_line(line))
+        .collect()
 }
 
-fn parse_uid_flags_line(line: &String) -> Option<(u32, bool, bool)> {
+fn parse_uid_flags_line(line: &str) -> Option<(u32, bool, bool)> {
     if !is_untagged_fetch_start(line) {
         return None;
     }
@@ -7486,7 +7501,11 @@ mod tests {
             .await
             .unwrap();
         let generation = store
-            .begin_mailbox_snapshot(account.id, "INBOX", "INBOX", 77, 2, Some(3), Some(100))
+            .begin_mailbox_snapshot(
+                account.id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 77, 2, Some(3), Some(100)),
+            )
             .await
             .unwrap();
         store
@@ -9680,7 +9699,11 @@ mod tests {
         old.subject = "Old namespace subject".into();
         store.upsert_catalog_messages(&[old]).await.unwrap();
         let old_generation = store
-            .begin_mailbox_snapshot(account.id, "INBOX", "INBOX", 10, 1, Some(2), None)
+            .begin_mailbox_snapshot(
+                account.id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 10, 1, Some(2), None),
+            )
             .await
             .unwrap();
         store
@@ -9781,11 +9804,13 @@ mod tests {
             .begin_mailbox_snapshot(
                 account.id,
                 "INBOX",
-                "INBOX",
-                10,
-                REMOTE_COUNT,
-                Some(REMOTE_COUNT + 1),
-                None,
+                MailboxSnapshotIdentity::new(
+                    "INBOX",
+                    10,
+                    REMOTE_COUNT,
+                    Some(REMOTE_COUNT + 1),
+                    None,
+                ),
             )
             .await
             .unwrap();
@@ -9921,7 +9946,11 @@ mod tests {
             .collect::<Vec<_>>();
         store.upsert_catalog_messages(&old_messages).await.unwrap();
         let old_generation = store
-            .begin_mailbox_snapshot(account.id, "INBOX", "INBOX", 10, 3, Some(4), None)
+            .begin_mailbox_snapshot(
+                account.id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 10, 3, Some(4), None),
+            )
             .await
             .unwrap();
         store
@@ -9992,7 +10021,11 @@ mod tests {
             .unwrap_err();
         first_server.await.unwrap();
         let resumed_generation = store
-            .begin_mailbox_snapshot(account.id, "INBOX", "INBOX", 11, 3, Some(4), None)
+            .begin_mailbox_snapshot(
+                account.id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 11, 3, Some(4), None),
+            )
             .await
             .unwrap();
         store
@@ -10057,7 +10090,11 @@ mod tests {
             .collect::<Vec<_>>();
         store.upsert_catalog_messages(&old_messages).await.unwrap();
         let old_generation = store
-            .begin_mailbox_snapshot(account.id, "INBOX", "INBOX", 10, 2, Some(3), None)
+            .begin_mailbox_snapshot(
+                account.id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 10, 2, Some(3), None),
+            )
             .await
             .unwrap();
         store
@@ -14576,7 +14613,7 @@ mod tests {
         );
         assert!(mailbox_snapshot_page_ranges(30_000)
             .iter()
-            .all(|(start, end)| end - start + 1 <= MAILBOX_SNAPSHOT_PAGE_SIZE));
+            .all(|(start, end)| end - start < MAILBOX_SNAPSHOT_PAGE_SIZE));
     }
 
     #[test]

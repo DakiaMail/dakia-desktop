@@ -85,6 +85,47 @@ enum SnapshotReplacementPublication<'a> {
     Staged,
 }
 
+/// The remote identity captured when a full mailbox inventory begins.
+///
+/// Grouping these values keeps the start and resume contract explicit: all
+/// fields must describe the same selected mailbox response.
+#[derive(Clone, Copy)]
+pub struct MailboxSnapshotIdentity<'a> {
+    pub remote_name: &'a str,
+    pub uid_validity: u32,
+    pub initial_exists: u32,
+    pub uid_next: Option<u32>,
+    pub highest_modseq: Option<u64>,
+}
+
+impl<'a> MailboxSnapshotIdentity<'a> {
+    pub const fn new(
+        remote_name: &'a str,
+        uid_validity: u32,
+        initial_exists: u32,
+        uid_next: Option<u32>,
+        highest_modseq: Option<u64>,
+    ) -> Self {
+        Self {
+            remote_name,
+            uid_validity,
+            initial_exists,
+            uid_next,
+            highest_modseq,
+        }
+    }
+}
+
+/// One complete CONDSTORE `CHANGEDSINCE` result and the mailbox state that
+/// made it valid.
+pub struct MailboxChangedSinceFlags<'a> {
+    pub identity: MailboxSnapshotIdentity<'a>,
+    pub remote_total: usize,
+    pub flags: &'a [(u32, bool, bool)],
+}
+
+type MailboxSnapshotGenerationState = (String, i64, i64, Option<i64>, Option<String>);
+
 /// Cancellation-safe ownership of one provider body fetch. Dropping the
 /// owning future schedules claim release so later readers do not wait for a
 /// process restart.
@@ -2093,8 +2134,7 @@ impl Store {
         } else {
             format!(
                 " AND mailbox NOT IN ({})",
-                std::iter::repeat("?")
-                    .take(keep_mailboxes.len())
+                std::iter::repeat_n("?", keep_mailboxes.len())
                     .collect::<Vec<_>>()
                     .join(", ")
             )
@@ -4946,6 +4986,10 @@ pub fn stable_message_id(account_id: AccountId, mailbox: &str, uid: u32) -> Stri
 }
 
 #[cfg(test)]
+// The snapshot implementation is intentionally kept beside the feature's
+// storage helpers below this long-standing test module. Keep this narrowly
+// scoped until the module is split into its own test file.
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 
@@ -10335,7 +10379,11 @@ mod tests {
                 .uid_validity_changed
         );
         let generation = store
-            .begin_mailbox_snapshot(account_id, "INBOX", "INBOX", 11, 3, Some(4), None)
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 11, 3, Some(4), None),
+            )
             .await
             .unwrap();
         store
@@ -10466,7 +10514,11 @@ mod tests {
         let account_id = uuid::Uuid::new_v4();
         save_test_account(&store, account_id).await;
         let generation = store
-            .begin_mailbox_snapshot(account_id, "INBOX", "INBOX", 10, 51, None, None)
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 10, 51, None, None),
+            )
             .await
             .unwrap();
         let flags: Vec<(u32, bool, bool)> = (100..=150).map(|uid| (uid, false, false)).collect();
@@ -10502,7 +10554,11 @@ mod tests {
             .unwrap();
 
         let generation = store
-            .begin_mailbox_snapshot(account_id, "INBOX", "INBOX", 11, 250, None, None)
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 11, 250, None, None),
+            )
             .await
             .unwrap();
         let mut replacements = Vec::new();
@@ -10542,7 +10598,11 @@ mod tests {
         );
 
         let empty_generation = store
-            .begin_mailbox_snapshot(account_id, "INBOX", "INBOX", 12, 1, None, None)
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 12, 1, None, None),
+            )
             .await
             .unwrap();
         store
@@ -10593,7 +10653,11 @@ mod tests {
             .await
             .unwrap();
         let generation = store
-            .begin_mailbox_snapshot(account_id, "INBOX", "INBOX", 11, 1, None, None)
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 11, 1, None, None),
+            )
             .await
             .unwrap();
         store
@@ -10650,11 +10714,7 @@ mod tests {
             .begin_mailbox_snapshot(
                 account_id,
                 "[Gmail]/All Mail",
-                "[Gmail]/All Mail",
-                7,
-                99_003,
-                Some(99_004),
-                None,
+                MailboxSnapshotIdentity::new("[Gmail]/All Mail", 7, 99_003, Some(99_004), None),
             )
             .await
             .unwrap();
@@ -10699,11 +10759,7 @@ mod tests {
             .begin_mailbox_snapshot(
                 account_id,
                 "[Gmail]/All Mail",
-                "[Gmail]/All Mail",
-                7,
-                99_003,
-                Some(99_004),
-                Some(42),
+                MailboxSnapshotIdentity::new("[Gmail]/All Mail", 7, 99_003, Some(99_004), Some(42)),
             )
             .await
             .unwrap();
@@ -10741,7 +10797,11 @@ mod tests {
         let account_id = uuid::Uuid::new_v4();
         save_test_account(&store, account_id).await;
         let first = store
-            .begin_mailbox_snapshot(account_id, "INBOX", "INBOX", 7, 2, Some(3), None)
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 7, 2, Some(3), None),
+            )
             .await
             .unwrap();
         store
@@ -10750,7 +10810,11 @@ mod tests {
             .unwrap();
 
         let replacement = store
-            .begin_mailbox_snapshot(account_id, "INBOX", "INBOX", 7, 2, Some(4), None)
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 7, 2, Some(4), None),
+            )
             .await
             .unwrap();
         assert_ne!(replacement, first);
@@ -10787,7 +10851,11 @@ mod tests {
             .await
             .unwrap();
         let generation = store
-            .begin_mailbox_snapshot(account_id, "Sent", "Sent", 5, 1, Some(5), None)
+            .begin_mailbox_snapshot(
+                account_id,
+                "Sent",
+                MailboxSnapshotIdentity::new("Sent", 5, 1, Some(5), None),
+            )
             .await
             .unwrap();
         store
@@ -10855,7 +10923,11 @@ mod tests {
             .await
             .unwrap();
         let generation = store
-            .begin_mailbox_snapshot(account_id, "INBOX", "INBOX", 11, 1, Some(8), None)
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 11, 1, Some(8), None),
+            )
             .await
             .unwrap();
         store
@@ -10920,7 +10992,11 @@ mod tests {
             .unwrap();
 
         let generation = store
-            .begin_mailbox_snapshot(account_id, "INBOX", "INBOX", 77, 2, Some(3), None)
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 77, 2, Some(3), None),
+            )
             .await
             .unwrap();
         store
@@ -10967,11 +11043,7 @@ mod tests {
             .begin_mailbox_snapshot(
                 account_id,
                 "INBOX",
-                "Remote Inbox",
-                88,
-                1,
-                Some(3),
-                Some(u64::MAX),
+                MailboxSnapshotIdentity::new("Remote Inbox", 88, 1, Some(3), Some(u64::MAX)),
             )
             .await
             .unwrap();
@@ -11062,7 +11134,11 @@ mod tests {
         assert_eq!(pending_tombstones, 1);
 
         let generation = store
-            .begin_mailbox_snapshot(account_id, "INBOX", "INBOX", 11, 1, Some(3), None)
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 11, 1, Some(3), None),
+            )
             .await
             .unwrap();
         store
@@ -11110,12 +11186,17 @@ mod tests {
             .apply_complete_mailbox_changed_since_flags(
                 account_id,
                 "INBOX",
-                "Remote Inbox",
-                77,
-                2,
-                Some(3),
-                Some(u64::MAX),
-                &[(1, true, true)],
+                MailboxChangedSinceFlags {
+                    identity: MailboxSnapshotIdentity::new(
+                        "Remote Inbox",
+                        77,
+                        2,
+                        Some(3),
+                        Some(u64::MAX),
+                    ),
+                    remote_total: 2,
+                    flags: &[(1, true, true)],
+                },
             )
             .await
             .unwrap();
@@ -11159,12 +11240,11 @@ mod tests {
             .apply_complete_mailbox_changed_since_flags(
                 account_id,
                 "INBOX",
-                "INBOX",
-                77,
-                0,
-                None,
-                None,
-                &[],
+                MailboxChangedSinceFlags {
+                    identity: MailboxSnapshotIdentity::new("INBOX", 77, 0, None, None),
+                    remote_total: 0,
+                    flags: &[],
+                },
             )
             .await
             .unwrap();
@@ -11212,7 +11292,11 @@ mod tests {
         let account_id = uuid::Uuid::new_v4();
         save_test_account(&store, account_id).await;
         let inbox_first = store
-            .begin_mailbox_snapshot(account_id, "INBOX", "INBOX", 7, 2, None, None)
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 7, 2, None, None),
+            )
             .await
             .unwrap();
         store
@@ -11220,7 +11304,11 @@ mod tests {
             .await
             .unwrap();
         let archive = store
-            .begin_mailbox_snapshot(account_id, "Archive", "Archive", 8, 1, None, None)
+            .begin_mailbox_snapshot(
+                account_id,
+                "Archive",
+                MailboxSnapshotIdentity::new("Archive", 8, 1, None, None),
+            )
             .await
             .unwrap();
         store
@@ -11229,7 +11317,11 @@ mod tests {
             .unwrap();
 
         let inbox_replacement = store
-            .begin_mailbox_snapshot(account_id, "INBOX", "INBOX", 7, 3, None, None)
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 7, 3, None, None),
+            )
             .await
             .unwrap();
         assert!(store
@@ -11267,7 +11359,11 @@ mod tests {
             .unwrap();
 
         let generation = store
-            .begin_mailbox_snapshot(account_id, "INBOX", "INBOX", 99, 0, Some(1), None)
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 99, 0, Some(1), None),
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -11419,7 +11515,11 @@ mod tests {
         let account_id = uuid::Uuid::new_v4();
         save_test_account(&store, account_id).await;
         let generation = store
-            .begin_mailbox_snapshot(account_id, "INBOX", "INBOX", 9, 2, None, None)
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 9, 2, None, None),
+            )
             .await
             .unwrap();
         store
@@ -11444,7 +11544,11 @@ mod tests {
             .unwrap();
 
         let resumed = store
-            .begin_mailbox_snapshot(account_id, "INBOX", "INBOX", 9, 2, None, None)
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 9, 2, None, None),
+            )
             .await
             .unwrap();
         assert_eq!(resumed, generation);
@@ -11498,7 +11602,11 @@ mod tests {
             .await
             .unwrap();
         let generation = store
-            .begin_mailbox_snapshot(account_id, "INBOX", "INBOX", 11, 1, Some(2), None)
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 11, 1, Some(2), None),
+            )
             .await
             .unwrap();
         store
@@ -11543,7 +11651,11 @@ mod tests {
         let account_id = uuid::Uuid::new_v4();
         save_test_account(&store, account_id).await;
         let generation = store
-            .begin_mailbox_snapshot(account_id, "INBOX", "INBOX", 1, 2, Some(3), None)
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 1, 2, Some(3), None),
+            )
             .await
             .unwrap();
         store
@@ -11604,7 +11716,11 @@ mod tests {
         }
         for (mailbox, uid) in [("Sent::A", 3), ("Sent::B", 4)] {
             let generation = store
-                .begin_mailbox_snapshot(account_id, mailbox, mailbox, 5, 1, Some(5), None)
+                .begin_mailbox_snapshot(
+                    account_id,
+                    mailbox,
+                    MailboxSnapshotIdentity::new(mailbox, 5, 1, Some(5), None),
+                )
                 .await
                 .unwrap();
             store
@@ -11959,12 +12075,15 @@ impl Store {
         &self,
         account_id: AccountId,
         mailbox: &str,
-        remote_name: &str,
-        uid_validity: u32,
-        initial_exists: u32,
-        uid_next: Option<u32>,
-        highest_modseq: Option<u64>,
+        identity: MailboxSnapshotIdentity<'_>,
     ) -> Result<String> {
+        let MailboxSnapshotIdentity {
+            remote_name,
+            uid_validity,
+            initial_exists,
+            uid_next,
+            highest_modseq,
+        } = identity;
         let account_id = account_id.to_string();
         let generation = uuid::Uuid::new_v4().to_string();
         let uid_next = uid_next.map(i64::from);
@@ -12487,7 +12606,7 @@ impl Store {
             tx.rollback().await?;
             return Err(anyhow!("account was removed"));
         }
-        let generation_state: Option<(String, i64, i64, Option<i64>, Option<String>)> = sqlx::query_as(
+        let generation_state: Option<MailboxSnapshotGenerationState> = sqlx::query_as(
             "SELECT remote_name, uid_validity, initial_exists, uid_next, highest_modseq FROM mailbox_snapshot_generations WHERE account_id = ? AND mailbox = ? AND generation = ?",
         )
         .bind(&account_id)
@@ -12791,13 +12910,20 @@ impl Store {
         &self,
         account_id: AccountId,
         mailbox: &str,
-        remote_name: &str,
-        uid_validity: u32,
-        remote_total: usize,
-        uid_next: Option<u32>,
-        highest_modseq: Option<u64>,
-        flags: &[(u32, bool, bool)],
+        changed_since: MailboxChangedSinceFlags<'_>,
     ) -> Result<()> {
+        let MailboxChangedSinceFlags {
+            identity:
+                MailboxSnapshotIdentity {
+                    remote_name,
+                    uid_validity,
+                    uid_next,
+                    highest_modseq,
+                    ..
+                },
+            remote_total,
+            flags,
+        } = changed_since;
         if flags.iter().any(|(uid, _, _)| *uid == 0) {
             return Err(anyhow!("CHANGEDSINCE flag delta contains UID 0"));
         }
