@@ -580,7 +580,13 @@ jobs:
   publish:
     name: Publish signed release
     needs: [decide, validate, build]
-    if: needs.decide.outputs.should_release == 'true'
+    if: >-
+      always() &&
+      !cancelled() &&
+      needs.decide.result == 'success' &&
+      needs.validate.result == 'success' &&
+      needs.build.result == 'success' &&
+      needs.decide.outputs.should_release == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     environment: production-release
@@ -698,7 +704,13 @@ jobs:
   verify-public:
     name: Verify anonymous public release
     needs: [decide, validate, publish]
-    if: needs.decide.outputs.should_release == 'true'
+    if: >-
+      always() &&
+      !cancelled() &&
+      needs.decide.result == 'success' &&
+      needs.validate.result == 'success' &&
+      needs.publish.result == 'success' &&
+      needs.decide.outputs.should_release == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:

@@ -26,6 +26,14 @@ const coreManifest = readFileSync(
   "utf8",
 );
 
+function jobCondition(job) {
+  const condition = job.match(
+    /if:\s*>-\s*\n([\s\S]*?)\n\s+(?:runs-on|strategy):/,
+  )?.[1];
+  assert.ok(condition, "job condition is missing");
+  return condition.trim().replace(/\s+/g, " ");
+}
+
 test("release builds run after the optional preparation job is skipped", () => {
   const buildJob = workflow.match(/\n  build:\n([\s\S]*?)\n  publish:\n/)?.[1];
   assert.ok(buildJob, "production release build job is missing");
@@ -33,6 +41,24 @@ test("release builds run after the optional preparation job is skipped", () => {
   assert.match(buildJob, /needs\.decide\.result == 'success'/);
   assert.match(buildJob, /needs\.validate\.result == 'success'/);
   assert.match(buildJob, /needs\.decide\.outputs\.should_release == 'true'/);
+});
+
+test("release publication runs after the optional preparation job is skipped", () => {
+  const publishJob = workflow.match(/\n  publish:\n([\s\S]*?)\n  verify-public:\n/)?.[1];
+  assert.ok(publishJob, "production release publish job is missing");
+  assert.match(publishJob, /needs: \[decide, validate, build\]/);
+  assert.equal(
+    jobCondition(publishJob),
+    "always() && !cancelled() && needs.decide.result == 'success' && needs.validate.result == 'success' && needs.build.result == 'success' && needs.decide.outputs.should_release == 'true'",
+  );
+
+  const verifyJob = workflow.match(/\n  verify-public:\n([\s\S]*)$/)?.[1];
+  assert.ok(verifyJob, "production release verification job is missing");
+  assert.match(verifyJob, /needs: \[decide, validate, publish\]/);
+  assert.equal(
+    jobCondition(verifyJob),
+    "always() && !cancelled() && needs.decide.result == 'success' && needs.validate.result == 'success' && needs.publish.result == 'success' && needs.decide.outputs.should_release == 'true'",
+  );
 });
 
 test("normalizes Windows runner paths before extracting the compiler cache", () => {
