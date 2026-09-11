@@ -54,6 +54,7 @@ const CLASSIFICATION_REVISION_ACTIVITY_SECONDS: i64 = 90;
 /// short grace period beyond that before a crashed process's lease may be
 /// replaced, while preserving fresh claims across concurrently open processes.
 const MESSAGE_CONTENT_FETCH_LEASE_SECONDS: i64 = 90;
+const MAILBOX_SNAPSHOT_REPLACEMENT_PUBLISH_BATCH_SIZE: i64 = 100;
 /// All stores opened by this process share a fetch-claim owner. This lets a
 /// second connection respect work already in flight, while a new process can
 /// discard claims left by the previous process during migration.
@@ -70,6 +71,60 @@ pub struct Store {
     pool: SqlitePool,
     vault_key: Arc<[u8; VAULT_KEY_LEN]>,
 }
+
+#[derive(Clone, Copy)]
+enum SnapshotFinalizeWatermark {
+    StagedMaximum,
+    Explicit(Option<u32>),
+}
+
+#[derive(Clone, Copy)]
+enum SnapshotReplacementPublication<'a> {
+    None,
+    InMemory(&'a [MailSummary]),
+    Staged,
+}
+
+/// The remote identity captured when a full mailbox inventory begins.
+///
+/// Grouping these values keeps the start and resume contract explicit: all
+/// fields must describe the same selected mailbox response.
+#[derive(Clone, Copy)]
+pub struct MailboxSnapshotIdentity<'a> {
+    pub remote_name: &'a str,
+    pub uid_validity: u32,
+    pub initial_exists: u32,
+    pub uid_next: Option<u32>,
+    pub highest_modseq: Option<u64>,
+}
+
+impl<'a> MailboxSnapshotIdentity<'a> {
+    pub const fn new(
+        remote_name: &'a str,
+        uid_validity: u32,
+        initial_exists: u32,
+        uid_next: Option<u32>,
+        highest_modseq: Option<u64>,
+    ) -> Self {
+        Self {
+            remote_name,
+            uid_validity,
+            initial_exists,
+            uid_next,
+            highest_modseq,
+        }
+    }
+}
+
+/// One complete CONDSTORE `CHANGEDSINCE` result and the mailbox state that
+/// made it valid.
+pub struct MailboxChangedSinceFlags<'a> {
+    pub identity: MailboxSnapshotIdentity<'a>,
+    pub remote_total: usize,
+    pub flags: &'a [(u32, bool, bool)],
+}
+
+type MailboxSnapshotGenerationState = (String, i64, i64, Option<i64>, Option<String>);
 
 /// Cancellation-safe ownership of one provider body fetch. Dropping the
 /// owning future schedules claim release so later readers do not wait for a
@@ -130,6 +185,7 @@ pub struct MailRebuildJob {
     pub phase: String,
     pub completed: usize,
     pub total: Option<usize>,
+    pub reset_before_sync: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, FromRow)]
@@ -191,6 +247,9 @@ pub struct MailboxSyncState {
     pub initialized: bool,
     pub highest_uid: Option<u32>,
     pub uid_validity: Option<u64>,
+    /// The selected mailbox is a new UID namespace and needs a replacement
+    /// catalogue, not an incremental UID sync.
+    pub uid_validity_changed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -261,6 +320,45 @@ pub struct MailboxCatalogState {
     pub uid_validity: i64,
     pub remote_total: i64,
     pub historical_complete: bool,
+    /// The provider's next UID at the last complete, identity-stable sync.
+    pub uid_next: Option<i64>,
+    /// Stored as decimal text because IMAP MODSEQ is an unsigned 64-bit value
+    /// while SQLite INTEGER is signed.
+    pub highest_modseq: Option<String>,
+}
+
+/// A durable, generation-scoped inventory of the UIDs and flags observed
+/// while reconciling one IMAP mailbox. A generation remains non-authoritative
+/// until [`Store::finalize_mailbox_snapshot`] succeeds.
+///
+/// The provider's message metadata is still published through the ordinary
+/// catalogue path. Keeping the inventory separate means an interrupted page
+/// fetch can never make an incomplete UID list look like an empty mailbox.
+#[derive(Debug, Clone, FromRow)]
+pub struct MailboxSnapshotGeneration {
+    pub account_id: String,
+    pub mailbox: String,
+    pub generation: String,
+    pub remote_name: String,
+    pub uid_validity: i64,
+    pub initial_exists: i64,
+    pub uid_next: Option<i64>,
+    pub highest_modseq: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A UID whose catalogue metadata could not be fetched or parsed. These rows
+/// deliberately outlive the current IMAP session so a later high-water mark
+/// cannot silently make the message permanently invisible.
+#[derive(Debug, Clone, FromRow)]
+pub struct MailboxSyncFailure {
+    pub account_id: String,
+    pub mailbox: String,
+    pub uid: i64,
+    pub stage: String,
+    pub error: String,
+    pub updated_at: DateTime<Utc>,
 }
 
 /// Display metadata for an attachment. Bytes stay in the local store and are
@@ -584,8 +682,14 @@ impl Store {
             "CREATE INDEX IF NOT EXISTS message_content_cache_lru ON message_content_cache(last_accessed, message_id)",
             "CREATE TABLE IF NOT EXISTS message_content_fetches (message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, claimed_at TEXT NOT NULL, claim_owner TEXT NOT NULL DEFAULT '')",
             "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
-            "CREATE TABLE IF NOT EXISTS mailbox_catalog_state (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, remote_name TEXT NOT NULL, uid_validity INTEGER NOT NULL, remote_total INTEGER NOT NULL DEFAULT 0, historical_complete INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox))",
-            "CREATE TABLE IF NOT EXISTS mail_rebuild_jobs (account_id TEXT PRIMARY KEY, phase TEXT NOT NULL, completed INTEGER NOT NULL DEFAULT 0, total INTEGER, updated_at TEXT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS mailbox_catalog_state (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, remote_name TEXT NOT NULL, uid_validity INTEGER NOT NULL, remote_total INTEGER NOT NULL DEFAULT 0, historical_complete INTEGER NOT NULL DEFAULT 0, uid_next INTEGER, highest_modseq TEXT, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox))",
+            "CREATE TABLE IF NOT EXISTS mailbox_snapshot_generations (account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, mailbox TEXT NOT NULL, generation TEXT NOT NULL, remote_name TEXT NOT NULL, uid_validity INTEGER NOT NULL, initial_exists INTEGER NOT NULL, uid_next INTEGER, highest_modseq TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox, generation))",
+            "CREATE TABLE IF NOT EXISTS mailbox_snapshot_items (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, generation TEXT NOT NULL, uid INTEGER NOT NULL, is_read INTEGER NOT NULL, is_flagged INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox, generation, uid), FOREIGN KEY(account_id, mailbox, generation) REFERENCES mailbox_snapshot_generations(account_id, mailbox, generation) ON DELETE CASCADE)",
+            "CREATE TABLE IF NOT EXISTS mailbox_snapshot_messages (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, generation TEXT NOT NULL, uid INTEGER NOT NULL, message_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox, generation, uid), FOREIGN KEY(account_id, mailbox, generation) REFERENCES mailbox_snapshot_generations(account_id, mailbox, generation) ON DELETE CASCADE)",
+            "CREATE TABLE IF NOT EXISTS mailbox_snapshot_replacement_outcomes (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, generation TEXT NOT NULL, uid INTEGER NOT NULL, outcome TEXT NOT NULL CHECK(outcome IN ('message', 'excluded')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox, generation, uid), FOREIGN KEY(account_id, mailbox, generation) REFERENCES mailbox_snapshot_generations(account_id, mailbox, generation) ON DELETE CASCADE)",
+            "CREATE INDEX IF NOT EXISTS mailbox_snapshot_items_generation_uid ON mailbox_snapshot_items(account_id, mailbox, generation, uid DESC)",
+            "CREATE TABLE IF NOT EXISTS mailbox_sync_failures (account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, mailbox TEXT NOT NULL, uid INTEGER NOT NULL, stage TEXT NOT NULL, error TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox, uid))",
+            "CREATE TABLE IF NOT EXISTS mail_rebuild_jobs (account_id TEXT PRIMARY KEY, phase TEXT NOT NULL, completed INTEGER NOT NULL DEFAULT 0, total INTEGER, reset_before_sync INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)",
             "CREATE TABLE IF NOT EXISTS deleted_account_tombstones (account_id TEXT PRIMARY KEY, deleted_at TEXT NOT NULL)",
             "CREATE TABLE IF NOT EXISTS sent_correspondents (account_id TEXT NOT NULL, address TEXT NOT NULL COLLATE NOCASE, PRIMARY KEY(account_id, address))",
         ] {
@@ -608,6 +712,23 @@ impl Store {
             .execute(&self.pool)
             .await?;
         }
+        let catalog_columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
+            sqlx::query_as("PRAGMA table_info(mailbox_catalog_state)")
+                .fetch_all(&self.pool)
+                .await?;
+        if !catalog_columns.iter().any(|column| column.1 == "uid_next") {
+            sqlx::query("ALTER TABLE mailbox_catalog_state ADD COLUMN uid_next INTEGER")
+                .execute(&self.pool)
+                .await?;
+        }
+        if !catalog_columns
+            .iter()
+            .any(|column| column.1 == "highest_modseq")
+        {
+            sqlx::query("ALTER TABLE mailbox_catalog_state ADD COLUMN highest_modseq TEXT")
+                .execute(&self.pool)
+                .await?;
+        }
         // A CLI and the desktop can open this database concurrently. Preserve
         // every fresh lease regardless of process owner; only work old enough
         // to have outlived the foreground wait window is safe to discard.
@@ -627,6 +748,11 @@ impl Store {
             "CREATE TRIGGER IF NOT EXISTS mailbox_sync_state_require_account BEFORE INSERT ON mailbox_sync_state WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
             "CREATE TRIGGER IF NOT EXISTS mailbox_action_tombstones_require_account BEFORE INSERT ON mailbox_action_tombstones WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
             "CREATE TRIGGER IF NOT EXISTS mailbox_catalog_state_require_account BEFORE INSERT ON mailbox_catalog_state WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS mailbox_snapshot_generations_require_account BEFORE INSERT ON mailbox_snapshot_generations WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS mailbox_snapshot_items_require_account BEFORE INSERT ON mailbox_snapshot_items WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS mailbox_snapshot_messages_require_account BEFORE INSERT ON mailbox_snapshot_messages WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS mailbox_snapshot_replacement_outcomes_require_account BEFORE INSERT ON mailbox_snapshot_replacement_outcomes WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS mailbox_sync_failures_require_account BEFORE INSERT ON mailbox_sync_failures WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
             "CREATE TRIGGER IF NOT EXISTS mail_rebuild_jobs_require_account BEFORE INSERT ON mail_rebuild_jobs WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
             "CREATE TRIGGER IF NOT EXISTS sent_correspondents_require_account BEFORE INSERT ON sent_correspondents WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
         ] {
@@ -651,6 +777,20 @@ impl Store {
         if !columns.iter().any(|column| column.1 == "content_state") {
             sqlx::query(
                 "ALTER TABLE messages ADD COLUMN content_state TEXT NOT NULL DEFAULT 'complete'",
+            )
+            .execute(&self.pool)
+            .await?;
+        }
+        let rebuild_job_columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
+            sqlx::query_as("PRAGMA table_info(mail_rebuild_jobs)")
+                .fetch_all(&self.pool)
+                .await?;
+        if !rebuild_job_columns
+            .iter()
+            .any(|column| column.1 == "reset_before_sync")
+        {
+            sqlx::query(
+                "ALTER TABLE mail_rebuild_jobs ADD COLUMN reset_before_sync INTEGER NOT NULL DEFAULT 0",
             )
             .execute(&self.pool)
             .await?;
@@ -1026,6 +1166,8 @@ impl Store {
                  SELECT account_id FROM messages \
                  UNION SELECT account_id FROM mailbox_sync_state \
                  UNION SELECT account_id FROM mailbox_catalog_state \
+                 UNION SELECT account_id FROM mailbox_snapshot_generations \
+                 UNION SELECT account_id FROM mailbox_sync_failures \
                  UNION SELECT account_id FROM mailbox_action_tombstones \
                  UNION SELECT account_id FROM mail_rebuild_jobs \
                  UNION SELECT account_id FROM sent_correspondents \
@@ -1045,6 +1187,8 @@ impl Store {
             "DELETE FROM messages WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = messages.account_id)",
             "DELETE FROM mailbox_sync_state WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = mailbox_sync_state.account_id)",
             "DELETE FROM mailbox_catalog_state WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = mailbox_catalog_state.account_id)",
+            "DELETE FROM mailbox_snapshot_generations WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = mailbox_snapshot_generations.account_id)",
+            "DELETE FROM mailbox_sync_failures WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = mailbox_sync_failures.account_id)",
             "DELETE FROM mailbox_action_tombstones WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = mailbox_action_tombstones.account_id)",
             "DELETE FROM mail_rebuild_jobs WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = mail_rebuild_jobs.account_id)",
             "DELETE FROM sent_correspondents WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = sent_correspondents.account_id)",
@@ -1329,23 +1473,68 @@ impl Store {
 
     pub async fn save_account(&self, account: &Account) -> Result<()> {
         let mut tx = self.pool.begin().await?;
-        let deleted: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM deleted_account_tombstones WHERE account_id = ?)",
-        )
-        .bind(account.id.to_string())
-        .fetch_one(&mut *tx)
-        .await?;
-        if deleted {
-            tx.rollback().await?;
-            return Err(anyhow!("account was removed"));
+        save_account_in_transaction(&mut tx, account).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Persists an account and its reset-required rebuild job as one commit.
+    /// This is used when a provider identity changes: callers cannot publish
+    /// the new account data before durable replacement intent exists.
+    pub async fn save_account_with_reset_mail_rebuild_job(
+        &self,
+        account: &Account,
+        job: &MailRebuildJob,
+    ) -> Result<()> {
+        if job.account_id != account.id {
+            return Err(anyhow!("mail rebuild job belongs to a different account"));
         }
-        sqlx::query("INSERT INTO accounts(id, email, data, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET email=excluded.email, data=excluded.data")
-            .bind(account.id.to_string())
-            .bind(&account.email)
-            .bind(serde_json::to_string(account)?)
-            .bind(account.created_at)
-            .execute(&mut *tx)
-            .await?;
+        if !job.reset_before_sync {
+            return Err(anyhow!(
+                "identity replacement requires a reset-before-sync rebuild job"
+            ));
+        }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        save_account_in_transaction(&mut tx, account).await?;
+        save_mail_rebuild_job_in_transaction(&mut tx, job).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Commits a changed account identity, durable reset intent, and removal
+    /// of its superseded credential key together. The replacement credential
+    /// is deliberately written before this boundary, under
+    /// `current_secret_name`; rejecting equal names makes it impossible for
+    /// this cleanup to erase that newly written key.
+    pub async fn save_account_with_reset_mail_rebuild_job_and_delete_previous_secret(
+        &self,
+        account: &Account,
+        job: &MailRebuildJob,
+        previous_secret_name: Option<&str>,
+        current_secret_name: &str,
+    ) -> Result<()> {
+        if job.account_id != account.id {
+            return Err(anyhow!("mail rebuild job belongs to a different account"));
+        }
+        if !job.reset_before_sync {
+            return Err(anyhow!(
+                "identity replacement requires a reset-before-sync rebuild job"
+            ));
+        }
+        if previous_secret_name.is_some_and(|name| name == current_secret_name) {
+            return Err(anyhow!(
+                "previous credential key must differ from the current credential key"
+            ));
+        }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        save_account_in_transaction(&mut tx, account).await?;
+        save_mail_rebuild_job_in_transaction(&mut tx, job).await?;
+        if let Some(previous_secret_name) = previous_secret_name {
+            sqlx::query("DELETE FROM credentials WHERE name = ?")
+                .bind(previous_secret_name)
+                .execute(&mut *tx)
+                .await?;
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -1368,34 +1557,28 @@ impl Store {
     }
 
     pub async fn mail_rebuild_jobs(&self) -> Result<Vec<MailRebuildJob>> {
-        let rows: Vec<(String, String, i64, Option<i64>)> = sqlx::query_as(
-            "SELECT account_id, phase, completed, total FROM mail_rebuild_jobs ORDER BY updated_at",
+        let rows: Vec<(String, String, i64, Option<i64>, bool)> = sqlx::query_as(
+            "SELECT account_id, phase, completed, total, reset_before_sync FROM mail_rebuild_jobs ORDER BY updated_at",
         )
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter()
-            .map(|(account_id, phase, completed, total)| {
+            .map(|(account_id, phase, completed, total, reset_before_sync)| {
                 Ok(MailRebuildJob {
                     account_id: AccountId::parse_str(&account_id)?,
                     phase,
                     completed: usize::try_from(completed)?,
                     total: total.map(usize::try_from).transpose()?,
+                    reset_before_sync,
                 })
             })
             .collect()
     }
 
     pub async fn save_mail_rebuild_job(&self, job: &MailRebuildJob) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO mail_rebuild_jobs(account_id, phase, completed, total, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(account_id) DO UPDATE SET phase=excluded.phase, completed=excluded.completed, total=excluded.total, updated_at=excluded.updated_at",
-        )
-        .bind(job.account_id.to_string())
-        .bind(&job.phase)
-        .bind(i64::try_from(job.completed)?)
-        .bind(job.total.map(i64::try_from).transpose()?)
-        .bind(Utc::now())
-        .execute(&self.pool)
-        .await?;
+        let mut tx = self.pool.begin().await?;
+        save_mail_rebuild_job_in_transaction(&mut tx, job).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1419,6 +1602,14 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         sqlx::query("DELETE FROM mailbox_catalog_state WHERE account_id = ?")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM mailbox_snapshot_generations WHERE account_id = ?")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM mailbox_sync_failures WHERE account_id = ?")
             .bind(id.to_string())
             .execute(&mut *tx)
             .await?;
@@ -1457,6 +1648,8 @@ impl Store {
             "DELETE FROM starred_message_bodies WHERE message_id IN (SELECT id FROM messages WHERE account_id = ?)",
             "DELETE FROM attachments WHERE message_id IN (SELECT id FROM messages WHERE account_id = ?)",
             "DELETE FROM mailbox_catalog_state WHERE account_id = ?",
+            "DELETE FROM mailbox_snapshot_generations WHERE account_id = ?",
+            "DELETE FROM mailbox_sync_failures WHERE account_id = ?",
             "DELETE FROM mailbox_sync_state WHERE account_id = ?",
             "DELETE FROM mailbox_action_tombstones WHERE account_id = ?",
             "DELETE FROM sent_correspondents WHERE account_id = ?",
@@ -1490,6 +1683,25 @@ impl Store {
         for message in messages {
             persist_message(&mut tx, message).await?;
         }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Publishes catalogue metadata from a replacement UIDVALIDITY namespace.
+    ///
+    /// A UID is only unique within one UIDVALIDITY value. Generic catalogue
+    /// writes intentionally preserve complete local content when a headers-
+    /// only refresh collides with an existing UID, but that policy would leak
+    /// the old namespace's snippet, body, classification, and attachment
+    /// state into a recycled UID. Replacement publication therefore removes
+    /// the exact old locator and all of its dependents before inserting the
+    /// new provider row.
+    pub async fn replace_uidvalidity_catalog_messages(
+        &self,
+        messages: &[MailSummary],
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        replace_uidvalidity_catalog_messages_in_transaction(&mut tx, messages).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -1569,6 +1781,27 @@ impl Store {
         mailbox: &str,
         messages: &[MailSummary],
     ) -> Result<Vec<MailSummary>> {
+        let watermark = messages
+            .iter()
+            .map(|message| u32::try_from(message.uid).context("message UID is invalid"))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .max();
+        self.save_synced_messages_through(account_id, mailbox, messages, watermark)
+            .await
+    }
+
+    /// Stores a realtime batch while advancing only through the caller's
+    /// highest contiguous successful UID. A higher message may be committed
+    /// for immediate display without making an earlier failed UID invisible
+    /// to the next retry.
+    pub async fn save_synced_messages_through(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        messages: &[MailSummary],
+        watermark: Option<u32>,
+    ) -> Result<Vec<MailSummary>> {
         let account_id = account_id.to_string();
         if messages
             .iter()
@@ -1624,12 +1857,11 @@ impl Store {
         for message in messages {
             persist_message(&mut tx, message).await?;
         }
-        let highest_uid = messages.iter().map(|message| message.uid).max();
         sqlx::query("INSERT INTO mailbox_sync_state(account_id, mailbox, initialized_at, highest_uid) VALUES (?, ?, ?, ?) ON CONFLICT(account_id, mailbox) DO UPDATE SET initialized_at=excluded.initialized_at, highest_uid=MAX(COALESCE(mailbox_sync_state.highest_uid, 0), COALESCE(excluded.highest_uid, 0))")
             .bind(&account_id)
             .bind(mailbox)
             .bind(Utc::now())
-            .bind(highest_uid)
+            .bind(watermark.map(i64::from))
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -1677,22 +1909,6 @@ impl Store {
                 .await?;
         uid.map(|uid| u32::try_from(uid).context("stored message UID is invalid"))
             .transpose()
-    }
-
-    pub(crate) async fn advance_mailbox_sync_watermark(
-        &self,
-        account_id: AccountId,
-        mailbox: &str,
-        uid: u32,
-    ) -> Result<()> {
-        sqlx::query("INSERT INTO mailbox_sync_state(account_id, mailbox, initialized_at, highest_uid) VALUES (?, ?, ?, ?) ON CONFLICT(account_id, mailbox) DO UPDATE SET initialized_at=excluded.initialized_at, highest_uid=MAX(COALESCE(mailbox_sync_state.highest_uid, 0), excluded.highest_uid)")
-            .bind(account_id.to_string())
-            .bind(mailbox)
-            .bind(Utc::now())
-            .bind(i64::from(uid))
-            .execute(&self.pool)
-            .await?;
-        Ok(())
     }
 
     pub async fn mailbox_uids(&self, account_id: AccountId, mailbox: &str) -> Result<HashSet<u32>> {
@@ -1788,7 +2004,7 @@ impl Store {
         mailbox: &str,
     ) -> Result<Option<MailboxCatalogState>> {
         Ok(sqlx::query_as::<_, MailboxCatalogState>(
-            "SELECT account_id, mailbox, remote_name, uid_validity, remote_total, historical_complete FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ?",
+            "SELECT account_id, mailbox, remote_name, uid_validity, remote_total, historical_complete, uid_next, highest_modseq FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ?",
         )
         .bind(account_id.to_string())
         .bind(mailbox)
@@ -1805,7 +2021,7 @@ impl Store {
         remote_total: usize,
         historical_complete: bool,
     ) -> Result<()> {
-        sqlx::query("INSERT INTO mailbox_catalog_state(account_id, mailbox, remote_name, uid_validity, remote_total, historical_complete, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(account_id, mailbox) DO UPDATE SET remote_name=excluded.remote_name, uid_validity=excluded.uid_validity, remote_total=excluded.remote_total, historical_complete=excluded.historical_complete, updated_at=excluded.updated_at")
+        sqlx::query("INSERT INTO mailbox_catalog_state(account_id, mailbox, remote_name, uid_validity, remote_total, historical_complete, uid_next, highest_modseq, updated_at) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?) ON CONFLICT(account_id, mailbox) DO UPDATE SET remote_name=excluded.remote_name, uid_validity=excluded.uid_validity, remote_total=excluded.remote_total, historical_complete=excluded.historical_complete, updated_at=excluded.updated_at")
             .bind(account_id.to_string())
             .bind(mailbox)
             .bind(remote_name)
@@ -1830,6 +2046,13 @@ impl Store {
             .bind(mailbox)
             .execute(&mut *tx)
             .await?;
+        sqlx::query(
+            "DELETE FROM mailbox_snapshot_generations WHERE account_id = ? AND mailbox = ?",
+        )
+        .bind(account_id.to_string())
+        .bind(mailbox)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query("DELETE FROM mailbox_action_tombstones WHERE account_id = ? AND mailbox = ?")
             .bind(account_id.to_string())
             .bind(mailbox)
@@ -1841,9 +2064,129 @@ impl Store {
         Ok(())
     }
 
+    /// Removes a mailbox namespace only after the provider has authoritatively
+    /// reported it nonexistent. This is transactional so a provider mapping
+    /// reset cannot leave old Sent, Archive, Spam, or cache rows visible.
+    pub async fn clear_nonexistent_mailbox_namespace(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+    ) -> Result<()> {
+        let account_id = account_id.to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        for table in [
+            "message_content_fetches",
+            "message_content_cache",
+            "starred_attachment_metadata",
+            "starred_message_bodies",
+            "attachments",
+        ] {
+            let statement = format!("DELETE FROM {table} WHERE message_id IN (SELECT id FROM messages WHERE account_id = ? AND mailbox = ?)");
+            sqlx::query(&statement)
+                .bind(&account_id)
+                .bind(mailbox)
+                .execute(&mut *tx)
+                .await?;
+        }
+        for statement in [
+            "DELETE FROM messages WHERE account_id = ? AND mailbox = ?",
+            "DELETE FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ?",
+            "DELETE FROM mailbox_sync_state WHERE account_id = ? AND mailbox = ?",
+            "DELETE FROM mailbox_snapshot_generations WHERE account_id = ? AND mailbox = ?",
+            "DELETE FROM mailbox_sync_failures WHERE account_id = ? AND mailbox = ?",
+            "DELETE FROM mailbox_action_tombstones WHERE account_id = ? AND mailbox = ?",
+        ] {
+            sqlx::query(statement)
+                .bind(&account_id)
+                .bind(mailbox)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        self.rebuild_threads_for_account(&account_id).await?;
+        Ok(())
+    }
+
+    /// After every authoritative plan for one special-use family has
+    /// completed, removes family keys which are absent from that plan's keep
+    /// set. A single mailbox finalization deliberately never calls this: a
+    /// provider can expose several valid Sent or Trash siblings at once.
+    /// An empty keep set is an authoritative empty family.
+    pub async fn prune_obsolete_mailbox_family_namespaces(
+        &self,
+        account_id: AccountId,
+        family: &str,
+        keep_mailboxes: &[String],
+    ) -> Result<()> {
+        if family.is_empty() || mailbox_family(family) != family {
+            return Err(anyhow!("mailbox family must be a non-empty root key"));
+        }
+        if keep_mailboxes
+            .iter()
+            .any(|mailbox| mailbox_family(mailbox) != family)
+        {
+            return Err(anyhow!("mailbox keep set contains another family"));
+        }
+        let account_id = account_id.to_string();
+        let descendants = format!("{family}::%");
+        let keep_clause = if keep_mailboxes.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " AND mailbox NOT IN ({})",
+                std::iter::repeat_n("?", keep_mailboxes.len())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        let predicate = format!("account_id = ? AND (mailbox = ? OR mailbox LIKE ?){keep_clause}");
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        for table in [
+            "message_content_fetches",
+            "message_content_cache",
+            "starred_attachment_metadata",
+            "starred_message_bodies",
+            "attachments",
+        ] {
+            let statement = format!(
+                "DELETE FROM {table} WHERE message_id IN (SELECT id FROM messages WHERE {predicate})"
+            );
+            let mut query = sqlx::query(&statement)
+                .bind(&account_id)
+                .bind(family)
+                .bind(&descendants);
+            for mailbox in keep_mailboxes {
+                query = query.bind(mailbox);
+            }
+            query.execute(&mut *tx).await?;
+        }
+        for table in [
+            "messages",
+            "mailbox_catalog_state",
+            "mailbox_sync_state",
+            "mailbox_snapshot_generations",
+            "mailbox_sync_failures",
+            "mailbox_action_tombstones",
+        ] {
+            let statement = format!("DELETE FROM {table} WHERE {predicate}");
+            let mut query = sqlx::query(&statement)
+                .bind(&account_id)
+                .bind(family)
+                .bind(&descendants);
+            for mailbox in keep_mailboxes {
+                query = query.bind(mailbox);
+            }
+            query.execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        self.rebuild_threads_for_account(&account_id).await?;
+        Ok(())
+    }
+
     /// Reconciles the durable UIDVALIDITY/watermark before incremental sync.
-    /// A changed UIDVALIDITY invalidates only this local mailbox and resets its
-    /// notification baseline so historical mail is never reported as new.
+    /// A changed UIDVALIDITY invalidates only pending incremental work. The
+    /// previous committed sync/catalogue identity survives until replacement
+    /// finalization, so retries and restarts still require a full replacement.
     pub async fn prepare_mailbox_sync(
         &self,
         account_id: AccountId,
@@ -1858,35 +2201,79 @@ impl Store {
         .bind(mailbox)
         .fetch_optional(&self.pool)
         .await?;
-        let changed = row
+        let catalog_uid_validity: Option<i64> = sqlx::query_scalar(
+            "SELECT uid_validity FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ?",
+        )
+        .bind(&account_id)
+        .bind(mailbox)
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten();
+        let stored_uid_validity = row
             .as_ref()
             .and_then(|(_, _, stored)| *stored)
+            .or(catalog_uid_validity);
+        let changed = stored_uid_validity
             .zip(uid_validity.and_then(|value| i64::try_from(value).ok()))
             .is_some_and(|(stored, current)| stored != current);
         if changed {
             let mut tx = self.pool.begin().await?;
-            sqlx::query("DELETE FROM messages WHERE account_id = ? AND mailbox = ?")
+            // Locators are scoped by UIDVALIDITY. Keep committed metadata
+            // visible until the replacement generation succeeds, but never
+            // let cached bodies or attachment bytes from the old namespace be
+            // served for a recycled UID.
+            for statement in [
+                "DELETE FROM message_content_cache WHERE message_id IN (SELECT id FROM messages WHERE account_id = ? AND mailbox = ?)",
+                "DELETE FROM starred_message_bodies WHERE message_id IN (SELECT id FROM messages WHERE account_id = ? AND mailbox = ?)",
+                "DELETE FROM starred_attachment_metadata WHERE message_id IN (SELECT id FROM messages WHERE account_id = ? AND mailbox = ?)",
+                "DELETE FROM attachments WHERE message_id IN (SELECT id FROM messages WHERE account_id = ? AND mailbox = ?)",
+            ] {
+                sqlx::query(statement)
+                    .bind(&account_id)
+                    .bind(mailbox)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            let current_uid_validity = uid_validity.and_then(|value| i64::try_from(value).ok());
+            let replacement_generation_matches = match current_uid_validity {
+                Some(current_uid_validity) => sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(SELECT 1 FROM mailbox_snapshot_generations WHERE account_id = ? AND mailbox = ? AND uid_validity = ?)",
+                )
+                .bind(&account_id)
+                .bind(mailbox)
+                .bind(current_uid_validity)
+                .fetch_one(&mut *tx)
+                .await?,
+                None => false,
+            };
+            if !replacement_generation_matches {
+                if let Some(current_uid_validity) = current_uid_validity {
+                    // A snapshot for another namespace is proven stale. Keep a
+                    // matching replacement generation across reconnects.
+                    sqlx::query("DELETE FROM mailbox_snapshot_generations WHERE account_id = ? AND mailbox = ? AND uid_validity != ?")
+                        .bind(&account_id)
+                        .bind(mailbox)
+                        .bind(current_uid_validity)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                // Failures belong to the previous namespace only until a
+                // replacement generation is active; later retries preserve
+                // its retry queue alongside its staged outcomes.
+                sqlx::query(
+                    "DELETE FROM mailbox_sync_failures WHERE account_id = ? AND mailbox = ?",
+                )
                 .bind(&account_id)
                 .bind(mailbox)
                 .execute(&mut *tx)
                 .await?;
-            sqlx::query("DELETE FROM mailbox_sync_state WHERE account_id = ? AND mailbox = ?")
-                .bind(&account_id)
-                .bind(mailbox)
-                .execute(&mut *tx)
-                .await?;
-            sqlx::query(
-                "DELETE FROM mailbox_action_tombstones WHERE account_id = ? AND mailbox = ?",
-            )
-            .bind(&account_id)
-            .bind(mailbox)
-            .execute(&mut *tx)
-            .await?;
+            }
             tx.commit().await?;
             return Ok(MailboxSyncState {
                 initialized: false,
                 highest_uid: None,
                 uid_validity,
+                uid_validity_changed: true,
             });
         }
         if let Some(uid_validity) = uid_validity.and_then(|value| i64::try_from(value).ok()) {
@@ -1904,6 +2291,7 @@ impl Store {
                 .and_then(|(_, uid, _)| *uid)
                 .and_then(|uid| u32::try_from(uid).ok()),
             uid_validity,
+            uid_validity_changed: false,
         })
     }
 
@@ -3859,6 +4247,146 @@ async fn persist_message(
     persist_message_with_flag_policy(tx, message, FlagUpdatePolicy::ProviderAuthoritative).await
 }
 
+async fn replace_uidvalidity_catalog_messages_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    messages: &[MailSummary],
+) -> Result<()> {
+    let mut scopes = HashSet::new();
+    for message in messages {
+        scopes.insert((message.account_id.as_str(), message.mailbox.as_str()));
+    }
+    for (account_id, mailbox) in scopes {
+        // A successful UIDVALIDITY replacement starts a new namespace;
+        // tombstones from the old one must not suppress replacement rows.
+        sqlx::query("DELETE FROM mailbox_action_tombstones WHERE account_id = ? AND mailbox = ?")
+            .bind(account_id)
+            .bind(mailbox)
+            .execute(&mut **tx)
+            .await?;
+    }
+    for message in messages {
+        for table in [
+            "message_content_fetches",
+            "message_content_cache",
+            "starred_attachment_metadata",
+            "starred_message_bodies",
+            "attachments",
+        ] {
+            let statement = format!("DELETE FROM {table} WHERE message_id IN (SELECT id FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?)");
+            sqlx::query(&statement)
+                .bind(&message.account_id)
+                .bind(&message.mailbox)
+                .bind(message.uid)
+                .execute(&mut **tx)
+                .await?;
+        }
+        sqlx::query("DELETE FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?")
+            .bind(&message.account_id)
+            .bind(&message.mailbox)
+            .bind(message.uid)
+            .execute(&mut **tx)
+            .await?;
+        persist_message(tx, message).await?;
+    }
+    Ok(())
+}
+
+async fn clear_uidvalidity_replacement_namespace_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    account_id: &str,
+    mailbox: &str,
+) -> Result<()> {
+    for table in [
+        "message_content_fetches",
+        "message_content_cache",
+        "starred_attachment_metadata",
+        "starred_message_bodies",
+        "attachments",
+    ] {
+        let statement = format!("DELETE FROM {table} WHERE message_id IN (SELECT id FROM messages WHERE account_id = ? AND mailbox = ?)");
+        sqlx::query(&statement)
+            .bind(account_id)
+            .bind(mailbox)
+            .execute(&mut **tx)
+            .await?;
+    }
+    sqlx::query("DELETE FROM messages WHERE account_id = ? AND mailbox = ?")
+        .bind(account_id)
+        .bind(mailbox)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM mailbox_action_tombstones WHERE account_id = ? AND mailbox = ?")
+        .bind(account_id)
+        .bind(mailbox)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Streams one replacement namespace from generation staging. Each query is
+/// keyset-bounded so finalization does not turn a large mailbox rebuild into a
+/// second in-memory catalogue.
+async fn persist_staged_uidvalidity_replacement_messages_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    account_id: &str,
+    mailbox: &str,
+    generation: &str,
+) -> Result<()> {
+    let mut after_uid: Option<i64> = None;
+    loop {
+        let rows: Vec<(i64, String)> = match after_uid {
+            Some(after_uid) => sqlx::query_as(
+                "SELECT message.uid, message.message_json FROM mailbox_snapshot_messages AS message JOIN mailbox_snapshot_items AS item ON item.account_id = message.account_id AND item.mailbox = message.mailbox AND item.generation = message.generation AND item.uid = message.uid WHERE message.account_id = ? AND message.mailbox = ? AND message.generation = ? AND message.uid > ? ORDER BY message.uid ASC LIMIT ?",
+            )
+            .bind(account_id)
+            .bind(mailbox)
+            .bind(generation)
+            .bind(after_uid)
+            .bind(MAILBOX_SNAPSHOT_REPLACEMENT_PUBLISH_BATCH_SIZE)
+            .fetch_all(&mut **tx)
+            .await?,
+            None => sqlx::query_as(
+                "SELECT message.uid, message.message_json FROM mailbox_snapshot_messages AS message JOIN mailbox_snapshot_items AS item ON item.account_id = message.account_id AND item.mailbox = message.mailbox AND item.generation = message.generation AND item.uid = message.uid WHERE message.account_id = ? AND message.mailbox = ? AND message.generation = ? ORDER BY message.uid ASC LIMIT ?",
+            )
+            .bind(account_id)
+            .bind(mailbox)
+            .bind(generation)
+            .bind(MAILBOX_SNAPSHOT_REPLACEMENT_PUBLISH_BATCH_SIZE)
+            .fetch_all(&mut **tx)
+            .await?,
+        };
+        if rows.is_empty() {
+            return Ok(());
+        }
+        for (uid, message_json) in &rows {
+            let message: MailSummary = serde_json::from_str(message_json)
+                .context("decode staged snapshot replacement message")?;
+            if message.account_id != account_id || message.mailbox != mailbox || message.uid != *uid
+            {
+                return Err(anyhow!(
+                    "staged replacement message does not match its snapshot UID namespace"
+                ));
+            }
+            let staged: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM mailbox_snapshot_items WHERE account_id = ? AND mailbox = ? AND generation = ? AND uid = ?)",
+            )
+            .bind(account_id)
+            .bind(mailbox)
+            .bind(generation)
+            .bind(uid)
+            .fetch_one(&mut **tx)
+            .await?;
+            if !staged {
+                return Err(anyhow!(
+                    "staged replacement message UID is absent from the finalized snapshot"
+                ));
+            }
+            persist_message(tx, &message).await?;
+        }
+        after_uid = rows.last().map(|(uid, _)| *uid);
+    }
+}
+
 async fn persist_message_with_flag_policy(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     message: &MailSummary,
@@ -4411,12 +4939,57 @@ fn is_sqlite_migration_race(error: &anyhow::Error) -> bool {
         .any(|cause| cause.to_string().contains("duplicate column name"))
 }
 
+async fn save_account_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    account: &Account,
+) -> Result<()> {
+    let deleted: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM deleted_account_tombstones WHERE account_id = ?)",
+    )
+    .bind(account.id.to_string())
+    .fetch_one(&mut **tx)
+    .await?;
+    if deleted {
+        return Err(anyhow!("account was removed"));
+    }
+    sqlx::query("INSERT INTO accounts(id, email, data, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET email=excluded.email, data=excluded.data")
+        .bind(account.id.to_string())
+        .bind(&account.email)
+        .bind(serde_json::to_string(account)?)
+        .bind(account.created_at)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn save_mail_rebuild_job_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    job: &MailRebuildJob,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO mail_rebuild_jobs(account_id, phase, completed, total, reset_before_sync, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(account_id) DO UPDATE SET phase=excluded.phase, completed=excluded.completed, total=excluded.total, reset_before_sync=excluded.reset_before_sync, updated_at=excluded.updated_at",
+    )
+    .bind(job.account_id.to_string())
+    .bind(&job.phase)
+    .bind(i64::try_from(job.completed)?)
+    .bind(job.total.map(i64::try_from).transpose()?)
+    .bind(job.reset_before_sync)
+    .bind(Utc::now())
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 pub fn stable_message_id(account_id: AccountId, mailbox: &str, uid: u32) -> String {
     // UUID v4 is used for accounts; deriving a stable ID avoids duplicates during resync.
     format!("{}:{}:{}", account_id, mailbox.replace(':', "_"), uid)
 }
 
 #[cfg(test)]
+// The snapshot implementation is intentionally kept beside the feature's
+// storage helpers below this long-standing test module. Keep this narrowly
+// scoped until the module is split into its own test file.
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 
@@ -4448,49 +5021,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejected_message_watermark_advances_without_a_message_row() {
-        let store = Store::in_memory().await.unwrap();
-        let account = AccountDraft {
-            email: "budget@example.test".into(),
-            display_name: "Budget".into(),
-            provider_id: Some("fastmail".into()),
-            username: None,
-            imap_host: None,
-            imap_port: None,
-            imap_security: None,
-            smtp_host: None,
-            smtp_port: None,
-            smtp_security: None,
-            archive_mailbox: None,
-            spam_mailbox: None,
-        }
-        .into_account(provider::by_id("fastmail").unwrap());
-        store.save_account(&account).await.unwrap();
-
-        store
-            .advance_mailbox_sync_watermark(account.id, "INBOX", 42)
-            .await
-            .unwrap();
-        store
-            .advance_mailbox_sync_watermark(account.id, "INBOX", 41)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            store
-                .highest_mailbox_uid(account.id, "INBOX")
-                .await
-                .unwrap(),
-            Some(42)
-        );
-        assert!(store
-            .mailbox_uids(account.id, "INBOX")
-            .await
-            .unwrap()
-            .is_empty());
-    }
-
-    #[tokio::test]
     async fn mail_rebuild_job_survives_until_explicitly_completed() {
         let store = Store::in_memory().await.unwrap();
         let account = AccountDraft {
@@ -4515,6 +5045,7 @@ mod tests {
             phase: "downloading".into(),
             completed: 150,
             total: Some(1_200),
+            reset_before_sync: true,
         };
 
         store.save_mail_rebuild_job(&job).await.unwrap();
@@ -4524,6 +5055,7 @@ mod tests {
         assert_eq!(restored[0].phase, "downloading");
         assert_eq!(restored[0].completed, 150);
         assert_eq!(restored[0].total, Some(1_200));
+        assert!(restored[0].reset_before_sync);
 
         store.delete_mail_rebuild_job(account_id).await.unwrap();
         assert!(store.mail_rebuild_jobs().await.unwrap().is_empty());
@@ -8833,38 +9365,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn uidvalidity_change_resets_mailbox_and_notification_baseline() {
-        let store = Store::in_memory().await.unwrap();
-        let account_id = uuid::Uuid::new_v4();
-        save_test_account(&store, account_id).await;
-        let mut old = message("Old UID namespace", "old");
-        old.account_id = account_id.to_string();
-        store
-            .save_synced_messages(account_id, "INBOX", &[old])
-            .await
-            .unwrap();
-        store
-            .set_mailbox_uid_validity(account_id, "INBOX", Some(10))
-            .await
-            .unwrap();
-
-        let reset = store
-            .prepare_mailbox_sync(account_id, "INBOX", Some(11))
-            .await
-            .unwrap();
-        assert!(!reset.initialized);
-        assert_eq!(reset.highest_uid, None);
-
-        let mut replacement = message("New UID namespace", "new");
-        replacement.account_id = account_id.to_string();
-        assert!(store
-            .save_synced_messages(account_id, "INBOX", &[replacement])
-            .await
-            .unwrap()
-            .is_empty());
-    }
-
-    #[tokio::test]
     async fn returns_the_highest_uid_for_a_mailbox() {
         let store = Store::in_memory().await.unwrap();
         let account_id = uuid::Uuid::new_v4();
@@ -9335,6 +9835,7 @@ mod tests {
                     phase: "downloading".into(),
                     completed: 1,
                     total: Some(2),
+                    reset_before_sync: false,
                 })
                 .await
                 .err(),
@@ -9433,6 +9934,7 @@ mod tests {
                 phase: "downloading".into(),
                 completed: 1,
                 total: Some(3),
+                reset_before_sync: false,
             })
             .await
             .unwrap();
@@ -9515,6 +10017,7 @@ mod tests {
                 phase: "late".into(),
                 completed: 0,
                 total: None,
+                reset_before_sync: false,
             })
             .await
             .is_err());
@@ -9731,5 +10234,2762 @@ mod tests {
 
         let restored = store.account(account.id).await.unwrap().unwrap();
         assert_eq!(restored.account_name, restored.email);
+    }
+    #[tokio::test]
+    async fn synced_message_above_a_gap_does_not_advance_the_contiguous_watermark() {
+        let store = Store::in_memory().await.unwrap();
+        let account = AccountDraft {
+            email: "budget@example.test".into(),
+            display_name: "Budget".into(),
+            provider_id: Some("fastmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("fastmail").unwrap());
+        store.save_account(&account).await.unwrap();
+
+        let mut higher = message("Higher UID", "available before the gap is repaired");
+        higher.account_id = account.id.to_string();
+        higher.uid = 42;
+        higher.id = stable_message_id(account.id, "INBOX", 42);
+        store
+            .save_synced_messages_through(account.id, "INBOX", &[higher], Some(41))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .highest_mailbox_uid(account.id, "INBOX")
+                .await
+                .unwrap(),
+            Some(41)
+        );
+        assert_eq!(
+            store.mailbox_uids(account.id, "INBOX").await.unwrap(),
+            [42].into()
+        );
+    }
+
+    #[tokio::test]
+    async fn uidvalidity_change_preserves_identity_and_rows_until_replacement_finalizes() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("uidvalidity-retry.db");
+        let store = Store::open(&database).await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let mut old = message("Old UID namespace", "old");
+        old.account_id = account_id.to_string();
+        let old_id = old.id.clone();
+        store
+            .save_synced_messages(account_id, "INBOX", &[old])
+            .await
+            .unwrap();
+        store
+            .set_mailbox_uid_validity(account_id, "INBOX", Some(10))
+            .await
+            .unwrap();
+        store
+            .save_mailbox_catalog_state(account_id, "INBOX", "INBOX", 10, 1, true)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE mailbox_sync_state SET initialized_at = ?, highest_uid = 2, uid_validity = 10 WHERE account_id = ? AND mailbox = 'INBOX'")
+            .bind(Utc::now())
+            .bind(account_id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        let reset = store
+            .prepare_mailbox_sync(account_id, "INBOX", Some(11))
+            .await
+            .unwrap();
+        assert!(!reset.initialized);
+        assert_eq!(reset.highest_uid, None);
+        assert_eq!(reset.uid_validity, Some(11));
+        assert!(reset.uid_validity_changed);
+        let old_catalogue = store
+            .mailbox_catalog_state(account_id, "INBOX")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(old_catalogue.uid_validity, 10);
+        assert_eq!(
+            store
+                .message_by_locator(account_id, "INBOX", 1)
+                .await
+                .unwrap()
+                .as_ref()
+                .map(|message| &message.id),
+            Some(&old_id),
+            "UIDVALIDITY rollover must not delete committed mail before a replacement snapshot finalizes"
+        );
+        drop(store);
+
+        let reopened = Store::open(&database).await.unwrap();
+        let retry = reopened
+            .prepare_mailbox_sync(account_id, "INBOX", Some(11))
+            .await
+            .unwrap();
+        assert!(!retry.initialized);
+        assert_eq!(retry.highest_uid, None);
+        assert!(retry.uid_validity_changed);
+        assert_eq!(
+            reopened
+                .mailbox_catalog_state(account_id, "INBOX")
+                .await
+                .unwrap()
+                .unwrap()
+                .uid_validity,
+            10
+        );
+    }
+
+    #[tokio::test]
+    async fn rollover_prepare_retry_preserves_matching_replacement_outcomes() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let mut old = message("Old namespace", "old");
+        old.account_id = account_id.to_string();
+        store
+            .save_synced_messages(account_id, "INBOX", &[old])
+            .await
+            .unwrap();
+        store
+            .set_mailbox_uid_validity(account_id, "INBOX", Some(10))
+            .await
+            .unwrap();
+        store
+            .save_mailbox_catalog_state(account_id, "INBOX", "INBOX", 10, 1, true)
+            .await
+            .unwrap();
+
+        assert!(
+            store
+                .prepare_mailbox_sync(account_id, "INBOX", Some(11))
+                .await
+                .unwrap()
+                .uid_validity_changed
+        );
+        let generation = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 11, 3, Some(4), None),
+            )
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(
+                account_id,
+                "INBOX",
+                &generation,
+                &[(1, false, false), (2, false, false), (3, false, false)],
+            )
+            .await
+            .unwrap();
+        let mut parsed = message("Replacement", "headers only");
+        parsed.account_id = account_id.to_string();
+        parsed.uid = 3;
+        store
+            .stage_mailbox_snapshot_message_page(account_id, "INBOX", &generation, &[parsed])
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_excluded_uids(account_id, "INBOX", &generation, &[2])
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .staged_mailbox_snapshot_uids_without_replacement_outcome(
+                    account_id,
+                    "INBOX",
+                    &generation,
+                )
+                .await
+                .unwrap(),
+            vec![1]
+        );
+
+        assert!(
+            store
+                .prepare_mailbox_sync(account_id, "INBOX", Some(11))
+                .await
+                .unwrap()
+                .uid_validity_changed
+        );
+        assert_eq!(
+            store
+                .staged_mailbox_snapshot_uids_without_replacement_outcome(
+                    account_id,
+                    "INBOX",
+                    &generation,
+                )
+                .await
+                .unwrap(),
+            vec![1],
+            "a retry must retain parsed and provider-excluded outcomes"
+        );
+    }
+
+    #[tokio::test]
+    async fn uidvalidity_replacement_catalogue_rows_cannot_retain_old_namespace_content() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let mut old = message("Old namespace", "old snippet");
+        old.id = stable_message_id(account_id, "INBOX", 7);
+        old.account_id = account_id.to_string();
+        old.uid = 7;
+        old.content_state = "complete".into();
+        old.is_flagged = true;
+        old.has_attachments = true;
+        old.category = Some("travel".into());
+        old.classification_confidence = Some(0.99);
+        old.classification_source = Some("model".into());
+        store
+            .upsert_messages(std::slice::from_ref(&old))
+            .await
+            .unwrap();
+        // Recreate fields a generic headers-only conflict intentionally keeps
+        // for ordinary incremental refreshes, then prove replacement deletes
+        // all of them before the new UID namespace is inserted.
+        sqlx::query("UPDATE messages SET snippet = 'old snippet', body_text = 'old body', body_html = '<p>old</p>', content_state = 'complete', has_attachments = 1, category = 'travel', classification_confidence = 0.99, classification_source = 'model' WHERE id = ?")
+            .bind(&old.id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store
+            .cache_message_content(&old.id, false, cached_content("old body"))
+            .await
+            .unwrap();
+
+        let mut replacement = message("Replacement namespace", "new snippet");
+        replacement.id = stable_message_id(account_id, "INBOX", 7);
+        replacement.account_id = account_id.to_string();
+        replacement.uid = 7;
+        replacement.content_state = "headers_only".into();
+        replacement.is_read = true;
+        replacement.is_flagged = false;
+        replacement.has_attachments = false;
+        replacement.category = None;
+        replacement.classification_confidence = None;
+        replacement.classification_source = None;
+        store
+            .replace_uidvalidity_catalog_messages(std::slice::from_ref(&replacement))
+            .await
+            .unwrap();
+
+        let stored = store
+            .message_by_locator(account_id, "INBOX", 7)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.subject, "Replacement namespace");
+        assert_eq!(stored.snippet, "new snippet");
+        assert!(stored.body_text.is_empty());
+        assert_eq!(stored.body_html, None);
+        assert_eq!(stored.content_state, "headers_only");
+        assert!(!stored.has_attachments);
+        assert_eq!(stored.category, None);
+        assert_eq!(stored.classification_confidence, None);
+        assert_eq!(stored.classification_source, None);
+        assert!(store
+            .cached_message_content(&old.id)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn explicit_snapshot_watermark_does_not_assume_the_staged_maximum() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let generation = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 10, 51, None, None),
+            )
+            .await
+            .unwrap();
+        let flags: Vec<(u32, bool, bool)> = (100..=150).map(|uid| (uid, false, false)).collect();
+        store
+            .stage_mailbox_snapshot_page(account_id, "INBOX", &generation, &flags)
+            .await
+            .unwrap();
+
+        store
+            .finalize_mailbox_snapshot_with_watermark(account_id, "INBOX", &generation, Some(124))
+            .await
+            .unwrap();
+        let state = store
+            .prepare_mailbox_sync(account_id, "INBOX", Some(10))
+            .await
+            .unwrap();
+        assert!(state.initialized);
+        assert_eq!(state.highest_uid, Some(124));
+        assert!(!state.uid_validity_changed);
+    }
+
+    #[tokio::test]
+    async fn staged_replacement_finalization_streams_metadata_and_purges_an_empty_namespace() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let mut old = message("Old namespace", "old");
+        old.account_id = account_id.to_string();
+        old.uid = 7;
+        store
+            .upsert_catalog_messages(std::slice::from_ref(&old))
+            .await
+            .unwrap();
+
+        let generation = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 11, 250, None, None),
+            )
+            .await
+            .unwrap();
+        let mut replacements = Vec::new();
+        let mut flags = Vec::new();
+        for uid in 1..=250_i64 {
+            let mut replacement = message(&format!("Replacement {uid}"), "headers only");
+            replacement.id = stable_message_id(account_id, "INBOX", uid as u32);
+            replacement.account_id = account_id.to_string();
+            replacement.uid = uid;
+            replacements.push(replacement);
+            flags.push((uid as u32, uid % 2 == 0, uid % 3 == 0));
+        }
+        store
+            .stage_mailbox_snapshot_page(account_id, "INBOX", &generation, &flags)
+            .await
+            .unwrap();
+        for page in replacements.chunks(37) {
+            store
+                .stage_mailbox_snapshot_message_page(account_id, "INBOX", &generation, page)
+                .await
+                .unwrap();
+        }
+        store
+            .finalize_mailbox_snapshot_with_staged_replacements(account_id, "INBOX", &generation)
+            .await
+            .unwrap();
+        let uids = store.mailbox_uids(account_id, "INBOX").await.unwrap();
+        assert_eq!(uids.len(), 250);
+        assert!(uids.contains(&250));
+        assert!(
+            store
+                .message_by_locator(account_id, "INBOX", 7)
+                .await
+                .unwrap()
+                .is_some(),
+            "UID 7 is the new staged replacement, not the old row"
+        );
+
+        let empty_generation = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 12, 1, None, None),
+            )
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(
+                account_id,
+                "INBOX",
+                &empty_generation,
+                &[(7, false, false)],
+            )
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_excluded_uids(account_id, "INBOX", &empty_generation, &[7])
+            .await
+            .unwrap();
+        store
+            .finalize_mailbox_snapshot_with_staged_replacements(
+                account_id,
+                "INBOX",
+                &empty_generation,
+            )
+            .await
+            .unwrap();
+        assert!(
+            store
+                .message_by_locator(account_id, "INBOX", 7)
+                .await
+                .unwrap()
+                .is_none(),
+            "replacement mode clears old rows even if this UID was filtered from metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_staged_replacement_rolls_back_the_namespace_publish() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let mut old = message("Old namespace", "old");
+        old.account_id = account_id.to_string();
+        old.uid = 7;
+        store
+            .upsert_catalog_messages(std::slice::from_ref(&old))
+            .await
+            .unwrap();
+        store
+            .save_mailbox_catalog_state(account_id, "INBOX", "INBOX", 10, 1, true)
+            .await
+            .unwrap();
+        let generation = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 11, 1, None, None),
+            )
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(account_id, "INBOX", &generation, &[(7, false, false)])
+            .await
+            .unwrap();
+        let now = Utc::now();
+        sqlx::query("INSERT INTO mailbox_snapshot_messages(account_id, mailbox, generation, uid, message_json, created_at, updated_at) VALUES (?, 'INBOX', ?, 7, '{bad json', ?, ?)")
+            .bind(account_id.to_string())
+            .bind(&generation)
+            .bind(now)
+            .bind(now)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        assert!(store
+            .finalize_mailbox_snapshot_with_staged_replacements(account_id, "INBOX", &generation)
+            .await
+            .is_err());
+        assert_eq!(
+            store
+                .message_by_locator(account_id, "INBOX", 7)
+                .await
+                .unwrap()
+                .unwrap()
+                .subject,
+            "Old namespace"
+        );
+        assert_eq!(
+            store
+                .mailbox_catalog_state(account_id, "INBOX")
+                .await
+                .unwrap()
+                .unwrap()
+                .uid_validity,
+            10
+        );
+        assert_eq!(
+            store
+                .staged_mailbox_snapshot_uids(account_id, "INBOX", &generation)
+                .await
+                .unwrap(),
+            vec![7]
+        );
+    }
+
+    #[tokio::test]
+    async fn matching_snapshot_identity_resumes_large_partial_replacement_outcomes() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let generation = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "[Gmail]/All Mail",
+                MailboxSnapshotIdentity::new("[Gmail]/All Mail", 7, 99_003, Some(99_004), None),
+            )
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(
+                account_id,
+                "[Gmail]/All Mail",
+                &generation,
+                &[
+                    (99_003, false, false),
+                    (99_002, true, false),
+                    (99_001, false, false),
+                ],
+            )
+            .await
+            .unwrap();
+        let mut parsed = message("Retained staged metadata", "headers only");
+        parsed.id = stable_message_id(account_id, "[Gmail]/All Mail", 99_003);
+        parsed.account_id = account_id.to_string();
+        parsed.mailbox = "[Gmail]/All Mail".into();
+        parsed.uid = 99_003;
+        store
+            .stage_mailbox_snapshot_message_page(
+                account_id,
+                "[Gmail]/All Mail",
+                &generation,
+                &[parsed],
+            )
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_excluded_uids(
+                account_id,
+                "[Gmail]/All Mail",
+                &generation,
+                &[99_002],
+            )
+            .await
+            .unwrap();
+
+        let resumed = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "[Gmail]/All Mail",
+                MailboxSnapshotIdentity::new("[Gmail]/All Mail", 7, 99_003, Some(99_004), Some(42)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resumed, generation);
+        store
+            .stage_mailbox_snapshot_page(
+                account_id,
+                "[Gmail]/All Mail",
+                &resumed,
+                &[
+                    (99_003, false, false),
+                    (99_002, true, false),
+                    (99_001, false, false),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .staged_mailbox_snapshot_uids_without_replacement_outcome(
+                    account_id,
+                    "[Gmail]/All Mail",
+                    &resumed,
+                )
+                .await
+                .unwrap(),
+            vec![99_001],
+            "already parsed and durably filtered UIDs are never fetched again"
+        );
+    }
+
+    #[tokio::test]
+    async fn mismatched_snapshot_identity_replaces_old_staging() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let first = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 7, 2, Some(3), None),
+            )
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(account_id, "INBOX", &first, &[(2, false, false)])
+            .await
+            .unwrap();
+
+        let replacement = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 7, 2, Some(4), None),
+            )
+            .await
+            .unwrap();
+        assert_ne!(replacement, first);
+        assert!(store
+            .staged_mailbox_snapshot_uids(account_id, "INBOX", &first)
+            .await
+            .is_err());
+        assert!(store
+            .staged_mailbox_snapshot_uids(account_id, "INBOX", &replacement)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn authoritative_nonexistent_mailbox_clear_removes_the_entire_namespace() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let mut old = message("Old Sent", "old");
+        old.account_id = account_id.to_string();
+        old.mailbox = "Sent".into();
+        old.uid = 4;
+        store
+            .upsert_catalog_messages(std::slice::from_ref(&old))
+            .await
+            .unwrap();
+        store
+            .save_mailbox_catalog_state(account_id, "Sent", "Sent", 5, 1, true)
+            .await
+            .unwrap();
+        store
+            .set_mailbox_uid_validity(account_id, "Sent", Some(5))
+            .await
+            .unwrap();
+        let generation = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "Sent",
+                MailboxSnapshotIdentity::new("Sent", 5, 1, Some(5), None),
+            )
+            .await
+            .unwrap();
+        store
+            .record_mailbox_sync_failure(account_id, "Sent", 4, "parse", "old namespace")
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO mailbox_action_tombstones(account_id, mailbox, uid, created_at) VALUES (?, 'Sent', 4, ?)")
+            .bind(account_id.to_string())
+            .bind(Utc::now())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        store
+            .clear_nonexistent_mailbox_namespace(account_id, "Sent")
+            .await
+            .unwrap();
+        assert!(store
+            .message_by_locator(account_id, "Sent", 4)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .mailbox_catalog_state(account_id, "Sent")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .prepare_mailbox_sync(account_id, "Sent", Some(5))
+            .await
+            .unwrap()
+            .highest_uid
+            .is_none());
+        assert!(store
+            .staged_mailbox_snapshot_uids(account_id, "Sent", &generation)
+            .await
+            .is_err());
+        assert!(store
+            .mailbox_sync_failure_uids(account_id, "Sent")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn replacement_snapshot_finalization_rolls_back_replacements_when_publish_fails() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let mut old = message("Old namespace", "old");
+        old.id = stable_message_id(account_id, "INBOX", 7);
+        old.account_id = account_id.to_string();
+        old.uid = 7;
+        let mut collision = message("Unrelated row", "keep");
+        collision.id = "replacement-id-collision".into();
+        collision.account_id = account_id.to_string();
+        collision.mailbox = "Archive".into();
+        collision.uid = 9;
+        store
+            .upsert_catalog_messages(&[old.clone(), collision])
+            .await
+            .unwrap();
+        store
+            .save_mailbox_catalog_state(account_id, "INBOX", "INBOX", 10, 1, true)
+            .await
+            .unwrap();
+        let generation = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 11, 1, Some(8), None),
+            )
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(account_id, "INBOX", &generation, &[(7, true, false)])
+            .await
+            .unwrap();
+        let mut replacement = message("Replacement namespace", "new");
+        replacement.id = "replacement-id-collision".into();
+        replacement.account_id = account_id.to_string();
+        replacement.uid = 7;
+
+        assert!(store
+            .finalize_mailbox_snapshot_with_replacements(
+                account_id,
+                "INBOX",
+                &generation,
+                &[replacement],
+            )
+            .await
+            .is_err());
+        assert_eq!(
+            store
+                .message_by_locator(account_id, "INBOX", 7)
+                .await
+                .unwrap()
+                .unwrap()
+                .subject,
+            "Old namespace"
+        );
+        assert_eq!(
+            store
+                .staged_mailbox_snapshot_uids(account_id, "INBOX", &generation)
+                .await
+                .unwrap(),
+            vec![7]
+        );
+        assert_eq!(
+            store
+                .mailbox_catalog_state(account_id, "INBOX")
+                .await
+                .unwrap()
+                .unwrap()
+                .uid_validity,
+            10
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_mailbox_snapshot_never_deletes_committed_messages() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let mut first = message("First", "one");
+        first.account_id = account_id.to_string();
+        first.uid = 1;
+        let mut second = message("Second", "two");
+        second.account_id = account_id.to_string();
+        second.uid = 2;
+        store
+            .upsert_catalog_messages(&[first, second])
+            .await
+            .unwrap();
+
+        let generation = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 77, 2, Some(3), None),
+            )
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(account_id, "INBOX", &generation, &[(2, true, false)])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .staged_mailbox_snapshot_uids(account_id, "INBOX", &generation)
+                .await
+                .unwrap(),
+            vec![2]
+        );
+        assert!(store
+            .message_by_locator(account_id, "INBOX", 1)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(store
+            .message_by_locator(account_id, "INBOX", 2)
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn finalized_mailbox_snapshot_applies_flags_deletes_absent_rows_and_clears_staging() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let mut stale = message("Stale", "remove me");
+        stale.account_id = account_id.to_string();
+        stale.uid = 1;
+        let mut retained = message("Retained", "keep me");
+        retained.account_id = account_id.to_string();
+        retained.uid = 2;
+        store
+            .upsert_catalog_messages(&[stale, retained])
+            .await
+            .unwrap();
+
+        let generation = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("Remote Inbox", 88, 1, Some(3), Some(u64::MAX)),
+            )
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(account_id, "INBOX", &generation, &[(2, true, true)])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .finalize_mailbox_snapshot(account_id, "INBOX", &generation)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(store
+            .message_by_locator(account_id, "INBOX", 1)
+            .await
+            .unwrap()
+            .is_none());
+        let retained = store
+            .message_by_locator(account_id, "INBOX", 2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(retained.is_read);
+        assert!(retained.is_flagged);
+        let state = store
+            .mailbox_catalog_state(account_id, "INBOX")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.remote_name, "Remote Inbox");
+        assert_eq!(state.uid_validity, 88);
+        assert_eq!(state.remote_total, 1);
+        assert!(state.historical_complete);
+        assert_eq!(state.uid_next, Some(3));
+        assert_eq!(
+            state.highest_modseq.as_deref(),
+            Some("18446744073709551615")
+        );
+        let sync_state = store
+            .prepare_mailbox_sync(account_id, "INBOX", Some(88))
+            .await
+            .unwrap();
+        assert!(sync_state.initialized);
+        assert_eq!(sync_state.highest_uid, Some(2));
+        assert!(store
+            .message_by_locator(account_id, "INBOX", 2)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(store
+            .staged_mailbox_snapshot_uids(account_id, "INBOX", &generation)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn finalized_uidvalidity_rollover_clears_old_namespace_tombstones() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        store
+            .save_mailbox_catalog_state(account_id, "INBOX", "INBOX", 10, 1, true)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO mailbox_action_tombstones(account_id, mailbox, uid, created_at) VALUES (?, 'INBOX', 2, ?)")
+            .bind(account_id.to_string())
+            .bind(Utc::now())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .prepare_mailbox_sync(account_id, "INBOX", Some(11))
+                .await
+                .unwrap()
+                .uid_validity_changed
+        );
+        let pending_tombstones: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM mailbox_action_tombstones WHERE account_id = ? AND mailbox = 'INBOX'",
+        )
+        .bind(account_id.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(pending_tombstones, 1);
+
+        let generation = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 11, 1, Some(3), None),
+            )
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(account_id, "INBOX", &generation, &[(2, false, false)])
+            .await
+            .unwrap();
+        store
+            .finalize_mailbox_snapshot(account_id, "INBOX", &generation)
+            .await
+            .unwrap();
+
+        let tombstones: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM mailbox_action_tombstones WHERE account_id = ? AND mailbox = 'INBOX'",
+        )
+        .bind(account_id.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(tombstones, 0);
+    }
+
+    #[tokio::test]
+    async fn changed_since_delta_updates_only_observed_flags_and_persists_condstore_state() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let mut changed = message("Changed", "one");
+        changed.account_id = account_id.to_string();
+        changed.uid = 1;
+        let mut omitted = message("Omitted", "two");
+        omitted.account_id = account_id.to_string();
+        omitted.uid = 2;
+        omitted.is_read = true;
+        omitted.is_flagged = true;
+        store
+            .upsert_catalog_messages(&[changed, omitted])
+            .await
+            .unwrap();
+        store
+            .save_mailbox_catalog_state(account_id, "INBOX", "Remote Inbox", 77, 2, true)
+            .await
+            .unwrap();
+
+        store
+            .apply_complete_mailbox_changed_since_flags(
+                account_id,
+                "INBOX",
+                MailboxChangedSinceFlags {
+                    identity: MailboxSnapshotIdentity::new(
+                        "Remote Inbox",
+                        77,
+                        2,
+                        Some(3),
+                        Some(u64::MAX),
+                    ),
+                    remote_total: 2,
+                    flags: &[(1, true, true)],
+                },
+            )
+            .await
+            .unwrap();
+
+        let changed = store
+            .message_by_locator(account_id, "INBOX", 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(changed.is_read && changed.is_flagged);
+        let omitted = store
+            .message_by_locator(account_id, "INBOX", 2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(omitted.is_read && omitted.is_flagged);
+        let state = store
+            .mailbox_catalog_state(account_id, "INBOX")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.remote_total, 2);
+        assert_eq!(state.uid_next, Some(3));
+        assert_eq!(
+            state.highest_modseq.as_deref(),
+            Some("18446744073709551615")
+        );
+    }
+
+    #[tokio::test]
+    async fn changed_since_delta_supports_nomodseq_by_persisting_null_condstore_state() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        store
+            .save_mailbox_catalog_state(account_id, "INBOX", "INBOX", 77, 0, true)
+            .await
+            .unwrap();
+
+        store
+            .apply_complete_mailbox_changed_since_flags(
+                account_id,
+                "INBOX",
+                MailboxChangedSinceFlags {
+                    identity: MailboxSnapshotIdentity::new("INBOX", 77, 0, None, None),
+                    remote_total: 0,
+                    flags: &[],
+                },
+            )
+            .await
+            .unwrap();
+        let state = store
+            .mailbox_catalog_state(account_id, "INBOX")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.uid_next, None);
+        assert_eq!(state.highest_modseq, None);
+    }
+
+    #[tokio::test]
+    async fn migration_adds_nullable_condstore_columns_to_existing_catalogue_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy-catalogue.db");
+        let options = SqliteConnectOptions::from_str(path.to_str().unwrap())
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await.unwrap();
+        sqlx::query("CREATE TABLE accounts (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, data TEXT NOT NULL, created_at TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE mailbox_catalog_state (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, remote_name TEXT NOT NULL, uid_validity INTEGER NOT NULL, remote_total INTEGER NOT NULL DEFAULT 0, historical_complete INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox))")
+            .execute(&pool)
+            .await
+            .unwrap();
+        drop(pool);
+
+        let store = Store::open(&path).await.unwrap();
+        let columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
+            sqlx::query_as("PRAGMA table_info(mailbox_catalog_state)")
+                .fetch_all(&store.pool)
+                .await
+                .unwrap();
+        assert!(columns.iter().any(|column| column.1 == "uid_next"));
+        assert!(columns.iter().any(|column| column.1 == "highest_modseq"));
+    }
+
+    #[tokio::test]
+    async fn mailbox_snapshot_generations_are_replaced_per_mailbox_and_isolated_between_mailboxes()
+    {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let inbox_first = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 7, 2, None, None),
+            )
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(account_id, "INBOX", &inbox_first, &[(2, false, false)])
+            .await
+            .unwrap();
+        let archive = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "Archive",
+                MailboxSnapshotIdentity::new("Archive", 8, 1, None, None),
+            )
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(account_id, "Archive", &archive, &[(9, true, true)])
+            .await
+            .unwrap();
+
+        let inbox_replacement = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 7, 3, None, None),
+            )
+            .await
+            .unwrap();
+        assert!(store
+            .stage_mailbox_snapshot_page(account_id, "INBOX", &inbox_first, &[(1, false, false)])
+            .await
+            .is_err());
+        assert_eq!(
+            store
+                .staged_mailbox_snapshot_uids(account_id, "Archive", &archive)
+                .await
+                .unwrap(),
+            vec![9]
+        );
+        assert!(store
+            .staged_mailbox_snapshot_uids(account_id, "INBOX", &inbox_replacement)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn finalized_empty_mailbox_snapshot_authoritatively_clears_a_mailbox() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let mut first = message("Old one", "old");
+        first.account_id = account_id.to_string();
+        first.uid = 1;
+        let mut second = message("Old two", "old");
+        second.account_id = account_id.to_string();
+        second.uid = 2;
+        store
+            .upsert_catalog_messages(&[first, second])
+            .await
+            .unwrap();
+
+        let generation = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 99, 0, Some(1), None),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .finalize_mailbox_snapshot(account_id, "INBOX", &generation)
+                .await
+                .unwrap(),
+            2
+        );
+        assert!(store
+            .mailbox_uids(account_id, "INBOX")
+            .await
+            .unwrap()
+            .is_empty());
+        let state = store
+            .mailbox_catalog_state(account_id, "INBOX")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.remote_total, 0);
+        assert!(state.historical_complete);
+    }
+
+    #[tokio::test]
+    async fn mailbox_sync_failures_remain_retryable_until_their_uids_are_cleared() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+
+        store
+            .record_mailbox_sync_failure(account_id, "INBOX", 100, "parse", "bad header")
+            .await
+            .unwrap();
+        store
+            .record_mailbox_sync_failure(account_id, "INBOX", 101, "fetch", "timed out")
+            .await
+            .unwrap();
+        // A retry updates the diagnostic but does not create a second UID.
+        store
+            .record_mailbox_sync_failure(account_id, "INBOX", 100, "fetch", "literal too large")
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .mailbox_sync_failure_uids(account_id, "INBOX")
+                .await
+                .unwrap(),
+            vec![101, 100]
+        );
+
+        store
+            .clear_mailbox_sync_failure(account_id, "INBOX", 100)
+            .await
+            .unwrap();
+        store
+            .clear_mailbox_sync_failures(account_id, "INBOX", &[101])
+            .await
+            .unwrap();
+        assert!(store
+            .mailbox_sync_failure_uids(account_id, "INBOX")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn retried_mailbox_sync_failure_yields_to_untouched_failures_in_oldest_first_order() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        for uid in 1..=50 {
+            store
+                .record_mailbox_sync_failure(account_id, "INBOX", uid, "fetch", "timed out")
+                .await
+                .unwrap();
+        }
+        let tie_time = Utc::now();
+        store
+            .record_mailbox_sync_failure(account_id, "INBOX", 25, "fetch", "still timed out")
+            .await
+            .unwrap();
+        sqlx::query("UPDATE mailbox_sync_failures SET updated_at = ? WHERE account_id = ? AND mailbox = 'INBOX' AND uid IN (49, 50)")
+            .bind(tie_time)
+            .bind(account_id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        let ordered = store
+            .mailbox_sync_failure_uids(account_id, "INBOX")
+            .await
+            .unwrap();
+        let retried = ordered.iter().position(|uid| *uid == 25).unwrap();
+        for uid in 26..=50 {
+            assert!(
+                ordered
+                    .iter()
+                    .position(|candidate| *candidate == uid)
+                    .unwrap()
+                    < retried,
+                "untouched UID {uid} must precede the retried UID"
+            );
+        }
+        let forty_nine = ordered.iter().position(|uid| *uid == 49).unwrap();
+        let fifty = ordered.iter().position(|uid| *uid == 50).unwrap();
+        assert!(
+            forty_nine < fifty,
+            "equal timestamps use UID as a stable tie-breaker"
+        );
+    }
+
+    #[tokio::test]
+    async fn mailbox_sync_failures_are_cleared_by_index_reset_and_fenced_after_account_deletion() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        store
+            .record_mailbox_sync_failure(account_id, "INBOX", 10, "parse", "bad header")
+            .await
+            .unwrap();
+        store.reset_account_mail_index(account_id).await.unwrap();
+        assert!(store
+            .mailbox_sync_failure_uids(account_id, "INBOX")
+            .await
+            .unwrap()
+            .is_empty());
+
+        store
+            .record_mailbox_sync_failure(account_id, "INBOX", 11, "fetch", "timed out")
+            .await
+            .unwrap();
+        store.delete_account(account_id).await.unwrap();
+        assert!(store
+            .mailbox_sync_failure_uids(account_id, "INBOX")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .record_mailbox_sync_failure(account_id, "INBOX", 12, "fetch", "late writer")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("account was removed"));
+    }
+
+    #[tokio::test]
+    async fn uidnext_absent_resume_rebuilds_inventory_and_keeps_current_outcomes() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let generation = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 9, 2, None, None),
+            )
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(
+                account_id,
+                "INBOX",
+                &generation,
+                &[(1, false, false), (2, false, false)],
+            )
+            .await
+            .unwrap();
+        let mut retained = message("Still present", "headers only");
+        retained.account_id = account_id.to_string();
+        retained.uid = 2;
+        store
+            .stage_mailbox_snapshot_message_page(account_id, "INBOX", &generation, &[retained])
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_excluded_uids(account_id, "INBOX", &generation, &[1])
+            .await
+            .unwrap();
+
+        let resumed = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 9, 2, None, None),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resumed, generation);
+        assert!(store
+            .staged_mailbox_snapshot_uids(account_id, "INBOX", &resumed)
+            .await
+            .unwrap()
+            .is_empty());
+        store
+            .stage_mailbox_snapshot_page(
+                account_id,
+                "INBOX",
+                &resumed,
+                &[(2, false, false), (3, false, false)],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .staged_mailbox_snapshot_uids(account_id, "INBOX", &resumed)
+                .await
+                .unwrap(),
+            vec![3, 2]
+        );
+        assert_eq!(
+            store
+                .staged_mailbox_snapshot_uids_without_replacement_outcome(
+                    account_id, "INBOX", &resumed,
+                )
+                .await
+                .unwrap(),
+            vec![3],
+            "the still-present UID retains its prior staged metadata outcome"
+        );
+    }
+
+    #[tokio::test]
+    async fn incomplete_staged_replacement_does_not_publish_or_delete_old_namespace() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let mut old = message("Old namespace", "old");
+        old.account_id = account_id.to_string();
+        old.uid = 1;
+        store
+            .upsert_catalog_messages(std::slice::from_ref(&old))
+            .await
+            .unwrap();
+        store
+            .save_mailbox_catalog_state(account_id, "INBOX", "INBOX", 10, 1, true)
+            .await
+            .unwrap();
+        let generation = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 11, 1, Some(2), None),
+            )
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(account_id, "INBOX", &generation, &[(1, false, false)])
+            .await
+            .unwrap();
+
+        assert!(store
+            .finalize_mailbox_snapshot_with_staged_replacements(account_id, "INBOX", &generation)
+            .await
+            .is_err());
+        assert_eq!(
+            store
+                .message_by_locator(account_id, "INBOX", 1)
+                .await
+                .unwrap()
+                .unwrap()
+                .subject,
+            "Old namespace"
+        );
+        assert_eq!(
+            store
+                .mailbox_catalog_state(account_id, "INBOX")
+                .await
+                .unwrap()
+                .unwrap()
+                .uid_validity,
+            10
+        );
+        assert_eq!(
+            store
+                .staged_mailbox_snapshot_uids(account_id, "INBOX", &generation)
+                .await
+                .unwrap(),
+            vec![1]
+        );
+    }
+
+    #[tokio::test]
+    async fn staging_replacement_outcomes_clears_their_durable_failures_atomically() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let generation = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 1, 2, Some(3), None),
+            )
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(
+                account_id,
+                "INBOX",
+                &generation,
+                &[(1, false, false), (2, false, false)],
+            )
+            .await
+            .unwrap();
+        store
+            .record_mailbox_sync_failure(account_id, "INBOX", 1, "parse", "filtered later")
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_excluded_uids(account_id, "INBOX", &generation, &[1])
+            .await
+            .unwrap();
+        let mut parsed = message("Parsed", "headers only");
+        parsed.account_id = account_id.to_string();
+        parsed.uid = 2;
+        store
+            .record_mailbox_sync_failure(account_id, "INBOX", 2, "parse", "fixed later")
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_message_page(account_id, "INBOX", &generation, &[parsed])
+            .await
+            .unwrap();
+        assert!(store
+            .mailbox_sync_failure_uids(account_id, "INBOX")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn complete_family_keep_set_prunes_only_obsolete_provider_keys() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        for (mailbox, uid) in [
+            ("Sent", 1),
+            ("Sent::Legacy", 2),
+            ("Sent::A", 3),
+            ("Sent::B", 4),
+        ] {
+            let mut message = message(mailbox, "old provider spelling");
+            message.account_id = account_id.to_string();
+            message.mailbox = mailbox.into();
+            message.uid = uid;
+            store.upsert_catalog_messages(&[message]).await.unwrap();
+            store
+                .save_mailbox_catalog_state(account_id, mailbox, mailbox, 5, 1, true)
+                .await
+                .unwrap();
+        }
+        for (mailbox, uid) in [("Sent::A", 3), ("Sent::B", 4)] {
+            let generation = store
+                .begin_mailbox_snapshot(
+                    account_id,
+                    mailbox,
+                    MailboxSnapshotIdentity::new(mailbox, 5, 1, Some(5), None),
+                )
+                .await
+                .unwrap();
+            store
+                .stage_mailbox_snapshot_page(
+                    account_id,
+                    mailbox,
+                    &generation,
+                    &[(uid, true, false)],
+                )
+                .await
+                .unwrap();
+            store
+                .finalize_mailbox_snapshot(account_id, mailbox, &generation)
+                .await
+                .unwrap();
+        }
+
+        // One sibling's completed plan must not erase another or a legacy
+        // key before the caller has a complete family keep-set.
+        assert!(store
+            .message_by_locator(account_id, "Sent::Legacy", 2)
+            .await
+            .unwrap()
+            .is_some());
+        store
+            .prune_obsolete_mailbox_family_namespaces(
+                account_id,
+                "Sent",
+                &["Sent::A".into(), "Sent::B".into()],
+            )
+            .await
+            .unwrap();
+        assert!(store
+            .message_by_locator(account_id, "Sent", 1)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .message_by_locator(account_id, "Sent::Legacy", 2)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .message_by_locator(account_id, "Sent::A", 3)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(store
+            .message_by_locator(account_id, "Sent::B", 4)
+            .await
+            .unwrap()
+            .is_some());
+        let old_state_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM mailbox_catalog_state WHERE account_id = ? AND mailbox IN ('Sent', 'Sent::Legacy')",
+        )
+        .bind(account_id.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(old_state_count, 0);
+
+        store
+            .prune_obsolete_mailbox_family_namespaces(account_id, "Sent", &[])
+            .await
+            .unwrap();
+        assert!(store
+            .message_by_locator(account_id, "Sent::A", 3)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .message_by_locator(account_id, "Sent::B", 4)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn nonexistent_mailbox_clear_isolated_to_the_confirmed_key() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        for (mailbox, uid) in [
+            ("Archive::Missing", 1),
+            ("Archive::Current", 2),
+            ("Spam::Missing", 3),
+            ("Spam::Current", 4),
+            ("Trash::Missing", 5),
+            ("Trash::Current", 6),
+            ("Sent::Missing", 7),
+            ("Sent::Current", 8),
+            ("INBOX", 9),
+            ("INBOX::Current", 10),
+        ] {
+            let mut message = message(mailbox, "gone");
+            message.account_id = account_id.to_string();
+            message.mailbox = mailbox.into();
+            message.uid = uid;
+            store.upsert_catalog_messages(&[message]).await.unwrap();
+        }
+        for (missing, current) in [
+            ("Archive::Missing", "Archive::Current"),
+            ("Spam::Missing", "Spam::Current"),
+            ("Trash::Missing", "Trash::Current"),
+            ("Sent::Missing", "Sent::Current"),
+            ("INBOX", "INBOX::Current"),
+        ] {
+            store
+                .clear_nonexistent_mailbox_namespace(account_id, missing)
+                .await
+                .unwrap();
+            let removed: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM messages WHERE account_id = ? AND mailbox = ?",
+            )
+            .bind(account_id.to_string())
+            .bind(missing)
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+            assert_eq!(removed, 0);
+            assert!(store
+                .message_by_locator(
+                    account_id,
+                    current,
+                    match current {
+                        "Archive::Current" => 2,
+                        "Spam::Current" => 4,
+                        "Trash::Current" => 6,
+                        "Sent::Current" => 8,
+                        _ => 10,
+                    },
+                )
+                .await
+                .unwrap()
+                .is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn account_and_reset_rebuild_job_commit_together() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let account = account_with_id(account_id, "atomic-reset@example.test");
+        let job = MailRebuildJob {
+            account_id,
+            phase: "queued".into(),
+            completed: 0,
+            total: None,
+            reset_before_sync: true,
+        };
+        store
+            .save_account_with_reset_mail_rebuild_job(&account, &job)
+            .await
+            .unwrap();
+        assert!(store.account(account_id).await.unwrap().is_some());
+        let saved_jobs = store.mail_rebuild_jobs().await.unwrap();
+        assert_eq!(saved_jobs.len(), 1);
+        assert_eq!(saved_jobs[0].account_id, job.account_id);
+        assert!(saved_jobs[0].reset_before_sync);
+
+        let uncommitted_id = uuid::Uuid::new_v4();
+        let uncommitted = account_with_id(uncommitted_id, "must-not-save@example.test");
+        let wrong_job = MailRebuildJob {
+            account_id: uuid::Uuid::new_v4(),
+            phase: "queued".into(),
+            completed: 0,
+            total: None,
+            reset_before_sync: true,
+        };
+        assert!(store
+            .save_account_with_reset_mail_rebuild_job(&uncommitted, &wrong_job)
+            .await
+            .is_err());
+        assert!(store.account(uncommitted_id).await.unwrap().is_none());
+        let mut changed_existing = account.clone();
+        changed_existing.email = "must-not-update@example.test".into();
+        assert!(store
+            .save_account_with_reset_mail_rebuild_job(&changed_existing, &wrong_job)
+            .await
+            .is_err());
+        assert_eq!(
+            store.account(account_id).await.unwrap().unwrap().email,
+            "atomic-reset@example.test"
+        );
+        assert!(store
+            .save_account_with_reset_mail_rebuild_job(
+                &uncommitted,
+                &MailRebuildJob {
+                    account_id: uncommitted_id,
+                    phase: "queued".into(),
+                    completed: 0,
+                    total: None,
+                    reset_before_sync: false,
+                },
+            )
+            .await
+            .is_err());
+        assert!(store.account(uncommitted_id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn account_reset_and_previous_secret_rotation_are_atomic() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let initial = account_with_id(account_id, "before-rotation@example.test");
+        store.save_account(&initial).await.unwrap();
+        store
+            .save_mail_rebuild_job(&MailRebuildJob {
+                account_id,
+                phase: "old-job".into(),
+                completed: 1,
+                total: Some(2),
+                reset_before_sync: false,
+            })
+            .await
+            .unwrap();
+        store
+            .set_secret("rotation-old", "old-secret")
+            .await
+            .unwrap();
+        store
+            .set_secret("rotation-new", "new-secret")
+            .await
+            .unwrap();
+        let mut rotated = initial.clone();
+        rotated.email = "after-rotation@example.test".into();
+        let reset_job = MailRebuildJob {
+            account_id,
+            phase: "new-job".into(),
+            completed: 0,
+            total: None,
+            reset_before_sync: true,
+        };
+        store
+            .save_account_with_reset_mail_rebuild_job_and_delete_previous_secret(
+                &rotated,
+                &reset_job,
+                Some("rotation-old"),
+                "rotation-new",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.account(account_id).await.unwrap().unwrap().email,
+            "after-rotation@example.test"
+        );
+        assert_eq!(store.mail_rebuild_jobs().await.unwrap()[0].phase, "new-job");
+        assert!(store.secret("rotation-old").await.unwrap().is_none());
+        assert_eq!(
+            store.secret("rotation-new").await.unwrap().as_deref(),
+            Some("new-secret")
+        );
+
+        let rollback_id = uuid::Uuid::new_v4();
+        let rollback_initial = account_with_id(rollback_id, "before-rollback@example.test");
+        store.save_account(&rollback_initial).await.unwrap();
+        store
+            .save_mail_rebuild_job(&MailRebuildJob {
+                account_id: rollback_id,
+                phase: "old-job".into(),
+                completed: 1,
+                total: Some(2),
+                reset_before_sync: false,
+            })
+            .await
+            .unwrap();
+        store
+            .set_secret("rollback-old", "old-secret")
+            .await
+            .unwrap();
+        store
+            .set_secret("rollback-new", "new-secret")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TRIGGER reject_rotation_secret_delete BEFORE DELETE ON credentials WHEN OLD.name = 'rollback-old' BEGIN SELECT RAISE(ABORT, 'forced credential cleanup failure'); END")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let mut rollback_rotated = rollback_initial.clone();
+        rollback_rotated.email = "must-not-commit@example.test".into();
+        assert!(store
+            .save_account_with_reset_mail_rebuild_job_and_delete_previous_secret(
+                &rollback_rotated,
+                &MailRebuildJob {
+                    account_id: rollback_id,
+                    phase: "must-not-commit".into(),
+                    completed: 0,
+                    total: None,
+                    reset_before_sync: true,
+                },
+                Some("rollback-old"),
+                "rollback-new",
+            )
+            .await
+            .is_err());
+        assert_eq!(
+            store.account(rollback_id).await.unwrap().unwrap().email,
+            "before-rollback@example.test"
+        );
+        assert_eq!(
+            store
+                .mail_rebuild_jobs()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|job| job.account_id == rollback_id)
+                .unwrap()
+                .phase,
+            "old-job"
+        );
+        assert_eq!(
+            store.secret("rollback-old").await.unwrap().as_deref(),
+            Some("old-secret")
+        );
+        assert_eq!(
+            store.secret("rollback-new").await.unwrap().as_deref(),
+            Some("new-secret")
+        );
+
+        let deleted_id = uuid::Uuid::new_v4();
+        let deleted_account = account_with_id(deleted_id, "deleted@example.test");
+        store.save_account(&deleted_account).await.unwrap();
+        store.set_secret("deleted-old", "old-secret").await.unwrap();
+        store.set_secret("deleted-new", "new-secret").await.unwrap();
+        store.delete_account(deleted_id).await.unwrap();
+        assert!(store
+            .save_account_with_reset_mail_rebuild_job_and_delete_previous_secret(
+                &deleted_account,
+                &MailRebuildJob {
+                    account_id: deleted_id,
+                    phase: "must-not-revive".into(),
+                    completed: 0,
+                    total: None,
+                    reset_before_sync: true,
+                },
+                Some("deleted-old"),
+                "deleted-new",
+            )
+            .await
+            .is_err());
+        assert_eq!(
+            store.secret("deleted-old").await.unwrap().as_deref(),
+            Some("old-secret")
+        );
+    }
+}
+impl Store {
+    /// Starts or resumes an incomplete mailbox inventory. Matching mailbox
+    /// identity retains its staged flags and replacement outcomes across a
+    /// cancelled connection; a changed identity replaces only staging.
+    pub async fn begin_mailbox_snapshot(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        identity: MailboxSnapshotIdentity<'_>,
+    ) -> Result<String> {
+        let MailboxSnapshotIdentity {
+            remote_name,
+            uid_validity,
+            initial_exists,
+            uid_next,
+            highest_modseq,
+        } = identity;
+        let account_id = account_id.to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let uid_next = uid_next.map(i64::from);
+        let highest_modseq = highest_modseq.map(|value| value.to_string());
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let account_removed: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM deleted_account_tombstones WHERE account_id = ?)",
+        )
+        .bind(&account_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let account_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM accounts WHERE id = ?)")
+                .bind(&account_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if account_removed || !account_exists {
+            tx.rollback().await?;
+            return Err(anyhow!(if account_removed {
+                "account was removed"
+            } else {
+                "account does not exist"
+            }));
+        }
+        let existing: Option<(String, String, i64, i64, Option<i64>)> = sqlx::query_as(
+            "SELECT generation, remote_name, uid_validity, initial_exists, uid_next FROM mailbox_snapshot_generations WHERE account_id = ? AND mailbox = ?",
+        )
+        .bind(&account_id)
+        .bind(mailbox)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some((
+            existing_generation,
+            existing_remote_name,
+            existing_uid_validity,
+            existing_exists,
+            existing_uid_next,
+        )) = existing
+        {
+            if existing_remote_name == remote_name
+                && existing_uid_validity == i64::from(uid_validity)
+                && existing_exists == i64::from(initial_exists)
+                && existing_uid_next == uid_next
+            {
+                sqlx::query("UPDATE mailbox_snapshot_generations SET highest_modseq = ?, updated_at = ? WHERE account_id = ? AND mailbox = ? AND generation = ?")
+                    .bind(highest_modseq)
+                    .bind(Utc::now())
+                    .bind(&account_id)
+                    .bind(mailbox)
+                    .bind(&existing_generation)
+                    .execute(&mut *tx)
+                    .await?;
+                // A resumed full inventory must replace its old UID list.
+                // Metadata and outcomes survive, then reattach only when the
+                // current bounded inventory restages their UID.
+                sqlx::query("DELETE FROM mailbox_snapshot_items WHERE account_id = ? AND mailbox = ? AND generation = ?")
+                    .bind(&account_id)
+                    .bind(mailbox)
+                    .bind(&existing_generation)
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+                return Ok(existing_generation);
+            }
+        }
+        sqlx::query(
+            "DELETE FROM mailbox_snapshot_generations WHERE account_id = ? AND mailbox = ?",
+        )
+        .bind(&account_id)
+        .bind(mailbox)
+        .execute(&mut *tx)
+        .await?;
+        let now = Utc::now();
+        sqlx::query("INSERT INTO mailbox_snapshot_generations(account_id, mailbox, generation, remote_name, uid_validity, initial_exists, uid_next, highest_modseq, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind(&account_id)
+            .bind(mailbox)
+            .bind(&generation)
+            .bind(remote_name)
+            .bind(i64::from(uid_validity))
+            .bind(i64::from(initial_exists))
+            .bind(uid_next)
+            // SQLite integers are signed, while IMAP mod-sequences are
+            // unsigned 64-bit values. Text preserves every valid value.
+            .bind(highest_modseq)
+            .bind(now)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(generation)
+    }
+
+    /// Writes one completed IMAP response page into a snapshot generation.
+    /// Repeating a UID is safe: the most recently observed flag tuple wins.
+    pub async fn stage_mailbox_snapshot_page(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        generation: &str,
+        flags: &[(u32, bool, bool)],
+    ) -> Result<()> {
+        if flags.iter().any(|(uid, _, _)| *uid == 0) {
+            return Err(anyhow!("mailbox snapshot contains UID 0"));
+        }
+        let account_id = account_id.to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let active: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM mailbox_snapshot_generations WHERE account_id = ? AND mailbox = ? AND generation = ?)",
+        )
+        .bind(&account_id)
+        .bind(mailbox)
+        .bind(generation)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !active {
+            tx.rollback().await?;
+            return Err(anyhow!("mailbox snapshot generation is not active"));
+        }
+        let now = Utc::now();
+        for (uid, is_read, is_flagged) in flags {
+            sqlx::query("INSERT INTO mailbox_snapshot_items(account_id, mailbox, generation, uid, is_read, is_flagged, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(account_id, mailbox, generation, uid) DO UPDATE SET is_read=excluded.is_read, is_flagged=excluded.is_flagged, updated_at=excluded.updated_at")
+                .bind(&account_id)
+                .bind(mailbox)
+                .bind(generation)
+                .bind(i64::from(*uid))
+                .bind(*is_read)
+                .bind(*is_flagged)
+                .bind(now)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+        }
+        sqlx::query("UPDATE mailbox_snapshot_generations SET updated_at = ? WHERE account_id = ? AND mailbox = ? AND generation = ?")
+            .bind(now)
+            .bind(&account_id)
+            .bind(mailbox)
+            .bind(generation)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Durably stages one bounded page of parsed replacement metadata. JSON is
+    /// intentionally stored per UID so a 100k-message replacement never needs
+    /// an in-memory `Vec<MailSummary>` at finalization time.
+    pub async fn stage_mailbox_snapshot_message_page(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        generation: &str,
+        messages: &[MailSummary],
+    ) -> Result<()> {
+        let account_id = account_id.to_string();
+        if messages
+            .iter()
+            .any(|message| message.account_id != account_id || message.mailbox != mailbox)
+        {
+            return Err(anyhow!(
+                "snapshot replacement message does not match the requested account or mailbox"
+            ));
+        }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let active: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM mailbox_snapshot_generations WHERE account_id = ? AND mailbox = ? AND generation = ?)",
+        )
+        .bind(&account_id)
+        .bind(mailbox)
+        .bind(generation)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !active {
+            tx.rollback().await?;
+            return Err(anyhow!("mailbox snapshot generation is not active"));
+        }
+        let now = Utc::now();
+        for message in messages {
+            let staged: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM mailbox_snapshot_items WHERE account_id = ? AND mailbox = ? AND generation = ? AND uid = ?)",
+            )
+            .bind(&account_id)
+            .bind(mailbox)
+            .bind(generation)
+            .bind(message.uid)
+            .fetch_one(&mut *tx)
+            .await?;
+            if !staged {
+                tx.rollback().await?;
+                return Err(anyhow!(
+                    "replacement message UID is absent from the snapshot"
+                ));
+            }
+            sqlx::query("INSERT INTO mailbox_snapshot_messages(account_id, mailbox, generation, uid, message_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(account_id, mailbox, generation, uid) DO UPDATE SET message_json=excluded.message_json, updated_at=excluded.updated_at")
+                .bind(&account_id)
+                .bind(mailbox)
+                .bind(generation)
+                .bind(message.uid)
+                .bind(serde_json::to_string(message).context("serialize snapshot replacement message")?)
+                .bind(now)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("INSERT INTO mailbox_snapshot_replacement_outcomes(account_id, mailbox, generation, uid, outcome, created_at, updated_at) VALUES (?, ?, ?, ?, 'message', ?, ?) ON CONFLICT(account_id, mailbox, generation, uid) DO UPDATE SET outcome=excluded.outcome, updated_at=excluded.updated_at")
+                .bind(&account_id)
+                .bind(mailbox)
+                .bind(generation)
+                .bind(message.uid)
+                .bind(now)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM mailbox_sync_failures WHERE account_id = ? AND mailbox = ? AND uid = ?")
+                .bind(&account_id)
+                .bind(mailbox)
+                .bind(message.uid)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Returns every staged UID newest first. This is only an inventory view,
+    /// never proof that the generation can delete absent local messages.
+    pub async fn staged_mailbox_snapshot_uids(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        generation: &str,
+    ) -> Result<Vec<u32>> {
+        let account_id = account_id.to_string();
+        let active: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM mailbox_snapshot_generations WHERE account_id = ? AND mailbox = ? AND generation = ?)",
+        )
+        .bind(&account_id)
+        .bind(mailbox)
+        .bind(generation)
+        .fetch_one(&self.pool)
+        .await?;
+        if !active {
+            return Err(anyhow!("mailbox snapshot generation is not active"));
+        }
+        let uids: Vec<i64> = sqlx::query_scalar("SELECT uid FROM mailbox_snapshot_items WHERE account_id = ? AND mailbox = ? AND generation = ? ORDER BY uid DESC")
+            .bind(&account_id)
+            .bind(mailbox)
+            .bind(generation)
+            .fetch_all(&self.pool)
+            .await?;
+        uids.into_iter()
+            .map(|uid| u32::try_from(uid).context("staged mailbox UID is invalid"))
+            .collect()
+    }
+
+    /// Returns staged UIDs that have no local message metadata yet, newest
+    /// first. Callers can fetch these headers without re-fetching rows that
+    /// were already committed by a prior incremental sync.
+    pub async fn staged_mailbox_snapshot_uids_needing_messages(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        generation: &str,
+    ) -> Result<Vec<u32>> {
+        let account_id = account_id.to_string();
+        let active: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM mailbox_snapshot_generations WHERE account_id = ? AND mailbox = ? AND generation = ?)",
+        )
+        .bind(&account_id)
+        .bind(mailbox)
+        .bind(generation)
+        .fetch_one(&self.pool)
+        .await?;
+        if !active {
+            return Err(anyhow!("mailbox snapshot generation is not active"));
+        }
+        let uids: Vec<i64> = sqlx::query_scalar("SELECT staged.uid FROM mailbox_snapshot_items AS staged LEFT JOIN messages AS message ON message.account_id = staged.account_id AND message.mailbox = staged.mailbox AND message.uid = staged.uid WHERE staged.account_id = ? AND staged.mailbox = ? AND staged.generation = ? AND message.id IS NULL ORDER BY staged.uid DESC")
+            .bind(&account_id)
+            .bind(mailbox)
+            .bind(generation)
+            .fetch_all(&self.pool)
+            .await?;
+        uids.into_iter()
+            .map(|uid| u32::try_from(uid).context("staged mailbox UID is invalid"))
+            .collect()
+    }
+
+    /// Persists provider-filtered UIDs as deliberate replacement outcomes.
+    /// They remain part of the authoritative flag inventory but must not be
+    /// repeatedly fetched as missing metadata on each resumed connection.
+    pub async fn stage_mailbox_snapshot_excluded_uids(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        generation: &str,
+        uids: &[u32],
+    ) -> Result<()> {
+        if uids.contains(&0) {
+            return Err(anyhow!("snapshot excluded outcome contains UID 0"));
+        }
+        let account_id = account_id.to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        for uid in uids {
+            let staged: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM mailbox_snapshot_items WHERE account_id = ? AND mailbox = ? AND generation = ? AND uid = ?)",
+            )
+            .bind(&account_id)
+            .bind(mailbox)
+            .bind(generation)
+            .bind(i64::from(*uid))
+            .fetch_one(&mut *tx)
+            .await?;
+            if !staged {
+                tx.rollback().await?;
+                return Err(anyhow!(
+                    "excluded replacement UID is absent from the snapshot"
+                ));
+            }
+            let now = Utc::now();
+            sqlx::query("INSERT INTO mailbox_snapshot_replacement_outcomes(account_id, mailbox, generation, uid, outcome, created_at, updated_at) VALUES (?, ?, ?, ?, 'excluded', ?, ?) ON CONFLICT(account_id, mailbox, generation, uid) DO UPDATE SET outcome=excluded.outcome, updated_at=excluded.updated_at")
+                .bind(&account_id)
+                .bind(mailbox)
+                .bind(generation)
+                .bind(i64::from(*uid))
+                .bind(now)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM mailbox_snapshot_messages WHERE account_id = ? AND mailbox = ? AND generation = ? AND uid = ?")
+                .bind(&account_id)
+                .bind(mailbox)
+                .bind(generation)
+                .bind(i64::from(*uid))
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM mailbox_sync_failures WHERE account_id = ? AND mailbox = ? AND uid = ?")
+                .bind(&account_id)
+                .bind(mailbox)
+                .bind(i64::from(*uid))
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Returns replacement UIDs that have not yet received either staged
+    /// metadata or a durable provider-excluded outcome, newest first.
+    pub async fn staged_mailbox_snapshot_uids_without_replacement_outcome(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        generation: &str,
+    ) -> Result<Vec<u32>> {
+        let account_id = account_id.to_string();
+        let active: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM mailbox_snapshot_generations WHERE account_id = ? AND mailbox = ? AND generation = ?)",
+        )
+        .bind(&account_id)
+        .bind(mailbox)
+        .bind(generation)
+        .fetch_one(&self.pool)
+        .await?;
+        if !active {
+            return Err(anyhow!("mailbox snapshot generation is not active"));
+        }
+        let uids: Vec<i64> = sqlx::query_scalar("SELECT item.uid FROM mailbox_snapshot_items AS item LEFT JOIN mailbox_snapshot_replacement_outcomes AS outcome ON outcome.account_id = item.account_id AND outcome.mailbox = item.mailbox AND outcome.generation = item.generation AND outcome.uid = item.uid WHERE item.account_id = ? AND item.mailbox = ? AND item.generation = ? AND outcome.uid IS NULL ORDER BY item.uid DESC")
+            .bind(&account_id)
+            .bind(mailbox)
+            .bind(generation)
+            .fetch_all(&self.pool)
+            .await?;
+        uids.into_iter()
+            .map(|uid| u32::try_from(uid).context("staged mailbox UID is invalid"))
+            .collect()
+    }
+
+    /// Makes a fully observed snapshot authoritative. Flags, absence-based
+    /// deletions, catalogue state, and staging cleanup commit together. The
+    /// caller must invoke this only after every page has received tagged OK
+    /// and mailbox identity remained stable.
+    pub async fn finalize_mailbox_snapshot(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        generation: &str,
+    ) -> Result<u64> {
+        self.finalize_mailbox_snapshot_inner(
+            account_id,
+            mailbox,
+            generation,
+            SnapshotReplacementPublication::None,
+            SnapshotFinalizeWatermark::StagedMaximum,
+        )
+        .await
+    }
+
+    /// Atomically publishes a completed snapshot and any metadata decoded in
+    /// its replacement UIDVALIDITY namespace. This is the only safe publish
+    /// path when numerical UIDs can overlap the prior namespace.
+    pub async fn finalize_mailbox_snapshot_with_replacements(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        generation: &str,
+        replacements: &[MailSummary],
+    ) -> Result<u64> {
+        self.finalize_mailbox_snapshot_inner(
+            account_id,
+            mailbox,
+            generation,
+            SnapshotReplacementPublication::InMemory(replacements),
+            SnapshotFinalizeWatermark::StagedMaximum,
+        )
+        .await
+    }
+
+    /// Finalizes a snapshot using the caller-proven contiguous realtime
+    /// watermark. `None` explicitly records that this snapshot established no
+    /// safe incremental watermark, even if staged UIDs are present.
+    pub async fn finalize_mailbox_snapshot_with_replacements_and_watermark(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        generation: &str,
+        replacements: &[MailSummary],
+        watermark: Option<u32>,
+    ) -> Result<u64> {
+        self.finalize_mailbox_snapshot_inner(
+            account_id,
+            mailbox,
+            generation,
+            SnapshotReplacementPublication::InMemory(replacements),
+            SnapshotFinalizeWatermark::Explicit(watermark),
+        )
+        .await
+    }
+
+    /// Atomically publishes a replacement namespace from durable, paged
+    /// generation staging rather than retaining all decoded messages in RAM.
+    pub async fn finalize_mailbox_snapshot_with_staged_replacements(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        generation: &str,
+    ) -> Result<u64> {
+        self.finalize_mailbox_snapshot_inner(
+            account_id,
+            mailbox,
+            generation,
+            SnapshotReplacementPublication::Staged,
+            SnapshotFinalizeWatermark::StagedMaximum,
+        )
+        .await
+    }
+
+    /// Realtime replacement finalization with a caller-proven contiguous
+    /// watermark. `None` is preserved as an explicit no-watermark outcome.
+    pub async fn finalize_mailbox_snapshot_with_staged_replacements_and_watermark(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        generation: &str,
+        watermark: Option<u32>,
+    ) -> Result<u64> {
+        self.finalize_mailbox_snapshot_inner(
+            account_id,
+            mailbox,
+            generation,
+            SnapshotReplacementPublication::Staged,
+            SnapshotFinalizeWatermark::Explicit(watermark),
+        )
+        .await
+    }
+
+    /// Realtime callers without replacement metadata can use an explicit
+    /// contiguous watermark without constructing an empty replacement slice.
+    pub async fn finalize_mailbox_snapshot_with_watermark(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        generation: &str,
+        watermark: Option<u32>,
+    ) -> Result<u64> {
+        self.finalize_mailbox_snapshot_inner(
+            account_id,
+            mailbox,
+            generation,
+            SnapshotReplacementPublication::None,
+            SnapshotFinalizeWatermark::Explicit(watermark),
+        )
+        .await
+    }
+
+    async fn finalize_mailbox_snapshot_inner(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        generation: &str,
+        replacement_publication: SnapshotReplacementPublication<'_>,
+        watermark: SnapshotFinalizeWatermark,
+    ) -> Result<u64> {
+        let account_id = account_id.to_string();
+        if let SnapshotReplacementPublication::InMemory(replacements) = replacement_publication {
+            if replacements
+                .iter()
+                .any(|message| message.account_id != account_id || message.mailbox != mailbox)
+            {
+                return Err(anyhow!(
+                    "replacement message does not match the finalized account or mailbox"
+                ));
+            }
+        }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let account_removed: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM deleted_account_tombstones WHERE account_id = ?)",
+        )
+        .bind(&account_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if account_removed {
+            tx.rollback().await?;
+            return Err(anyhow!("account was removed"));
+        }
+        let generation_state: Option<MailboxSnapshotGenerationState> = sqlx::query_as(
+            "SELECT remote_name, uid_validity, initial_exists, uid_next, highest_modseq FROM mailbox_snapshot_generations WHERE account_id = ? AND mailbox = ? AND generation = ?",
+        )
+        .bind(&account_id)
+        .bind(mailbox)
+        .bind(generation)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((remote_name, uid_validity, initial_exists, uid_next, highest_modseq)) =
+            generation_state
+        else {
+            tx.rollback().await?;
+            return Err(anyhow!("mailbox snapshot generation is not active"));
+        };
+        let prior_uid_validities: Vec<i64> = sqlx::query_scalar(
+            "SELECT uid_validity FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ? UNION SELECT uid_validity FROM mailbox_sync_state WHERE account_id = ? AND mailbox = ? AND uid_validity IS NOT NULL",
+        )
+        .bind(&account_id)
+        .bind(mailbox)
+        .bind(&account_id)
+        .bind(mailbox)
+        .fetch_all(&mut *tx)
+        .await?;
+        let replacement_namespace = !matches!(
+            replacement_publication,
+            SnapshotReplacementPublication::None
+        );
+        if let SnapshotReplacementPublication::InMemory(replacements) = replacement_publication {
+            for replacement in replacements {
+                let staged: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM mailbox_snapshot_items WHERE account_id = ? AND mailbox = ? AND generation = ? AND uid = ?)",
+                )
+                .bind(&account_id)
+                .bind(mailbox)
+                .bind(generation)
+                .bind(replacement.uid)
+                .fetch_one(&mut *tx)
+                .await?;
+                if !staged {
+                    tx.rollback().await?;
+                    return Err(anyhow!(
+                        "replacement message UID is absent from the finalized snapshot"
+                    ));
+                }
+            }
+        }
+        if matches!(
+            replacement_publication,
+            SnapshotReplacementPublication::Staged
+        ) {
+            let missing_outcome: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM mailbox_snapshot_items AS item LEFT JOIN mailbox_snapshot_replacement_outcomes AS outcome ON outcome.account_id = item.account_id AND outcome.mailbox = item.mailbox AND outcome.generation = item.generation AND outcome.uid = item.uid WHERE item.account_id = ? AND item.mailbox = ? AND item.generation = ? AND outcome.uid IS NULL)",
+            )
+            .bind(&account_id)
+            .bind(mailbox)
+            .bind(generation)
+            .fetch_one(&mut *tx)
+            .await?;
+            let message_outcome_without_json: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM mailbox_snapshot_items AS item JOIN mailbox_snapshot_replacement_outcomes AS outcome ON outcome.account_id = item.account_id AND outcome.mailbox = item.mailbox AND outcome.generation = item.generation AND outcome.uid = item.uid AND outcome.outcome = 'message' LEFT JOIN mailbox_snapshot_messages AS message ON message.account_id = item.account_id AND message.mailbox = item.mailbox AND message.generation = item.generation AND message.uid = item.uid WHERE item.account_id = ? AND item.mailbox = ? AND item.generation = ? AND message.uid IS NULL)",
+            )
+            .bind(&account_id)
+            .bind(mailbox)
+            .bind(generation)
+            .fetch_one(&mut *tx)
+            .await?;
+            if missing_outcome || message_outcome_without_json {
+                tx.rollback().await?;
+                return Err(anyhow!(
+                    "staged replacement snapshot is incomplete and cannot be published"
+                ));
+            }
+        }
+        if replacement_namespace {
+            clear_uidvalidity_replacement_namespace_in_transaction(&mut tx, &account_id, mailbox)
+                .await?;
+        }
+        match replacement_publication {
+            SnapshotReplacementPublication::None => {}
+            SnapshotReplacementPublication::InMemory(replacements) => {
+                for replacement in replacements {
+                    persist_message(&mut tx, replacement).await?;
+                }
+            }
+            SnapshotReplacementPublication::Staged => {
+                persist_staged_uidvalidity_replacement_messages_in_transaction(
+                    &mut tx,
+                    &account_id,
+                    mailbox,
+                    generation,
+                )
+                .await?;
+            }
+        }
+        sqlx::query("DELETE FROM message_content_cache WHERE message_id IN (SELECT message.id FROM messages AS message JOIN mailbox_snapshot_items AS staged ON staged.account_id = message.account_id AND staged.mailbox = message.mailbox AND staged.uid = message.uid WHERE staged.account_id = ? AND staged.mailbox = ? AND staged.generation = ? AND staged.is_flagged = 1)")
+            .bind(&account_id)
+            .bind(mailbox)
+            .bind(generation)
+            .execute(&mut *tx)
+            .await?;
+        for table in ["starred_message_bodies", "starred_attachment_metadata"] {
+            let statement = format!("DELETE FROM {table} WHERE message_id IN (SELECT message.id FROM messages AS message JOIN mailbox_snapshot_items AS staged ON staged.account_id = message.account_id AND staged.mailbox = message.mailbox AND staged.uid = message.uid WHERE staged.account_id = ? AND staged.mailbox = ? AND staged.generation = ? AND staged.is_flagged = 0)");
+            sqlx::query(&statement)
+                .bind(&account_id)
+                .bind(mailbox)
+                .bind(generation)
+                .execute(&mut *tx)
+                .await?;
+        }
+        sqlx::query("UPDATE messages SET is_read = (SELECT staged.is_read FROM mailbox_snapshot_items AS staged WHERE staged.account_id = messages.account_id AND staged.mailbox = messages.mailbox AND staged.uid = messages.uid AND staged.generation = ?), is_flagged = (SELECT staged.is_flagged FROM mailbox_snapshot_items AS staged WHERE staged.account_id = messages.account_id AND staged.mailbox = messages.mailbox AND staged.uid = messages.uid AND staged.generation = ?) WHERE account_id = ? AND mailbox = ? AND EXISTS (SELECT 1 FROM mailbox_snapshot_items AS staged WHERE staged.account_id = messages.account_id AND staged.mailbox = messages.mailbox AND staged.uid = messages.uid AND staged.generation = ?)")
+            .bind(generation)
+            .bind(generation)
+            .bind(&account_id)
+            .bind(mailbox)
+            .bind(generation)
+            .execute(&mut *tx)
+            .await?;
+        let deleted = sqlx::query("DELETE FROM messages WHERE account_id = ? AND mailbox = ? AND NOT EXISTS (SELECT 1 FROM mailbox_snapshot_items AS staged WHERE staged.account_id = messages.account_id AND staged.mailbox = messages.mailbox AND staged.generation = ? AND staged.uid = messages.uid)")
+            .bind(&account_id)
+            .bind(mailbox)
+            .bind(generation)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        // A complete authoritative snapshot also proves that failures for
+        // UIDs no longer present remotely are obsolete. Failures for staged
+        // UIDs remain until their metadata fetch succeeds explicitly.
+        sqlx::query("DELETE FROM mailbox_sync_failures WHERE account_id = ? AND mailbox = ? AND NOT EXISTS (SELECT 1 FROM mailbox_snapshot_items AS staged WHERE staged.account_id = mailbox_sync_failures.account_id AND staged.mailbox = mailbox_sync_failures.mailbox AND staged.generation = ? AND staged.uid = mailbox_sync_failures.uid)")
+            .bind(&account_id)
+            .bind(mailbox)
+            .bind(generation)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT INTO mailbox_catalog_state(account_id, mailbox, remote_name, uid_validity, remote_total, historical_complete, uid_next, highest_modseq, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?) ON CONFLICT(account_id, mailbox) DO UPDATE SET remote_name=excluded.remote_name, uid_validity=excluded.uid_validity, remote_total=excluded.remote_total, historical_complete=excluded.historical_complete, uid_next=excluded.uid_next, highest_modseq=excluded.highest_modseq, updated_at=excluded.updated_at")
+            .bind(&account_id)
+            .bind(mailbox)
+            .bind(remote_name)
+            .bind(uid_validity)
+            .bind(initial_exists)
+            .bind(uid_next)
+            .bind(highest_modseq)
+            .bind(Utc::now())
+            .execute(&mut *tx)
+            .await?;
+        if prior_uid_validities
+            .iter()
+            .any(|previous| *previous != uid_validity)
+        {
+            sqlx::query(
+                "DELETE FROM mailbox_action_tombstones WHERE account_id = ? AND mailbox = ?",
+            )
+            .bind(&account_id)
+            .bind(mailbox)
+            .execute(&mut *tx)
+            .await?;
+        }
+        let highest_uid = match watermark {
+            SnapshotFinalizeWatermark::StagedMaximum => {
+                sqlx::query_scalar(
+                    "SELECT MAX(uid) FROM mailbox_snapshot_items WHERE account_id = ? AND mailbox = ? AND generation = ?",
+                )
+                .bind(&account_id)
+                .bind(mailbox)
+                .bind(generation)
+                .fetch_one(&mut *tx)
+                .await?
+            }
+            SnapshotFinalizeWatermark::Explicit(watermark) => watermark.map(i64::from),
+        };
+        sqlx::query("INSERT INTO mailbox_sync_state(account_id, mailbox, initialized_at, highest_uid, uid_validity) VALUES (?, ?, ?, ?, ?) ON CONFLICT(account_id, mailbox) DO UPDATE SET initialized_at=excluded.initialized_at, highest_uid=excluded.highest_uid, uid_validity=excluded.uid_validity")
+            .bind(&account_id)
+            .bind(mailbox)
+            .bind(Utc::now())
+            .bind(highest_uid)
+            .bind(uid_validity)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM mailbox_snapshot_generations WHERE account_id = ? AND mailbox = ? AND generation = ?")
+            .bind(&account_id)
+            .bind(mailbox)
+            .bind(generation)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        if deleted > 0 || replacement_namespace {
+            self.rebuild_threads_for_account(&account_id).await?;
+        }
+        Ok(deleted)
+    }
+
+    /// Discards an incomplete or invalidated snapshot without touching the
+    /// committed mailbox. This is the cancellation and identity-change path.
+    pub async fn discard_mailbox_snapshot(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        generation: &str,
+    ) -> Result<()> {
+        sqlx::query("DELETE FROM mailbox_snapshot_generations WHERE account_id = ? AND mailbox = ? AND generation = ?")
+            .bind(account_id.to_string())
+            .bind(mailbox)
+            .bind(generation)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Records a retryable per-UID failure. A later failure for the same UID
+    /// replaces its diagnostic while preserving the fact that it still needs
+    /// a fetch, even if newer UIDs were successfully committed.
+    pub async fn record_mailbox_sync_failure(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        uid: u32,
+        stage: &str,
+        error: &str,
+    ) -> Result<()> {
+        if uid == 0 {
+            return Err(anyhow!("mailbox sync failure contains UID 0"));
+        }
+        sqlx::query("INSERT INTO mailbox_sync_failures(account_id, mailbox, uid, stage, error, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(account_id, mailbox, uid) DO UPDATE SET stage=excluded.stage, error=excluded.error, updated_at=excluded.updated_at")
+            .bind(account_id.to_string())
+            .bind(mailbox)
+            .bind(i64::from(uid))
+            .bind(stage)
+            .bind(error)
+            .bind(Utc::now())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Returns outstanding failures oldest first. Retrying a permanent
+    /// failure refreshes its timestamp, allowing untouched failures to make
+    /// progress on later reconnects instead of starving behind one UID.
+    pub async fn mailbox_sync_failure_uids(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+    ) -> Result<Vec<u32>> {
+        let uids: Vec<i64> = sqlx::query_scalar(
+            "SELECT uid FROM mailbox_sync_failures WHERE account_id = ? AND mailbox = ? ORDER BY updated_at ASC, uid ASC",
+        )
+        .bind(account_id.to_string())
+        .bind(mailbox)
+        .fetch_all(&self.pool)
+        .await?;
+        uids.into_iter()
+            .map(|uid| u32::try_from(uid).context("stored failed mailbox UID is invalid"))
+            .collect()
+    }
+
+    /// Marks one previously failed UID as successfully published.
+    pub async fn clear_mailbox_sync_failure(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        uid: u32,
+    ) -> Result<()> {
+        sqlx::query(
+            "DELETE FROM mailbox_sync_failures WHERE account_id = ? AND mailbox = ? AND uid = ?",
+        )
+        .bind(account_id.to_string())
+        .bind(mailbox)
+        .bind(i64::from(uid))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Clears a page of successfully published UIDs. An empty page is a
+    /// no-op, which makes callers safe to invoke this after every batch.
+    pub async fn clear_mailbox_sync_failures(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        uids: &[u32],
+    ) -> Result<()> {
+        if uids.is_empty() {
+            return Ok(());
+        }
+        let placeholders = vec!["?"; uids.len()].join(",");
+        let statement = format!(
+            "DELETE FROM mailbox_sync_failures WHERE account_id = ? AND mailbox = ? AND uid IN ({placeholders})"
+        );
+        let mut query = sqlx::query(&statement)
+            .bind(account_id.to_string())
+            .bind(mailbox);
+        for uid in uids {
+            query = query.bind(i64::from(*uid));
+        }
+        query.execute(&self.pool).await?;
+        Ok(())
+    }
+
+    /// Commits a complete CONDSTORE `CHANGEDSINCE` flag result. Unlike a full
+    /// snapshot, omitted UIDs are not evidence of deletion and are left
+    /// untouched. Call this only after the IMAP command received tagged OK
+    /// and the caller has confirmed the selected mailbox identity is stable.
+    pub async fn apply_complete_mailbox_changed_since_flags(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        changed_since: MailboxChangedSinceFlags<'_>,
+    ) -> Result<()> {
+        let MailboxChangedSinceFlags {
+            identity:
+                MailboxSnapshotIdentity {
+                    remote_name,
+                    uid_validity,
+                    uid_next,
+                    highest_modseq,
+                    ..
+                },
+            remote_total,
+            flags,
+        } = changed_since;
+        if flags.iter().any(|(uid, _, _)| *uid == 0) {
+            return Err(anyhow!("CHANGEDSINCE flag delta contains UID 0"));
+        }
+        let remote_total =
+            i64::try_from(remote_total).context("remote mailbox total is invalid")?;
+        let account_id = account_id.to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let current: Option<(String, i64, bool)> = sqlx::query_as(
+            "SELECT remote_name, uid_validity, historical_complete FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ?",
+        )
+        .bind(&account_id)
+        .bind(mailbox)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if current.as_ref() != Some(&(remote_name.to_owned(), i64::from(uid_validity), true)) {
+            tx.rollback().await?;
+            return Err(anyhow!(
+                "cannot apply CHANGEDSINCE delta without a stable mailbox catalogue"
+            ));
+        }
+        for (uid, is_read, is_flagged) in flags {
+            sqlx::query("UPDATE messages SET is_read = ?, is_flagged = ? WHERE account_id = ? AND mailbox = ? AND uid = ?")
+                .bind(is_read)
+                .bind(is_flagged)
+                .bind(&account_id)
+                .bind(mailbox)
+                .bind(i64::from(*uid))
+                .execute(&mut *tx)
+                .await?;
+            if *is_flagged {
+                sqlx::query("DELETE FROM message_content_cache WHERE message_id IN (SELECT id FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?)")
+                    .bind(&account_id)
+                    .bind(mailbox)
+                    .bind(i64::from(*uid))
+                    .execute(&mut *tx)
+                    .await?;
+            } else {
+                for table in ["starred_message_bodies", "starred_attachment_metadata"] {
+                    let statement = format!("DELETE FROM {table} WHERE message_id IN (SELECT id FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?)");
+                    sqlx::query(&statement)
+                        .bind(&account_id)
+                        .bind(mailbox)
+                        .bind(i64::from(*uid))
+                        .execute(&mut *tx)
+                        .await?;
+                }
+            }
+        }
+        let updated = sqlx::query("UPDATE mailbox_catalog_state SET remote_total = ?, uid_next = ?, highest_modseq = ?, updated_at = ? WHERE account_id = ? AND mailbox = ? AND remote_name = ? AND uid_validity = ?")
+            .bind(remote_total)
+            .bind(uid_next.map(i64::from))
+            .bind(highest_modseq.map(|value| value.to_string()))
+            .bind(Utc::now())
+            .bind(&account_id)
+            .bind(mailbox)
+            .bind(remote_name)
+            .bind(i64::from(uid_validity))
+            .execute(&mut *tx)
+            .await?;
+        if updated.rows_affected() != 1 {
+            tx.rollback().await?;
+            return Err(anyhow!(
+                "mailbox identity changed while applying CHANGEDSINCE delta"
+            ));
+        }
+        tx.commit().await?;
+        Ok(())
     }
 }
