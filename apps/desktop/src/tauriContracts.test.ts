@@ -49,6 +49,16 @@ describe("Tauri payload contracts", () => {
     Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
   });
 
+  it("does not expose a command that can start a new OAuth account flow", async () => {
+    const { api } = await import("./api");
+
+    expect(api).not.toHaveProperty("addOAuthAccount");
+    expect(apiMocks.invoke).not.toHaveBeenCalledWith(
+      "add_oauth_account",
+      expect.anything(),
+    );
+  });
+
   it("decodes native MessageContent success and sanitizes its error envelope", async () => {
     apiMocks.invoke.mockImplementation((command: string) => {
       if (command === fixture.commands.messageContent.command) {

@@ -461,13 +461,10 @@ jobs:
           APPLE_NOTARY_PROFILE: dakia-notary
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          DAKIA_GOOGLE_CLIENT_ID: ${{ secrets.DAKIA_GOOGLE_CLIENT_ID }}
-          DAKIA_GOOGLE_CLIENT_SECRET: ${{ secrets.DAKIA_GOOGLE_CLIENT_SECRET }}
           RUSTC_WRAPPER: sccache
           CARGO_INCREMENTAL: 0
         run: |
           test -n "$APPLE_SIGNING_IDENTITY"; test -n "$TAURI_SIGNING_PRIVATE_KEY"
-          test -n "$DAKIA_GOOGLE_CLIENT_ID"; test -n "$DAKIA_GOOGLE_CLIENT_SECRET"
           npm run release:build -- "${{ needs.validate.outputs.tag }}"
       - name: Write platform updater endpoint overlay
         if: matrix.platform != 'macos'
@@ -479,15 +476,9 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          DAKIA_GOOGLE_CLIENT_ID: ${{ secrets.DAKIA_GOOGLE_CLIENT_ID }}
-          DAKIA_GOOGLE_CLIENT_SECRET: ${{ secrets.DAKIA_GOOGLE_CLIENT_SECRET }}
           RUSTC_WRAPPER: sccache
           CARGO_INCREMENTAL: 0
         run: |
-          source scripts/local-release-env.sh
-          dakia_require_google_oauth_environment
-          dakia_prepare_google_oauth_compiler_environment
-          trap 'dakia_clear_google_oauth_compiler_environment' EXIT HUP INT TERM
           ./node_modules/.bin/tauri build --target x86_64-unknown-linux-gnu --bundles appimage \
             --config apps/desktop/src-tauri/tauri.conf.json --config "$RUNNER_TEMP/tauri-production-overlay.json" -- --locked
       - name: Build Windows updater installer
@@ -495,15 +486,9 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          DAKIA_GOOGLE_CLIENT_ID: ${{ secrets.DAKIA_GOOGLE_CLIENT_ID }}
-          DAKIA_GOOGLE_CLIENT_SECRET: ${{ secrets.DAKIA_GOOGLE_CLIENT_SECRET }}
           RUSTC_WRAPPER: sccache
           CARGO_INCREMENTAL: 0
         run: |
-          source scripts/local-release-env.sh
-          dakia_require_google_oauth_environment
-          dakia_prepare_google_oauth_compiler_environment
-          trap 'dakia_clear_google_oauth_compiler_environment' EXIT HUP INT TERM
           ./node_modules/.bin/tauri build --target x86_64-pc-windows-msvc --bundles nsis \
             --config apps/desktop/src-tauri/tauri.conf.json --config "$RUNNER_TEMP/tauri-production-overlay.json" -- --locked
       - name: Assemble and verify Linux release assets

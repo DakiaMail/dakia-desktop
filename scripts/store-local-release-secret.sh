@@ -15,12 +15,8 @@ case "$name" in
     service="dev.dakia.mail.r2"
     account="secret-access-key"
     ;;
-  google-oauth-client-secret)
-    service="dev.dakia.mail.google-oauth"
-    account="client-secret"
-    ;;
   *)
-    echo "Usage: $0 <updater-password|r2-access-key-id|r2-secret-access-key|google-oauth-client-secret>" >&2
+    echo "Usage: $0 <updater-password|r2-access-key-id|r2-secret-access-key>" >&2
     exit 2
     ;;
 esac

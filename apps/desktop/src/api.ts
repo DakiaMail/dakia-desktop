@@ -100,8 +100,6 @@ const desktopApi = {
     invoke<void>("remove_account", { accountId }),
   addAccount: (draft: Record<string, unknown>, password: string) =>
     invoke<AccountConnection>("add_account", { input: { draft, password } }),
-  addOAuthAccount: (draft: Record<string, unknown>) =>
-    invoke<AccountConnection>("add_oauth_account", { draft }),
   search: (
     text = "",
     accountIds: string[] = [],
@@ -461,7 +459,8 @@ const demoApi: typeof desktopApi = {
       smtp_security: "tls",
       archive_mailbox: "[Gmail]/All Mail",
       spam_mailbox: "[Gmail]/Spam",
-      oauth: true,
+      app_password_help:
+        "https://support.google.com/accounts/answer/185833?hl=en",
     },
     {
       id: "fastmail",
@@ -475,7 +474,6 @@ const demoApi: typeof desktopApi = {
       smtp_security: "tls",
       archive_mailbox: "Archive",
       spam_mailbox: "Spam",
-      oauth: false,
     },
   ],
   configureTray: async () => undefined,
@@ -503,10 +501,6 @@ const demoApi: typeof desktopApi = {
       : Promise.resolve(),
   removeAccount: async () => undefined,
   addAccount: async () => ({
-    account: demoAccount,
-    reusedExistingAccount: false,
-  }),
-  addOAuthAccount: async () => ({
     account: demoAccount,
     reusedExistingAccount: false,
   }),

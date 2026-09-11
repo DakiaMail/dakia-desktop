@@ -11,7 +11,7 @@ Rust CLI (`dakia`) ─────────┘      │
                                   └─ OpenAI-compatible / Ollama / llama.cpp AI
 ```
 
-The Tauri webview never connects directly to a mail or AI server. Tauri commands deserialize typed inputs, select an account from the local database, and delegate to `dakia-core`. Passwords, OAuth refresh tokens, and AI API keys are encrypted with AES-256-GCM in a dedicated SQLite table. The random vault key is stored beside the database in `vault.key`, with owner-only permissions on Unix systems. This favors prompt-free access and launch reliability over protection from an attacker who can copy both files.
+The Tauri webview never connects directly to a mail or AI server. Tauri commands deserialize typed inputs, select an account from the local database, and delegate to `dakia-core`. Passwords, legacy OAuth refresh tokens, and AI API keys are encrypted with AES-256-GCM in a dedicated SQLite table. The random vault key is stored beside the database in `vault.key`, with owner-only permissions on Unix systems. This favors prompt-free access and launch reliability over protection from an attacker who can copy both files.
 
 ## Local data
 
@@ -20,8 +20,9 @@ The Tauri webview never connects directly to a mail or AI server. Tauri commands
 ## Mail transport
 
 - IMAP connections use TLS 1.2+ with the Mozilla WebPKI root set.
-- Password accounts authenticate with IMAP `LOGIN`; OAuth accounts use `XOAUTH2`.
-- SMTP uses `lettre` with implicit TLS or mandatory STARTTLS and selects XOAUTH2 for OAuth accounts.
+- Password accounts authenticate with IMAP `LOGIN`; existing OAuth accounts use `XOAUTH2` while their saved token remains valid.
+- SMTP uses `lettre` with implicit TLS or mandatory STARTTLS and selects XOAUTH2 only for existing OAuth accounts.
+- New Gmail and Google Workspace accounts use a Google app password with IMAP and SMTP. Dakia does not start a new Google OAuth flow.
 - Archive and spam operations prefer IMAP `MOVE`, with a `COPY` + `\Deleted` fallback.
 
 ### Near-real-time inbox delivery

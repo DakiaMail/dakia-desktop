@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -83,7 +84,6 @@ function writeExecutable(path, source) {
 function createCliContractFixture({
   invalidInputSucceeds = false,
   missingFrameworkRpath = false,
-  missingOauthMarker = false,
   appArchitecture = "arm64",
   wrongTeam = false,
 } = {}) {
@@ -105,12 +105,9 @@ function createCliContractFixture({
 set -eu
 test "\${DAKIA_RELEASE_SMOKE_TEST:-}" = 1
 test -n "\${DAKIA_RELEASE_SMOKE_DATA_DIR:-}"
-test -z "\${DAKIA_GOOGLE_CLIENT_ID:-}"
-test -z "\${DAKIA_GOOGLE_CLIENT_SECRET:-}"
 if [ -n "\${DAKIA_TEST_LAUNCH_PATH_FILE:-}" ]; then
   printf '%s' "$0" > "\$DAKIA_TEST_LAUNCH_PATH_FILE"
 fi
-${missingOauthMarker ? "" : "printf '%s\\\\n' DAKIA_RELEASE_GOOGLE_OAUTH_CONFIG_OK"}
 printf '%s\\n' DAKIA_RELEASE_SMOKE_TEST_OK
 `,
   );
@@ -223,7 +220,10 @@ test("release builder requires exact clean main provenance and all version autho
   assert.match(script, /status --porcelain=v1 --untracked-files=all/);
   assert.match(script, /source_commit=/);
   assert.match(script, /source-commit\.txt/);
-  assert.match(script, /Release source changed while artifacts were being built/);
+  assert.match(
+    script,
+    /Release source changed while artifacts were being built/,
+  );
   assert.ok(
     script.lastIndexOf('dakia_require_expected_release_origin "$root_dir"') >
       script.indexOf("npm run setup:worktree"),
@@ -231,21 +231,23 @@ test("release builder requires exact clean main provenance and all version autho
   );
 });
 
-test("release builder invalidates cached desktop credentials before Tauri compilation", () => {
+test("release builder invokes the normal Tauri build without credential-specific overrides", () => {
   const script = readFileSync(releaseBuilder, "utf8");
   const cliBundle = script.indexOf("npm run bundle:cli");
-  const desktopClean = script.indexOf(
-    "cargo clean -p dakia-desktop --target aarch64-apple-darwin",
+  const tauriBuild = script.indexOf(
+    '"$root_dir/node_modules/.bin/tauri" build',
   );
-  const tauriBuild = script.indexOf('"$root_dir/node_modules/.bin/tauri" build');
   assert.ok(cliBundle >= 0);
-  assert.ok(desktopClean > cliBundle);
-  assert.ok(tauriBuild > desktopClean);
+  assert.ok(tauriBuild > cliBundle);
+  assert.doesNotMatch(script, /cargo clean -p dakia-desktop/);
+  assert.doesNotMatch(script, /release-tauri-config/);
 });
 
 test("release builder thins only the packaged ONNX dylib before final signing", () => {
   const script = readFileSync(releaseBuilder, "utf8");
-  const tauriBuild = script.indexOf('"$root_dir/node_modules/.bin/tauri" build');
+  const tauriBuild = script.indexOf(
+    '"$root_dir/node_modules/.bin/tauri" build',
+  );
   const thin = script.indexOf(
     '"$root_dir/scripts/thin-macos-onnx-runtime.sh" "$app"',
   );
@@ -329,7 +331,7 @@ test("ONNX thinning rejects an unexpected packaged runtime architecture", () => 
   );
   writeExecutable(
     join(mockBin, "lipo"),
-    '#!/bin/sh\nsed -n \'s/^architectures=//p\' "$2"\n',
+    "#!/bin/sh\nsed -n 's/^architectures=//p' \"$2\"\n",
   );
   try {
     const result = spawnSync(onnxRuntimeThinner, [app], {
@@ -357,10 +359,7 @@ test("publisher resumes only when immutable public bytes match", () => {
   const script = readFileSync(publisher, "utf8");
   assert.match(script, /verify-updater-signature\.mjs/);
   assert.match(script, /tar -xzf "\$apple_update"/);
-  assert.match(
-    script,
-    /verify-macos-release-app\.sh" "\$updater_app"/,
-  );
+  assert.match(script, /verify-macos-release-app\.sh" "\$updater_app"/);
   assert.match(script, /Updater app version.*does not match/);
   assert.match(script, /aws s3api get-object/);
   assert.match(script, /cmp -s "\$source" "\$existing"/);
@@ -485,8 +484,6 @@ test(
     const badFixture = createCliContractFixture({ invalidInputSucceeds: true });
     const environmentFor = (mockBin) => ({
       PATH: `${mockBin}:${process.env.PATH}`,
-      DAKIA_GOOGLE_CLIENT_ID: "runtime-id-must-not-reach-release-smoke",
-      DAKIA_GOOGLE_CLIENT_SECRET: "runtime-secret-must-not-reach-release-smoke",
     });
     try {
       const goodResult = spawnSync(appVerifier, [goodFixture.app], {
@@ -495,8 +492,6 @@ test(
       });
       assert.equal(goodResult.status, 0, goodResult.stderr);
       assert.match(goodResult.stdout, /startup smoke test passed/);
-      assert.doesNotMatch(goodResult.stdout, /runtime-secret-must-not-reach/);
-      assert.doesNotMatch(goodResult.stderr, /runtime-secret-must-not-reach/);
 
       const badResult = spawnSync(appVerifier, [badFixture.app], {
         encoding: "utf8",
@@ -577,29 +572,6 @@ test(
 );
 
 test(
-  "packaged-app verification rejects a missing compiled Google OAuth marker",
-  { skip: process.platform !== "darwin" },
-  () => {
-    const fixture = createCliContractFixture({ missingOauthMarker: true });
-    try {
-      const result = spawnSync(appVerifier, [fixture.app], {
-        encoding: "utf8",
-        env: {
-          PATH: `${fixture.mockBin}:${process.env.PATH}`,
-        },
-      });
-      assert.notEqual(result.status, 0);
-      assert.match(
-        result.stderr,
-        /missing its compiled Google OAuth configuration/,
-      );
-    } finally {
-      rmSync(fixture.fixtureRoot, { recursive: true, force: true });
-    }
-  },
-);
-
-test(
   "packaged-app verification canonicalizes symlinked temporary launch paths",
   { skip: process.platform !== "darwin" },
   () => {
@@ -639,24 +611,43 @@ test("updater packaging executes the extracted signed app and CLI verifier", () 
   );
 });
 
-test("release environment preserves an explicitly injected Google OAuth secret", () => {
-  const result = spawnSync(
-    "/bin/bash",
-    [
-      "-c",
-      'source "$1"; dakia_keychain_read() { return 1; }; dakia_google_oauth_probe() { return 0; }; dakia_require_google_oauth_environment; test "$DAKIA_GOOGLE_CLIENT_SECRET" = injected-secret; test -z "$(env | grep ^DAKIA_GOOGLE_CLIENT_)"',
-      "bash",
-      releaseEnvironment,
-    ],
-    {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        DAKIA_GOOGLE_CLIENT_SECRET: "injected-secret",
-      },
-    },
+test("release tooling has no Google OAuth secret, compiler wrapper, or startup marker contract", () => {
+  const sources = [
+    releaseEnvironment,
+    releaseBuilder,
+    appVerifier,
+    join(root, ".github", "workflows", "production-release.yml"),
+    join(root, "scripts", "store-local-release-secret.sh"),
+    join(root, "docs", "publishing-macos-release.md"),
+  ].map((path) => readFileSync(path, "utf8"));
+
+  for (const source of sources) {
+    assert.doesNotMatch(source, /DAKIA_GOOGLE_CLIENT_(?:ID|SECRET)/);
+    assert.doesNotMatch(source, /google-oauth/i);
+    assert.doesNotMatch(source, /GOOGLE_OAUTH_CONFIG_OK/);
+  }
+  assert.equal(existsSync(join(root, ".env.example")), false);
+});
+
+test("provider documentation directs new Gmail accounts to Google app passwords", () => {
+  const providers = readFileSync(join(root, "docs", "providers.md"), "utf8");
+  assert.match(providers, /Google app password/);
+  assert.match(
+    providers,
+    /https:\/\/support\.google\.com\/accounts\/answer\/185833\?hl=en/,
   );
-  assert.equal(result.status, 0, result.stderr);
+  assert.match(
+    providers,
+    /Do not use your personal Gmail or regular Google Account password in Dakia\./,
+  );
+  assert.match(
+    providers,
+    /Google Advanced Protection can disable app\s+passwords/,
+  );
+  assert.match(
+    providers,
+    /Existing Dakia accounts that already use Google OAuth continue to work/,
+  );
 });
 
 test("release environment pins the exact Developer ID identity and team", () => {
@@ -707,179 +698,11 @@ esac
       },
     );
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /HEAD, cached origin\/main, and live origin\/main must all match/);
+    assert.match(
+      result.stderr,
+      /HEAD, cached origin\/main, and live origin\/main must all match/,
+    );
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }
-});
-
-test("Google OAuth preflight keeps the secret out of curl arguments", () => {
-  const tempRoot = mkdtempSync(join(tmpdir(), "dakia-google-oauth-curl-test-"));
-  const curlPath = join(tempRoot, "curl");
-  const capturedArgs = join(tempRoot, "curl-args.txt");
-  writeFileSync(
-    curlPath,
-    '#!/bin/sh\nprintf "%s\\n" "$@" > "$DAKIA_TEST_CURL_ARGS"\nprintf \'{"error":"invalid_grant"}\'\n',
-  );
-  chmodSync(curlPath, 0o755);
-  try {
-    const result = spawnSync(
-      "/bin/bash",
-      [
-        "-c",
-        'source "$1"; dakia_load_google_oauth_environment; dakia_google_oauth_probe test-client injected-secret; test -z "$(env | grep ^DAKIA_GOOGLE_CLIENT_)"',
-        "bash",
-        releaseEnvironment,
-      ],
-      {
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          PATH: `${tempRoot}:${process.env.PATH}`,
-          DAKIA_GOOGLE_CLIENT_ID: "test-client",
-          DAKIA_GOOGLE_CLIENT_SECRET: "injected-secret",
-          DAKIA_TEST_CURL_ARGS: capturedArgs,
-        },
-      },
-    );
-    assert.equal(result.status, 0, result.stderr);
-    assert.doesNotMatch(readFileSync(capturedArgs, "utf8"), /injected-secret/);
-  } finally {
-    rmSync(tempRoot, { recursive: true, force: true });
-  }
-});
-
-test("Google OAuth secret reaches the Rust library crate that implements OAuth", () => {
-  const tempRoot = mkdtempSync(
-    join(tmpdir(), "dakia-google-oauth-rustc-test-"),
-  );
-  const rustcPath = join(tempRoot, "rustc");
-  const capturedEnvironment = join(tempRoot, "rustc-environment.txt");
-  writeFileSync(
-    rustcPath,
-    '#!/bin/sh\nprintf "%s|%s\\n" "${DAKIA_GOOGLE_CLIENT_ID:-}" "${DAKIA_GOOGLE_CLIENT_SECRET:-}" >> "$DAKIA_TEST_RUSTC_ENV"\n',
-  );
-  chmodSync(rustcPath, 0o755);
-  try {
-    const result = spawnSync(
-      "/bin/bash",
-      [
-        "-c",
-        'source "$1"; dakia_load_google_oauth_environment; dakia_prepare_google_oauth_compiler_environment; test -z "$(env | grep ^DAKIA_GOOGLE_CLIENT_)"; "$RUSTC_WRAPPER" "$2" --crate-type rlib --crate-name dakia_desktop_lib; "$RUSTC_WRAPPER" "$2" --crate-type bin --crate-name dakia_desktop; "$RUSTC_WRAPPER" "$2" --crate-type rlib --crate-name third_party_dependency; dakia_clear_google_oauth_compiler_environment',
-        "bash",
-        releaseEnvironment,
-        rustcPath,
-      ],
-      {
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          DAKIA_GOOGLE_CLIENT_ID: "test-client",
-          DAKIA_GOOGLE_CLIENT_SECRET: "injected-secret",
-          DAKIA_TEST_RUSTC_ENV: capturedEnvironment,
-        },
-      },
-    );
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(
-      readFileSync(capturedEnvironment, "utf8"),
-      "test-client|injected-secret\n|\n|\n",
-    );
-    assert.doesNotMatch(result.stdout, /injected-secret/);
-    assert.doesNotMatch(result.stderr, /injected-secret/);
-  } finally {
-    rmSync(tempRoot, { recursive: true, force: true });
-  }
-});
-
-test("release environment loads the Google OAuth secret from Keychain", () => {
-  const result = spawnSync(
-    "/bin/bash",
-    [
-      "-c",
-      'source "$1"; dakia_keychain_read() { test "$1" = dev.dakia.mail.google-oauth; test "$2" = client-secret; printf keychain-secret; }; dakia_google_oauth_probe() { test "$1" = 77400090557-np3jvrl1d13oec7i9evs0i9c89u7q3hg.apps.googleusercontent.com; test "$2" = keychain-secret; }; unset DAKIA_GOOGLE_CLIENT_SECRET; dakia_require_google_oauth_environment; test "$DAKIA_GOOGLE_CLIENT_SECRET" = keychain-secret',
-      "bash",
-      releaseEnvironment,
-    ],
-    { encoding: "utf8", env: { ...process.env } },
-  );
-  assert.equal(result.status, 0, result.stderr);
-});
-
-test("release environment rejects a missing Google OAuth secret", () => {
-  const result = spawnSync(
-    "/bin/bash",
-    [
-      "-c",
-      'source "$1"; dakia_keychain_read() { return 1; }; dakia_google_oauth_probe() { return 0; }; unset DAKIA_GOOGLE_CLIENT_SECRET; dakia_require_google_oauth_environment',
-      "bash",
-      releaseEnvironment,
-    ],
-    { encoding: "utf8", env: { ...process.env } },
-  );
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /Missing Google OAuth client secret/);
-});
-
-test("release environment rejects whitespace-only Google OAuth material", () => {
-  const result = spawnSync(
-    "/bin/bash",
-    [
-      "-c",
-      'source "$1"; dakia_keychain_read() { return 1; }; dakia_google_oauth_probe() { return 0; }; dakia_require_google_oauth_environment',
-      "bash",
-      releaseEnvironment,
-    ],
-    {
-      encoding: "utf8",
-      env: { ...process.env, DAKIA_GOOGLE_CLIENT_SECRET: "   " },
-    },
-  );
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /Missing Google OAuth client secret/);
-});
-
-test("release environment rejects a mismatched Google OAuth client pairing", () => {
-  const result = spawnSync(
-    "/bin/bash",
-    [
-      "-c",
-      'source "$1"; dakia_keychain_read() { return 1; }; dakia_google_oauth_probe() { return 1; }; dakia_require_google_oauth_environment',
-      "bash",
-      releaseEnvironment,
-    ],
-    {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        DAKIA_GOOGLE_CLIENT_SECRET: "stale-secret",
-      },
-    },
-  );
-  assert.notEqual(result.status, 0);
-  assert.match(
-    result.stderr,
-    /Google rejected the configured OAuth client ID and secret pairing/,
-  );
-});
-
-test("release environment canonicalizes and unexports an empty client ID override", () => {
-  const result = spawnSync(
-    "/bin/bash",
-    [
-      "-c",
-      'source "$1"; dakia_keychain_read() { return 1; }; dakia_google_oauth_probe() { test "$1" = 77400090557-np3jvrl1d13oec7i9evs0i9c89u7q3hg.apps.googleusercontent.com; }; dakia_require_google_oauth_environment; test "$DAKIA_GOOGLE_CLIENT_ID" = 77400090557-np3jvrl1d13oec7i9evs0i9c89u7q3hg.apps.googleusercontent.com; test -z "$(env | grep ^DAKIA_GOOGLE_CLIENT_)"',
-      "bash",
-      releaseEnvironment,
-    ],
-    {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        DAKIA_GOOGLE_CLIENT_ID: "",
-        DAKIA_GOOGLE_CLIENT_SECRET: "injected-secret",
-      },
-    },
-  );
-  assert.equal(result.status, 0, result.stderr);
 });

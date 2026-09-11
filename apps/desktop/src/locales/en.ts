@@ -216,14 +216,19 @@ export const en = {
       connected: "{{email}} is connected",
       setupError: "Could not connect account",
       required: "This field is required",
-      continueWith: "Continue with {{provider}}",
-      useAppPassword: "Use an app password",
-      useSecureSignIn: "Use secure sign-in",
       appPasswordHelp: "How to create an app password for {{provider}}",
-      browserHint:
-        "Your provider will open in the browser. Dakia never sees your provider password.",
-      gmailVerificationNotice:
-        "Dakia’s app is awaiting Google verification, so you may see an “unverified app” warning during sign-in. This should be resolved soon; use an app password in the meantime.",
+      googleAppPassword: "Google app password",
+      gmailAppPasswordTitle: "Connect Gmail with an app password",
+      gmailAppPasswordStepOne: "Enable Google 2-Step Verification.",
+      gmailAppPasswordStepTwoBefore:
+        "Create an app password for Dakia using Google’s",
+      gmailAppPasswordGuide: "official app-password guide",
+      gmailAppPasswordStepTwoAfter: ".",
+      gmailAppPasswordStepThree: "Paste that app password into Dakia.",
+      gmailAppPasswordWarning:
+        "Do not use your personal Gmail or regular Google Account password in Dakia.",
+      gmailAppPasswordUnavailable:
+        "Managed Google Workspace accounts or Advanced Protection may prevent app-password creation. In that case, the account cannot currently connect to Dakia.",
     },
     composer: {
       title: "New message",
@@ -401,6 +406,14 @@ export const en = {
       credentials: "Credentials",
       newPassword: "New password or app password",
       passwordHint: "Leave blank to keep the current password.",
+      googleAppPasswordRequired: "Gmail sign-in needs an app password",
+      googleAppPasswordRequiredBody:
+        "Google no longer accepts this account’s saved sign-in. Create an app password, then save it here to reconnect without losing your mail index.",
+      googleAppPasswordGuide: "Open Google’s app-password guide",
+      googleAppPasswordUnavailable:
+        "Managed Google Workspace accounts or Advanced Protection may prevent app-password creation. In that case, the account cannot currently connect to Dakia.",
+      googleAppPasswordWarning:
+        "Do not use your personal Gmail or regular Google Account password in Dakia.",
       mailIndex: "Mail index",
       fullSync: "Re-index all mail",
       fullSyncBody:

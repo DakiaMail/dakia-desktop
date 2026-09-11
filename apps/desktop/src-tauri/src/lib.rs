@@ -14,9 +14,9 @@ use dakia_core::{
     mailbox_action_destination, normalize_sender_address, provider, Account, AccountAuth,
     AccountDraft, Attachment, CachedMessageContent, ComposeMessage, EmailClassificationInput,
     LocalEmailClassifier, MailConversation, MailConversationPage, MailRebuildJob, MailService,
-    MailSummary, MailboxAction, ModelClassificationUpdate, OAuthFlow, OAuthProviderConfig,
-    ProviderPreset, SearchQuery, SenderTrashResult, SmartInboxPage, SmartInboxQuery, Store,
-    SyncProgress, SyncResult, UnsubscribeOutcome,
+    MailSummary, MailboxAction, ModelClassificationUpdate, ProviderPreset, SearchQuery,
+    SenderTrashResult, SmartInboxPage, SmartInboxQuery, Store, SyncProgress, SyncResult,
+    UnsubscribeOutcome,
 };
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -288,28 +288,195 @@ fn same_mail_namespace(existing: &Account, candidate: &Account) -> bool {
         && existing.spam_mailbox == candidate.spam_mailbox
 }
 
-fn reuse_existing_account_record(existing: &Account, candidate: &mut Account) -> bool {
-    let can_resume_existing_index = same_mail_namespace(existing, candidate);
-    candidate.id = existing.id;
-    candidate.created_at = existing.created_at;
-    candidate.account_name = existing.account_name.clone();
-    can_resume_existing_index
-}
-
 fn credential_secret_name(account: &Account) -> String {
-    // Keep this aligned with `dakia_core::mail::CredentialStore::key` so an
-    // OAuth save failure can restore a credential it just replaced.
+    // Keep this aligned with `dakia_core::mail::CredentialStore::key` so a
+    // failed account save can restore a credential it just replaced.
     format!("dev.dakia.mail:{}:{}", account.id, account.auth.username())
 }
 
-fn previous_credential_secret_name(
-    existing: Option<&Account>,
-    candidate: &Account,
-) -> Option<String> {
-    let current = credential_secret_name(candidate);
-    existing
-        .map(credential_secret_name)
-        .filter(|previous| previous != &current)
+/// Converts only the authentication scheme. Callers retain the same account
+/// value so mailbox settings, ID, and indexed data remain associated with it.
+fn convert_legacy_oauth_to_password(account: &mut Account) -> bool {
+    let AccountAuth::OAuth2 { username, .. } = &account.auth else {
+        return false;
+    };
+    account.auth = AccountAuth::Password {
+        username: username.clone(),
+    };
+    true
+}
+
+fn validate_legacy_oauth_conversion(
+    account: &Account,
+    statuses: &[RealtimeSyncStatus],
+) -> Result<(), String> {
+    let AccountAuth::OAuth2 { provider, .. } = &account.auth else {
+        return Ok(());
+    };
+    if account.provider_id != "gmail" || provider != "gmail" {
+        return Err("Only legacy Gmail OAuth accounts can be converted to an app password".into());
+    }
+    let failed_authentication = statuses.iter().any(|status| {
+        status.account_id == account.id
+            && status.state == "paused"
+            && status.error_kind.as_deref() == Some("authentication")
+    });
+    if !failed_authentication {
+        return Err(
+            "This Gmail account can use an app password after its existing sign-in stops working"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn ensure_account_is_not_connected(accounts: &[Account], email: &str) -> Result<(), String> {
+    if accounts
+        .iter()
+        .any(|stored| matching_account_email(stored, email))
+    {
+        return Err("This account is already connected. Update it in Settings.".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod legacy_oauth_conversion_tests {
+    use super::*;
+    use chrono::Utc;
+
+    #[test]
+    fn conversion_preserves_the_account_identity_and_credential_key() {
+        let id = Uuid::new_v4();
+        let mut account = Account {
+            id,
+            email: "legacy@gmail.com".into(),
+            account_name: "Personal Gmail".into(),
+            display_name: "Legacy User".into(),
+            provider_id: "gmail".into(),
+            auth: AccountAuth::OAuth2 {
+                username: "legacy@gmail.com".into(),
+                provider: "gmail".into(),
+                access_token_expires_at: None,
+            },
+            imap_host: "imap.gmail.com".into(),
+            imap_port: 993,
+            imap_security: dakia_core::Security::Tls,
+            smtp_host: "smtp.gmail.com".into(),
+            smtp_port: 465,
+            smtp_security: dakia_core::Security::Tls,
+            archive_mailbox: "[Gmail]/All Mail".into(),
+            spam_mailbox: "[Gmail]/Spam".into(),
+            enabled: true,
+            created_at: Utc::now(),
+        };
+        let previous_secret_name = credential_secret_name(&account);
+
+        assert!(convert_legacy_oauth_to_password(&mut account));
+
+        assert_eq!(account.id, id);
+        assert_eq!(account.account_name, "Personal Gmail");
+        assert_eq!(account.archive_mailbox, "[Gmail]/All Mail");
+        assert_eq!(credential_secret_name(&account), previous_secret_name);
+        assert!(matches!(account.auth, AccountAuth::Password { .. }));
+    }
+
+    #[test]
+    fn password_accounts_are_not_converted() {
+        let mut account = AccountDraft {
+            email: "already-password@example.test".into(),
+            display_name: "Password User".into(),
+            provider_id: Some("fastmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("fastmail").unwrap());
+
+        assert!(!convert_legacy_oauth_to_password(&mut account));
+        assert!(matches!(account.auth, AccountAuth::Password { .. }));
+    }
+
+    #[test]
+    fn app_password_conversion_requires_a_paused_legacy_gmail_oauth_account() {
+        let id = Uuid::new_v4();
+        let mut gmail = Account {
+            id,
+            email: "legacy@gmail.com".into(),
+            account_name: "Legacy Gmail".into(),
+            display_name: "Legacy User".into(),
+            provider_id: "gmail".into(),
+            auth: AccountAuth::OAuth2 {
+                username: "legacy@gmail.com".into(),
+                provider: "gmail".into(),
+                access_token_expires_at: None,
+            },
+            imap_host: "imap.gmail.com".into(),
+            imap_port: 993,
+            imap_security: dakia_core::Security::Tls,
+            smtp_host: "smtp.gmail.com".into(),
+            smtp_port: 465,
+            smtp_security: dakia_core::Security::Tls,
+            archive_mailbox: "[Gmail]/All Mail".into(),
+            spam_mailbox: "[Gmail]/Spam".into(),
+            enabled: true,
+            created_at: Utc::now(),
+        };
+        let paused_authentication = vec![RealtimeSyncStatus {
+            account_id: id,
+            state: "paused".into(),
+            retry_at: None,
+            error_kind: Some("authentication".into()),
+        }];
+
+        assert!(validate_legacy_oauth_conversion(&gmail, &paused_authentication).is_ok());
+        assert!(validate_legacy_oauth_conversion(&gmail, &[])
+            .unwrap_err()
+            .contains("after its existing sign-in stops working"));
+
+        gmail.provider_id = "outlook".into();
+        gmail.auth = AccountAuth::OAuth2 {
+            username: "legacy@gmail.com".into(),
+            provider: "outlook".into(),
+            access_token_expires_at: None,
+        };
+        assert!(
+            validate_legacy_oauth_conversion(&gmail, &paused_authentication)
+                .unwrap_err()
+                .contains("Only legacy Gmail OAuth accounts")
+        );
+    }
+
+    #[test]
+    fn add_account_rejects_case_insensitive_duplicate_email() {
+        let existing = AccountDraft {
+            email: "already-connected@example.test".into(),
+            display_name: "Connected User".into(),
+            provider_id: Some("fastmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("fastmail").unwrap());
+
+        assert!(
+            ensure_account_is_not_connected(&[existing], " ALREADY-CONNECTED@example.test ")
+                .unwrap_err()
+                .contains("already connected")
+        );
+    }
 }
 
 async fn enabled_account_for_operation(
@@ -582,24 +749,6 @@ mod account_operation_lock_tests {
         let mut different_mailbox = same_remote;
         different_mailbox.archive_mailbox = "All Mail".into();
         assert!(!same_mail_namespace(&existing, &different_mailbox));
-    }
-
-    #[test]
-    fn reconnecting_with_a_new_login_selects_only_the_old_credential_key() {
-        let existing = account();
-        let mut reconnected = existing.clone();
-        reconnected.auth = AccountAuth::Password {
-            username: "new-login@example.com".into(),
-        };
-
-        assert_eq!(
-            previous_credential_secret_name(Some(&existing), &reconnected),
-            Some(credential_secret_name(&existing)),
-        );
-        assert_eq!(
-            previous_credential_secret_name(Some(&reconnected), &reconnected),
-            None,
-        );
     }
 }
 #[derive(Default)]
@@ -3303,19 +3452,72 @@ async fn update_account(
     account.smtp_security = input.smtp_security;
     account.archive_mailbox = input.archive_mailbox.trim().to_owned();
     account.spam_mailbox = input.spam_mailbox.trim().to_owned();
-    let password_was_supplied = input
-        .password
-        .as_deref()
-        .is_some_and(|value| !value.is_empty());
-    if password_was_supplied && !matches!(account.auth, AccountAuth::Password { .. }) {
-        return Err("OAuth accounts must be reconnected through their provider".into());
+    let password = input.password.filter(|value| !value.trim().is_empty());
+    let password_was_supplied = password.is_some();
+    let converts_legacy_oauth =
+        password_was_supplied && matches!(&previous_account.auth, AccountAuth::OAuth2 { .. });
+    if converts_legacy_oauth {
+        if let Err(validation_error) =
+            validate_legacy_oauth_conversion(&previous_account, &state.realtime.statuses().await)
+        {
+            resume_scheduled_mail_rebuild(
+                app.clone(),
+                state.inner().clone(),
+                previous_account.clone(),
+            )
+            .await;
+            return Err(validation_error);
+        }
+    } else if password_was_supplied && !matches!(account.auth, AccountAuth::Password { .. }) {
+        resume_scheduled_mail_rebuild(app.clone(), state.inner().clone(), previous_account.clone())
+            .await;
+        return Err("OAuth accounts can only be converted after authentication fails".into());
     }
     let namespace_changed = !same_mail_namespace(&previous_account, &account);
-    if namespace_changed {
+    if converts_legacy_oauth && namespace_changed {
+        resume_scheduled_mail_rebuild(app.clone(), state.inner().clone(), previous_account.clone())
+            .await;
+        return Err(
+            "Save the Google app password before changing the IMAP or folder settings".into(),
+        );
+    }
+    if namespace_changed || converts_legacy_oauth {
         // Stop the old namespace watcher before committing a replacement.
         state.realtime.stop_account(account.id).await;
     }
     let password_secret_name = credential_secret_name(&account);
+
+    if converts_legacy_oauth {
+        convert_legacy_oauth_to_password(&mut account);
+        if let Err(save_error) = state
+            .store
+            .save_account_with_secret(
+                &account,
+                &password_secret_name,
+                password.as_deref().expect("conversion password"),
+            )
+            .await
+        {
+            if previous_account.enabled {
+                state
+                    .realtime
+                    .start_account(app.clone(), previous_account.clone())
+                    .await;
+            }
+            resume_scheduled_mail_rebuild(app.clone(), state.inner().clone(), previous_account)
+                .await;
+            return Err(error(save_error));
+        }
+        if account.enabled {
+            state
+                .realtime
+                .start_account(app.clone(), account.clone())
+                .await;
+        }
+        resume_scheduled_mail_rebuild(app, state.inner().clone(), account.clone()).await;
+        return Ok(account);
+    }
+
     let previous_password_credential = if password_was_supplied {
         match state.store.secret(&password_secret_name).await {
             Ok(credential) => credential,
@@ -3329,15 +3531,21 @@ async fn update_account(
     } else {
         None
     };
-    if let Some(password) = input.password.filter(|value| !value.is_empty()) {
+    if let Some(password) = password.as_deref() {
         if let Err(set_error) = MailService::new(state.store.clone())
             .credentials()
-            .set_password(&account, &password)
+            .set_password(&account, password)
             .await
         {
             if namespace_changed {
                 let _ = state.realtime.reconcile(app.clone()).await;
             }
+            resume_scheduled_mail_rebuild(
+                app.clone(),
+                state.inner().clone(),
+                previous_account.clone(),
+            )
+            .await;
             return Err(error(set_error));
         }
     }
@@ -3369,6 +3577,7 @@ async fn update_account(
         if namespace_changed {
             let _ = state.realtime.reconcile(app.clone()).await;
         }
+        resume_scheduled_mail_rebuild(app, state.inner().clone(), previous_account).await;
         return Err(error(save_error));
     }
     if !namespace_changed {
@@ -3583,6 +3792,9 @@ async fn add_account(
     state: State<'_, Arc<AppState>>,
     input: AddAccountInput,
 ) -> Result<AccountConnection, String> {
+    if input.password.trim().is_empty() {
+        return Err("A password or app password is required".into());
+    }
     let preset = input
         .draft
         .provider_id
@@ -3605,82 +3817,25 @@ async fn add_account(
     {
         return Err("Custom accounts require IMAP and SMTP hosts".into());
     }
-    let mut account = input.draft.into_account(preset);
+    let account = input.draft.into_account(preset);
     let stored_accounts = state.store.accounts().await.map_err(error)?;
-    let mut reuses_existing_account_record = false;
-    let mut can_resume_existing_index = false;
-    if let Some(existing) = stored_accounts
-        .into_iter()
-        .find(|stored| matching_account_email(stored, &account.email))
-    {
-        can_resume_existing_index = reuse_existing_account_record(&existing, &mut account);
-        reuses_existing_account_record = true;
-    }
-    if reuses_existing_account_record {
-        request_mail_rebuild_cancel(
-            state.inner(),
-            account.id,
-            MailRebuildCancellationDisposition::Retain,
-        );
-    }
-    let requires_reset = !can_resume_existing_index;
+    ensure_account_is_not_connected(&stored_accounts, &account.email)?;
     let _operation = state.account_operations.acquire(account.id).await;
-    let existing_account = if reuses_existing_account_record {
-        state.store.account(account.id).await.map_err(error)?
-    } else {
-        None
-    };
-    if reuses_existing_account_record && existing_account.is_none() {
-        return Err("Account not found".into());
-    }
-    if requires_reset {
-        state.realtime.stop_account(account.id).await;
-    }
+    state.realtime.stop_account(account.id).await;
     let mail = MailService::new(state.store.clone());
     let password_secret_name = credential_secret_name(&account);
-    let previous_secret_name = previous_credential_secret_name(existing_account.as_ref(), &account);
-    let replaced_credential = if let Some(existing) = existing_account.as_ref() {
-        let existing_secret_name = credential_secret_name(existing);
-        if existing_secret_name == password_secret_name {
-            state
-                .store
-                .secret(&existing_secret_name)
-                .await
-                .map_err(error)?
-        } else {
-            None
-        }
-    } else {
-        None
-    };
     if let Err(set_error) = mail
         .credentials()
         .set_password(&account, &input.password)
         .await
     {
-        if requires_reset {
-            let _ = state.realtime.reconcile(app.clone()).await;
-        }
         return Err(error(set_error));
     }
-    if let Err(save_error) = save_account_with_rebuild_intent(
-        state.inner(),
-        &account,
-        requires_reset,
-        previous_secret_name.as_deref(),
-        &password_secret_name,
-    )
-    .await
+    if let Err(save_error) =
+        save_account_with_rebuild_intent(state.inner(), &account, true, None, &password_secret_name)
+            .await
     {
-        let rollback = match replaced_credential {
-            Some(previous) => {
-                state
-                    .store
-                    .set_secret(&password_secret_name, &previous)
-                    .await
-            }
-            None => mail.credentials().delete(&account).await,
-        };
+        let rollback = mail.credentials().delete(&account).await;
         if let Err(rollback_error) = rollback {
             tracing::error!(
                 account_id = %account.id,
@@ -3688,238 +3843,13 @@ async fn add_account(
                 "could not roll back password credentials after saving the account failed"
             );
         }
-        if requires_reset {
-            let _ = state.realtime.reconcile(app.clone()).await;
-        }
         return Err(error(save_error));
-    }
-    if !requires_reset {
-        state.realtime.reconcile(app.clone()).await.map_err(error)?;
     }
     resume_scheduled_mail_rebuild(app, state.inner().clone(), account.clone()).await;
     Ok(AccountConnection {
         account,
-        reused_existing_account: can_resume_existing_index,
+        reused_existing_account: false,
     })
-}
-
-#[tauri::command]
-async fn add_oauth_account(
-    app: tauri::AppHandle,
-    state: State<'_, Arc<AppState>>,
-    draft: AccountDraft,
-) -> Result<AccountConnection, String> {
-    let preset = draft
-        .provider_id
-        .as_deref()
-        .and_then(provider::by_id)
-        .unwrap_or_else(|| provider::detect(&draft.email));
-    if !preset.oauth {
-        return Err("The selected provider does not offer OAuth sign-in".into());
-    }
-    let client_id = oauth_client_id(preset.id)?;
-    let username = draft
-        .username
-        .clone()
-        .unwrap_or_else(|| draft.email.clone());
-    let email = draft.email.clone();
-    let client_secret = oauth_client_secret(preset.id)?;
-    let config = OAuthProviderConfig::for_provider(preset.id, client_id)
-        .map_err(error)?
-        .with_client_secret(client_secret);
-    let (flow, authorization_url) = OAuthFlow::start(config, Some(&email))
-        .await
-        .map_err(error)?;
-    app.opener()
-        .open_url(authorization_url.as_str(), None::<&str>)
-        .map_err(error)?;
-    let tokens = flow.finish().await.map_err(error)?;
-    let mut account = draft.into_account(preset);
-    account.auth = AccountAuth::OAuth2 {
-        username,
-        provider: preset.id.into(),
-        access_token_expires_at: tokens.expires_at,
-    };
-    let stored_accounts = state.store.accounts().await.map_err(error)?;
-    let mut reuses_existing_account_record = false;
-    let mut can_resume_existing_index = false;
-    if let Some(existing) = stored_accounts
-        .into_iter()
-        .find(|stored| matching_account_email(stored, &account.email))
-    {
-        can_resume_existing_index = reuse_existing_account_record(&existing, &mut account);
-        reuses_existing_account_record = true;
-    }
-    if reuses_existing_account_record {
-        request_mail_rebuild_cancel(
-            state.inner(),
-            account.id,
-            MailRebuildCancellationDisposition::Retain,
-        );
-    }
-    let requires_reset = !can_resume_existing_index;
-    let _operation = state.account_operations.acquire(account.id).await;
-    let existing_account = if reuses_existing_account_record {
-        Some(
-            state
-                .store
-                .account(account.id)
-                .await
-                .map_err(error)?
-                .ok_or_else(|| "Account not found".to_owned())?,
-        )
-    } else {
-        None
-    };
-    if requires_reset {
-        state.realtime.stop_account(account.id).await;
-    }
-    let mail = MailService::new(state.store.clone());
-    let oauth_secret_name = credential_secret_name(&account);
-    let previous_secret_name = previous_credential_secret_name(existing_account.as_ref(), &account);
-    let replaced_credential = if let Some(existing) = existing_account.as_ref() {
-        let existing_secret_name = credential_secret_name(existing);
-        if existing_secret_name == oauth_secret_name {
-            state
-                .store
-                .secret(&existing_secret_name)
-                .await
-                .map_err(error)?
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    if let Err(set_error) = mail.credentials().set_oauth_tokens(&account, &tokens).await {
-        if requires_reset {
-            let _ = state.realtime.reconcile(app.clone()).await;
-        }
-        return Err(error(set_error));
-    }
-    if let Err(save_error) = save_account_with_rebuild_intent(
-        state.inner(),
-        &account,
-        requires_reset,
-        previous_secret_name.as_deref(),
-        &oauth_secret_name,
-    )
-    .await
-    {
-        let rollback = match replaced_credential {
-            Some(previous_credential) => {
-                state
-                    .store
-                    .set_secret(&oauth_secret_name, &previous_credential)
-                    .await
-            }
-            None => mail.credentials().delete(&account).await,
-        };
-        if let Err(rollback_error) = rollback {
-            tracing::error!(
-                account_id = %account.id,
-                error = %rollback_error,
-                "could not roll back OAuth credentials after saving the account failed"
-            );
-        }
-        if requires_reset {
-            let _ = state.realtime.reconcile(app.clone()).await;
-        }
-        return Err(error(save_error));
-    }
-    if !requires_reset {
-        state.realtime.reconcile(app.clone()).await.map_err(error)?;
-    }
-    resume_scheduled_mail_rebuild(app, state.inner().clone(), account.clone()).await;
-    Ok(AccountConnection {
-        account,
-        reused_existing_account: can_resume_existing_index,
-    })
-}
-
-const GOOGLE_DESKTOP_CLIENT_ID: &str =
-    "77400090557-np3jvrl1d13oec7i9evs0i9c89u7q3hg.apps.googleusercontent.com";
-
-fn oauth_client_id(provider: &str) -> Result<String, String> {
-    let (key, compiled, default) = match provider {
-        "gmail" => (
-            "DAKIA_GOOGLE_CLIENT_ID",
-            option_env!("DAKIA_GOOGLE_CLIENT_ID"),
-            Some(GOOGLE_DESKTOP_CLIENT_ID),
-        ),
-        "outlook" => (
-            "DAKIA_MICROSOFT_CLIENT_ID",
-            option_env!("DAKIA_MICROSOFT_CLIENT_ID"),
-            None,
-        ),
-        "yahoo" => (
-            "DAKIA_YAHOO_CLIENT_ID",
-            option_env!("DAKIA_YAHOO_CLIENT_ID"),
-            None,
-        ),
-        _ => {
-            return Err(format!(
-                "OAuth client registration is unavailable for {provider}"
-            ))
-        }
-    };
-    resolve_oauth_client_id(std::env::var(key).ok(), compiled, default, key)
-}
-
-fn resolve_oauth_client_id(
-    runtime: Option<String>,
-    compiled: Option<&str>,
-    default: Option<&str>,
-    key: &str,
-) -> Result<String, String> {
-    runtime
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            compiled
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-        })
-        .or_else(|| default.filter(|value| !value.is_empty()).map(str::to_owned))
-        .ok_or_else(|| format!("This build is missing {key}"))
-}
-
-fn oauth_client_secret(provider: &str) -> Result<Option<String>, String> {
-    if provider != "gmail" {
-        return Ok(None);
-    }
-    let key = "DAKIA_GOOGLE_CLIENT_SECRET";
-    std::env::var(key)
-        .ok()
-        .or_else(|| option_env!("DAKIA_GOOGLE_CLIENT_SECRET").map(str::to_owned))
-        .filter(|value| !value.is_empty())
-        .map(Some)
-        .ok_or_else(|| format!("This build is missing {key}"))
-}
-
-#[cfg(test)]
-mod oauth_client_id_tests {
-    use super::*;
-
-    #[test]
-    fn gmail_uses_the_configured_desktop_client_by_default() {
-        assert!(!oauth_client_id("gmail")
-            .expect("Gmail OAuth client")
-            .is_empty());
-    }
-
-    #[test]
-    fn empty_oauth_client_overrides_fall_back_to_the_default() {
-        assert_eq!(
-            resolve_oauth_client_id(
-                Some(String::new()),
-                Some(""),
-                Some(GOOGLE_DESKTOP_CLIENT_ID),
-                "DAKIA_GOOGLE_CLIENT_ID",
-            )
-            .expect("default client ID"),
-            GOOGLE_DESKTOP_CLIENT_ID
-        );
-    }
 }
 
 #[tauri::command]
@@ -5453,9 +5383,6 @@ pub fn run() {
                     }
                 }));
             if release_smoke_test {
-                oauth_client_id("gmail")?;
-                oauth_client_secret("gmail")?;
-                eprintln!("DAKIA_RELEASE_GOOGLE_OAUTH_CONFIG_OK");
                 eprintln!("DAKIA_RELEASE_SMOKE_TEST_OK");
                 app.handle().exit(0);
                 return Ok(());
@@ -5538,7 +5465,6 @@ pub fn run() {
             remove_account,
             open_external_url,
             add_account,
-            add_oauth_account,
             search,
             search_smart_inbox,
             conversation_for_target,

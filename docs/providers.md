@@ -4,7 +4,7 @@ Dakia auto-detects common personal domains and also accepts custom IMAP/SMTP hos
 
 | Provider | IMAP | SMTP | Authentication |
 | --- | --- | --- | --- |
-| Gmail / Google Workspace | `imap.gmail.com:993` TLS | `smtp.gmail.com:465` TLS | OAuth 2.0 (or an app password while Google verification is pending) |
+| Gmail / Google Workspace | `imap.gmail.com:993` TLS | `smtp.gmail.com:465` TLS | Google app password |
 | Outlook.com / Hotmail | `outlook.office365.com:993` TLS | `smtp-mail.outlook.com:587` STARTTLS | App password; enable IMAP in Outlook.com settings |
 | Microsoft 365 / Exchange Online | — | — | OAuth 2.0 only; unavailable until a Microsoft Entra client is registered |
 | Fastmail | `imap.fastmail.com:993` TLS | `smtp.fastmail.com:465` TLS | App password |
@@ -14,28 +14,24 @@ Dakia auto-detects common personal domains and also accepts custom IMAP/SMTP hos
 | Yahoo Mail | `imap.mail.yahoo.com:993` TLS | `smtp.mail.yahoo.com:465` TLS | App password |
 | Other | User supplied | User supplied | Password / app password |
 
-## OAuth client registration
+## Gmail and Google Workspace
 
-Google Desktop OAuth builds must provide the generated client secret at compile
-time. Keep it in the ignored `.env` file for `npm run dev`, and inject it
-through the supervised local release-build environment for release builds:
+New Gmail and Google Workspace accounts connect with an app password, not a
+Google OAuth sign-in. Enable 2-Step Verification, then create an app password
+for Dakia by following Google's [app-password guide](https://support.google.com/accounts/answer/185833?hl=en).
+Use that generated password in Dakia. Do not use your personal Gmail or regular Google Account password in Dakia.
 
-```bash
-export DAKIA_GOOGLE_CLIENT_SECRET='…'
-npm run build
-```
+New Google OAuth sign-in is temporarily disabled because Google requires an
+expensive CASA certification even for this local desktop app. It can be
+restored after that certification is completed.
 
-The registered Google desktop client ID is the Gmail default; it can be
-overridden with `DAKIA_GOOGLE_CLIENT_ID`. Dakia binds an ephemeral `127.0.0.1`
-port, validates OAuth state, and uses PKCE S256. Google still requires the
-desktop client's generated secret during code exchange and refresh, even though
-an installed app cannot treat that value as confidential. Do not commit the
-secret. OAuth tokens and the client secret used to refresh them are stored in
-Dakia's encrypted local credential vault. Add `DAKIA_MICROSOFT_CLIENT_ID` back
-when the Microsoft Entra registration is complete and Outlook OAuth is
-re-enabled.
+Google Workspace administrators and Google Advanced Protection can disable app
+passwords. Dakia cannot currently connect to those accounts when an app
+password is unavailable.
 
-Until Google verifies Dakia's restricted Gmail scope, use OAuth only with an
-authorized test account and expect Google's unverified-app limits to apply.
+Existing Dakia accounts that already use Google OAuth continue to work while
+their saved token remains valid. If that authentication fails, update the
+account with a Google app password in Settings to convert it to password
+authentication.
 
 Provider tenants and custom domains can still use the preset by selecting it manually. For nonstandard servers, choose “Other IMAP / SMTP” and enter both hosts.
