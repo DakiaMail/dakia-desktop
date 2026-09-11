@@ -1,8 +1,13 @@
 import { Loader } from "@mantine/core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api } from "./api";
+import {
+  api,
+  type SenderCleanupTarget,
+  type TrashMessagesFromSenderResult,
+} from "./api";
 import { openComposeWindow } from "./composeWindow";
+import { ActionStatus } from "./components/ActionStatus";
 import { Reader } from "./components/Reader";
 import { parseEmailAddressMenuAction } from "./emailAddressMenu";
 import { AI_FEATURES_VISIBLE } from "./features";
@@ -26,7 +31,7 @@ import {
 import { replyRecipients } from "./recipients";
 import { formatReplyHistory } from "./replyHistory";
 import type { AiSettings, MailSummary, MailThread } from "./types";
-import { concreteThreadMessages } from "./threads";
+import { concreteThreadMessages, groupMessages } from "./threads";
 
 const defaultAi: AiSettings = {
   provider: "ollama",
@@ -39,6 +44,58 @@ const defaultAi: AiSettings = {
 
 const readerApi = api;
 
+type ActionStatusState = {
+  id: number;
+  message: string;
+  tone: "success" | "error";
+  action?: { label: string; onAction: () => void; disabled?: boolean };
+};
+
+function normalizeSenderAddress(address: string) {
+  return address
+    .trim()
+    .replace(/[A-Z]/g, (character) => character.toLowerCase());
+}
+
+function isSenderCleanupMessage(
+  message: MailSummary,
+  target: SenderCleanupTarget,
+) {
+  return (
+    message.account_id === target.accountId &&
+    normalizeSenderAddress(message.from_address) ===
+      normalizeSenderAddress(target.senderAddress)
+  );
+}
+
+function removeSenderCleanupMessages(
+  thread: MailThread,
+  target: SenderCleanupTarget,
+) {
+  const messages = concreteThreadMessages(thread);
+  const remaining = messages.filter(
+    (message) => !isSenderCleanupMessage(message, target),
+  );
+  if (remaining.length === messages.length) return thread;
+  return remaining.length
+    ? { ...thread, ...groupMessages(remaining)[0] }
+    : undefined;
+}
+
+function senderCleanupOutcome(
+  t: ReturnType<typeof useTranslation>["t"],
+  result: TrashMessagesFromSenderResult,
+) {
+  if (result.matched === 0) return t("feedback.unsubscribeCleanupNone");
+  if (result.moved === result.matched && result.failed === 0) {
+    return t("feedback.unsubscribeCleanupSuccess", { count: result.moved });
+  }
+  if (result.moved > 0) {
+    return t("feedback.unsubscribeCleanupPartial", result);
+  }
+  return t("feedback.unsubscribeCleanupFailed");
+}
+
 export function ReaderWindowApp() {
   const { t } = useTranslation();
   const [seed, setSeed] = useState<ReaderWindowSeed | undefined>(
@@ -49,16 +106,25 @@ export function ReaderWindowApp() {
   const [loading, setLoading] = useState(Boolean(seed));
   const [actionBusy, setActionBusy] = useState(false);
   const [unsubscribeLoading, setUnsubscribeLoading] = useState(false);
+  const [senderCleanupLoading, setSenderCleanupLoading] = useState(false);
+  const [actionStatus, setActionStatus] = useState<ActionStatusState>();
   const [aiLoading, setAiLoading] = useState(false);
   const [aiResult, setAiResult] = useState<string>();
   const [aiConnected, setAiConnected] = useState(false);
   const loadGeneration = useRef(0);
+  const statusId = useRef(0);
+  const senderCleanupInFlightRef = useRef(false);
+  const actionBusyRef = useRef(false);
+  const threadRef = useRef<MailThread | undefined>(undefined);
   const translate = useRef(t);
   translate.current = t;
   const aiSettings = useMemo(() => readAiSettings(), []);
+  actionBusyRef.current = actionBusy;
+  threadRef.current = thread;
 
   const loadThread = useCallback(async (nextSeed: ReaderWindowSeed) => {
     const generation = ++loadGeneration.current;
+    setActionStatus(undefined);
     setLoading(true);
     setThread(undefined);
     setAiResult(undefined);
@@ -160,7 +226,11 @@ export function ReaderWindowApp() {
   useEffect(() => {
     let dispose: () => void = () => undefined;
     let disposed = false;
-    void onReaderTarget((nextSeed) => setSeed(nextSeed)).then((unlisten) => {
+    void onReaderTarget((nextSeed) => {
+      loadGeneration.current += 1;
+      setActionStatus(undefined);
+      setSeed(nextSeed);
+    }).then((unlisten) => {
       if (disposed) unlisten();
       else dispose = unlisten;
     });
@@ -453,14 +523,135 @@ export function ReaderWindowApp() {
     }
   };
 
+  const showStatus = useCallback(
+    (
+      message: string,
+      tone: "success" | "error" = "success",
+      action?: ActionStatusState["action"],
+    ) => {
+      statusId.current += 1;
+      setActionStatus({ id: statusId.current, message, tone, action });
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!actionStatus || actionStatus.action) return;
+    const timer = window.setTimeout(() => setActionStatus(undefined), 2500);
+    return () => window.clearTimeout(timer);
+  }, [actionStatus]);
+
+  const refreshAfterSenderCleanup = async (expectedGeneration: number) => {
+    if (!seed) return;
+    const refreshed = await readerApi.conversationForTarget(seed.target);
+    if (loadGeneration.current !== expectedGeneration) return;
+    setThread(refreshed ?? undefined);
+    if (!refreshed) await closeReaderWindow();
+  };
+
+  const trashMessagesFromSender = async (target: SenderCleanupTarget) => {
+    const currentThread = threadRef.current;
+    if (
+      senderCleanupInFlightRef.current ||
+      actionBusyRef.current ||
+      !currentThread
+    )
+      return;
+    senderCleanupInFlightRef.current = true;
+    const cleanupGeneration = loadGeneration.current;
+    const removedMessageIds = concreteThreadMessages(currentThread)
+      .filter((message) => isSenderCleanupMessage(message, target))
+      .map((message) => message.id);
+    setActionStatus(undefined);
+    setSenderCleanupLoading(true);
+    setThread((current) =>
+      current ? removeSenderCleanupMessages(current, target) : current,
+    );
+    let result: TrashMessagesFromSenderResult;
+    try {
+      result = await readerApi.trashMessagesFromSender(
+        target.accountId,
+        target.senderAddress,
+      );
+    } catch (error) {
+      if (loadGeneration.current === cleanupGeneration)
+        setThread(currentThread);
+      try {
+        await refreshAfterSenderCleanup(cleanupGeneration);
+      } catch (refreshError) {
+        console.warn("Could not reconcile sender cleanup", refreshError);
+      }
+      if (loadGeneration.current === cleanupGeneration)
+        showStatus(t("feedback.unsubscribeCleanupFailed"), "error");
+      console.warn("Could not move sender messages to Trash", error);
+      senderCleanupInFlightRef.current = false;
+      setSenderCleanupLoading(false);
+      return;
+    }
+    if (
+      loadGeneration.current === cleanupGeneration &&
+      (result.failed > 0 ||
+        result.moved === 0 ||
+        result.moved !== result.matched)
+    )
+      setThread(currentThread);
+    try {
+      await notifyMutation("trash", removedMessageIds);
+    } catch (error) {
+      console.warn(
+        "Could not notify the main window about sender cleanup",
+        error,
+      );
+    }
+    try {
+      await refreshAfterSenderCleanup(cleanupGeneration);
+    } catch (error) {
+      console.warn("Could not reconcile sender cleanup", error);
+    }
+    if (loadGeneration.current === cleanupGeneration)
+      showStatus(
+        senderCleanupOutcome(t, result),
+        result.failed || result.moved !== result.matched ? "error" : "success",
+      );
+    senderCleanupInFlightRef.current = false;
+    setSenderCleanupLoading(false);
+  };
+
   const unsubscribe = async (message: MailSummary) => {
     if (unsubscribeLoading) return;
     setUnsubscribeLoading(true);
     try {
-      await readerApi.unsubscribe(message.id);
-      await notifyMutation("unsubscribe", [message.id]);
-    } catch (error) {
-      showError(error);
+      let result: Awaited<ReturnType<typeof readerApi.unsubscribe>>;
+      try {
+        result = await readerApi.unsubscribe(message.id);
+      } catch (error) {
+        showError(error);
+        return;
+      }
+      try {
+        await notifyMutation("unsubscribe", [message.id]);
+      } catch (error) {
+        console.warn(
+          "Could not notify the main window about unsubscribe",
+          error,
+        );
+      }
+      showStatus(
+        t(
+          result.kind === "opened_web"
+            ? "feedback.unsubscribeWeb"
+            : "feedback.unsubscribeSuccess",
+        ),
+        "success",
+        result.cleanupTarget
+          ? {
+              label: t("feedback.unsubscribeCleanupAction"),
+              onAction: () =>
+                void trashMessagesFromSender(result.cleanupTarget!),
+              disabled: senderCleanupLoading,
+            }
+          : undefined,
+      );
     } finally {
       setUnsubscribeLoading(false);
     }
@@ -587,6 +778,18 @@ export function ReaderWindowApp() {
         onUnsubscribe={(message) => void unsubscribe(message)}
         onToggleStar={(message, starred) => void toggleStar(message, starred)}
       />
+      {actionStatus ? (
+        <ActionStatus
+          key={actionStatus.id}
+          message={actionStatus.message}
+          tone={actionStatus.tone}
+          action={actionStatus.action}
+          dismiss={{
+            label: t("actions.close"),
+            onDismiss: () => setActionStatus(undefined),
+          }}
+        />
+      ) : null}
     </div>
   );
 

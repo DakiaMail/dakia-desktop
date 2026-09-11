@@ -184,6 +184,19 @@ describe("Tauri payload contracts", () => {
     });
   });
 
+  it("uses the sender cleanup command with the immutable account and address", async () => {
+    apiMocks.invoke.mockResolvedValue({ matched: 3, moved: 2, failed: 1 });
+    const { api } = await import("./api");
+
+    await expect(
+      api.trashMessagesFromSender("account-1", "sender@example.test"),
+    ).resolves.toEqual({ matched: 3, moved: 2, failed: 1 });
+    expect(apiMocks.invoke).toHaveBeenCalledWith("trash_messages_from_sender", {
+      accountId: "account-1",
+      senderAddress: "sender@example.test",
+    });
+  });
+
   it("delivers camelCase event envelopes while preserving native null fields", async () => {
     const handlers = new Map<string, ListenHandler>();
     eventMocks.listen.mockImplementation(

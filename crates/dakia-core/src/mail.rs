@@ -186,6 +186,27 @@ pub fn mailbox_action_destination(action: MailboxAction) -> Option<&'static str>
 }
 
 #[derive(Debug, Clone)]
+struct SenderTrashCandidate {
+    remote: String,
+    /// Every local catalogue locator, when this provider folder has been
+    /// indexed. Remote-only candidates still move remotely and appear on a
+    /// later sync.
+    local_locators: Vec<SenderTrashLocalLocator>,
+    uid: u32,
+    uid_validity: u32,
+    gmail_message_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SenderTrashLocalLocator {
+    remote: String,
+    mailbox: String,
+    uid: u32,
+    discovered_uid_validity: u32,
+    catalogue_uid_validity: i64,
+}
+
+#[derive(Debug, Clone)]
 pub enum UnsubscribeOutcome {
     Completed,
     Web(String),
@@ -194,6 +215,17 @@ pub enum UnsubscribeOutcome {
         subject: String,
         body: String,
     },
+}
+
+/// The provider operation is deliberately expressed as counts rather than a
+/// list of message IDs: remote-only messages have no local ID yet, and a
+/// failure for one message must not hide successful moves for the others.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SenderTrashResult {
+    pub matched: usize,
+    pub moved: usize,
+    pub failed: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2163,6 +2195,179 @@ impl MailService {
             expected_uid_validity,
         )
         .await
+    }
+
+    /// Moves every received message whose RFC-parsed From mailbox is exactly
+    /// `sender_address` to Trash. Discovery completes before the first move,
+    /// so a partially completed move cannot change which messages qualify.
+    pub async fn trash_messages_from_sender(
+        &self,
+        account: &Account,
+        sender_address: &str,
+    ) -> Result<SenderTrashResult> {
+        let secret = self.credentials.secret(account).await?;
+        let mut client = ImapClient::connect(account).await?;
+        self.trash_messages_from_sender_with_client(&mut client, account, &secret, sender_address)
+            .await
+    }
+
+    async fn trash_messages_from_sender_with_client<S>(
+        &self,
+        client: &mut ImapClient<S>,
+        account: &Account,
+        secret: &str,
+        sender_address: &str,
+    ) -> Result<SenderTrashResult>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let sender_address =
+            normalize_sender_address(sender_address).context("sender address is invalid")?;
+        client.authenticate(account, secret).await?;
+        let listing = client.command("LIST \"\" \"*\"").await?;
+        let mut candidates = Vec::new();
+        let mut seen_mailboxes = BTreeSet::new();
+        for (flags, remote) in listing.iter().filter_map(|line| parse_list_mailbox(line)) {
+            if !seen_mailboxes.insert(remote.to_ascii_lowercase()) {
+                continue;
+            }
+            let catalogue_states = self
+                .store
+                .mailbox_catalog_states_for_remote(account.id, &remote)
+                .await?;
+            if !sender_cleanup_mailbox_is_received(account, &flags, &remote)
+                || !sender_cleanup_catalogue_roles_are_received(&catalogue_states)
+                || (account.provider_id == "gmail"
+                    && !gmail_sender_cleanup_mailbox_is_received(account, &flags, &remote))
+            {
+                continue;
+            }
+            let selected = client
+                .command(&format!("SELECT {}", quote_imap(&remote)))
+                .await
+                .with_context(|| format!("cannot inspect received mailbox {remote}"))?;
+            let uid_validity = parse_uid_validity(&selected).with_context(|| {
+                format!("provider omitted UIDVALIDITY for received mailbox {remote}")
+            })?;
+            for state in &catalogue_states {
+                verify_mailbox_uid_validity(
+                    uid_validity,
+                    state.uid_validity,
+                    "cleaning up this sender from",
+                )?;
+            }
+            // IMAP FROM narrows the potentially large mailbox on the server.
+            // It is only a candidate filter: the parsed header comparison
+            // below remains the authority for exact matching.
+            let search = client
+                .command(&format!("UID SEARCH FROM {}", quote_imap(&sender_address)))
+                .await
+                .with_context(|| format!("cannot search received mailbox {remote}"))?;
+            for uid in parse_search_uids(&search)? {
+                let fields = sender_cleanup_fetch_fields(account);
+                let mut response = client
+                    .command_with_literal_limited(
+                        &format!("UID FETCH {uid} ({fields})"),
+                        MAX_MIME_HEADER_BYTES,
+                    )
+                    .await
+                    .with_context(|| format!("cannot verify sender in {remote} UID {uid}"))?;
+                let headers = response.take_header_literal_for(uid).with_context(|| {
+                    format!("provider omitted From header for {remote} UID {uid}")
+                })?;
+                if sender_address_from_headers(&headers).as_deref() != Some(&sender_address) {
+                    continue;
+                }
+                let gmail_message_id = if account.provider_id == "gmail" {
+                    if !gmail_sender_cleanup_is_received(&response.lines).with_context(|| {
+                        format!("provider omitted or malformed X-GM-LABELS for {remote} UID {uid}")
+                    })? {
+                        continue;
+                    }
+                    Some(gmail_message_id(&response.lines).with_context(|| {
+                        format!("provider omitted or malformed X-GM-MSGID for {remote} UID {uid}")
+                    })?)
+                } else {
+                    None
+                };
+                candidates.push(SenderTrashCandidate {
+                    remote: remote.clone(),
+                    local_locators: catalogue_states
+                        .iter()
+                        .map(|state| SenderTrashLocalLocator {
+                            remote: remote.clone(),
+                            mailbox: state.mailbox.clone(),
+                            uid,
+                            discovered_uid_validity: uid_validity,
+                            catalogue_uid_validity: state.uid_validity,
+                        })
+                        .collect(),
+                    uid,
+                    uid_validity,
+                    gmail_message_id,
+                });
+            }
+        }
+        let candidates = deduplicate_sender_trash_candidates(account, candidates);
+        let mut result = SenderTrashResult {
+            matched: candidates.len(),
+            ..Default::default()
+        };
+        for candidate in candidates {
+            let moved = async {
+                let identities = sender_trash_remote_identities(&candidate)?;
+                for (remote, expected_uid_validity) in identities {
+                    let selected = client
+                        .command(&format!("SELECT {}", quote_imap(&remote)))
+                        .await?;
+                    let current_uid_validity = parse_uid_validity(&selected)
+                        .context("IMAP server omitted UIDVALIDITY before sender cleanup move")?;
+                    verify_mailbox_uid_validity(
+                        current_uid_validity,
+                        i64::from(expected_uid_validity),
+                        "moving sender cleanup messages",
+                    )?;
+                    for locator in candidate
+                        .local_locators
+                        .iter()
+                        .filter(|locator| locator.remote.eq_ignore_ascii_case(&remote))
+                    {
+                        verify_mailbox_uid_validity(
+                            current_uid_validity,
+                            locator.catalogue_uid_validity,
+                            "moving sender cleanup messages",
+                        )?;
+                    }
+                }
+                let destination_uid =
+                    move_selected_message_to_trash(client, account, candidate.uid).await?;
+                let sources = candidate
+                    .local_locators
+                    .iter()
+                    .map(|locator| (locator.mailbox.clone(), locator.uid))
+                    .collect::<Vec<_>>();
+                self.store
+                    .move_messages_to_destination(account.id, &sources, "Trash", destination_uid)
+                    .await?;
+                Result::<(), anyhow::Error>::Ok(())
+            }
+            .await;
+            match moved {
+                Ok(()) => result.moved += 1,
+                Err(failure) => {
+                    // Keep going: each UID is independently movable, and a
+                    // user needs an honest partial result rather than an
+                    // all-or-nothing claim after the first provider error.
+                    eprintln!(
+                        "Dakia could not move sender-cleanup UID {} from {}: {failure}",
+                        candidate.uid, candidate.remote
+                    );
+                    result.failed += 1;
+                }
+            }
+        }
+        let _ = client.command("LOGOUT").await;
+        Ok(result)
     }
 
     async fn apply_action_with_client<S>(
@@ -6291,6 +6496,297 @@ fn parse_first_address(value: &str) -> (Option<String>, String) {
             .unwrap_or((None, value.to_owned())),
         None => (None, value.to_owned()),
     }
+}
+
+/// Normalizes a bare RFC mailbox address supplied at a command boundary.
+/// Display names, folded headers, and malformed values are rejected so this
+/// cannot turn a sender cleanup into a broad text or display-name match.
+pub fn normalize_sender_address(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 320 || value.contains(['\r', '\n', '\0']) {
+        return None;
+    }
+    let raw = format!("From: {value}\r\n\r\n");
+    let parsed = parse_header_block(raw.as_bytes()).ok()?;
+    let address = first_parsed_address(&parsed)?.trim().to_ascii_lowercase();
+    // A command accepts only the mailbox, not a syntactically valid display
+    // name plus mailbox. This equality check is also what prevents a parser
+    // fallback from making an arbitrary header value actionable.
+    value.eq_ignore_ascii_case(&address).then_some(address)
+}
+
+fn first_parsed_address(parsed: &ParsedMessage<'_>) -> Option<String> {
+    match parsed.header(HeaderName::From)?.as_address()? {
+        ParsedAddress::List(addresses) => {
+            addresses.first()?.address.as_ref().map(ToString::to_string)
+        }
+        ParsedAddress::Group(groups) => groups
+            .iter()
+            .flat_map(|group| group.addresses.iter())
+            .find_map(|address| address.address.as_ref().map(ToString::to_string)),
+    }
+}
+
+fn sender_address_from_headers(headers: &[u8]) -> Option<String> {
+    let parsed = parse_header_block(headers).ok()?;
+    let address = first_parsed_address(&parsed)?;
+    normalize_sender_address(&address)
+}
+
+fn sender_cleanup_fetch_fields(account: &Account) -> &'static str {
+    if account.provider_id == "gmail" {
+        "X-GM-MSGID X-GM-LABELS BODY.PEEK[HEADER.FIELDS (FROM)]"
+    } else {
+        "BODY.PEEK[HEADER.FIELDS (FROM)]"
+    }
+}
+
+fn gmail_sender_cleanup_is_received(lines: &[String]) -> Option<bool> {
+    let metadata = lines.join(" ").to_ascii_lowercase();
+    let (_, labels) = metadata.split_once("x-gm-labels")?;
+    let labels = labels.trim_start();
+    let mut depth = 0usize;
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut end = None;
+    for (index, character) in labels.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if quoted && character == '\\' {
+            escaped = true;
+            continue;
+        }
+        if character == '"' {
+            quoted = !quoted;
+            continue;
+        }
+        if quoted {
+            continue;
+        }
+        match character {
+            '(' => depth += 1,
+            ')' if depth == 1 => {
+                end = Some(index + 1);
+                break;
+            }
+            ')' if depth > 1 => depth -= 1,
+            _ => {}
+        }
+    }
+    let labels = labels.get(..end?)?;
+    if !labels.starts_with('(') || quoted || depth != 1 {
+        return None;
+    }
+    Some(
+        !["\\sent", "\\draft", "\\trash"]
+            .iter()
+            .any(|label| labels.contains(label)),
+    )
+}
+
+fn gmail_sender_cleanup_mailbox_is_received(
+    account: &Account,
+    flags: &[String],
+    remote: &str,
+) -> bool {
+    flags
+        .iter()
+        .any(|flag| matches!(flag.as_str(), "\\inbox" | "\\all" | "\\junk"))
+        || remote.eq_ignore_ascii_case("INBOX")
+        || remote.eq_ignore_ascii_case(&account.archive_mailbox)
+        || remote.eq_ignore_ascii_case(&account.spam_mailbox)
+}
+
+fn sender_cleanup_mailbox_is_received(account: &Account, flags: &[String], remote: &str) -> bool {
+    if remote.trim().is_empty()
+        || flags.iter().any(|flag| {
+            matches!(
+                flag.as_str(),
+                "\\noselect" | "\\sent" | "\\drafts" | "\\trash"
+            )
+        })
+    {
+        return false;
+    }
+    // Some providers omit special-use attributes. Never let their configured
+    // sent, drafts, or trash folders become a received-mail cleanup target.
+    ![
+        remote_mailbox(account, "Sent"),
+        remote_mailbox(account, "Drafts"),
+        remote_mailbox(account, "Trash"),
+        "Sent".into(),
+        "Drafts".into(),
+        "Trash".into(),
+    ]
+    .iter()
+    .any(|excluded| remote.eq_ignore_ascii_case(excluded))
+}
+
+fn sender_cleanup_catalogue_roles_are_received(
+    states: &[crate::storage::MailboxCatalogState],
+) -> bool {
+    !states.iter().any(|state| {
+        let role = state
+            .mailbox
+            .split_once("::")
+            .map_or(state.mailbox.as_str(), |(role, _)| role);
+        matches!(role, "Sent" | "Drafts" | "Trash")
+    })
+}
+
+fn gmail_message_id(lines: &[String]) -> Option<String> {
+    lines.iter().find_map(|line| {
+        let (_, value) = line.split_once("X-GM-MSGID ")?;
+        let value = value.trim_start();
+        let end = value
+            .find(|character: char| !character.is_ascii_digit())
+            .unwrap_or(value.len());
+        let suffix = &value[end..];
+        (end > 0
+            && suffix
+                .chars()
+                .next()
+                .is_none_or(|character| character.is_whitespace() || character == ')'))
+        .then(|| value[..end].to_owned())
+    })
+}
+
+fn sender_trash_candidate_rank(candidate: &SenderTrashCandidate) -> (u8, u8, String, u32) {
+    let storage_rank = candidate
+        .local_locators
+        .iter()
+        .map(|locator| match locator.mailbox.as_str() {
+            "INBOX" => 0,
+            "Archive" => 1,
+            "Spam" => 2,
+            _ => 3,
+        })
+        .min()
+        .unwrap_or(4);
+    (
+        storage_rank,
+        u8::from(candidate.local_locators.is_empty()),
+        candidate.remote.to_ascii_lowercase(),
+        candidate.uid,
+    )
+}
+
+fn deduplicate_sender_trash_candidates(
+    account: &Account,
+    candidates: Vec<SenderTrashCandidate>,
+) -> Vec<SenderTrashCandidate> {
+    let mut deduplicated = BTreeMap::new();
+    for candidate in candidates {
+        let key = if account.provider_id == "gmail" {
+            candidate
+                .gmail_message_id
+                .as_ref()
+                .map(|id| format!("gmail:{id}"))
+                .unwrap_or_else(|| format!("locator:{}:{}", candidate.remote, candidate.uid))
+        } else {
+            format!("locator:{}:{}", candidate.remote, candidate.uid)
+        };
+        match deduplicated.get_mut(&key) {
+            Some(existing) => {
+                if sender_trash_candidate_rank(&candidate) < sender_trash_candidate_rank(existing) {
+                    let mut replacement = candidate;
+                    replacement
+                        .local_locators
+                        .extend(existing.local_locators.clone());
+                    *existing = replacement;
+                } else {
+                    existing.local_locators.extend(candidate.local_locators);
+                }
+                deduplicate_sender_trash_local_locators(&mut existing.local_locators);
+            }
+            None => {
+                deduplicated.insert(key, candidate);
+            }
+        }
+    }
+    deduplicated.into_values().collect()
+}
+
+fn deduplicate_sender_trash_local_locators(locators: &mut Vec<SenderTrashLocalLocator>) {
+    let mut unique = BTreeMap::new();
+    for locator in std::mem::take(locators) {
+        let key = (
+            locator.remote.to_ascii_lowercase(),
+            locator.mailbox.clone(),
+            locator.uid,
+        );
+        unique.entry(key).or_insert(locator);
+    }
+    *locators = unique.into_values().collect();
+}
+
+fn sender_trash_remote_identities(candidate: &SenderTrashCandidate) -> Result<Vec<(String, u32)>> {
+    let mut identities = BTreeMap::new();
+    identities.insert(
+        candidate.remote.to_ascii_lowercase(),
+        (candidate.remote.clone(), candidate.uid_validity),
+    );
+    for locator in &candidate.local_locators {
+        let key = locator.remote.to_ascii_lowercase();
+        match identities.get(&key) {
+            Some((_, uid_validity)) if *uid_validity != locator.discovered_uid_validity => {
+                bail!("mailbox identity changed during sender cleanup discovery")
+            }
+            Some(_) => {}
+            None => {
+                identities.insert(
+                    key,
+                    (locator.remote.clone(), locator.discovered_uid_validity),
+                );
+            }
+        }
+    }
+    let mut identities = identities.into_values().collect::<Vec<_>>();
+    // Keep the selected primary mailbox active for the one remote mutation.
+    identities.sort_by_key(|(remote, _)| remote.eq_ignore_ascii_case(&candidate.remote));
+    Ok(identities)
+}
+
+async fn move_selected_message_to_trash<S>(
+    client: &mut ImapClient<S>,
+    account: &Account,
+    uid: u32,
+) -> Result<Option<u32>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let destination = if account.provider_id == "gmail" {
+        "[Gmail]/Trash"
+    } else {
+        "Trash"
+    };
+    let response = client
+        .command(&format!("UID MOVE {uid} {}", quote_imap(destination)))
+        .await;
+    if let Ok(lines) = response {
+        return Ok(parse_copy_uid(&lines));
+    }
+    let capabilities = client.command("CAPABILITY").await?;
+    if !supports_uidplus(&capabilities) {
+        bail!("moving sender cleanup messages requires IMAP UIDPLUS when UID MOVE is unavailable");
+    }
+    let lines = client
+        .command(&format!("UID COPY {uid} {}", quote_imap(destination)))
+        .await?;
+    client
+        .command(&format!("UID STORE {uid} +FLAGS.SILENT (\\Deleted)"))
+        .await?;
+    if let Err(error) = client.command(&format!("UID EXPUNGE {uid}")).await {
+        // Never leave a message marked Deleted after an exact expunge failure:
+        // a later unrelated EXPUNGE must not permanently remove it.
+        let _ = client
+            .command(&format!("UID STORE {uid} -FLAGS.SILENT (\\Deleted)"))
+            .await;
+        return Err(error);
+    }
+    Ok(parse_copy_uid(&lines))
 }
 
 pub(crate) fn parsed_header_mailboxes(value: &str) -> Vec<String> {
@@ -16067,5 +16563,597 @@ For you, Alex =E2=80=94 related to your saved topic."
             ]
         );
         assert!(parsed_header_mailboxes("victim@example.com in prose").is_empty());
+    }
+
+    #[test]
+    fn sender_cleanup_uses_only_a_normalized_bare_rfc_mailbox() {
+        assert_eq!(
+            normalize_sender_address("  Sender@Example.TEST "),
+            Some("sender@example.test".into())
+        );
+        assert_eq!(
+            sender_address_from_headers(b"From: Sender <sender@example.test>\r\n\r\n"),
+            Some("sender@example.test".into())
+        );
+        assert!(normalize_sender_address("Sender <sender@example.test>").is_none());
+        assert!(
+            normalize_sender_address("sender@example.test\r\nBcc: victim@example.test").is_none()
+        );
+        assert_ne!(
+            sender_address_from_headers(b"From: sender+offers@example.test\r\n\r\n"),
+            Some("sender@example.test".into())
+        );
+        assert!(sender_address_from_headers(b"From: malformed sender\r\n\r\n").is_none());
+    }
+
+    #[test]
+    fn sender_cleanup_excludes_non_received_special_use_folders_but_keeps_custom_and_junk() {
+        let account = test_account();
+        assert!(sender_cleanup_mailbox_is_received(
+            &account,
+            &[],
+            "Projects"
+        ));
+        assert!(sender_cleanup_mailbox_is_received(
+            &account,
+            &["\\junk".into()],
+            "Spam"
+        ));
+        for mailbox in ["Sent", "Drafts", "Trash"] {
+            assert!(
+                !sender_cleanup_mailbox_is_received(&account, &[], mailbox),
+                "a missing special-use flag must not include {mailbox}"
+            );
+        }
+        for (flags, mailbox) in [
+            (vec!["\\sent".into()], "Sent"),
+            (vec!["\\drafts".into()], "Drafts"),
+            (vec!["\\trash".into()], "Trash"),
+            (vec!["\\noselect".into()], "Not selectable"),
+        ] {
+            assert!(
+                !sender_cleanup_mailbox_is_received(&account, &flags, mailbox),
+                "{mailbox} must not be a cleanup source"
+            );
+        }
+    }
+
+    #[test]
+    fn sender_cleanup_excludes_flagless_folders_mapped_to_non_received_catalogue_roles() {
+        let state = |mailbox: &str| crate::storage::MailboxCatalogState {
+            account_id: uuid::Uuid::nil().to_string(),
+            mailbox: mailbox.into(),
+            remote_name: "Sent Items".into(),
+            uid_validity: 7,
+            remote_total: 0,
+            historical_complete: true,
+            uid_next: None,
+            highest_modseq: None,
+        };
+        assert!(!sender_cleanup_catalogue_roles_are_received(&[state(
+            "Sent::Sent Items"
+        )]));
+        assert!(!sender_cleanup_catalogue_roles_are_received(&[state(
+            "Drafts::Brouillons"
+        )]));
+        assert!(!sender_cleanup_catalogue_roles_are_received(&[state(
+            "Trash::Deleted Items"
+        )]));
+        assert!(sender_cleanup_catalogue_roles_are_received(&[state(
+            "Projects"
+        )]));
+        assert!(sender_cleanup_catalogue_roles_are_received(&[]));
+    }
+
+    #[test]
+    fn gmail_sender_cleanup_excludes_sent_draft_and_trash_labels_in_every_selected_folder() {
+        assert_eq!(
+            gmail_sender_cleanup_is_received(&[
+                "* 1 FETCH (X-GM-LABELS (\\Inbox custom-label))".into()
+            ]),
+            Some(true)
+        );
+        assert_eq!(
+            gmail_sender_cleanup_is_received(&[
+                "* 1 FETCH (X-GM-LABELS (\\Spam custom-label))".into()
+            ]),
+            Some(true)
+        );
+        assert_eq!(
+            gmail_sender_cleanup_is_received(&[
+                "* 1 FETCH (X-GM-LABELS (\"project) x\" \\Sent))".into()
+            ]),
+            Some(false)
+        );
+        for label in ["\\Sent", "\\Draft", "\\Trash"] {
+            assert!(
+                gmail_sender_cleanup_is_received(&[format!(
+                    "* 1 FETCH (X-GM-LABELS ({label} custom-label))"
+                )]) == Some(false),
+                "{label} must not be moved from a custom Gmail label"
+            );
+        }
+    }
+
+    #[test]
+    fn gmail_sender_cleanup_rejects_missing_or_malformed_stable_metadata() {
+        assert!(gmail_sender_cleanup_is_received(&[]).is_none());
+        assert!(
+            gmail_sender_cleanup_is_received(&["* 1 FETCH (X-GM-LABELS malformed)".into()])
+                .is_none()
+        );
+        assert!(gmail_message_id(&[]).is_none());
+        assert!(gmail_message_id(&["* 1 FETCH (X-GM-MSGID invalid)".into()]).is_none());
+        assert!(gmail_message_id(&["* 1 FETCH (X-GM-MSGID 123malformed)".into()]).is_none());
+        assert_eq!(
+            gmail_message_id(&["* 1 FETCH (X-GM-MSGID 12345)".into()]),
+            Some("12345".into())
+        );
+    }
+
+    #[test]
+    fn gmail_sender_cleanup_limits_discovery_to_inbox_all_mail_and_junk() {
+        let mut account = test_account();
+        account.provider_id = "gmail".into();
+        account.archive_mailbox = "[Google Mail]/Alle Nachrichten".into();
+        account.spam_mailbox = "[Google Mail]/Spam".into();
+
+        assert!(gmail_sender_cleanup_mailbox_is_received(
+            &account,
+            &["\\inbox".into()],
+            "Posteingang"
+        ));
+        assert!(gmail_sender_cleanup_mailbox_is_received(
+            &account,
+            &["\\all".into()],
+            "Alle Nachrichten"
+        ));
+        assert!(gmail_sender_cleanup_mailbox_is_received(
+            &account,
+            &["\\junk".into()],
+            "Spam"
+        ));
+        assert!(gmail_sender_cleanup_mailbox_is_received(
+            &account,
+            &[],
+            "[Google Mail]/Alle Nachrichten"
+        ));
+        assert!(gmail_sender_cleanup_mailbox_is_received(
+            &account,
+            &[],
+            "[Google Mail]/Spam"
+        ));
+        assert!(!gmail_sender_cleanup_mailbox_is_received(
+            &account,
+            &[],
+            "Custom label"
+        ));
+    }
+
+    #[test]
+    fn gmail_sender_cleanup_deduplicates_by_gmail_message_id_and_prefers_inbox_locator() {
+        let mut account = test_account();
+        account.provider_id = "gmail".into();
+        let local_locator = |remote: &str, mailbox: &str, uid| SenderTrashLocalLocator {
+            remote: remote.into(),
+            mailbox: mailbox.into(),
+            uid,
+            discovered_uid_validity: 7,
+            catalogue_uid_validity: 7,
+        };
+        let candidates = vec![
+            SenderTrashCandidate {
+                remote: "[Gmail]/All Mail".into(),
+                local_locators: vec![local_locator("[Gmail]/All Mail", "Archive", 40)],
+                uid: 40,
+                uid_validity: 7,
+                gmail_message_id: Some("100".into()),
+            },
+            SenderTrashCandidate {
+                remote: "INBOX".into(),
+                local_locators: vec![local_locator("INBOX", "INBOX", 4)],
+                uid: 4,
+                uid_validity: 7,
+                gmail_message_id: Some("100".into()),
+            },
+        ];
+        let selected = deduplicate_sender_trash_candidates(&account, candidates);
+        // One selected candidate means the operation issues one provider move,
+        // while the retained locators reconcile both local Gmail projections.
+        assert_eq!(selected.len(), 1);
+        let inbox = selected
+            .iter()
+            .find(|candidate| candidate.remote == "INBOX" && candidate.uid == 4)
+            .unwrap();
+        assert_eq!(inbox.local_locators.len(), 2);
+        assert!(inbox
+            .local_locators
+            .iter()
+            .any(|locator| locator.mailbox == "INBOX" && locator.uid == 4));
+        assert!(inbox
+            .local_locators
+            .iter()
+            .any(|locator| locator.mailbox == "Archive" && locator.uid == 40));
+    }
+
+    #[tokio::test]
+    async fn sender_cleanup_verifies_from_after_server_filter_and_moves_only_after_discovery() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store);
+        let account = test_account();
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            let tag = scripted_expect_command(
+                &mut read,
+                &mut transcript,
+                "LOGIN \"reader@example.test\" \"sync secret\"",
+            )
+            .await;
+            write
+                .write_all(format!("{tag} OK authenticated\r\n").as_bytes())
+                .await
+                .unwrap();
+
+            let tag = scripted_expect_command(&mut read, &mut transcript, "LIST \"\" \"*\"").await;
+            write
+                .write_all(
+                    format!(
+                        "* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n* LIST (\\HasNoChildren) \"/\" \"Projects\"\r\n* LIST (\\HasNoChildren \\Sent) \"/\" \"Sent\"\r\n{tag} OK listed\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+            write
+                .write_all(
+                    format!("* OK [UIDVALIDITY 7] UIDs valid\r\n{tag} OK selected\r\n").as_bytes(),
+                )
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(
+                &mut read,
+                &mut transcript,
+                "UID SEARCH FROM \"sender@example.test\"",
+            )
+            .await;
+            write
+                .write_all(format!("* SEARCH 2 3\r\n{tag} OK searched\r\n").as_bytes())
+                .await
+                .unwrap();
+            for (uid, from) in [
+                (2, "sender+lookalike@example.test"),
+                (3, "Sender <sender@example.test>"),
+            ] {
+                let tag = scripted_expect_command(
+                    &mut read,
+                    &mut transcript,
+                    &format!("UID FETCH {uid} (BODY.PEEK[HEADER.FIELDS (FROM)])"),
+                )
+                .await;
+                let headers = format!("From: {from}\r\n\r\n");
+                write
+                    .write_all(
+                        format!(
+                            "* 1 FETCH (UID {uid} BODY[HEADER.FIELDS (FROM)] {{{}}}\r\n{} )\r\n{tag} OK fetched\r\n",
+                            headers.len(), headers
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "SELECT \"Projects\"").await;
+            write
+                .write_all(
+                    format!("* OK [UIDVALIDITY 7] UIDs valid\r\n{tag} OK selected\r\n").as_bytes(),
+                )
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(
+                &mut read,
+                &mut transcript,
+                "UID SEARCH FROM \"sender@example.test\"",
+            )
+            .await;
+            write
+                .write_all(format!("* SEARCH\r\n{tag} OK searched\r\n").as_bytes())
+                .await
+                .unwrap();
+
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+            write
+                .write_all(
+                    format!("* OK [UIDVALIDITY 7] UIDs valid\r\n{tag} OK selected\r\n").as_bytes(),
+                )
+                .await
+                .unwrap();
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "UID MOVE 3 \"Trash\"").await;
+            write
+                .write_all(format!("{tag} OK moved\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "LOGOUT").await;
+            write
+                .write_all(format!("{tag} OK bye\r\n").as_bytes())
+                .await
+                .unwrap();
+            transcript
+        });
+
+        let result = service
+            .trash_messages_from_sender_with_client(
+                &mut client,
+                &account,
+                "sync secret",
+                "sender@example.test",
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.matched, 1);
+        assert_eq!(result.moved, 1);
+        assert_eq!(result.failed, 0);
+        let transcript = server.await.unwrap();
+        assert!(
+            transcript
+                .iter()
+                .position(|command| command.starts_with("UID MOVE"))
+                > transcript
+                    .iter()
+                    .position(|command| command == "SELECT \"Projects\""),
+            "no mutation may begin before every selected received folder is discovered"
+        );
+    }
+
+    #[tokio::test]
+    async fn sender_cleanup_skips_a_flagless_catalogued_sent_folder_but_discovers_custom_mail() {
+        let store = Store::in_memory().await.unwrap();
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        store
+            .save_mailbox_catalog_state(account.id, "Sent::Sent Items", "Sent Items", 7, 0, true)
+            .await
+            .unwrap();
+        let service = MailService::new(store);
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            let tag = scripted_expect_command(
+                &mut read,
+                &mut transcript,
+                "LOGIN \"reader@example.test\" \"sync secret\"",
+            )
+            .await;
+            write
+                .write_all(format!("{tag} OK authenticated\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "LIST \"\" \"*\"").await;
+            write
+                .write_all(
+                    format!(
+                        "* LIST (\\HasNoChildren) \"/\" \"Sent Items\"\r\n* LIST (\\HasNoChildren) \"/\" \"Projects\"\r\n{tag} OK listed\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "SELECT \"Projects\"").await;
+            write
+                .write_all(
+                    format!("* OK [UIDVALIDITY 7] UIDs valid\r\n{tag} OK selected\r\n").as_bytes(),
+                )
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(
+                &mut read,
+                &mut transcript,
+                "UID SEARCH FROM \"sender@example.test\"",
+            )
+            .await;
+            write
+                .write_all(format!("* SEARCH\r\n{tag} OK searched\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "LOGOUT").await;
+            write
+                .write_all(format!("{tag} OK bye\r\n").as_bytes())
+                .await
+                .unwrap();
+            transcript
+        });
+
+        let result = service
+            .trash_messages_from_sender_with_client(
+                &mut client,
+                &account,
+                "sync secret",
+                "sender@example.test",
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.matched, 0);
+        let transcript = server.await.unwrap();
+        assert!(transcript
+            .iter()
+            .all(|command| !command.contains("Sent Items")));
+        assert!(transcript
+            .iter()
+            .any(|command| command == "SELECT \"Projects\""));
+    }
+
+    #[tokio::test]
+    async fn sender_cleanup_counts_a_failed_move_and_continues_with_later_matches() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store);
+        let account = test_account();
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            let tag = scripted_expect_command(
+                &mut read,
+                &mut transcript,
+                "LOGIN \"reader@example.test\" \"sync secret\"",
+            )
+            .await;
+            write
+                .write_all(format!("{tag} OK authenticated\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "LIST \"\" \"*\"").await;
+            write
+                .write_all(
+                    format!("* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n{tag} OK listed\r\n")
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+            write
+                .write_all(
+                    format!("* OK [UIDVALIDITY 7] UIDs valid\r\n{tag} OK selected\r\n").as_bytes(),
+                )
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(
+                &mut read,
+                &mut transcript,
+                "UID SEARCH FROM \"sender@example.test\"",
+            )
+            .await;
+            write
+                .write_all(format!("* SEARCH 2 3\r\n{tag} OK searched\r\n").as_bytes())
+                .await
+                .unwrap();
+            for uid in [2, 3] {
+                let tag = scripted_expect_command(
+                    &mut read,
+                    &mut transcript,
+                    &format!("UID FETCH {uid} (BODY.PEEK[HEADER.FIELDS (FROM)])"),
+                )
+                .await;
+                let headers = b"From: Sender <sender@example.test>\r\n\r\n";
+                write
+                    .write_all(
+                        format!(
+                            "* 1 FETCH (UID {uid} BODY[HEADER.FIELDS (FROM)] {{{}}}\r\n",
+                            headers.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                write.write_all(headers).await.unwrap();
+                write
+                    .write_all(format!(")\r\n{tag} OK fetched\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+            write
+                .write_all(
+                    format!("* OK [UIDVALIDITY 7] UIDs valid\r\n{tag} OK selected\r\n").as_bytes(),
+                )
+                .await
+                .unwrap();
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "UID MOVE 2 \"Trash\"").await;
+            write
+                .write_all(format!("{tag} NO MOVE unavailable\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "CAPABILITY").await;
+            write
+                .write_all(
+                    format!("* CAPABILITY IMAP4rev1 UIDPLUS\r\n{tag} OK capabilities\r\n")
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "UID COPY 2 \"Trash\"").await;
+            write
+                .write_all(format!("{tag} OK copied\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(
+                &mut read,
+                &mut transcript,
+                "UID STORE 2 +FLAGS.SILENT (\\Deleted)",
+            )
+            .await;
+            write
+                .write_all(format!("{tag} OK marked\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "UID EXPUNGE 2").await;
+            write
+                .write_all(format!("{tag} NO expunge unavailable\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(
+                &mut read,
+                &mut transcript,
+                "UID STORE 2 -FLAGS.SILENT (\\Deleted)",
+            )
+            .await;
+            write
+                .write_all(format!("{tag} OK restored\r\n").as_bytes())
+                .await
+                .unwrap();
+
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+            write
+                .write_all(
+                    format!("* OK [UIDVALIDITY 7] UIDs valid\r\n{tag} OK selected\r\n").as_bytes(),
+                )
+                .await
+                .unwrap();
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "UID MOVE 3 \"Trash\"").await;
+            write
+                .write_all(format!("{tag} OK moved\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "LOGOUT").await;
+            write
+                .write_all(format!("{tag} OK bye\r\n").as_bytes())
+                .await
+                .unwrap();
+            transcript
+        });
+
+        let result = service
+            .trash_messages_from_sender_with_client(
+                &mut client,
+                &account,
+                "sync secret",
+                "sender@example.test",
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.matched, 2);
+        assert_eq!(result.moved, 1);
+        assert_eq!(result.failed, 1);
+        let transcript = server.await.unwrap();
+        assert!(
+            transcript
+                .iter()
+                .any(|command| command == "UID MOVE 3 \"Trash\""),
+            "a move failure must not prevent later sender matches from being processed"
+        );
     }
 }

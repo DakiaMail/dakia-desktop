@@ -300,9 +300,17 @@ export const en = {
       starFailed_one: "Could not update the message star",
       starFailed_other: "Could not update {{count}} message stars",
       sent: "Message sent",
-      unsubscribeSuccess: "Unsubscribe request sent",
-      unsubscribeWeb: "Opened the unsubscribe page",
+      unsubscribeSuccess: "Unsubscribe request sent.",
+      unsubscribeWeb: "Unsubscribe page opened.",
       unsubscribeFailed: "Could not unsubscribe",
+      unsubscribeCleanupAction: "Move to Trash",
+      unsubscribeCleanupSuccess_one: "Moved 1 email to Trash",
+      unsubscribeCleanupSuccess_other: "Moved {{count}} emails to Trash",
+      unsubscribeCleanupNone: "No emails from this sender were found",
+      unsubscribeCleanupPartial:
+        "Moved {{moved}} of {{matched}} emails to Trash; {{failed}} could not be moved",
+      unsubscribeCleanupFailed:
+        "Could not move emails from this sender to Trash",
       categorySaved: "Category saved",
     },
     ai: {
