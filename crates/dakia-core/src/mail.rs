@@ -196,6 +196,17 @@ pub enum UnsubscribeOutcome {
     },
 }
 
+/// The provider operation is deliberately expressed as counts rather than a
+/// list of message IDs: remote-only messages have no local ID yet, and a
+/// failure for one message must not hide successful moves for the others.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SenderTrashResult {
+    pub matched: usize,
+    pub moved: usize,
+    pub failed: usize,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncProgress {
@@ -6291,6 +6302,43 @@ fn parse_first_address(value: &str) -> (Option<String>, String) {
             .unwrap_or((None, value.to_owned())),
         None => (None, value.to_owned()),
     }
+}
+
+/// Normalizes a bare RFC mailbox address supplied at a command boundary.
+/// Display names, folded headers, and malformed values are rejected so this
+/// cannot turn a sender cleanup into a broad text or display-name match.
+pub fn normalize_sender_address(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 320 || value.contains(['\r', '\n', '\0']) {
+        return None;
+    }
+    let raw = format!("From: {value}\r\n\r\n");
+    let parsed = parse_header_block(raw.as_bytes()).ok()?;
+    let address = first_parsed_address(&parsed)?.trim().to_ascii_lowercase();
+    // A command accepts only the mailbox, not a syntactically valid display
+    // name plus mailbox. This equality check is also what prevents a parser
+    // fallback from making an arbitrary header value actionable.
+    value.eq_ignore_ascii_case(&address).then_some(address)
+}
+
+fn first_parsed_address(parsed: &ParsedMessage<'_>) -> Option<String> {
+    match parsed.header(HeaderName::From)?.as_address()? {
+        ParsedAddress::List(addresses) => addresses
+            .first()?
+            .address
+            .as_ref()
+            .map(ToString::to_string),
+        ParsedAddress::Group(groups) => groups
+            .iter()
+            .flat_map(|group| group.addresses.iter())
+            .find_map(|address| address.address.as_ref().map(ToString::to_string)),
+    }
+}
+
+fn sender_address_from_headers(headers: &[u8]) -> Option<String> {
+    let parsed = parse_header_block(headers).ok()?;
+    let address = first_parsed_address(&parsed)?;
+    normalize_sender_address(&address)
 }
 
 pub(crate) fn parsed_header_mailboxes(value: &str) -> Vec<String> {

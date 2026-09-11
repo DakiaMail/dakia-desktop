@@ -2012,6 +2012,26 @@ impl Store {
         .await?)
     }
 
+    /// Returns the local catalogue mailbox or mailboxes backed by a provider
+    /// mailbox. A provider can expose the same special-use mailbox under more
+    /// than one catalogue entry, so callers must still choose one locator.
+    pub async fn mailbox_catalog_storages_for_remote(
+        &self,
+        account_id: AccountId,
+        remote_name: &str,
+    ) -> Result<Vec<String>> {
+        Ok(sqlx::query_as::<_, (String,)>(
+            "SELECT mailbox FROM mailbox_catalog_state WHERE account_id = ? AND LOWER(remote_name) = LOWER(?) ORDER BY CASE mailbox WHEN 'INBOX' THEN 0 WHEN 'Archive' THEN 1 WHEN 'Spam' THEN 2 ELSE 3 END, mailbox",
+        )
+        .bind(account_id.to_string())
+        .bind(remote_name)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(|(mailbox,)| mailbox)
+        .collect())
+    }
+
     pub async fn save_mailbox_catalog_state(
         &self,
         account_id: AccountId,
