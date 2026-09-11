@@ -148,6 +148,17 @@ export type ComposeAttachment = {
   content_base64: string;
   size_bytes: number;
 };
+export type ImageReductionResult = {
+  status: "reduced" | "unchanged";
+  reason?: string | null;
+  attachment?: ComposeAttachment | null;
+  original_size_bytes: number;
+  reduced_size_bytes?: number | null;
+};
+export type ComposeImageInspectionResult = {
+  eligible: boolean;
+  reason?: string | null;
+};
 export type MailCategory =
   "people" | "transactions" | "notifications" | "newsletters" | "other";
 export type ClassificationSource = "model" | "override" | "user";

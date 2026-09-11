@@ -17,6 +17,8 @@ import type {
   SmartInboxPage,
   SmartSectionId,
   MessageContentErrorKind,
+  ImageReductionResult,
+  ComposeImageInspectionResult,
   Provider,
   SyncProgress,
   SyncResult,
@@ -216,6 +218,12 @@ const desktopApi = {
     invoke<ComposeAttachment[]>("forward_attachments", { messageId }),
   readDroppedFiles: (receipt: string) =>
     invoke<ComposeAttachment[]>("read_dropped_files", { receipt }),
+  reduceComposeImage: (attachment: ComposeAttachment) =>
+    invoke<ImageReductionResult>("reduce_compose_image", { attachment }),
+  inspectComposeImage: (attachment: ComposeAttachment) =>
+    invoke<ComposeImageInspectionResult>("inspect_compose_image", {
+      attachment,
+    }),
   send: (draft: Record<string, unknown>) =>
     invoke<string>("send_message", { draft }),
   action: (
@@ -683,6 +691,17 @@ const demoApi: typeof desktopApi = {
   readDroppedFiles: async () => {
     throw new Error("Native file drop support is unavailable in the web demo");
   },
+  reduceComposeImage: async (attachment) => ({
+    status: "unchanged" as const,
+    reason: "native_image_processing_unavailable",
+    attachment: null,
+    original_size_bytes: attachment.size_bytes,
+    reduced_size_bytes: null,
+  }),
+  inspectComposeImage: async () => ({
+    eligible: false,
+    reason: "native_image_processing_unavailable",
+  }),
   send: async () => "queued",
   action: async () => undefined,
   openExternal: async (url) => {

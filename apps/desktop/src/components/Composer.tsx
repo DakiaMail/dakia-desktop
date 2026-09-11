@@ -14,6 +14,7 @@ import { useTranslation } from "react-i18next";
 import { AI_FEATURES_VISIBLE } from "../features";
 import { api } from "../api";
 import type { ComposeSeed } from "../composeWindow";
+import { confirmNativeAction } from "../nativeFeedback";
 import type { Account, ComposeAttachment } from "../types";
 import { splitAddressValues } from "../recipients";
 import { RichTextEditor } from "./RichTextEditor";
@@ -27,6 +28,13 @@ import {
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 const MAX_ATTACHMENT_TOTAL_BYTES = 50 * 1024 * 1024;
 const MAX_ATTACHMENTS = 50;
+const LARGE_IMAGE_BYTES = 2 * 1024 * 1024;
+
+type LocalAttachment = ComposeAttachment & {
+  localId: string;
+  imageReview: "pending" | "reviewing" | "kept" | "reduced";
+  original_size_bytes?: number;
+};
 
 type Props = {
   accounts: Account[];
@@ -66,13 +74,18 @@ export function Composer({
   });
   const [showCopies, setShowCopies] = useState(Boolean(seed?.cc || seed?.bcc));
   const [aiLoading, setAiLoading] = useState(false);
-  const [attachments, setAttachments] = useState<ComposeAttachment[]>(
-    seed?.attachments ?? [],
+  const [attachments, setAttachments] = useState<LocalAttachment[]>(() =>
+    localAttachments(seed?.attachments ?? []),
   );
   const [attachmentError, setAttachmentError] = useState<string>();
+  const [attachmentNotice, setAttachmentNotice] = useState<string>();
+  const [reducingImages, setReducingImages] = useState(false);
+  const [reviewCycle, setReviewCycle] = useState(0);
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
-  const attachmentsRef = useRef<ComposeAttachment[]>(seed?.attachments ?? []);
+  const attachmentsRef = useRef<LocalAttachment[]>(attachments);
+  const imageReviewInFlightRef = useRef(false);
+  const mountedRef = useRef(true);
   const browserDropHandledRef = useRef(false);
 
   useEffect(() => {
@@ -83,12 +96,29 @@ export function Composer({
     attachmentsRef.current = attachments;
   }, [attachments]);
 
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   const selectedAccount = useMemo(
     () => accounts.find((account) => account.id === accountId),
     [accountId, accounts],
   );
   const sending = sendState !== "idle";
-  const canSend = Boolean(accountId && to.trim() && !sending);
+  const hasPendingLargeImages = attachments.some(
+    (attachment) =>
+      attachment.imageReview === "pending" && needsImageInspection(attachment),
+  );
+  const attachmentLocked =
+    reducingImages ||
+    hasPendingLargeImages ||
+    attachments.some((attachment) => attachment.imageReview === "reviewing");
+  const canSend = Boolean(
+    accountId && to.trim() && !sending && !attachmentLocked,
+  );
   const send = () => {
     if (!accountId || !to.trim()) return;
     onSend({
@@ -135,13 +165,158 @@ export function Composer({
         setAttachmentError(t("composer.attachmentLimit"));
         return;
       }
-      const next = [...attachmentsRef.current, ...additions];
+      const next = [...attachmentsRef.current, ...localAttachments(additions)];
       attachmentsRef.current = next;
       setAttachments(next);
       setAttachmentError(undefined);
+      setAttachmentNotice(undefined);
     },
     [t],
   );
+
+  useEffect(() => {
+    if (imageReviewInFlightRef.current) return;
+    const unreviewed = attachmentsRef.current.filter(
+      (attachment) =>
+        attachment.imageReview === "pending" &&
+        needsImageInspection(attachment),
+    );
+    if (!unreviewed.length) return;
+
+    imageReviewInFlightRef.current = true;
+    const candidateIds = new Set(unreviewed.map(({ localId }) => localId));
+    const markCandidates = (
+      update: (attachment: LocalAttachment) => LocalAttachment,
+    ) => {
+      const next = attachmentsRef.current.map((attachment) =>
+        candidateIds.has(attachment.localId) ? update(attachment) : attachment,
+      );
+      attachmentsRef.current = next;
+      if (mountedRef.current) setAttachments(next);
+    };
+    markCandidates((attachment) => ({
+      ...attachment,
+      imageReview: "reviewing",
+    }));
+
+    void (async () => {
+      const candidates: LocalAttachment[] = [];
+      const inspectionProblems: string[] = [];
+      for (const attachment of unreviewed) {
+        try {
+          const result = await api.inspectComposeImage(
+            stripLocalAttachment(attachment),
+          );
+          if (result.eligible) {
+            candidates.push(attachment);
+          } else {
+            markCandidates((current) =>
+              current.localId === attachment.localId
+                ? { ...current, imageReview: "kept" }
+                : current,
+            );
+          }
+        } catch {
+          inspectionProblems.push(attachment.filename);
+          markCandidates((current) =>
+            current.localId === attachment.localId
+              ? { ...current, imageReview: "kept" }
+              : current,
+          );
+        }
+      }
+      if (inspectionProblems.length && mountedRef.current) {
+        setAttachmentNotice(
+          t("composer.imageInspectionFailed", {
+            count: inspectionProblems.length,
+            filename: inspectionProblems[0],
+            filenames: inspectionProblems.join(", "),
+          }),
+        );
+      }
+      if (!candidates.length) return;
+
+      const reduce = await confirmNativeAction(
+        t("composer.imageReduceTitle"),
+        t("composer.imageReducePrompt", {
+          count: candidates.length,
+          filename: candidates[0]?.filename,
+        }),
+        t("composer.reduceImages"),
+        t("composer.keepOriginals"),
+      );
+      if (!reduce) {
+        markCandidates((attachment) => ({
+          ...attachment,
+          imageReview: "kept",
+        }));
+        return;
+      }
+
+      if (mountedRef.current) {
+        setReducingImages(true);
+        setAttachmentNotice(undefined);
+      }
+      const problemFilenames = [...inspectionProblems];
+      for (const candidate of candidates) {
+        try {
+          const result = await api.reduceComposeImage(
+            stripLocalAttachment(candidate),
+          );
+          if (result.status === "reduced" && result.attachment) {
+            const replacement = result.attachment;
+            markCandidates((attachment) =>
+              attachment.localId === candidate.localId
+                ? {
+                    ...replacement,
+                    localId: attachment.localId,
+                    imageReview: "reduced",
+                    original_size_bytes: candidate.size_bytes,
+                  }
+                : attachment,
+            );
+          } else {
+            problemFilenames.push(candidate.filename);
+            markCandidates((attachment) =>
+              attachment.localId === candidate.localId
+                ? { ...attachment, imageReview: "kept" }
+                : attachment,
+            );
+          }
+        } catch {
+          problemFilenames.push(candidate.filename);
+          markCandidates((attachment) =>
+            attachment.localId === candidate.localId
+              ? { ...attachment, imageReview: "kept" }
+              : attachment,
+          );
+        }
+      }
+      if (!mountedRef.current) return;
+      if (problemFilenames.length) {
+        setAttachmentNotice(
+          t("composer.imageReductionIncomplete", {
+            count: problemFilenames.length,
+            filename: problemFilenames[0],
+            filenames: problemFilenames.join(", "),
+          }),
+        );
+      }
+    })()
+      .catch(() => {
+        markCandidates((attachment) => ({
+          ...attachment,
+          imageReview: "kept",
+        }));
+      })
+      .finally(() => {
+        imageReviewInFlightRef.current = false;
+        if (mountedRef.current) {
+          setReducingImages(false);
+          setReviewCycle((cycle) => cycle + 1);
+        }
+      });
+  }, [attachments, reviewCycle, t]);
 
   const addFiles = useCallback(
     async (files: FileList | File[]) => {
@@ -198,7 +373,7 @@ export function Composer({
       });
     void webview
       .listen<string>("dakia://dropped-file-receipt", (event) => {
-        if (sending) return;
+        if (sending || attachmentLocked) return;
         window.setTimeout(() => {
           if (browserDropHandledRef.current) {
             browserDropHandledRef.current = false;
@@ -231,12 +406,12 @@ export function Composer({
       unlistenReceipts?.();
       unlistenErrors?.();
     };
-  }, [receiveNativeDrop, sending, t]);
+  }, [attachmentLocked, receiveNativeDrop, sending, t]);
 
   const onBrowserDrop = (event: DragEvent<HTMLElement>) => {
     event.preventDefault();
     setIsDraggingFiles(false);
-    if (!sending && event.dataTransfer.files.length) {
+    if (!sending && !attachmentLocked && event.dataTransfer.files.length) {
       browserDropHandledRef.current = true;
       window.setTimeout(() => {
         browserDropHandledRef.current = false;
@@ -251,6 +426,7 @@ export function Composer({
     );
     attachmentsRef.current = next;
     setAttachments(next);
+    setAttachmentNotice(undefined);
   };
 
   const aiDraft = async () => {
@@ -415,13 +591,14 @@ export function Composer({
           aria-label={t("composer.attachments")}
         >
           {attachments.map((attachment, index) => (
-            <div
-              className="compose-attachment-chip"
-              key={`${attachment.filename}-${index}`}
-            >
+            <div className="compose-attachment-chip" key={attachment.localId}>
               <IconPaperclip size={15} stroke={1.8} aria-hidden="true" />
               <span title={attachment.filename}>{attachment.filename}</span>
-              <small>{formatBytes(attachment.size_bytes)}</small>
+              <small>
+                {attachment.original_size_bytes
+                  ? `${formatBytes(attachment.original_size_bytes)} → ${formatBytes(attachment.size_bytes)}`
+                  : formatBytes(attachment.size_bytes)}
+              </small>
               <button
                 type="button"
                 aria-label={t("composer.removeAttachment", {
@@ -431,13 +608,23 @@ export function Composer({
                   filename: attachment.filename,
                 })}
                 onClick={() => removeAttachment(index)}
-                disabled={sending}
+                disabled={sending || attachmentLocked}
               >
                 <IconX size={14} stroke={2} />
               </button>
             </div>
           ))}
         </section>
+      ) : null}
+
+      {reducingImages ? (
+        <p className="compose-attachment-status" role="status">
+          {t("composer.reducingImages")}
+        </p>
+      ) : attachmentNotice ? (
+        <p className="compose-attachment-status" role="status">
+          {attachmentNotice}
+        </p>
       ) : null}
 
       <footer className="compose-toolbar">
@@ -488,7 +675,7 @@ export function Composer({
           className="compose-attachment-button"
           type="button"
           onClick={() => attachmentInputRef.current?.click()}
-          disabled={sending}
+          disabled={sending || attachmentLocked}
         >
           <IconPaperclip size={17} stroke={1.8} />
           {t("composer.attach")}
@@ -519,6 +706,29 @@ function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+let nextLocalAttachmentId = 0;
+
+function localAttachments(attachments: ComposeAttachment[]): LocalAttachment[] {
+  return attachments.map((attachment) => ({
+    ...attachment,
+    localId: `compose-attachment-${nextLocalAttachmentId++}`,
+    imageReview: "pending",
+  }));
+}
+
+function stripLocalAttachment({
+  filename,
+  mime_type,
+  content_base64,
+  size_bytes,
+}: LocalAttachment): ComposeAttachment {
+  return { filename, mime_type, content_base64, size_bytes };
+}
+
+function needsImageInspection(attachment: ComposeAttachment) {
+  return attachment.size_bytes > LARGE_IMAGE_BYTES;
 }
 
 function uniqueAttachments(

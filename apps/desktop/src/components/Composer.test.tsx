@@ -14,22 +14,35 @@ import {
   type Mock,
   vi,
 } from "vitest";
+import { StrictMode } from "react";
 import "../i18n";
 import type { Account } from "../types";
 import { Composer } from "./Composer";
 
 const nativeDropMocks = vi.hoisted(() => ({
   readDroppedFiles: vi.fn(),
+  reduceComposeImage: vi.fn(),
+  inspectComposeImage: vi.fn(),
   onDragDropEvent: vi.fn(),
   listen: vi.fn(),
   listeners: new Map<string, (event: { payload: string }) => void>(),
   disposers: [] as ReturnType<typeof vi.fn>[],
 }));
 
+const nativeFeedbackMocks = vi.hoisted(() => ({
+  confirmNativeAction: vi.fn(),
+}));
+
 vi.mock("../api", () => ({
   api: {
     readDroppedFiles: nativeDropMocks.readDroppedFiles,
+    reduceComposeImage: nativeDropMocks.reduceComposeImage,
+    inspectComposeImage: nativeDropMocks.inspectComposeImage,
   },
+}));
+
+vi.mock("../nativeFeedback", () => ({
+  confirmNativeAction: nativeFeedbackMocks.confirmNativeAction,
 }));
 
 vi.mock("@tauri-apps/api/webview", () => ({
@@ -72,6 +85,29 @@ const nativeAttachment = {
   size_bytes: 6,
 };
 
+const TWO_MIB = 2 * 1024 * 1024;
+
+const largeImage = (
+  filename: string,
+  size_bytes = TWO_MIB + 1,
+  content_base64 = `base64-${filename}`,
+) => ({
+  filename,
+  mime_type: "image/jpeg",
+  content_base64,
+  size_bytes,
+});
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 async function waitForNativeListeners() {
   await waitFor(() => {
     expect(nativeDropMocks.listeners.has("dakia://dropped-file-receipt")).toBe(
@@ -97,6 +133,14 @@ beforeEach(() => {
   nativeDropMocks.listeners.clear();
   nativeDropMocks.disposers.length = 0;
   nativeDropMocks.readDroppedFiles.mockReset();
+  nativeDropMocks.reduceComposeImage.mockReset();
+  nativeDropMocks.inspectComposeImage.mockReset();
+  nativeDropMocks.inspectComposeImage.mockResolvedValue({
+    eligible: true,
+    reason: null,
+  });
+  nativeFeedbackMocks.confirmNativeAction.mockReset();
+  nativeFeedbackMocks.confirmNativeAction.mockResolvedValue(false);
   nativeDropMocks.onDragDropEvent.mockReset();
   nativeDropMocks.listen.mockReset();
   nativeDropMocks.onDragDropEvent.mockImplementation(async () => {
@@ -422,6 +466,419 @@ describe("Composer send feedback", () => {
         }),
       ),
     );
+  });
+});
+
+describe("Composer large image attachment review", () => {
+  it("finishes image review under the production StrictMode lifecycle", async () => {
+    render(
+      <StrictMode>
+        <Composer
+          {...props}
+          seed={{
+            to: "you@example.com",
+            attachments: [largeImage("strict.jpg")],
+          }}
+          sendState="idle"
+        />
+      </StrictMode>,
+    );
+
+    await waitFor(() =>
+      expect(nativeFeedbackMocks.confirmNativeAction).toHaveBeenCalledOnce(),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^Send/ })).toBeEnabled(),
+    );
+    expect(
+      screen.getByRole("button", { name: "Remove strict.jpg" }),
+    ).toBeEnabled();
+  });
+
+  it("does not offer reduction at the exact 2 MiB boundary", async () => {
+    render(
+      <Composer
+        {...props}
+        seed={{
+          to: "you@example.com",
+          attachments: [largeImage("boundary.jpg", TWO_MIB)],
+        }}
+        sendState="idle"
+      />,
+    );
+
+    expect(await screen.findByText("boundary.jpg")).toBeInTheDocument();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(nativeFeedbackMocks.confirmNativeAction).not.toHaveBeenCalled();
+    expect(nativeDropMocks.inspectComposeImage).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /^Send/ })).toBeEnabled();
+  });
+
+  it("uses native byte inspection for a forwarded image with generic MIME metadata", async () => {
+    const forwarded = {
+      ...largeImage("forwarded.jpg"),
+      mime_type: "application/octet-stream",
+    };
+    render(
+      <Composer
+        {...props}
+        seed={{ to: "you@example.com", attachments: [forwarded] }}
+        sendState="idle"
+      />,
+    );
+
+    await waitFor(() =>
+      expect(nativeDropMocks.inspectComposeImage).toHaveBeenCalledWith(
+        forwarded,
+      ),
+    );
+    await waitFor(() =>
+      expect(nativeFeedbackMocks.confirmNativeAction).toHaveBeenCalledOnce(),
+    );
+  });
+
+  it("does not offer reduction after native inspection rejects a large non-image", async () => {
+    nativeDropMocks.inspectComposeImage.mockResolvedValue({
+      eligible: false,
+      reason: "unsupported_format",
+    });
+    render(
+      <Composer
+        {...props}
+        seed={{
+          to: "you@example.com",
+          attachments: [
+            {
+              ...largeImage("document.pdf"),
+              mime_type: "application/pdf",
+            },
+          ],
+        }}
+        sendState="idle"
+      />,
+    );
+
+    await waitFor(() =>
+      expect(nativeDropMocks.inspectComposeImage).toHaveBeenCalledOnce(),
+    );
+    expect(nativeFeedbackMocks.confirmNativeAction).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^Send/ })).toBeEnabled(),
+    );
+  });
+
+  it.each(["picker", "browser drop"])(
+    "offers reduction for a large image added through the %s path",
+    async (source) => {
+      const file = new File(["image"], `${source}.jpg`, {
+        type: "image/jpeg",
+      });
+      Object.defineProperty(file, "size", { value: TWO_MIB + 1 });
+      const { container } = render(<Composer {...props} sendState="idle" />);
+
+      if (source === "picker") {
+        fireEvent.change(container.querySelector('input[type="file"]')!, {
+          target: { files: [file] },
+        });
+      } else {
+        fireEvent.drop(screen.getByRole("main"), {
+          dataTransfer: { files: [file], types: ["Files"] },
+        });
+      }
+
+      await waitFor(() =>
+        expect(nativeFeedbackMocks.confirmNativeAction).toHaveBeenCalledOnce(),
+      );
+    },
+  );
+
+  it("groups large images added together into one native offer", async () => {
+    const choice = deferred<boolean>();
+    nativeFeedbackMocks.confirmNativeAction.mockReturnValue(choice.promise);
+    render(
+      <Composer
+        {...props}
+        seed={{
+          to: "you@example.com",
+          attachments: [largeImage("first.jpg"), largeImage("second.jpg")],
+        }}
+        sendState="idle"
+      />,
+    );
+
+    expect(await screen.findByText("first.jpg")).toBeInTheDocument();
+    expect(screen.getByText("second.jpg")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(nativeFeedbackMocks.confirmNativeAction).toHaveBeenCalledWith(
+        "Reduce image size?",
+        "2 attached images are larger than 2 MB. Reduce them to make this message smaller? They will be limited to 1600 px and may lose some detail.",
+        "Reduce size",
+        "Keep originals",
+      ),
+    );
+    expect(nativeFeedbackMocks.confirmNativeAction).toHaveBeenCalledOnce();
+
+    await act(async () => choice.resolve(false));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^Send/ })).toBeEnabled(),
+    );
+  });
+
+  it("keeps originals and does not offer them again", async () => {
+    const onSend = vi.fn();
+    const original = largeImage("kept.jpg", 3 * 1024 * 1024, "original-data");
+    const { rerender } = render(
+      <Composer
+        {...props}
+        seed={{ to: "you@example.com", attachments: [original] }}
+        onSend={onSend}
+        sendState="idle"
+      />,
+    );
+
+    await waitFor(() =>
+      expect(nativeFeedbackMocks.confirmNativeAction).toHaveBeenCalledOnce(),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^Send/ })).toBeEnabled(),
+    );
+    rerender(
+      <Composer
+        {...props}
+        seed={{ to: "you@example.com", attachments: [original] }}
+        onSend={onSend}
+        sendState="idle"
+      />,
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(nativeFeedbackMocks.confirmNativeAction).toHaveBeenCalledOnce();
+    expect(nativeDropMocks.reduceComposeImage).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
+    expect(onSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        attachments: [
+          {
+            filename: "kept.jpg",
+            mime_type: "image/jpeg",
+            content_base64: "original-data",
+          },
+        ],
+      }),
+    );
+  });
+
+  it("replaces a reduced image, shows the size saving, and sends the new bytes", async () => {
+    const onSend = vi.fn();
+    nativeFeedbackMocks.confirmNativeAction.mockResolvedValue(true);
+    nativeDropMocks.reduceComposeImage.mockResolvedValue({
+      status: "reduced",
+      attachment: largeImage("photo-reduced.jpg", 1024 * 1024, "reduced-data"),
+      original_size_bytes: 3 * 1024 * 1024,
+      reduced_size_bytes: 1024 * 1024,
+    });
+    render(
+      <Composer
+        {...props}
+        seed={{
+          to: "you@example.com",
+          attachments: [largeImage("photo.jpg", 3 * 1024 * 1024, "old-data")],
+        }}
+        onSend={onSend}
+        sendState="idle"
+      />,
+    );
+
+    expect(await screen.findByText("photo-reduced.jpg")).toBeInTheDocument();
+    expect(screen.getByText("3.0 MB → 1.0 MB")).toBeInTheDocument();
+    expect(nativeDropMocks.reduceComposeImage).toHaveBeenCalledWith(
+      largeImage("photo.jpg", 3 * 1024 * 1024, "old-data"),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
+    expect(onSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        attachments: [
+          {
+            filename: "photo-reduced.jpg",
+            mime_type: "image/jpeg",
+            content_base64: "reduced-data",
+          },
+        ],
+      }),
+    );
+  });
+
+  it.each([
+    {
+      label: "failure",
+      arrange: () =>
+        nativeDropMocks.reduceComposeImage.mockRejectedValue(
+          new Error("decoder failed"),
+        ),
+      expected: "problem.jpg could not be made smaller. The original was kept.",
+    },
+    {
+      label: "unchanged result",
+      arrange: () =>
+        nativeDropMocks.reduceComposeImage.mockResolvedValue({
+          status: "unchanged",
+          reason: "not_smaller",
+          attachment: null,
+          original_size_bytes: TWO_MIB + 1,
+          reduced_size_bytes: null,
+        }),
+      expected: "problem.jpg could not be made smaller. The original was kept.",
+    },
+  ])(
+    "keeps the original and explains a reduction $label",
+    async ({ arrange, expected }) => {
+      nativeFeedbackMocks.confirmNativeAction.mockResolvedValue(true);
+      arrange();
+      render(
+        <Composer
+          {...props}
+          seed={{
+            to: "you@example.com",
+            attachments: [largeImage("problem.jpg")],
+          }}
+          sendState="idle"
+        />,
+      );
+
+      expect(await screen.findByRole("status")).toHaveTextContent(expected);
+      expect(screen.getByText("problem.jpg")).toBeInTheDocument();
+      expect(screen.getByText("2.0 MB")).toBeInTheDocument();
+    },
+  );
+
+  it("names every original kept when a mixed batch cannot be reduced", async () => {
+    nativeFeedbackMocks.confirmNativeAction.mockResolvedValue(true);
+    nativeDropMocks.reduceComposeImage
+      .mockResolvedValueOnce({
+        status: "unchanged",
+        reason: "not_smaller",
+        attachment: null,
+        original_size_bytes: TWO_MIB + 1,
+        reduced_size_bytes: null,
+      })
+      .mockRejectedValueOnce(new Error("decoder failed"));
+    render(
+      <Composer
+        {...props}
+        seed={{
+          to: "you@example.com",
+          attachments: [largeImage("first.jpg"), largeImage("second.jpg")],
+        }}
+        sendState="idle"
+      />,
+    );
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "2 images could not be made smaller. Their originals were kept: first.jpg, second.jpg.",
+    );
+  });
+
+  it("offers again after a kept image is removed and re-added", async () => {
+    const image = largeImage("again.jpg");
+    nativeDropMocks.readDroppedFiles.mockResolvedValue([image]);
+    render(
+      <Composer
+        {...props}
+        seed={{ to: "you@example.com", attachments: [image] }}
+        sendState="idle"
+      />,
+    );
+
+    await waitFor(() =>
+      expect(nativeFeedbackMocks.confirmNativeAction).toHaveBeenCalledOnce(),
+    );
+    const remove = await screen.findByRole("button", {
+      name: "Remove again.jpg",
+    });
+    await waitFor(() => expect(remove).toBeEnabled());
+    fireEvent.click(remove);
+    expect(screen.queryByText("again.jpg")).not.toBeInTheDocument();
+
+    await waitForNativeListeners();
+    act(() => emitNative("dakia://dropped-file-receipt", "re-added"));
+    await waitFor(() =>
+      expect(nativeFeedbackMocks.confirmNativeAction).toHaveBeenCalledTimes(2),
+    );
+  });
+
+  it("offers once for each later attachment batch", async () => {
+    nativeDropMocks.readDroppedFiles
+      .mockResolvedValueOnce([largeImage("batch-one.jpg")])
+      .mockResolvedValueOnce([largeImage("batch-two.jpg")]);
+    render(<Composer {...props} sendState="idle" />);
+    await waitForNativeListeners();
+
+    act(() => emitNative("dakia://dropped-file-receipt", "batch-one"));
+    await waitFor(() =>
+      expect(nativeFeedbackMocks.confirmNativeAction).toHaveBeenCalledOnce(),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Remove batch-one.jpg" }),
+      ).toBeEnabled(),
+    );
+
+    act(() => emitNative("dakia://dropped-file-receipt", "batch-two"));
+    await waitFor(() =>
+      expect(nativeFeedbackMocks.confirmNativeAction).toHaveBeenCalledTimes(2),
+    );
+    expect(await screen.findByText("batch-two.jpg")).toBeInTheDocument();
+  });
+
+  it("blocks button and keyboard sending while the decision or reduction is pending", async () => {
+    const onSend = vi.fn();
+    const choice = deferred<boolean>();
+    const reduction = deferred<{
+      status: "unchanged";
+      original_size_bytes: number;
+    }>();
+    nativeFeedbackMocks.confirmNativeAction.mockReturnValue(choice.promise);
+    nativeDropMocks.reduceComposeImage.mockReturnValue(reduction.promise);
+    render(
+      <Composer
+        {...props}
+        seed={{
+          to: "you@example.com",
+          attachments: [largeImage("pending.jpg")],
+        }}
+        onSend={onSend}
+        sendState="idle"
+      />,
+    );
+
+    const send = screen.getByRole("button", { name: /^Send/ });
+    await waitFor(() => expect(send).toBeDisabled());
+    expect(screen.getByRole("button", { name: "Attach" })).toBeDisabled();
+    fireEvent.click(send);
+    fireEvent.keyDown(window, { key: "Enter", metaKey: true });
+    expect(onSend).not.toHaveBeenCalled();
+
+    await act(async () => choice.resolve(true));
+    await waitFor(() =>
+      expect(nativeDropMocks.reduceComposeImage).toHaveBeenCalledOnce(),
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("Reducing images…");
+    expect(send).toBeDisabled();
+    fireEvent.keyDown(window, { key: "Enter", metaKey: true });
+    expect(onSend).not.toHaveBeenCalled();
+
+    await act(async () =>
+      reduction.resolve({
+        status: "unchanged",
+        original_size_bytes: TWO_MIB + 1,
+      }),
+    );
+    await waitFor(() => expect(send).toBeEnabled());
   });
 });
 

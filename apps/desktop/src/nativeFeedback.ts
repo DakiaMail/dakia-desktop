@@ -22,13 +22,14 @@ export async function confirmNativeAction(
   title: string,
   detail: string,
   okLabel: string,
+  cancelLabel = "Cancel",
 ) {
   if (isTauri()) {
     return ask(detail, {
       title,
       kind: "warning",
       okLabel,
-      cancelLabel: "Cancel",
+      cancelLabel,
     });
   }
   return window.confirm(`${title}\n\n${detail}`);

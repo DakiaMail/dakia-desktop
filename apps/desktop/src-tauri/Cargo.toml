@@ -24,6 +24,7 @@ base64.workspace = true
 chrono.workspace = true
 dakia-core = { path = "../../../crates/dakia-core" }
 directories.workspace = true
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 libc = "0.2"
 reqwest.workspace = true
 secrecy.workspace = true
@@ -51,4 +52,5 @@ notify-rust = "4"
 
 [dev-dependencies]
 flate2 = "1"
+image-webp = "0.2"
 tempfile = "3"

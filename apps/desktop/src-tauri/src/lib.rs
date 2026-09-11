@@ -18,14 +18,18 @@ use dakia_core::{
     SearchQuery, SmartInboxPage, SmartInboxQuery, Store, SyncProgress, SyncResult,
     UnsubscribeOutcome,
 };
+use image::{
+    codecs::{jpeg::JpegEncoder, png::PngEncoder},
+    imageops::FilterType,
+    DynamicImage, ImageDecoder, ImageEncoder, ImageFormat, ImageReader,
+};
 use secrecy::SecretString;
-use serde::Deserialize;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fs::OpenOptions,
     future::Future,
-    io::{ErrorKind, Read, Write},
+    io::{Cursor, ErrorKind, Read, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -1054,9 +1058,17 @@ impl From<MailRebuildJob> for MailRebuildProgress {
 const MAX_DROPPED_ATTACHMENT_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_DROPPED_ATTACHMENT_TOTAL_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_DROPPED_ATTACHMENTS: usize = 50;
+const COMPOSE_IMAGE_REDUCTION_UI_THRESHOLD_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_COMPOSE_IMAGE_DIMENSION: u32 = 1600;
+const MAX_COMPOSE_IMAGE_PIXELS: u64 = 100_000_000;
+// 256 MiB admits ordinary 12–48 MP phone photos while preventing one request
+// from reserving an unbounded decoded framebuffer.
+const MAX_COMPOSE_IMAGE_DECODED_BYTES: u64 = 256 * 1024 * 1024;
+const COMPOSE_IMAGE_JPEG_QUALITY: u8 = 75;
 const DROPPED_FILE_RECEIPT_TTL: Duration = Duration::from_secs(30);
 const DROPPED_FILE_RECEIPT_EVENT: &str = "dakia://dropped-file-receipt";
 const DROPPED_FILE_ERROR_EVENT: &str = "dakia://dropped-file-error";
+static COMPOSE_IMAGE_REDUCTION_SEMAPHORE: Semaphore = Semaphore::const_new(1);
 #[cfg(target_os = "macos")]
 const TERMINAL_COMMAND_PATH: &str = "/usr/local/bin/dakia";
 
@@ -1141,12 +1153,31 @@ impl DroppedFileReceiptStore {
     }
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct DroppedAttachment {
     filename: String,
     mime_type: String,
     content_base64: String,
     size_bytes: u64,
+}
+
+/// Result of a best-effort reduction. Expected failures are returned as an
+/// unchanged result so the composer can keep the already-added attachment.
+#[derive(Debug, Serialize)]
+struct ComposeImageReductionResult {
+    status: &'static str,
+    reason: Option<String>,
+    attachment: Option<DroppedAttachment>,
+    original_size_bytes: u64,
+    reduced_size_bytes: Option<u64>,
+}
+
+/// A lightweight, header-only eligibility check for the composer. It never
+/// decodes image pixels, so it is safe to run before offering reduction.
+#[derive(Debug, Serialize)]
+struct ComposeImageInspection {
+    eligible: bool,
+    reason: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -2549,6 +2580,358 @@ fn mime_type_for_filename(filename: &str) -> &'static str {
     }
 }
 
+fn unchanged_compose_image(
+    _attachment: &DroppedAttachment,
+    original_size_bytes: u64,
+    reason: impl Into<String>,
+) -> ComposeImageReductionResult {
+    ComposeImageReductionResult {
+        status: "unchanged",
+        reason: Some(reason.into()),
+        attachment: None,
+        original_size_bytes,
+        reduced_size_bytes: None,
+    }
+}
+
+fn reduced_compose_filename(filename: &str, extension: &str) -> String {
+    let stem = filename
+        .rsplit_once('.')
+        .filter(|(stem, _)| !stem.is_empty())
+        .map(|(stem, _)| stem)
+        .unwrap_or(filename);
+    format!("{stem}.{extension}")
+}
+
+fn is_animated_png(bytes: &[u8]) -> bool {
+    const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    if !bytes.starts_with(PNG_SIGNATURE) {
+        return false;
+    }
+
+    let mut offset = PNG_SIGNATURE.len();
+    while offset.checked_add(12).is_some_and(|end| end <= bytes.len()) {
+        let length = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        let Some(next) = offset
+            .checked_add(12)
+            .and_then(|value| value.checked_add(length))
+        else {
+            return false;
+        };
+        if next > bytes.len() {
+            return false;
+        }
+        if &bytes[offset + 4..offset + 8] == b"acTL" {
+            return true;
+        }
+        offset = next;
+    }
+    false
+}
+
+fn is_animated_webp(bytes: &[u8]) -> bool {
+    if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
+        return false;
+    }
+
+    let mut offset: usize = 12;
+    while offset.checked_add(8).is_some_and(|end| end <= bytes.len()) {
+        let length = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
+        let Some(next) = offset
+            .checked_add(8)
+            .and_then(|value| value.checked_add(length))
+            .and_then(|value| value.checked_add(length % 2))
+        else {
+            return false;
+        };
+        if next > bytes.len() {
+            return false;
+        }
+        if &bytes[offset..offset + 4] == b"ANIM" || &bytes[offset..offset + 4] == b"ANMF" {
+            return true;
+        }
+        offset = next;
+    }
+    false
+}
+
+fn ineligible_compose_image(reason: impl Into<String>) -> ComposeImageInspection {
+    ComposeImageInspection {
+        eligible: false,
+        reason: Some(reason.into()),
+    }
+}
+
+fn inspect_compose_image_attachment(attachment: &DroppedAttachment) -> ComposeImageInspection {
+    let max_base64_bytes = ((MAX_DROPPED_ATTACHMENT_BYTES as usize + 2) / 3) * 4;
+    if attachment.content_base64.len() > max_base64_bytes {
+        return ineligible_compose_image("Image exceeds the attachment limit.");
+    }
+    let bytes = match STANDARD.decode(&attachment.content_base64) {
+        Ok(bytes) => bytes,
+        Err(_) => return ineligible_compose_image("Image data could not be read."),
+    };
+    if bytes.len() as u64 > MAX_DROPPED_ATTACHMENT_BYTES {
+        return ineligible_compose_image("Image exceeds the attachment limit.");
+    }
+
+    let format = match image::guess_format(&bytes) {
+        Ok(ImageFormat::Jpeg) => ImageFormat::Jpeg,
+        Ok(ImageFormat::Png) => ImageFormat::Png,
+        Ok(ImageFormat::WebP) => ImageFormat::WebP,
+        Ok(_) => {
+            return ineligible_compose_image("Only JPEG, PNG, and WebP images can be reduced.")
+        }
+        Err(_) => return ineligible_compose_image("Image data could not be read."),
+    };
+    if (format == ImageFormat::Png && is_animated_png(&bytes))
+        || (format == ImageFormat::WebP && is_animated_webp(&bytes))
+    {
+        return ineligible_compose_image("Animated images cannot be reduced.");
+    }
+
+    let reader = match ImageReader::new(Cursor::new(bytes.as_slice())).with_guessed_format() {
+        Ok(reader) => reader,
+        Err(_) => return ineligible_compose_image("Image data could not be read."),
+    };
+    let decoder = match reader.into_decoder() {
+        Ok(decoder) => decoder,
+        Err(_) => return ineligible_compose_image("Image data could not be read."),
+    };
+    let (width, height) = decoder.dimensions();
+    if u64::from(width) * u64::from(height) > MAX_COMPOSE_IMAGE_PIXELS {
+        return ineligible_compose_image("Image dimensions exceed the safety limit.");
+    }
+    if decoder.total_bytes() > MAX_COMPOSE_IMAGE_DECODED_BYTES {
+        return ineligible_compose_image("Image would use too much memory to reduce.");
+    }
+    if bytes.len() as u64 <= COMPOSE_IMAGE_REDUCTION_UI_THRESHOLD_BYTES {
+        return ineligible_compose_image("Image is not large enough to reduce.");
+    }
+    ComposeImageInspection {
+        eligible: true,
+        reason: None,
+    }
+}
+
+fn reduce_compose_image_attachment(attachment: DroppedAttachment) -> ComposeImageReductionResult {
+    // The compose attachment limit also bounds work from a renderer that has
+    // been compromised or has stale state. Decode only after this inexpensive
+    // encoded-size check.
+    let max_base64_bytes = ((MAX_DROPPED_ATTACHMENT_BYTES as usize + 2) / 3) * 4;
+    if attachment.content_base64.len() > max_base64_bytes {
+        return unchanged_compose_image(
+            &attachment,
+            attachment.size_bytes,
+            "Image exceeds the attachment limit.",
+        );
+    }
+    let bytes = match STANDARD.decode(&attachment.content_base64) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return unchanged_compose_image(
+                &attachment,
+                attachment.size_bytes,
+                "Image data could not be read.",
+            )
+        }
+    };
+    let original_size_bytes = bytes.len() as u64;
+    if original_size_bytes > MAX_DROPPED_ATTACHMENT_BYTES {
+        return unchanged_compose_image(
+            &attachment,
+            original_size_bytes,
+            "Image exceeds the attachment limit.",
+        );
+    }
+
+    let format = match image::guess_format(&bytes) {
+        Ok(ImageFormat::Jpeg) => ImageFormat::Jpeg,
+        Ok(ImageFormat::Png) => ImageFormat::Png,
+        Ok(ImageFormat::WebP) => ImageFormat::WebP,
+        Ok(_) => {
+            return unchanged_compose_image(
+                &attachment,
+                original_size_bytes,
+                "Only JPEG, PNG, and WebP images can be reduced.",
+            )
+        }
+        Err(_) => {
+            return unchanged_compose_image(
+                &attachment,
+                original_size_bytes,
+                "Image data could not be read.",
+            )
+        }
+    };
+    if (format == ImageFormat::Png && is_animated_png(&bytes))
+        || (format == ImageFormat::WebP && is_animated_webp(&bytes))
+    {
+        return unchanged_compose_image(
+            &attachment,
+            original_size_bytes,
+            "Animated images cannot be reduced.",
+        );
+    }
+
+    let reader = match ImageReader::new(Cursor::new(bytes.as_slice())).with_guessed_format() {
+        Ok(reader) => reader,
+        Err(_) => {
+            return unchanged_compose_image(
+                &attachment,
+                original_size_bytes,
+                "Image data could not be read.",
+            )
+        }
+    };
+    let mut decoder = match reader.into_decoder() {
+        Ok(decoder) => decoder,
+        Err(_) => {
+            return unchanged_compose_image(
+                &attachment,
+                original_size_bytes,
+                "Image data could not be read.",
+            )
+        }
+    };
+    let (width, height) = decoder.dimensions();
+    if u64::from(width) * u64::from(height) > MAX_COMPOSE_IMAGE_PIXELS {
+        return unchanged_compose_image(
+            &attachment,
+            original_size_bytes,
+            "Image dimensions exceed the safety limit.",
+        );
+    }
+    if decoder.total_bytes() > MAX_COMPOSE_IMAGE_DECODED_BYTES {
+        return unchanged_compose_image(
+            &attachment,
+            original_size_bytes,
+            "Image would use too much memory to reduce.",
+        );
+    }
+    let orientation = match decoder.orientation() {
+        Ok(orientation) => orientation,
+        Err(_) => {
+            return unchanged_compose_image(
+                &attachment,
+                original_size_bytes,
+                "Image data could not be read.",
+            )
+        }
+    };
+    let mut image = match DynamicImage::from_decoder(decoder) {
+        Ok(image) => image,
+        Err(_) => {
+            return unchanged_compose_image(
+                &attachment,
+                original_size_bytes,
+                "Image data could not be read.",
+            )
+        }
+    };
+    image.apply_orientation(orientation);
+    let image = if image.width() > MAX_COMPOSE_IMAGE_DIMENSION
+        || image.height() > MAX_COMPOSE_IMAGE_DIMENSION
+    {
+        image.resize(
+            MAX_COMPOSE_IMAGE_DIMENSION,
+            MAX_COMPOSE_IMAGE_DIMENSION,
+            FilterType::Lanczos3,
+        )
+    } else {
+        image
+    };
+
+    // A PNG is only necessary when pixels actually contain transparency.
+    // Re-encoding through these encoders also intentionally strips EXIF, XMP,
+    // ICC, and all other source metadata.
+    let rgba = image.to_rgba8();
+    let has_transparency = rgba.pixels().any(|pixel| pixel[3] != u8::MAX);
+    let mut output = Vec::new();
+    let (filename, mime_type) = if has_transparency {
+        if PngEncoder::new(&mut output)
+            .write_image(
+                rgba.as_raw(),
+                rgba.width(),
+                rgba.height(),
+                image::ExtendedColorType::Rgba8,
+            )
+            .is_err()
+        {
+            return unchanged_compose_image(
+                &attachment,
+                original_size_bytes,
+                "Image could not be reduced.",
+            );
+        }
+        (
+            reduced_compose_filename(&attachment.filename, "png"),
+            "image/png",
+        )
+    } else {
+        let rgb = image.to_rgb8();
+        if JpegEncoder::new_with_quality(&mut output, COMPOSE_IMAGE_JPEG_QUALITY)
+            .encode_image(&rgb)
+            .is_err()
+        {
+            return unchanged_compose_image(
+                &attachment,
+                original_size_bytes,
+                "Image could not be reduced.",
+            );
+        }
+        (
+            reduced_compose_filename(&attachment.filename, "jpg"),
+            "image/jpeg",
+        )
+    };
+
+    let reduced_size_bytes = output.len() as u64;
+    if reduced_size_bytes >= original_size_bytes {
+        return unchanged_compose_image(
+            &attachment,
+            original_size_bytes,
+            "The reduced image would not be smaller.",
+        );
+    }
+    ComposeImageReductionResult {
+        status: "reduced",
+        reason: None,
+        attachment: Some(DroppedAttachment {
+            filename,
+            mime_type: mime_type.into(),
+            content_base64: STANDARD.encode(output),
+            size_bytes: reduced_size_bytes,
+        }),
+        original_size_bytes,
+        reduced_size_bytes: Some(reduced_size_bytes),
+    }
+}
+
+#[tauri::command]
+async fn reduce_compose_image(
+    attachment: DroppedAttachment,
+) -> Result<ComposeImageReductionResult, String> {
+    // This is process-wide rather than window-local: two compose windows must
+    // not decode large images concurrently and exhaust desktop memory.
+    let _permit = COMPOSE_IMAGE_REDUCTION_SEMAPHORE
+        .acquire()
+        .await
+        .map_err(error)?;
+    tokio::task::spawn_blocking(move || reduce_compose_image_attachment(attachment))
+        .await
+        .map_err(error)
+}
+
+#[tauri::command]
+async fn inspect_compose_image(
+    attachment: DroppedAttachment,
+) -> Result<ComposeImageInspection, String> {
+    tokio::task::spawn_blocking(move || inspect_compose_image_attachment(&attachment))
+        .await
+        .map_err(error)
+}
+
 #[cfg(test)]
 mod dropped_file_receipt_tests {
     use super::*;
@@ -2778,6 +3161,370 @@ mod dropped_file_receipt_tests {
                 .decode(&attachments[0].content_base64)
                 .expect("base64"),
             b"original bytes"
+        );
+    }
+}
+
+#[cfg(test)]
+mod compose_image_reduction_tests {
+    use super::*;
+    use image::{GenericImageView, Rgb, RgbImage, Rgba, RgbaImage};
+    use image_webp::{ColorType as WebPColorType, WebPEncoder};
+
+    fn attachment(filename: &str, mime_type: &str, bytes: Vec<u8>) -> DroppedAttachment {
+        DroppedAttachment {
+            filename: filename.into(),
+            mime_type: mime_type.into(),
+            size_bytes: bytes.len() as u64,
+            content_base64: STANDARD.encode(bytes),
+        }
+    }
+
+    fn noisy_rgb(width: u32, height: u32) -> RgbImage {
+        let mut image = RgbImage::new(width, height);
+        let mut seed = 0x7e57_1eed_u32;
+        for pixel in image.pixels_mut() {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *pixel = Rgb([(seed >> 24) as u8, (seed >> 16) as u8, (seed >> 8) as u8]);
+        }
+        image
+    }
+
+    fn png_bytes(image: DynamicImage) -> Vec<u8> {
+        let mut output = Cursor::new(Vec::new());
+        image
+            .write_to(&mut output, ImageFormat::Png)
+            .expect("PNG fixture");
+        output.into_inner()
+    }
+
+    fn jpeg_bytes(image: &RgbImage, quality: u8) -> Vec<u8> {
+        let mut output = Vec::new();
+        JpegEncoder::new_with_quality(&mut output, quality)
+            .encode_image(image)
+            .expect("JPEG fixture");
+        output
+    }
+
+    fn webp_bytes(image: &RgbImage) -> Vec<u8> {
+        let mut output = Vec::new();
+        WebPEncoder::new(&mut output)
+            .encode(
+                image.as_raw(),
+                image.width(),
+                image.height(),
+                WebPColorType::Rgb8,
+            )
+            .expect("WebP fixture");
+        output
+    }
+
+    fn insert_exif_orientation(mut jpeg: Vec<u8>, orientation: u8) -> Vec<u8> {
+        assert!(jpeg.starts_with(&[0xff, 0xd8]));
+        let mut exif = vec![
+            b'E',
+            b'x',
+            b'i',
+            b'f',
+            0,
+            0, // Exif marker
+            b'M',
+            b'M',
+            0,
+            42,
+            0,
+            0,
+            0,
+            8, // TIFF header
+            0,
+            1, // one IFD entry
+            0x01,
+            0x12, // orientation
+            0,
+            3, // SHORT
+            0,
+            0,
+            0,
+            1, // one value
+            0,
+            orientation,
+            0,
+            0, // value
+            0,
+            0,
+            0,
+            0, // no next IFD
+        ];
+        let length = (exif.len() + 2) as u16;
+        let mut app1 = vec![0xff, 0xe1];
+        app1.extend_from_slice(&length.to_be_bytes());
+        app1.append(&mut exif);
+        jpeg.splice(2..2, app1);
+        jpeg
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = 0xffff_ffff_u32;
+        for byte in bytes {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xedb8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+
+    fn png_header_with_dimensions(width: u32, height: u32, color_type: u8) -> Vec<u8> {
+        let mut source = png_bytes(DynamicImage::ImageRgb8(RgbImage::from_pixel(
+            1,
+            1,
+            Rgb([0, 0, 0]),
+        )));
+        source[16..20].copy_from_slice(&width.to_be_bytes());
+        source[20..24].copy_from_slice(&height.to_be_bytes());
+        source[25] = color_type;
+        let checksum = crc32(&source[12..29]);
+        source[29..33].copy_from_slice(&checksum.to_be_bytes());
+        source
+    }
+
+    #[test]
+    fn reduces_opaque_images_to_jpeg_using_bytes_not_declared_mime_type() {
+        let source = png_bytes(DynamicImage::ImageRgb8(noisy_rgb(2_000, 1_200)));
+        let expected = jpeg_bytes(
+            &image::imageops::resize(&noisy_rgb(2_000, 1_200), 1_600, 960, FilterType::Lanczos3),
+            COMPOSE_IMAGE_JPEG_QUALITY,
+        );
+        let result = reduce_compose_image_attachment(attachment("photo.png", "text/plain", source));
+
+        assert_eq!(result.status, "reduced");
+        assert_eq!(result.reason, None);
+        let reduced = result.attachment.expect("reduced attachment");
+        assert_eq!(reduced.filename, "photo.jpg");
+        assert_eq!(reduced.mime_type, "image/jpeg");
+        assert_eq!(
+            reduced.size_bytes,
+            result.reduced_size_bytes.expect("reduced size")
+        );
+        assert!(reduced.size_bytes < result.original_size_bytes);
+        let reduced_bytes = STANDARD
+            .decode(reduced.content_base64)
+            .expect("reduced bytes");
+        assert_eq!(reduced_bytes, expected, "JPEG output must use quality 75");
+        let decoded = image::load_from_memory(&reduced_bytes).expect("valid output");
+        assert_eq!(decoded.dimensions(), (1_600, 960));
+    }
+
+    #[test]
+    fn never_upscales_a_large_byte_image_below_the_dimension_limit() {
+        let source = png_bytes(DynamicImage::ImageRgb8(noisy_rgb(1_200, 1_200)));
+        assert!(source.len() as u64 > COMPOSE_IMAGE_REDUCTION_UI_THRESHOLD_BYTES);
+
+        let result = reduce_compose_image_attachment(attachment("photo.png", "image/png", source));
+
+        assert_eq!(result.status, "reduced");
+        let reduced = result.attachment.expect("reduced attachment");
+        let decoded = image::load_from_memory(
+            &STANDARD
+                .decode(reduced.content_base64)
+                .expect("reduced bytes"),
+        )
+        .expect("valid output");
+        assert_eq!(decoded.dimensions(), (1_200, 1_200));
+    }
+
+    #[test]
+    fn preserves_transparency_and_encodes_png() {
+        let mut source = RgbaImage::new(1_800, 600);
+        for (index, pixel) in source.pixels_mut().enumerate() {
+            *pixel = Rgba([
+                (index as u8).wrapping_mul(13),
+                (index as u8).wrapping_mul(29),
+                (index as u8).wrapping_mul(47),
+                if index % 3 == 0 { 96 } else { 255 },
+            ]);
+        }
+        let result = reduce_compose_image_attachment(attachment(
+            "logo.webp",
+            "image/webp",
+            png_bytes(DynamicImage::ImageRgba8(source)),
+        ));
+
+        assert_eq!(result.status, "reduced");
+        let reduced = result.attachment.expect("reduced attachment");
+        assert_eq!(reduced.filename, "logo.png");
+        assert_eq!(reduced.mime_type, "image/png");
+        let decoded = image::load_from_memory(
+            &STANDARD
+                .decode(reduced.content_base64)
+                .expect("reduced bytes"),
+        )
+        .expect("valid output");
+        assert_eq!(decoded.dimensions(), (1_600, 533));
+        assert!(decoded.to_rgba8().pixels().any(|pixel| pixel[3] != u8::MAX));
+    }
+
+    #[test]
+    fn applies_exif_orientation_before_resizing_and_strips_metadata() {
+        let source = insert_exif_orientation(jpeg_bytes(&noisy_rgb(2_000, 1_000), 100), 6);
+        let result =
+            reduce_compose_image_attachment(attachment("camera.jpeg", "image/jpeg", source));
+
+        assert_eq!(result.status, "reduced");
+        let reduced = result.attachment.expect("reduced attachment");
+        let bytes = STANDARD
+            .decode(reduced.content_base64)
+            .expect("reduced bytes");
+        let decoded = image::load_from_memory(&bytes).expect("valid output");
+        assert_eq!(decoded.dimensions(), (800, 1_600));
+        assert!(!bytes
+            .windows(b"Exif\0\0".len())
+            .any(|window| window == b"Exif\0\0"));
+    }
+
+    #[test]
+    fn keeps_original_when_reencoding_would_not_reduce_it() {
+        let source = jpeg_bytes(&RgbImage::from_pixel(1, 1, Rgb([12, 34, 56])), 75);
+        let result = reduce_compose_image_attachment(attachment("small.jpg", "image/jpeg", source));
+
+        assert_eq!(result.status, "unchanged");
+        assert_eq!(
+            result.reason.as_deref(),
+            Some("The reduced image would not be smaller.")
+        );
+        assert!(result.attachment.is_none());
+        assert!(result.reduced_size_bytes.is_none());
+    }
+
+    #[test]
+    fn rejects_animated_png_without_decoding_a_frame() {
+        let source = STANDARD
+            .decode(include_str!("../tests/fixtures/compose-images/animated.apng.base64").trim())
+            .expect("valid APNG fixture");
+        let result =
+            reduce_compose_image_attachment(attachment("animated.png", "image/png", source));
+
+        assert_eq!(result.status, "unchanged");
+        assert_eq!(
+            result.reason.as_deref(),
+            Some("Animated images cannot be reduced.")
+        );
+    }
+
+    #[test]
+    fn rejects_animated_webp_without_decoding_a_frame() {
+        let source = STANDARD
+            .decode(include_str!("../tests/fixtures/compose-images/animated.webp.base64").trim())
+            .expect("valid animated WebP fixture");
+        let result =
+            reduce_compose_image_attachment(attachment("animated.webp", "image/webp", source));
+
+        assert_eq!(result.status, "unchanged");
+        assert_eq!(
+            result.reason.as_deref(),
+            Some("Animated images cannot be reduced.")
+        );
+    }
+
+    #[test]
+    fn decodes_static_webp_from_its_bytes() {
+        // This fixture is written as a static WebP. Its declared MIME is
+        // intentionally wrong to prove decoding relies on the content
+        // signature rather than the extension or declared MIME type.
+        let source = webp_bytes(&noisy_rgb(2_000, 1_200));
+        assert_eq!(
+            image::load_from_memory(&source)
+                .expect("valid WebP fixture")
+                .dimensions(),
+            (2_000, 1_200)
+        );
+        let result =
+            reduce_compose_image_attachment(attachment("picture.webp", "image/png", source));
+
+        assert_eq!(result.status, "reduced");
+        assert_eq!(
+            result.attachment.expect("reduced attachment").mime_type,
+            "image/jpeg"
+        );
+    }
+
+    #[test]
+    fn inspection_uses_image_bytes_not_the_declared_mime_type() {
+        let source = png_bytes(DynamicImage::ImageRgb8(noisy_rgb(2_000, 1_200)));
+        let inspection = inspect_compose_image_attachment(&attachment(
+            "photo.bin",
+            "application/octet-stream",
+            source,
+        ));
+
+        assert!(inspection.eligible);
+        assert_eq!(inspection.reason, None);
+    }
+
+    #[test]
+    fn inspection_excludes_non_images_and_animated_images() {
+        let non_image = attachment(
+            "notes.bin",
+            "image/jpeg",
+            vec![b'x'; COMPOSE_IMAGE_REDUCTION_UI_THRESHOLD_BYTES as usize + 1],
+        );
+        let inspection = inspect_compose_image_attachment(&non_image);
+        assert!(!inspection.eligible);
+        assert_eq!(
+            inspection.reason.as_deref(),
+            Some("Image data could not be read.")
+        );
+
+        let animated_png = STANDARD
+            .decode(include_str!("../tests/fixtures/compose-images/animated.apng.base64").trim())
+            .expect("valid APNG fixture");
+        let inspection = inspect_compose_image_attachment(&attachment(
+            "animated.png",
+            "image/png",
+            animated_png,
+        ));
+        assert!(!inspection.eligible);
+        assert_eq!(
+            inspection.reason.as_deref(),
+            Some("Animated images cannot be reduced.")
+        );
+    }
+
+    #[test]
+    fn rejects_decoded_images_that_would_use_too_much_memory() {
+        // 9,000 × 9,000 RGBA is below the pixel count limit but needs more
+        // than the 256 MiB decoded framebuffer limit. The header is valid,
+        // and the decoder is rejected before pixel data is read.
+        let source = png_header_with_dimensions(9_000, 9_000, 6);
+        let input = attachment("large.png", "image/png", source);
+        let inspection = inspect_compose_image_attachment(&input);
+        assert!(!inspection.eligible);
+        assert_eq!(
+            inspection.reason.as_deref(),
+            Some("Image would use too much memory to reduce.")
+        );
+
+        let result = reduce_compose_image_attachment(input);
+        assert_eq!(result.status, "unchanged");
+        assert_eq!(
+            result.reason.as_deref(),
+            Some("Image would use too much memory to reduce.")
+        );
+    }
+
+    #[test]
+    fn rejects_images_over_the_pixel_budget_before_decoding() {
+        let source = png_header_with_dimensions(10_001, 10_001, 2);
+        let result = reduce_compose_image_attachment(attachment("huge.png", "image/png", source));
+
+        assert_eq!(result.status, "unchanged");
+        assert_eq!(
+            result.reason.as_deref(),
+            Some("Image dimensions exceed the safety limit.")
         );
     }
 }
@@ -5446,6 +6193,8 @@ pub fn run() {
             save_all_attachments,
             forward_attachments,
             read_dropped_files,
+            inspect_compose_image,
+            reduce_compose_image,
             accounts,
             update_account,
             show_account_context_menu,
