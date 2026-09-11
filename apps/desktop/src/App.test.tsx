@@ -117,7 +117,21 @@ const mocks = vi.hoisted(() => {
       starredCount: vi.fn(async () => 0),
       startRealtimeSync: vi.fn(async () => undefined),
       sync: vi.fn(async () => ({ syncedCount: 0, newMessages: [] })),
-      unsubscribe: vi.fn(async () => ({ kind: "completed" as const })),
+      unsubscribe: vi.fn(
+        async (): Promise<import("./api").UnsubscribeResult> => ({
+          kind: "completed",
+          cleanupTarget: {
+            accountId: "account-1",
+            senderName: "Sender",
+            senderAddress: "sender@example.com",
+          },
+        }),
+      ),
+      trashMessagesFromSender: vi.fn(async () => ({
+        matched: 0,
+        moved: 0,
+        failed: 0,
+      })),
     },
     windowApi: {
       show: vi.fn(async () => undefined),
@@ -2277,6 +2291,253 @@ describe("App read state", () => {
     expect(
       await screen.findByText("invalid unsubscribe email address"),
     ).toBeVisible();
+  });
+
+  it("offers sender cleanup after opening an unsubscribe page", async () => {
+    const cleanupTarget = {
+      accountId: "account-1",
+      senderName: "Sender",
+      senderAddress: "sender@example.com",
+    };
+    mocks.api.search.mockResolvedValue({
+      conversations: groupMessages([
+        { ...mocks.message, unsubscribe_kind: "web" },
+        {
+          ...mocks.message,
+          id: "message-2",
+          uid: 2,
+          from_address: "not-sender@example.com",
+          subject: "Mixed sender thread",
+        },
+      ]),
+      nextCursor: null,
+    });
+    mocks.api.content.mockResolvedValue({
+      body_text: "Message body",
+      unsubscribe_kind: "web",
+      attachments: [],
+    });
+    mocks.api.unsubscribe.mockResolvedValueOnce({
+      kind: "opened_web",
+      cleanupTarget,
+    });
+    mocks.api.trashMessagesFromSender.mockResolvedValueOnce({
+      matched: 1,
+      moved: 1,
+      failed: 0,
+    });
+
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(
+      (await screen.findByText("Mixed sender thread")).closest("button")!,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Unsubscribe" }));
+    expect(await screen.findByText("Unsubscribe page opened.")).toBeVisible();
+
+    const cleanupButton = screen.getByRole("button", {
+      name: "Move to Trash",
+    });
+    fireEvent.click(cleanupButton);
+    fireEvent.click(cleanupButton);
+    await waitFor(() =>
+      expect(mocks.api.trashMessagesFromSender).toHaveBeenCalledWith(
+        "account-1",
+        "sender@example.com",
+      ),
+    );
+    expect(mocks.api.trashMessagesFromSender).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText("Moved 1 email to Trash")).toBeVisible();
+  });
+
+  it("keeps sender mail hidden through a stale reload while cleanup is pending", async () => {
+    let resolveCleanup: (
+      result: import("./api").TrashMessagesFromSenderResult,
+    ) => void = () => undefined;
+    let cleanupResolved = false;
+    mocks.api.search.mockImplementation(async () => ({
+      conversations: cleanupResolved ? [] : groupMessages([mocks.message]),
+      nextCursor: null,
+    }));
+    mocks.api.trashMessagesFromSender.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveCleanup = resolve;
+        }),
+    );
+    mocks.api.content.mockResolvedValue({
+      body_text: "Message body",
+      unsubscribe_kind: "one_click",
+      attachments: [],
+    });
+
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const list = document.querySelector<HTMLElement>(".mail-list-panel")!;
+    fireEvent.click(
+      await within(list).findByRole("checkbox", { name: "Select" }),
+    );
+    expect(within(list).getByText("1 selected")).toBeVisible();
+    fireEvent.click(
+      (await within(list).findByText("Unread thread")).closest("button")!,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Unsubscribe" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Move to Trash" }),
+    );
+
+    await waitFor(() =>
+      expect(within(list).queryByText("Unread thread")).not.toBeInTheDocument(),
+    );
+    expect(within(list).queryByText("0 selected")).not.toBeInTheDocument();
+    expect(within(list).queryByText("1 selected")).not.toBeInTheDocument();
+    const searchesBeforeReload = mocks.api.search.mock.calls.length;
+    act(() => mocks.mailChangedHandlers.at(-1)!());
+    await waitFor(() =>
+      expect(mocks.api.search.mock.calls.length).toBeGreaterThan(
+        searchesBeforeReload,
+      ),
+    );
+    expect(within(list).queryByText("Unread thread")).not.toBeInTheDocument();
+
+    cleanupResolved = true;
+    await act(async () => resolveCleanup({ matched: 1, moved: 1, failed: 0 }));
+    expect(await screen.findByText("Moved 1 email to Trash")).toBeVisible();
+  });
+
+  it("restores sender mail when cleanup and reconciliation both fail", async () => {
+    let searchCount = 0;
+    mocks.api.search.mockImplementation(async () => {
+      searchCount += 1;
+      if (searchCount === 1) {
+        return {
+          conversations: groupMessages([mocks.message]),
+          nextCursor: null,
+        };
+      }
+      throw new Error("catalogue unavailable");
+    });
+    mocks.api.trashMessagesFromSender.mockRejectedValueOnce(
+      new Error("provider unavailable"),
+    );
+    mocks.api.content.mockResolvedValue({
+      body_text: "Message body",
+      unsubscribe_kind: "one_click",
+      attachments: [],
+    });
+
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const list = document.querySelector<HTMLElement>(".mail-list-panel")!;
+    fireEvent.click(
+      (await within(list).findByText("Unread thread")).closest("button")!,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Unsubscribe" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Move to Trash" }),
+    );
+
+    expect(await within(list).findByText("Unread thread")).toBeVisible();
+    expect(
+      await screen.findByText(
+        "Could not move emails from this sender to Trash",
+      ),
+    ).toBeVisible();
+    expect(searchCount).toBeGreaterThan(1);
+  });
+
+  it("restores provider failures after a partial sender cleanup", async () => {
+    let resolveCleanup: (
+      result: import("./api").TrashMessagesFromSenderResult,
+    ) => void = () => undefined;
+    mocks.api.search.mockResolvedValue({
+      conversations: groupMessages([mocks.message]),
+      nextCursor: null,
+    });
+    mocks.api.trashMessagesFromSender.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveCleanup = resolve;
+        }),
+    );
+    mocks.api.content.mockResolvedValue({
+      body_text: "Message body",
+      unsubscribe_kind: "one_click",
+      attachments: [],
+    });
+
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const list = document.querySelector<HTMLElement>(".mail-list-panel")!;
+    fireEvent.click(
+      (await within(list).findByText("Unread thread")).closest("button")!,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Unsubscribe" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Move to Trash" }),
+    );
+    await waitFor(() =>
+      expect(within(list).queryByText("Unread thread")).not.toBeInTheDocument(),
+    );
+
+    await act(async () => resolveCleanup({ matched: 2, moved: 1, failed: 1 }));
+
+    expect(await within(list).findByText("Unread thread")).toBeVisible();
+    expect(
+      await screen.findByText(
+        "Moved 1 of 2 emails to Trash; 1 could not be moved",
+      ),
+    ).toBeVisible();
+  });
+
+  it("keeps unsubscribe successful when no safe cleanup target is available", async () => {
+    mocks.api.search.mockResolvedValue({
+      conversations: groupMessages([
+        { ...mocks.message, unsubscribe_kind: "one_click" },
+      ]),
+      nextCursor: null,
+    });
+    mocks.api.content.mockResolvedValue({
+      body_text: "Message body",
+      unsubscribe_kind: "one_click",
+      attachments: [],
+    });
+    mocks.api.unsubscribe.mockResolvedValueOnce({
+      kind: "completed",
+      cleanupTarget: null,
+    });
+
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(
+      (await screen.findByText("Unread thread")).closest("button")!,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Unsubscribe" }));
+
+    expect(await screen.findByText("Unsubscribe request sent.")).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Move to Trash" }),
+    ).not.toBeInTheDocument();
   });
 
   it("uses incremental sync from the inbox toolbar", async () => {

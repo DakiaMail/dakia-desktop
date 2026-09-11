@@ -3,7 +3,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { api } from "./api";
+import {
+  api,
+  type SenderCleanupTarget,
+  type TrashMessagesFromSenderResult,
+} from "./api";
 import { AI_FEATURES_VISIBLE } from "./features";
 import { parseEmailAddressMenuAction } from "./emailAddressMenu";
 import {
@@ -145,6 +149,81 @@ function emptySmartSections(): Record<SmartSectionId, SmartSection> {
   );
 }
 
+type ActionStatusState = {
+  id: number;
+  message: string;
+  tone: "success" | "error";
+  action?: { label: string; onAction: () => void; disabled?: boolean };
+};
+
+function normalizeSenderAddress(address: string) {
+  return address
+    .trim()
+    .replace(/[A-Z]/g, (character) => character.toLowerCase());
+}
+
+function isSenderCleanupMessage(
+  message: MailSummary,
+  target: SenderCleanupTarget,
+) {
+  return (
+    message.account_id === target.accountId &&
+    normalizeSenderAddress(message.from_address) ===
+      normalizeSenderAddress(target.senderAddress)
+  );
+}
+
+function removeSenderCleanupMessages(
+  threads: MailThread[],
+  target: SenderCleanupTarget,
+) {
+  return threads.flatMap((thread) => {
+    const messages = concreteThreadMessages(thread);
+    const remaining = messages.filter(
+      (message) => !isSenderCleanupMessage(message, target),
+    );
+    if (remaining.length === messages.length) return [thread];
+    return remaining.length ? groupMessages(remaining) : [];
+  });
+}
+
+function restoreSenderCleanupMessages(
+  current: MailThread[],
+  original: MailThread[],
+  target: SenderCleanupTarget,
+) {
+  const messages = new Map(
+    current
+      .flatMap(concreteThreadMessages)
+      .map((message) => [message.id, message] as const),
+  );
+  for (const message of original.flatMap(concreteThreadMessages)) {
+    if (isSenderCleanupMessage(message, target) && !messages.has(message.id))
+      messages.set(message.id, message);
+  }
+  return groupMessages([...messages.values()]);
+}
+
+function sameStringSet(left: Set<string>, right: Set<string>) {
+  return (
+    left.size === right.size && [...left].every((value) => right.has(value))
+  );
+}
+
+function senderCleanupOutcome(
+  t: ReturnType<typeof useTranslation>["t"],
+  result: TrashMessagesFromSenderResult,
+) {
+  if (result.matched === 0) return t("feedback.unsubscribeCleanupNone");
+  if (result.moved === result.matched && result.failed === 0) {
+    return t("feedback.unsubscribeCleanupSuccess", { count: result.moved });
+  }
+  if (result.moved > 0) {
+    return t("feedback.unsubscribeCleanupPartial", result);
+  }
+  return t("feedback.unsubscribeCleanupFailed");
+}
+
 export default function App() {
   const { t, i18n } = useTranslation();
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -185,6 +264,7 @@ export default function App() {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiConnected, setAiConnected] = useState(false);
   const [unsubscribeLoading, setUnsubscribeLoading] = useState(false);
+  const [senderCleanupLoading, setSenderCleanupLoading] = useState(false);
   const [permanentDeleteLoading, setPermanentDeleteLoading] = useState(false);
   const [pendingActions, setPendingActions] = useState<PendingMailActions>({});
   const [outbox, setOutbox] = useState<MailSummary[]>([]);
@@ -195,15 +275,13 @@ export default function App() {
   const [retainedSmartThreads, setRetainedSmartThreads] = useState(
     new Map<string, { sectionId: SmartSectionId; thread: MailThread }>(),
   );
-  const [actionStatus, setActionStatus] = useState<{
-    id: number;
-    message: string;
-    tone: "success" | "error";
-  }>();
+  const [actionStatus, setActionStatus] = useState<ActionStatusState>();
   const [updateState, setUpdateState] = useState<UpdateBannerState>();
   const searchRef = useRef<HTMLInputElement>(null);
   const statusId = useRef(0);
   const actionBusyRef = useRef(false);
+  const senderCleanupInFlightRef = useRef(false);
+  const activeThreadRef = useRef<MailThread | undefined>(undefined);
   const mailboxActionsInFlightRef = useRef(0);
   const mailboxActionThreadIdsRef = useRef(new Set<string>());
   const readMutationGenerationRef = useRef(0);
@@ -223,9 +301,24 @@ export default function App() {
   const selectedAccountIdRef = useRef<string | undefined>(undefined);
   const removedAccountIdsRef = useRef(new Set<string>());
   const accountStateGenerationRef = useRef(0);
+  const senderCleanupTargetRef = useRef<SenderCleanupTarget | undefined>(
+    undefined,
+  );
+  const threadsRef = useRef<MailThread[]>([]);
+  const smartSectionsRef = useRef(smartSections);
+  const retainedSmartThreadsRef = useRef(retainedSmartThreads);
+  const activeRef = useRef(active);
+  const activeThreadSnapshotRef = useRef(activeThreadSnapshot);
+  const selectedRef = useRef(selected);
 
   accountsRef.current = accounts;
   selectedAccountIdRef.current = selectedAccountId;
+  threadsRef.current = threads;
+  smartSectionsRef.current = smartSections;
+  retainedSmartThreadsRef.current = retainedSmartThreads;
+  activeRef.current = active;
+  activeThreadSnapshotRef.current = activeThreadSnapshot;
+  selectedRef.current = selected;
 
   useEffect(
     () => () => {
@@ -235,15 +328,19 @@ export default function App() {
   );
 
   const showStatus = useCallback(
-    (message: string, tone: "success" | "error" = "success") => {
+    (
+      message: string,
+      tone: "success" | "error" = "success",
+      action?: ActionStatusState["action"],
+    ) => {
       statusId.current += 1;
-      setActionStatus({ id: statusId.current, message, tone });
+      setActionStatus({ id: statusId.current, message, tone, action });
     },
     [],
   );
 
   useEffect(() => {
-    if (!actionStatus) return;
+    if (!actionStatus || actionStatus.action) return;
     const timer = window.setTimeout(() => setActionStatus(undefined), 2500);
     return () => window.clearTimeout(timer);
   }, [actionStatus]);
@@ -465,12 +562,18 @@ export default function App() {
           setSmartSections(() => {
             const next = emptySmartSections();
             for (const section of page.sections) {
+              const visible = excludeThreads(
+                section.conversations,
+                mailboxActionThreadIdsRef.current,
+              );
               next[section.id] = {
                 id: section.id,
-                threads: excludeThreads(
-                  section.conversations,
-                  mailboxActionThreadIdsRef.current,
-                ),
+                threads: senderCleanupTargetRef.current
+                  ? removeSenderCleanupMessages(
+                      visible,
+                      senderCleanupTargetRef.current,
+                    )
+                  : visible,
                 nextCursor: section.nextCursor,
                 loadingMore: false,
               };
@@ -503,8 +606,17 @@ export default function App() {
         sameMailView(currentView, currentViewRef.current)
       ) {
         nextCursorRef.current = page.nextCursor;
+        const visible = excludeThreads(
+          page.conversations,
+          mailboxActionThreadIdsRef.current,
+        );
         setThreads(
-          excludeThreads(page.conversations, mailboxActionThreadIdsRef.current),
+          senderCleanupTargetRef.current
+            ? removeSenderCleanupMessages(
+                visible,
+                senderCleanupTargetRef.current,
+              )
+            : visible,
         );
         setHasMore(page.nextCursor !== null);
       }
@@ -527,15 +639,21 @@ export default function App() {
             for (const thread of groupMessages(remote)) {
               if (!merged.has(thread.id)) merged.set(thread.id, thread);
             }
-            setThreads(
-              excludeThreads(
-                [...merged.values()].sort(
-                  (left, right) =>
-                    new Date(right.latest.received_at).getTime() -
-                    new Date(left.latest.received_at).getTime(),
-                ),
-                mailboxActionThreadIdsRef.current,
+            const visible = excludeThreads(
+              [...merged.values()].sort(
+                (left, right) =>
+                  new Date(right.latest.received_at).getTime() -
+                  new Date(left.latest.received_at).getTime(),
               ),
+              mailboxActionThreadIdsRef.current,
+            );
+            setThreads(
+              senderCleanupTargetRef.current
+                ? removeSenderCleanupMessages(
+                    visible,
+                    senderCleanupTargetRef.current,
+                  )
+                : visible,
             );
           }
         } catch {
@@ -1202,6 +1320,7 @@ export default function App() {
         : undefined,
     [active, activeThreadSnapshot, displayedThreads],
   );
+  activeThreadRef.current = activeThread;
   const targetThreads = selected.size
     ? displayedThreads.filter((thread) => selected.has(thread.id))
     : activeThread
@@ -1949,16 +2068,209 @@ export default function App() {
     }
     if (smartInboxActive) await loadMessages();
   };
+  const trashMessagesFromSender = async (target: SenderCleanupTarget) => {
+    if (senderCleanupInFlightRef.current) return;
+    senderCleanupInFlightRef.current = true;
+    senderCleanupTargetRef.current = target;
+    const originalThreads = threadsRef.current;
+    const originalSmartSections = smartSectionsRef.current;
+    const originalRetainedSmartThreads = retainedSmartThreadsRef.current;
+    const originalActive = activeRef.current;
+    const originalActiveThreadSnapshot = activeThreadSnapshotRef.current;
+    const originalSelected = new Set(selectedRef.current);
+    const originalVisibleThreads = [
+      ...originalThreads,
+      ...smartSectionIds.flatMap((id) => originalSmartSections[id].threads),
+    ];
+    const optimisticSelected = new Set(originalSelected);
+    for (const id of originalSelected) {
+      const matchingThreads = originalVisibleThreads.filter(
+        (thread) => thread.id === id,
+      );
+      if (
+        matchingThreads.length > 0 &&
+        matchingThreads.every(
+          (thread) =>
+            removeSenderCleanupMessages([thread], target).length === 0,
+        )
+      )
+        optimisticSelected.delete(id);
+    }
+    const originalView = {
+      ...currentViewRef.current,
+      accountIds: [...currentViewRef.current.accountIds],
+    };
+    const restoreOptimisticMessages = () => {
+      if (!sameMailView(originalView, currentViewRef.current)) return;
+      setSelected((current) =>
+        sameStringSet(current, optimisticSelected) ? originalSelected : current,
+      );
+      setThreads((current) =>
+        restoreSenderCleanupMessages(current, originalThreads, target),
+      );
+      setSmartSections(
+        (current) =>
+          Object.fromEntries(
+            smartSectionIds.map((id) => [
+              id,
+              {
+                ...current[id],
+                threads: restoreSenderCleanupMessages(
+                  current[id].threads,
+                  originalSmartSections[id].threads,
+                  target,
+                ),
+              },
+            ]),
+          ) as Record<SmartSectionId, SmartSection>,
+      );
+      setRetainedSmartThreads((current) => {
+        const next = new Map(current);
+        for (const [id, retained] of originalRetainedSmartThreads) {
+          if (
+            concreteThreadMessages(retained.thread).some((message) =>
+              isSenderCleanupMessage(message, target),
+            )
+          ) {
+            const currentRetained = next.get(id);
+            next.set(
+              id,
+              currentRetained
+                ? {
+                    ...currentRetained,
+                    thread: restoreSenderCleanupMessages(
+                      [currentRetained.thread],
+                      [retained.thread],
+                      target,
+                    )[0],
+                  }
+                : retained,
+            );
+          }
+        }
+        return next;
+      });
+      setActive((current) => {
+        if (current) return current;
+        return originalActive && isSenderCleanupMessage(originalActive, target)
+          ? originalActive
+          : current;
+      });
+      setActiveThreadSnapshot((current) => {
+        if (!originalActiveThreadSnapshot) return current;
+        if (current && current.id !== originalActiveThreadSnapshot.id)
+          return current;
+        return restoreSenderCleanupMessages(
+          current ? [current] : [],
+          [originalActiveThreadSnapshot],
+          target,
+        )[0];
+      });
+    };
+    setActionStatus(undefined);
+    setSenderCleanupLoading(true);
+    loadRequestIdRef.current += 1;
+    smartLoadRequestIdRef.current += 1;
+    setSelected(optimisticSelected);
+    setThreads((current) => removeSenderCleanupMessages(current, target));
+    setSmartSections(
+      (current) =>
+        Object.fromEntries(
+          smartSectionIds.map((id) => [
+            id,
+            {
+              ...current[id],
+              threads: removeSenderCleanupMessages(current[id].threads, target),
+            },
+          ]),
+        ) as Record<SmartSectionId, SmartSection>,
+    );
+    setRetainedSmartThreads((current) => {
+      const next = new Map(current);
+      for (const [id, retained] of next) {
+        const thread = removeSenderCleanupMessages(
+          [retained.thread],
+          target,
+        )[0];
+        if (thread) next.set(id, { ...retained, thread });
+        else next.delete(id);
+      }
+      return next;
+    });
+    const currentActiveThread = activeThreadRef.current;
+    const remainingActiveThread = currentActiveThread
+      ? removeSenderCleanupMessages([currentActiveThread], target)[0]
+      : undefined;
+    setActive((current) =>
+      current && isSenderCleanupMessage(current, target)
+        ? remainingActiveThread?.latest
+        : current,
+    );
+    setActiveThreadSnapshot((current) =>
+      current ? removeSenderCleanupMessages([current], target)[0] : current,
+    );
+    setAiResult(undefined);
+    try {
+      let result: TrashMessagesFromSenderResult;
+      try {
+        result = await api.trashMessagesFromSender(
+          target.accountId,
+          target.senderAddress,
+        );
+      } catch {
+        senderCleanupTargetRef.current = undefined;
+        restoreOptimisticMessages();
+        try {
+          await loadMessages();
+        } catch (error) {
+          console.warn("Could not reconcile sender cleanup", error);
+        }
+        showStatus(t("feedback.unsubscribeCleanupFailed"), "error");
+        return;
+      }
+      senderCleanupTargetRef.current = undefined;
+      if (
+        result.failed > 0 ||
+        result.moved === 0 ||
+        result.moved !== result.matched
+      )
+        restoreOptimisticMessages();
+      try {
+        await loadMessages();
+      } catch (error) {
+        console.warn("Could not reconcile sender cleanup", error);
+      }
+      showStatus(
+        senderCleanupOutcome(t, result),
+        result.failed || result.moved !== result.matched ? "error" : "success",
+      );
+    } finally {
+      senderCleanupTargetRef.current = undefined;
+      senderCleanupInFlightRef.current = false;
+      setSenderCleanupLoading(false);
+    }
+  };
   const unsubscribe = async (message: MailSummary) => {
     if (unsubscribeLoading) return;
     setUnsubscribeLoading(true);
     try {
       const result = await api.unsubscribe(message.id);
-      if (result.kind === "opened_web") {
-        showStatus(t("feedback.unsubscribeWeb"));
-      } else {
-        showStatus(t("feedback.unsubscribeSuccess"));
-      }
+      showStatus(
+        t(
+          result.kind === "opened_web"
+            ? "feedback.unsubscribeWeb"
+            : "feedback.unsubscribeSuccess",
+        ),
+        "success",
+        result.cleanupTarget
+          ? {
+              label: t("feedback.unsubscribeCleanupAction"),
+              onAction: () =>
+                void trashMessagesFromSender(result.cleanupTarget!),
+              disabled: senderCleanupLoading,
+            }
+          : undefined,
+      );
     } catch (error) {
       showStatus(
         error instanceof Error
@@ -2523,6 +2835,11 @@ export default function App() {
           key={actionStatus.id}
           message={actionStatus.message}
           tone={actionStatus.tone}
+          action={actionStatus.action}
+          dismiss={{
+            label: t("actions.close"),
+            onDismiss: () => setActionStatus(undefined),
+          }}
         />
       ) : null}
       {analyticsConsentDialog}

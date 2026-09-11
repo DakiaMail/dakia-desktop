@@ -35,6 +35,12 @@ const messageContentErrorKinds = new Set<MessageContentErrorKind>([
   "transient",
 ]);
 
+function normalizeSenderAddress(address: string) {
+  return address
+    .trim()
+    .replace(/[A-Z]/g, (character) => character.toLowerCase());
+}
+
 export class MessageContentError extends Error {
   readonly retryable: boolean;
 
@@ -228,6 +234,11 @@ const desktopApi = {
   openExternal: (url: string) => invoke<void>("open_external_url", { url }),
   unsubscribe: (messageId: string) =>
     invoke<UnsubscribeResult>("unsubscribe_message", { messageId }),
+  trashMessagesFromSender: (accountId: string, senderAddress: string) =>
+    invoke<TrashMessagesFromSenderResult>("trash_messages_from_sender", {
+      accountId,
+      senderAddress,
+    }),
   summarize: (settings: AiSettings, messageIds: string[]) =>
     invoke<string>("ai_summarize", { input: aiInput(settings, messageIds) }),
   draft: (settings: AiSettings, messageIds: string[], instruction: string) =>
@@ -262,7 +273,21 @@ const desktopApi = {
     invoke<void>("translation_remove_model", { source }),
 };
 
-export type UnsubscribeResult = { kind: "completed" } | { kind: "opened_web" };
+export type SenderCleanupTarget = {
+  readonly accountId: string;
+  readonly senderName: string | null;
+  readonly senderAddress: string;
+};
+
+export type UnsubscribeResult =
+  | { kind: "completed"; cleanupTarget: SenderCleanupTarget | null }
+  | { kind: "opened_web"; cleanupTarget: SenderCleanupTarget | null };
+
+export type TrashMessagesFromSenderResult = {
+  matched: number;
+  moved: number;
+  failed: number;
+};
 
 const aiInput = (settings: AiSettings, messageIds: string[]) => ({
   provider: settings.provider,
@@ -688,7 +713,24 @@ const demoApi: typeof desktopApi = {
   openExternal: async (url) => {
     window.open(url, "_blank", "noopener,noreferrer");
   },
-  unsubscribe: async () => ({ kind: "completed" }),
+  unsubscribe: async () => ({
+    kind: "completed" as const,
+    cleanupTarget: {
+      accountId: demoAccount.id,
+      senderName: "Mara Chen",
+      senderAddress: "mara@example.com",
+    },
+  }),
+  trashMessagesFromSender: async (accountId, senderAddress) => {
+    const normalized = normalizeSenderAddress(senderAddress);
+    const matches = demoMessages.filter(
+      (message) =>
+        message.account_id === accountId &&
+        normalizeSenderAddress(message.from_address) === normalized,
+    );
+    for (const message of matches) message.mailbox = "Trash";
+    return { matched: matches.length, moved: matches.length, failed: 0 };
+  },
   summarize: async () =>
     "Mara confirmed that notarization credentials are ready for Friday and the Linux smoke test is scheduled for Monday. She needs confirmation of who owns the final provider matrix.",
   draft: async () =>
