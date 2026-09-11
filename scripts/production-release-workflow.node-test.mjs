@@ -9,6 +9,14 @@ const workflow = readFileSync(
   resolve(root, ".github/workflows/production-release.yml"),
   "utf8",
 );
+const classifierDirectory = resolve(
+  root,
+  "apps/desktop/src-tauri/resources/email-classifier-v2",
+);
+const classifierManifest = JSON.parse(
+  readFileSync(resolve(classifierDirectory, "MANIFEST.json"), "utf8"),
+);
+const gitAttributes = readFileSync(resolve(root, ".gitattributes"), "utf8");
 
 test("release builds run after the optional preparation job is skipped", () => {
   const buildJob = workflow.match(/\n  build:\n([\s\S]*?)\n  publish:\n/)?.[1];
@@ -33,4 +41,22 @@ test("normalizes Windows runner paths before extracting the compiler cache", () 
     workflow,
     /archive="\$RUNNER_TEMP\/\$\{\{ matrix\.sccache_archive \}\}"/,
   );
+});
+
+test("preserves the exact bytes of every pinned classifier asset", () => {
+  const binaryPaths = new Set(
+    gitAttributes
+      .split("\n")
+      .filter((line) => line.endsWith(" -text"))
+      .map((line) => line.split(" ", 1)[0]),
+  );
+
+  for (const file of Object.keys(classifierManifest.files)) {
+    assert.ok(
+      binaryPaths.has(
+        `/apps/desktop/src-tauri/resources/email-classifier-v2/${file}`,
+      ),
+      `${file} must be exempt from checkout line-ending conversion`,
+    );
+  }
 });
