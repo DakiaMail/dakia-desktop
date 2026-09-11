@@ -44,7 +44,9 @@ test("release builds run after the optional preparation job is skipped", () => {
 });
 
 test("release publication runs after the optional preparation job is skipped", () => {
-  const publishJob = workflow.match(/\n  publish:\n([\s\S]*?)\n  verify-public:\n/)?.[1];
+  const publishJob = workflow.match(
+    /\n  publish:\n([\s\S]*?)\n  verify-public:\n/,
+  )?.[1];
   assert.ok(publishJob, "production release publish job is missing");
   assert.match(publishJob, /needs: \[decide, validate, build\]/);
   assert.equal(
@@ -76,6 +78,23 @@ test("normalizes Windows runner paths before extracting the compiler cache", () 
     /archive="\$RUNNER_TEMP\/\$\{\{ matrix\.sccache_archive \}\}"/,
   );
 });
+
+test("writes canonical Windows checksums while hashing binary bytes", () => {
+  const windowsAssets = workflow.match(
+    /- name: Sign and assemble Windows release assets([\s\S]*?)- name: Verify macOS release asset set/,
+  )?.[1];
+  assert.ok(windowsAssets, "Windows release asset step is missing");
+  assert.match(
+    windowsAssets,
+    /sha256sum --binary "\$artifact" \| awk '\{print \$1\}'/,
+  );
+  assert.match(windowsAssets, /printf '%s  %s\\n' "\$digest" "\$artifact"/);
+  assert.doesNotMatch(
+    windowsAssets,
+    /sha256sum "\$expected" "\$expected\.sig" > SHA256SUMS\.txt/,
+  );
+});
+
 test("preserves the exact bytes of every pinned classifier asset", () => {
   const binaryPaths = new Set(
     gitAttributes
@@ -103,8 +122,5 @@ test("keeps the tokenizer C++ training accelerator out of release builds", () =>
     pullRequestWorkflow,
     /cargo tree --locked --target x86_64-pc-windows-msvc -p dakia-cli -e features -i esaxx-rs/,
   );
-  assert.match(
-    pullRequestWorkflow,
-    /grep -Fq 'esaxx-rs feature "cpp"'/,
-  );
+  assert.match(pullRequestWorkflow, /grep -Fq 'esaxx-rs feature "cpp"'/);
 });

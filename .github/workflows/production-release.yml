@@ -544,7 +544,15 @@ jobs:
           # signature last even when no Windows certificate is configured.
           ./node_modules/.bin/tauri signer sign "$output/$expected"
           test -s "$output/$expected.sig"
-          (cd "$output" && sha256sum "$expected" "$expected.sig" > SHA256SUMS.txt)
+          # Git for Windows prefixes binary-mode filenames with `*`. Compute
+          # the digest in binary mode, then write a platform-neutral manifest.
+          (
+            cd "$output"
+            for artifact in "$expected" "$expected.sig"; do
+              digest="$(sha256sum --binary "$artifact" | awk '{print $1}')"
+              printf '%s  %s\n' "$digest" "$artifact"
+            done > SHA256SUMS.txt
+          )
           node scripts/verify-updater-signature.mjs "$output/$expected" "$output/$expected.sig" apps/desktop/src-tauri/tauri.conf.json
       - name: Verify macOS release asset set
         if: matrix.platform == 'macos'
