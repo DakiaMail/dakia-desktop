@@ -13,6 +13,7 @@
     "mail-changed": "native",
     "mail-hydrated": "native",
     "mail-index-rebuilt": "native",
+    "mail-rebuild-finished": "native",
     "mail-rebuild-progress": "native",
     "mail-sync-state": "native",
     "menu-action": "native",

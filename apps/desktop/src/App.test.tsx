@@ -13,6 +13,8 @@ import App from "./App";
 import { groupMessages } from "./threads";
 import type {
   Account,
+  AccountConnection,
+  MailRebuildFinished,
   MailRebuildProgress,
   MailSummary,
   SmartInboxPage,
@@ -28,6 +30,8 @@ const mocks = vi.hoisted(() => {
   const rebuildProgressHandlers: Array<
     (progress: MailRebuildProgress) => void
   > = [];
+  const rebuildFinishedHandlers: Array<(result: MailRebuildFinished) => void> =
+    [];
   const hydratedHandlers: Array<() => void> = [];
   const mailChangedHandlers: Array<() => void> = [];
   const nativeMenuHandlers: Array<(action: string) => void> = [];
@@ -44,6 +48,9 @@ const mocks = vi.hoisted(() => {
   const accountRemovedHandlers: Array<(event: { accountId: string }) => void> =
     [];
   const accountUpdatedHandlers: Array<(account: Account) => void> = [];
+  const accountConnectedHandlers: Array<
+    (connection: AccountConnection) => void
+  > = [];
   const account = {
     id: "account-1",
     email: "me@example.com",
@@ -149,9 +156,17 @@ const mocks = vi.hoisted(() => {
       accountUpdatedHandlers.push(handler);
       return unlisten;
     }),
+    onAccountConnected: vi.fn(
+      async (handler: (connection: AccountConnection) => void) => {
+        accountConnectedHandlers.push(handler);
+        return unlisten;
+      },
+    ),
+    accountConnectedHandlers,
     accountRemovedHandlers,
     accountUpdatedHandlers,
     rebuildProgressHandlers,
+    rebuildFinishedHandlers,
     hydratedHandlers,
     mailChangedHandlers,
     nativeMenuHandlers,
@@ -190,6 +205,12 @@ const mocks = vi.hoisted(() => {
     onMailRebuildProgress: vi.fn(
       async (handler: (progress: MailRebuildProgress) => void) => {
         rebuildProgressHandlers.push(handler);
+        return unlisten;
+      },
+    ),
+    onMailRebuildFinished: vi.fn(
+      async (handler: (result: MailRebuildFinished) => void) => {
+        rebuildFinishedHandlers.push(handler);
         return unlisten;
       },
     ),
@@ -247,7 +268,7 @@ vi.mock("./notifications", () => ({
 }));
 
 vi.mock("./nativeWindows", () => ({
-  onAccountConnected: mocks.noopListener,
+  onAccountConnected: mocks.onAccountConnected,
   onAccountRemoved: mocks.onAccountRemoved,
   onAccountUpdated: mocks.onAccountUpdated,
   onMailArrived: mocks.noopListener,
@@ -255,6 +276,7 @@ vi.mock("./nativeWindows", () => ({
   onMailHydrated: mocks.onMailHydrated,
   onMailIndexRebuilt: mocks.noopListener,
   onMailRebuildProgress: mocks.onMailRebuildProgress,
+  onMailRebuildFinished: mocks.onMailRebuildFinished,
   onMailSyncState: mocks.noopListener,
   onDesktopNotificationAction: mocks.onDesktopNotificationAction,
   onNativeMenuAction: mocks.onNativeMenuAction,
@@ -283,6 +305,7 @@ describe("App read state", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.rebuildProgressHandlers.length = 0;
+    mocks.rebuildFinishedHandlers.length = 0;
     mocks.hydratedHandlers.length = 0;
     mocks.mailChangedHandlers.length = 0;
     mocks.nativeMenuHandlers.length = 0;
@@ -293,6 +316,7 @@ describe("App read state", () => {
     mocks.openReaderWindow.mockClear();
     mocks.accountRemovedHandlers.length = 0;
     mocks.accountUpdatedHandlers.length = 0;
+    mocks.accountConnectedHandlers.length = 0;
     localStorage.clear();
     mocks.api.accounts.mockResolvedValue([mocks.account]);
     mocks.api.action.mockResolvedValue(undefined);
@@ -308,6 +332,54 @@ describe("App read state", () => {
       body_text: "Message body",
       attachments: [],
     });
+  });
+
+  it("observes an existing account connection without invoking a rebuild", async () => {
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+    await waitFor(() =>
+      expect(mocks.accountConnectedHandlers.length).toBeGreaterThan(0),
+    );
+    mocks.api.sync.mockClear();
+
+    act(() => {
+      mocks.accountConnectedHandlers.at(-1)!({
+        account: { ...mocks.account, id: "existing-account" },
+        reusedExistingAccount: true,
+      });
+    });
+
+    await waitFor(() =>
+      expect(screen.getByText("Unread thread")).toBeVisible(),
+    );
+    expect(mocks.api.sync).not.toHaveBeenCalled();
+  });
+
+  it("does not depend on the account-connected listener to start a fresh rebuild", async () => {
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+    await waitFor(() =>
+      expect(mocks.accountConnectedHandlers.length).toBeGreaterThan(0),
+    );
+    mocks.api.sync.mockClear();
+
+    act(() => {
+      mocks.accountConnectedHandlers.at(-1)!({
+        account: { ...mocks.account, id: "new-account" },
+        reusedExistingAccount: false,
+      });
+    });
+
+    await waitFor(() =>
+      expect(screen.getByText("Unread thread")).toBeVisible(),
+    );
+    expect(mocks.api.sync).not.toHaveBeenCalled();
   });
 
   it("does not probe an AI provider while AI features are hidden", async () => {
@@ -2289,6 +2361,42 @@ describe("App read state", () => {
     );
 
     expect(await screen.findByText("Rebuilt message")).toBeVisible();
+  });
+
+  it("reloads committed rows when a rebuild is cancelled after finding", async () => {
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    await screen.findByText("Unread thread");
+    await waitFor(() =>
+      expect(mocks.rebuildProgressHandlers.length).toBeGreaterThan(0),
+    );
+    await waitFor(() =>
+      expect(mocks.rebuildFinishedHandlers.length).toBeGreaterThan(0),
+    );
+    const rebuildProgress =
+      mocks.rebuildProgressHandlers[mocks.rebuildProgressHandlers.length - 1];
+    const rebuildFinished =
+      mocks.rebuildFinishedHandlers[mocks.rebuildFinishedHandlers.length - 1];
+
+    act(() =>
+      rebuildProgress({
+        accountId: "account-1",
+        phase: "finding",
+        completed: 0,
+        total: null,
+      }),
+    );
+    expect(screen.queryByText("Unread thread")).not.toBeInTheDocument();
+
+    act(() =>
+      rebuildFinished({ accountId: "account-1", outcome: "cancelled" }),
+    );
+
+    expect(await screen.findByText("Unread thread")).toBeVisible();
   });
 
   it("purges a deleted account and reloads only the remaining account", async () => {
