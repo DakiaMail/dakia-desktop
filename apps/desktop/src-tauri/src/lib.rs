@@ -3571,7 +3571,7 @@ async fn add_account(
     let password_secret_name = credential_secret_name(&account);
     let previous_secret_name = previous_credential_secret_name(existing_account.as_ref(), &account);
     let replaced_credential = if let Some(existing) = existing_account.as_ref() {
-        let existing_secret_name = credential_secret_name(&existing);
+        let existing_secret_name = credential_secret_name(existing);
         if existing_secret_name == password_secret_name {
             state
                 .store
@@ -3709,7 +3709,7 @@ async fn add_oauth_account(
     let oauth_secret_name = credential_secret_name(&account);
     let previous_secret_name = previous_credential_secret_name(existing_account.as_ref(), &account);
     let replaced_credential = if let Some(existing) = existing_account.as_ref() {
-        let existing_secret_name = credential_secret_name(&existing);
+        let existing_secret_name = credential_secret_name(existing);
         if existing_secret_name == oauth_secret_name {
             state
                 .store
@@ -4493,7 +4493,7 @@ async fn run_mail_rebuild(
         Err(error) => {
             state.mail_rebuild_cancellations.clear(account.id);
             release_mail_rebuild(&state, account.id);
-            return Err(error.into());
+            return Err(error);
         }
         Ok(Some(account)) => account,
         Ok(None) => {
@@ -4625,7 +4625,7 @@ async fn run_mail_rebuild_locked(
     });
     if result.is_ok() {
         if let Err(error) = state.store.delete_mail_rebuild_job(account.id).await {
-            result = Err(error.into());
+            result = Err(error);
         }
         state
             .mail_rebuilds
