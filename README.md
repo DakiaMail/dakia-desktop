@@ -1,20 +1,30 @@
+<p align="center">
+  <a href="https://dakiamail.com">
+    <img src="apps/desktop/public/icon.png" alt="Dakia logo" width="128" height="128">
+  </a>
+</p>
+
 # Dakia
 
-Dakia is a privacy-minded desktop mail application for macOS. It combines multiple IMAP/SMTP accounts, local full-text search, downloadable offline email translation, and a scriptable CLI.
+Dakia is a privacy-minded desktop mail application for macOS, Windows, and Linux. It combines multiple IMAP/SMTP accounts, local full-text search, downloadable offline email translation, and a scriptable CLI.
+
+[Visit the official Dakia website](https://dakiamail.com)
 
 > [!NOTE]
 > Dakia is still under rapid development, and bugs are expected.
 
 ## Current architecture
 
-- `crates/dakia-core` — accounts, provider discovery, SQLite/FTS search, mail transport, translation, and optional AI integrations
-- `crates/dakia-cli` — terminal mail operations sharing the desktop profile
-- `apps/desktop` — React + Mantine user interface
-- `apps/desktop/src-tauri` — Tauri desktop process and command boundary
+- `crates/dakia-core`: accounts, provider discovery, SQLite/FTS search, mail transport, translation, and optional AI integrations
+- `crates/dakia-cli`: terminal mail operations sharing the desktop profile
+- `apps/desktop`: React + Mantine user interface
+- `apps/desktop/src-tauri`: Tauri desktop process and command boundary
 
 ## Developer setup
 
-Requirements: macOS, Rust 1.82+, Node 20+, and Git LFS.
+Requirements: Rust 1.82+, Node 20+, Git LFS, and the build tools for your platform.
+See the [release workflow](.github/workflows/production-release.yml) for the
+macOS, Windows, and Linux build environments.
 
 ```bash
 npm run setup:worktree
@@ -22,9 +32,8 @@ npm run dev
 ```
 
 `setup:worktree` is safe to rerun. It installs the locked JavaScript
-dependencies when missing, materializes the shared Git LFS classifier assets,
-reuses a verified ONNX Runtime from another Dakia worktree when available, and
-prebuilds the native CLI sidecar. Running `npm run dev` directly also ensures
+dependencies when missing, prepares the classifier and platform runtime assets,
+and prebuilds the native CLI sidecar. Running `npm run dev` directly also ensures
 the required dependencies and assets are present.
 
 ## Community
