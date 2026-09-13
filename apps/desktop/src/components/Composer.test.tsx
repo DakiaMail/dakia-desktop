@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import {
   afterEach,
@@ -20,6 +21,11 @@ import { Composer } from "./Composer";
 
 const nativeDropMocks = vi.hoisted(() => ({
   readDroppedFiles: vi.fn(),
+  suggestContactedPeople: vi.fn(),
+  hideContactedPerson: vi.fn(),
+  contactedPeopleSettings: vi.fn(),
+  onContactedPeopleChanged: vi.fn(),
+  validateComposeRecipients: vi.fn(),
   onDragDropEvent: vi.fn(),
   listen: vi.fn(),
   listeners: new Map<string, (event: { payload: string }) => void>(),
@@ -29,6 +35,11 @@ const nativeDropMocks = vi.hoisted(() => ({
 vi.mock("../api", () => ({
   api: {
     readDroppedFiles: nativeDropMocks.readDroppedFiles,
+    suggestContactedPeople: nativeDropMocks.suggestContactedPeople,
+    hideContactedPerson: nativeDropMocks.hideContactedPerson,
+    contactedPeopleSettings: nativeDropMocks.contactedPeopleSettings,
+    onContactedPeopleChanged: nativeDropMocks.onContactedPeopleChanged,
+    validateComposeRecipients: nativeDropMocks.validateComposeRecipients,
   },
 }));
 
@@ -55,6 +66,19 @@ const account: Account = {
   archive_mailbox: "Archive",
   spam_mailbox: "Spam",
   enabled: true,
+};
+
+const disabledAccount: Account = {
+  ...account,
+  id: "disabled-account",
+  email: "disabled@example.com",
+  enabled: false,
+};
+const secondEnabledAccount: Account = {
+  ...account,
+  id: "enabled-account",
+  email: "enabled@example.com",
+  display_name: "Enabled",
 };
 
 const props = {
@@ -97,6 +121,19 @@ beforeEach(() => {
   nativeDropMocks.listeners.clear();
   nativeDropMocks.disposers.length = 0;
   nativeDropMocks.readDroppedFiles.mockReset();
+  nativeDropMocks.suggestContactedPeople.mockReset();
+  nativeDropMocks.hideContactedPerson.mockReset();
+  nativeDropMocks.contactedPeopleSettings.mockReset();
+  nativeDropMocks.onContactedPeopleChanged.mockReset();
+  nativeDropMocks.validateComposeRecipients.mockReset();
+  nativeDropMocks.suggestContactedPeople.mockResolvedValue([]);
+  nativeDropMocks.contactedPeopleSettings.mockResolvedValue({ enabled: true });
+  nativeDropMocks.onContactedPeopleChanged.mockResolvedValue(vi.fn());
+  nativeDropMocks.validateComposeRecipients.mockResolvedValue({
+    to: { valid: true, invalid: [] },
+    cc: { valid: true, invalid: [] },
+    bcc: { valid: true, invalid: [] },
+  });
   nativeDropMocks.onDragDropEvent.mockReset();
   nativeDropMocks.listen.mockReset();
   nativeDropMocks.onDragDropEvent.mockImplementation(async () => {
@@ -119,6 +156,54 @@ afterEach(() => {
 });
 
 describe("Composer send feedback", () => {
+  it("uses the first enabled account when the first configured account is disabled", async () => {
+    const onSend = vi.fn();
+    render(
+      <Composer
+        {...props}
+        accounts={[disabledAccount, secondEnabledAccount]}
+        seed={{ to: "person@example.com" }}
+        onSend={onSend}
+        sendState="idle"
+      />,
+    );
+
+    const from = screen.getByLabelText("From");
+    await waitFor(() => expect(from).toHaveValue("enabled-account"));
+    expect(
+      screen.queryByRole("option", { name: /disabled@example.com/ }),
+    ).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
+    await waitFor(() =>
+      expect(onSend).toHaveBeenCalledWith(
+        expect.objectContaining({ account_id: "enabled-account" }),
+      ),
+    );
+  });
+
+  it("repairs a disabled seeded From account before suggestions or send", async () => {
+    render(
+      <Composer
+        {...props}
+        accounts={[disabledAccount, secondEnabledAccount]}
+        seed={{ accountId: "disabled-account", to: "person@example.com" }}
+        sendState="idle"
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByLabelText("From")).toHaveValue("enabled-account"),
+    );
+    const to = screen.getByRole("combobox", { name: "To" });
+    fireEvent.focus(to);
+    await waitFor(() =>
+      expect(nativeDropMocks.suggestContactedPeople).toHaveBeenCalledWith(
+        "",
+        "enabled-account",
+      ),
+    );
+  });
+
   it("keeps AI drafting hidden even when a provider is connected", () => {
     render(<Composer {...props} aiConnected sendState="idle" />);
 
@@ -168,7 +253,7 @@ describe("Composer send feedback", () => {
     );
   });
 
-  it("sends semantic HTML with a readable plain-text alternative", () => {
+  it("sends semantic HTML with a readable plain-text alternative", async () => {
     const onSend = vi.fn();
     render(<Composer {...props} onSend={onSend} sendState="idle" />);
     const editor = screen.getByLabelText("Write your message…");
@@ -177,15 +262,17 @@ describe("Composer send feedback", () => {
     fireEvent.input(editor);
     fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
 
-    expect(onSend).toHaveBeenCalledWith(
-      expect.objectContaining({
-        body_html: "<p>Hello <strong>there</strong></p><ul><li>One</li></ul>",
-        body_text: "Hello there\n• One",
-      }),
+    await waitFor(() =>
+      expect(onSend).toHaveBeenCalledWith(
+        expect.objectContaining({
+          body_html: "<p>Hello <strong>there</strong></p><ul><li>One</li></ul>",
+          body_text: "Hello there\n• One",
+        }),
+      ),
     );
   });
 
-  it("preserves edited Thunderbird quote markers and their plain-text alternative", () => {
+  it("preserves edited Thunderbird quote markers and their plain-text alternative", async () => {
     const onSend = vi.fn();
     const bodyHtml = [
       "<p><br></p>",
@@ -210,6 +297,8 @@ describe("Composer send feedback", () => {
     editor.innerHTML = `<p>Authored text</p>${bodyHtml}`;
     fireEvent.input(editor);
     fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
+
+    await waitFor(() => expect(onSend).toHaveBeenCalled());
 
     expect(onSend).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -236,7 +325,7 @@ describe("Composer send feedback", () => {
     );
   });
 
-  it("renders and sends safe table and image layout in quoted rich email history", () => {
+  it("renders and sends safe table and image layout in quoted rich email history", async () => {
     const onSend = vi.fn();
     const bodyHtml = [
       "<p><br></p>",
@@ -265,6 +354,7 @@ describe("Composer send feedback", () => {
     editor.innerHTML = `<p>Authored text</p>${editor.innerHTML}`;
     fireEvent.input(editor);
     fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
+    await waitFor(() => expect(onSend).toHaveBeenCalled());
     expect(onSend).toHaveBeenCalledWith(
       expect.objectContaining({
         body_html: expect.stringContaining('<table width="600"'),
@@ -278,7 +368,7 @@ describe("Composer send feedback", () => {
     );
   });
 
-  it("sanitizes a hostile seeded reply before rendering and sends that unchanged sanitized HTML", () => {
+  it("sanitizes a hostile seeded reply before rendering and sends that unchanged sanitized HTML", async () => {
     const onSend = vi.fn();
     const bodyHtml = [
       "<p>Valid <strong>text</strong></p>",
@@ -310,6 +400,8 @@ describe("Composer send feedback", () => {
     expect(editor.innerHTML).toBe(sanitizedBodyHtml);
 
     fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
+
+    await waitFor(() => expect(onSend).toHaveBeenCalled());
 
     expect(onSend).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -354,7 +446,7 @@ describe("Composer send feedback", () => {
     );
   });
 
-  it("initializes and sends Cc and Bcc recipients from the compose seed", () => {
+  it("initializes and sends Cc and Bcc recipients from the compose seed", async () => {
     const onSend = vi.fn();
     render(
       <Composer
@@ -369,9 +461,10 @@ describe("Composer send feedback", () => {
       />,
     );
 
-    expect(screen.getByLabelText("Cc")).toHaveValue("peer@example.com");
-    expect(screen.getByLabelText("Bcc")).toHaveValue("hidden@example.com");
+    expect(screen.getByText("peer@example.com")).toBeVisible();
+    expect(screen.getByText("hidden@example.com")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
+    await waitFor(() => expect(onSend).toHaveBeenCalled());
     expect(onSend).toHaveBeenCalledWith(
       expect.objectContaining({
         to: ["sender@example.com"],
@@ -381,7 +474,7 @@ describe("Composer send feedback", () => {
     );
   });
 
-  it("keeps quoted display-name commas intact when sending", () => {
+  it("keeps quoted display-name commas intact when sending", async () => {
     const onSend = vi.fn();
     render(
       <Composer
@@ -392,11 +485,320 @@ describe("Composer send feedback", () => {
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
+    await waitFor(() => expect(onSend).toHaveBeenCalled());
     expect(onSend).toHaveBeenCalledWith(
       expect.objectContaining({
         to: ['"Doe, Jane" <jane@example.com>'],
       }),
     );
+  });
+
+  it.each(["To", "Cc", "Bcc"] as const)(
+    "blocks sending and preserves an invalid %s recipient",
+    async (field) => {
+      const onSend = vi.fn();
+      render(
+        <Composer
+          {...props}
+          seed={field === "To" ? {} : { to: "valid@example.com" }}
+          onSend={onSend}
+          sendState="idle"
+        />,
+      );
+      if (field !== "To") {
+        fireEvent.click(screen.getByRole("button", { name: "Cc · Bcc" }));
+      }
+      const input = screen.getByRole("combobox", { name: field });
+      fireEvent.change(input, { target: { value: "not an address" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      nativeDropMocks.validateComposeRecipients.mockResolvedValueOnce({
+        to: {
+          valid: field !== "To",
+          invalid: field === "To" ? ["not an address"] : [],
+        },
+        cc: {
+          valid: field !== "Cc",
+          invalid: field === "Cc" ? ["not an address"] : [],
+        },
+        bcc: {
+          valid: field !== "Bcc",
+          invalid: field === "Bcc" ? ["not an address"] : [],
+        },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
+
+      expect(onSend).not.toHaveBeenCalled();
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "This recipient cannot be used: not an address",
+      );
+      expect(input).toHaveAttribute("aria-invalid", "true");
+      expect(screen.getByText("not an address")).toBeVisible();
+    },
+  );
+
+  it("sends a parser-compatible free-form recipient", async () => {
+    const onSend = vi.fn();
+    render(<Composer {...props} seed={{}} onSend={onSend} sendState="idle" />);
+    const to = screen.getByRole("combobox", { name: "To" });
+    fireEvent.change(to, { target: { value: "Jane <jane@example.com>" } });
+    fireEvent.keyDown(to, { key: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
+
+    await waitFor(() =>
+      expect(onSend).toHaveBeenCalledWith(
+        expect.objectContaining({ to: ["Jane <jane@example.com>"] }),
+      ),
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("defers unusual backend-supported addresses to the Rust parser", async () => {
+    const onSend = vi.fn();
+    render(<Composer {...props} seed={{}} onSend={onSend} sendState="idle" />);
+    const to = screen.getByRole("combobox", { name: "To" });
+    fireEvent.change(to, {
+      target: { value: '"quoted local"@example.com, user@localhost' },
+    });
+    fireEvent.keyDown(to, { key: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
+
+    await waitFor(() => expect(onSend).toHaveBeenCalled());
+    expect(nativeDropMocks.validateComposeRecipients).toHaveBeenCalledWith({
+      to: ['"quoted local"@example.com', "user@localhost"],
+      cc: [],
+      bcc: [],
+    });
+    expect(onSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: ['"quoted local"@example.com', "user@localhost"],
+      }),
+    );
+  });
+
+  it("does not send when recipient validation cannot be completed", async () => {
+    const onSend = vi.fn();
+    nativeDropMocks.validateComposeRecipients.mockRejectedValueOnce(
+      new Error("native command unavailable"),
+    );
+    render(
+      <Composer
+        {...props}
+        seed={{ to: "person@example.com" }}
+        onSend={onSend}
+        sendState="idle"
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Recipients could not be checked",
+    );
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("does not submit twice while recipient validation is pending and unlocks after a rejected send", async () => {
+    const onSend = vi.fn();
+    let resolveValidation:
+      | ((value: {
+          to: { valid: boolean; invalid: string[] };
+          cc: { valid: boolean; invalid: string[] };
+          bcc: { valid: boolean; invalid: string[] };
+        }) => void)
+      | undefined;
+    nativeDropMocks.validateComposeRecipients.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveValidation = resolve;
+        }),
+    );
+    const { rerender } = render(
+      <Composer
+        {...props}
+        seed={{ to: "person@example.com" }}
+        onSend={onSend}
+        sendState="idle"
+      />,
+    );
+    const sendButton = screen.getByRole("button", { name: /^Send/ });
+
+    act(() => {
+      fireEvent.click(sendButton);
+      fireEvent.keyDown(window, { key: "Enter", metaKey: true });
+      fireEvent.click(sendButton);
+    });
+
+    expect(nativeDropMocks.validateComposeRecipients).toHaveBeenCalledTimes(1);
+    expect(onSend).not.toHaveBeenCalled();
+    expect(sendButton).toBeDisabled();
+
+    await act(async () => {
+      resolveValidation?.({
+        to: { valid: true, invalid: [] },
+        cc: { valid: true, invalid: [] },
+        bcc: { valid: true, invalid: [] },
+      });
+    });
+    await waitFor(() => expect(onSend).toHaveBeenCalledTimes(1));
+
+    rerender(
+      <Composer
+        {...props}
+        seed={{ to: "person@example.com" }}
+        onSend={onSend}
+        sendState="sending"
+      />,
+    );
+    rerender(
+      <Composer
+        {...props}
+        seed={{ to: "person@example.com" }}
+        onSend={onSend}
+        sendState="idle"
+      />,
+    );
+    await waitFor(() => expect(sendButton).not.toBeDisabled());
+
+    fireEvent.click(sendButton);
+    await waitFor(() => expect(onSend).toHaveBeenCalledTimes(2));
+  });
+
+  it("uses contacted-people suggestions in recipient fields and keeps duplicate suggestions out of Cc", async () => {
+    nativeDropMocks.suggestContactedPeople.mockResolvedValue([
+      {
+        address: "jane@example.com",
+        display_name: "Jane Doe",
+        last_contacted_at: "2026-09-01T00:00:00Z",
+      },
+    ]);
+    const onSend = vi.fn();
+    render(<Composer {...props} seed={{}} onSend={onSend} sendState="idle" />);
+
+    const to = screen.getByRole("combobox", { name: "To" });
+    fireEvent.focus(to);
+    fireEvent.click(await screen.findByRole("option", { name: /Jane Doe/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Cc/ }));
+    const cc = screen.getByRole("combobox", { name: "Cc" });
+    fireEvent.focus(cc);
+
+    await waitFor(() =>
+      expect(screen.queryByRole("option", { name: /Jane Doe/ })).toBeNull(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
+    await waitFor(() =>
+      expect(onSend).toHaveBeenCalledWith(
+        expect.objectContaining({ to: ["Jane Doe <jane@example.com>"] }),
+      ),
+    );
+  });
+
+  it("adds a pointer-selected contacted person to Bcc before sending", async () => {
+    nativeDropMocks.suggestContactedPeople.mockResolvedValue([
+      {
+        address: "jane@example.com",
+        display_name: "Jane Doe",
+        last_contacted_at: "2026-09-01T00:00:00Z",
+      },
+    ]);
+    const onSend = vi.fn();
+    render(
+      <Composer
+        {...props}
+        seed={{ to: "recipient@example.com" }}
+        onSend={onSend}
+        sendState="idle"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Cc · Bcc" }));
+    const bcc = screen.getByRole("combobox", { name: "Bcc" });
+    fireEvent.focus(bcc);
+    fireEvent.click(
+      await within(bcc.closest(".recipient-combobox")!).findByRole("option", {
+        name: /Jane Doe/,
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
+
+    await waitFor(() =>
+      expect(onSend).toHaveBeenCalledWith(
+        expect.objectContaining({ bcc: ["Jane Doe <jane@example.com>"] }),
+      ),
+    );
+  });
+
+  it("does not send a Cc duplicate that was still being typed in To", async () => {
+    const onSend = vi.fn();
+    render(<Composer {...props} seed={{}} onSend={onSend} sendState="idle" />);
+
+    const to = screen.getByRole("combobox", { name: "To" });
+    fireEvent.change(to, { target: { value: "person@example.com" } });
+    fireEvent.click(screen.getByRole("button", { name: /Cc/ }));
+    const cc = screen.getByRole("combobox", { name: "Cc" });
+    fireEvent.change(cc, { target: { value: "person@example.com" } });
+    fireEvent.keyDown(cc, { key: "Enter" });
+
+    expect(cc).toHaveValue("");
+    fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
+    await waitFor(() =>
+      expect(onSend).toHaveBeenCalledWith(
+        expect.objectContaining({
+          to: ["person@example.com"],
+          cc: [],
+        }),
+      ),
+    );
+  });
+
+  it("deduplicates an uncommitted Cc draft against a committed To chip before validation and send", async () => {
+    const onSend = vi.fn();
+    render(<Composer {...props} seed={{}} onSend={onSend} sendState="idle" />);
+
+    const to = screen.getByRole("combobox", { name: "To" });
+    fireEvent.change(to, { target: { value: "First <person@example.com>" } });
+    fireEvent.keyDown(to, { key: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: /Cc/ }));
+    const cc = screen.getByRole("combobox", { name: "Cc" });
+    fireEvent.change(cc, { target: { value: "Second <PERSON@example.com>" } });
+
+    fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
+    await waitFor(() =>
+      expect(nativeDropMocks.validateComposeRecipients).toHaveBeenCalledWith({
+        to: ["First <person@example.com>"],
+        cc: [],
+        bcc: [],
+      }),
+    );
+    expect(onSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: ["First <person@example.com>"],
+        cc: [],
+        bcc: [],
+      }),
+    );
+    await waitFor(() => expect(cc).toHaveValue(""));
+  });
+
+  it("deduplicates a typed duplicate in the same recipient field before send", async () => {
+    const onSend = vi.fn();
+    render(<Composer {...props} seed={{}} onSend={onSend} sendState="idle" />);
+
+    const to = screen.getByRole("combobox", { name: "To" });
+    fireEvent.change(to, { target: { value: "First <person@example.com>" } });
+    fireEvent.keyDown(to, { key: "Enter" });
+    fireEvent.change(to, { target: { value: "Second <PERSON@example.com>" } });
+
+    fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
+    await waitFor(() =>
+      expect(nativeDropMocks.validateComposeRecipients).toHaveBeenCalledWith({
+        to: ["First <person@example.com>"],
+        cc: [],
+        bcc: [],
+      }),
+    );
+    expect(onSend).toHaveBeenCalledWith(
+      expect.objectContaining({ to: ["First <person@example.com>"] }),
+    );
+    await waitFor(() => expect(to).toHaveValue(""));
   });
 
   it("adds a selected file once and silently ignores a duplicate", async () => {
@@ -441,15 +843,17 @@ describe("Composer native dropped-file receipts", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: /^Send/ }));
-    expect(onSend).toHaveBeenCalledWith(
-      expect.objectContaining({
-        attachments: [
-          expect.objectContaining({
-            filename: "native.pdf",
-            content_base64: "bmF0aXZl",
-          }),
-        ],
-      }),
+    await waitFor(() =>
+      expect(onSend).toHaveBeenCalledWith(
+        expect.objectContaining({
+          attachments: [
+            expect.objectContaining({
+              filename: "native.pdf",
+              content_base64: "bmF0aXZl",
+            }),
+          ],
+        }),
+      ),
     );
   });
 

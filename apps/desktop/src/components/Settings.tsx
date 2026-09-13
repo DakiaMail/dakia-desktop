@@ -101,6 +101,10 @@ export function Settings({
   const [translationModelRemoving, setTranslationModelRemoving] =
     useState<string>();
   const [translationModelError, setTranslationModelError] = useState<string>();
+  const [contactedPeopleEnabled, setContactedPeopleEnabled] = useState(true);
+  const [contactedPeopleLoading, setContactedPeopleLoading] = useState(false);
+  const [contactedPeopleClearing, setContactedPeopleClearing] = useState(false);
+  const [contactedPeopleError, setContactedPeopleError] = useState<string>();
   useEffect(() => {
     if (selectedAccountId) setActiveTab("accounts");
   }, [selectedAccountId]);
@@ -118,6 +122,16 @@ export function Settings({
       )
       .finally(() => setTranslationModelsLoading(false));
   }, [activeTab]);
+  useEffect(() => {
+    if (activeTab !== "privacy") return;
+    setContactedPeopleLoading(true);
+    setContactedPeopleError(undefined);
+    void api
+      .contactedPeopleSettings()
+      .then((settings) => setContactedPeopleEnabled(settings.enabled))
+      .catch(() => setContactedPeopleError(t("settings.contactedPeopleError")))
+      .finally(() => setContactedPeopleLoading(false));
+  }, [activeTab, t]);
   const removeTranslationModel = async (model: TranslationModelStatus) => {
     const language = model.sourceName;
     const confirmed = await confirmNativeAction(
@@ -146,6 +160,32 @@ export function Settings({
   };
   const update = <K extends keyof AiSettings>(key: K, value: AiSettings[K]) =>
     onAiChange({ ...ai, [key]: value });
+  const updateContactedPeopleEnabled = (enabled: boolean) => {
+    const previous = contactedPeopleEnabled;
+    setContactedPeopleEnabled(enabled);
+    setContactedPeopleError(undefined);
+    void api.setContactedPeopleSettings(enabled).catch(() => {
+      setContactedPeopleEnabled(previous);
+      setContactedPeopleError(t("settings.contactedPeopleError"));
+    });
+  };
+  const clearContactedPeople = async () => {
+    const confirmed = await confirmNativeAction(
+      t("settings.clearContactedPeople"),
+      t("settings.clearContactedPeopleConfirm"),
+      t("settings.clearContactedPeople"),
+    );
+    if (!confirmed) return;
+    setContactedPeopleClearing(true);
+    setContactedPeopleError(undefined);
+    try {
+      await api.clearContactedPeople();
+    } catch {
+      setContactedPeopleError(t("settings.contactedPeopleError"));
+    } finally {
+      setContactedPeopleClearing(false);
+    }
+  };
   return (
     <main className="utility-window settings-window">
       <header className="utility-header" data-tauri-drag-region>
@@ -461,6 +501,36 @@ export function Settings({
             <Divider my="xs" />
             <Text fw={650}>{t("settings.privacy")}</Text>
             <Text size="sm">{t("settings.privacyBody")}</Text>
+            <Divider my="xs" />
+            <Text fw={600} size="sm">
+              {t("settings.contactedPeople")}
+            </Text>
+            <Text size="sm" c="dimmed">
+              {t("settings.contactedPeopleBody")}
+            </Text>
+            <Switch
+              label={t("settings.suggestContactedPeople")}
+              checked={contactedPeopleEnabled}
+              disabled={contactedPeopleLoading}
+              onChange={(event) =>
+                updateContactedPeopleEnabled(event.currentTarget.checked)
+              }
+            />
+            <Group>
+              <Button
+                variant="light"
+                color="red"
+                loading={contactedPeopleClearing}
+                onClick={() => void clearContactedPeople()}
+              >
+                {t("settings.clearContactedPeople")}
+              </Button>
+            </Group>
+            {contactedPeopleError ? (
+              <Text size="sm" c="red" role="alert">
+                {contactedPeopleError}
+              </Text>
+            ) : null}
             {AI_FEATURES_VISIBLE ? (
               <>
                 <Divider my="xs" />

@@ -33,6 +33,7 @@ tokenizers = { version = "=0.22.2", default-features = false, features = ["onig"
 tracing.workspace = true
 url.workspace = true
 uuid.workspace = true
+unicode-normalization.workspace = true
 webpki-roots.workspace = true
 
 [dev-dependencies]

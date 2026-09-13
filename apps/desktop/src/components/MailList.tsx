@@ -5,7 +5,6 @@ import {
   Loader,
   Menu,
   Progress,
-  TextInput,
   Tooltip,
 } from "@mantine/core";
 import {
@@ -15,9 +14,9 @@ import {
   IconEdit,
   IconMail,
   IconMailForward,
+  IconInfoCircle,
   IconPaperclip,
   IconRefresh,
-  IconSearch,
   IconShieldCheck,
   IconShieldX,
   IconSparkles,
@@ -43,10 +42,16 @@ import type {
   SmartSection,
   SmartSectionId,
   MailThread,
+  Account,
+  ContactedPersonSuggestion,
+  SearchCoverage,
+  SearchMatchEvidence,
   SyncStatus,
 } from "../types";
 import { concreteThreadMessages } from "../threads";
 import { EmptyState } from "./EmptyState";
+import { SearchControls } from "./SearchControls";
+import type { SearchPeopleSuggestionContext } from "./SearchControls";
 
 type Props = {
   threads: MailThread[];
@@ -57,11 +62,21 @@ type Props = {
   loadingMore: boolean;
   hasMore: boolean;
   remoteSearchUnavailable: boolean;
+  searchUnavailableReason?: string;
+  searchErrorMessage?: string;
+  searchCoverage?: SearchCoverage[];
+  searchAccounts?: Account[];
+  searchMatchEvidence?: Record<string, SearchMatchEvidence>;
+  searchPeople?: ContactedPersonSuggestion[];
+  searchPeopleContext?: SearchPeopleSuggestionContext;
+  recentSearches?: string[];
+  localOnlySearch?: boolean;
   syncStatus?: SyncStatus;
   classifying: boolean;
   lastSyncAt?: string;
   aiConnected: boolean;
   mailboxTitle: string;
+  searchFolderCatalogue?: string[];
   view: MailListView;
   onViewChange: (view: MailListView) => void;
   onCategorize: (message: MailSummary, category: MailCategory) => void;
@@ -70,6 +85,10 @@ type Props = {
   smartSections?: SmartSection[];
   exitingThreadIds?: Set<string>;
   onQuery: (value: string) => void;
+  onSubmitSearch?: (value: string) => void;
+  onClearRecentSearches?: () => void;
+  onLocalOnlySearchChange?: (enabled: boolean) => void;
+  onSaveSearch?: () => void;
   onOpen: (thread: MailThread) => void;
   onDoubleOpen: (thread: MailThread) => void;
   onSelect: (ids: string[], checked: boolean) => void;
@@ -102,11 +121,21 @@ export function MailList({
   loadingMore,
   hasMore,
   remoteSearchUnavailable,
+  searchUnavailableReason,
+  searchErrorMessage,
+  searchCoverage = [],
+  searchAccounts = [],
+  searchMatchEvidence = {},
+  searchPeople = [],
+  searchPeopleContext,
+  recentSearches = [],
+  localOnlySearch = false,
   syncStatus,
   classifying,
   lastSyncAt,
   aiConnected,
   mailboxTitle,
+  searchFolderCatalogue = [],
   view,
   onViewChange,
   onCategorize,
@@ -115,6 +144,10 @@ export function MailList({
   smartSections = [],
   exitingThreadIds = new Set(),
   onQuery,
+  onSubmitSearch = () => undefined,
+  onClearRecentSearches = () => undefined,
+  onLocalOnlySearchChange = () => undefined,
+  onSaveSearch,
   onOpen,
   onDoubleOpen,
   onSelect,
@@ -216,18 +249,40 @@ export function MailList({
             </Tooltip>
           </div>
         </div>
-        <TextInput
-          ref={searchRef}
+        <SearchControls
+          searchRef={searchRef}
           value={query}
-          onChange={(event) => onQuery(event.currentTarget.value)}
-          leftSection={<IconSearch size={16} />}
-          placeholder={t("search.placeholder")}
-          aria-label={t("actions.search")}
+          folderCatalogue={searchFolderCatalogue}
+          people={searchPeople}
+          peopleContext={searchPeopleContext}
+          recentSearches={recentSearches}
+          localOnly={localOnlySearch}
+          onChange={onQuery}
+          onSubmit={onSubmitSearch}
+          onClearRecent={onClearRecentSearches}
+          onLocalOnlyChange={onLocalOnlySearchChange}
+          onSaveSearch={onSaveSearch}
         />
         {query.trim() && remoteSearchUnavailable ? (
           <div className="search-scope-notice" role="status">
             {t("search.localOnly")}
           </div>
+        ) : null}
+        {query.trim() && searchUnavailableReason ? (
+          <div className="search-scope-notice" role="status">
+            {searchUnavailableReason}
+          </div>
+        ) : null}
+        {query.trim() && searchErrorMessage ? (
+          <div className="search-scope-notice" role="alert">
+            {searchErrorMessage}
+          </div>
+        ) : null}
+        {query.trim() && searchCoverage.length ? (
+          <SearchCoverageNotice
+            coverage={searchCoverage}
+            accounts={searchAccounts}
+          />
         ) : null}
         {syncStatus ? <SyncIndicator status={syncStatus} compact /> : null}
         {classifying ? (
@@ -316,6 +371,7 @@ export function MailList({
             onActionThread={onActionThread}
             onToggleReadThread={onToggleReadThread}
             onToggleStarThread={onToggleStarThread}
+            searchMatchEvidence={searchMatchEvidence}
             onLoadMore={onLoadMoreSmart}
           />
         ) : (
@@ -335,6 +391,7 @@ export function MailList({
             onActionThread={onActionThread}
             onToggleReadThread={onToggleReadThread}
             onToggleStarThread={onToggleStarThread}
+            searchMatchEvidence={searchMatchEvidence}
           />
         )}
         {loadingMore ? (
@@ -342,9 +399,97 @@ export function MailList({
             <Loader size="xs" />
           </div>
         ) : null}
+        {hasMore && !loadingMore && !(view === "smart" && smartInbox) ? (
+          <button className="mail-load-more" onClick={onLoadMore}>
+            {t("inbox.showMore")}
+          </button>
+        ) : null}
       </div>
     </section>
   );
+}
+
+const incompleteCoverageStates = new Set<SearchCoverage["state"]>([
+  "provider_partial",
+  "offline",
+  "authentication_failed",
+  "unsupported",
+  "cancelled",
+  "mailbox_changed",
+]);
+
+function SearchCoverageNotice({
+  coverage,
+  accounts,
+}: {
+  coverage: SearchCoverage[];
+  accounts: Account[];
+}) {
+  const { t } = useTranslation();
+
+  const completedScopes = new Set(
+    coverage
+      .filter((item) => item.state === "provider_searched")
+      .map(coverageScopeKey),
+  );
+  const incomplete = coverage.filter(
+    (item) =>
+      incompleteCoverageStates.has(item.state) &&
+      !completedScopes.has(coverageScopeKey(item)),
+  );
+
+  if (!incomplete.length) return null;
+
+  const accountLabels = Array.from(
+    new Set(
+      incomplete.map((item) => {
+        const account = accounts.find(
+          (candidate) => candidate.id === item.account_id,
+        );
+        return (
+          account?.account_name ||
+          account?.display_name ||
+          account?.email ||
+          t("search.accountFallback")
+        );
+      }),
+    ),
+  );
+  const accountList = new Intl.ListFormat(undefined, {
+    style: "long",
+    type: "conjunction",
+  }).format(accountLabels);
+  const states = new Set(incomplete.map((item) => item.state));
+  const messageKey =
+    states.size > 1
+      ? "search.statusUnavailable"
+      : states.has("authentication_failed")
+        ? "search.statusReconnect"
+        : states.has("offline")
+          ? "search.statusOffline"
+          : states.has("unsupported")
+            ? "search.statusUnsupported"
+            : states.has("mailbox_changed")
+              ? "search.statusChanged"
+              : states.has("cancelled")
+                ? "search.statusStopped"
+                : "search.statusIncomplete";
+
+  return (
+    <div
+      className="search-coverage"
+      role="status"
+      aria-live="polite"
+      aria-label={t("search.statusLabel")}
+    >
+      <IconInfoCircle size={14} stroke={1.8} aria-hidden="true" />
+      <span>{t(messageKey, { accounts: accountList })}</span>
+    </div>
+  );
+}
+
+function coverageScopeKey(item: SearchCoverage) {
+  return `${item.account_id}:${item.mailbox ?? ""}`;
 }
 
 const categories: Array<{ id: MailCategory; label: string }> = [
@@ -371,6 +516,7 @@ type RowsProps = Pick<
   | "onToggleReadThread"
   | "onToggleStarThread"
   | "exitingThreadIds"
+  | "searchMatchEvidence"
 > & { threads: MailThread[] };
 
 function SmartThreadSections(
@@ -425,6 +571,7 @@ function ThreadRows({
   onActionThread,
   onToggleReadThread,
   onToggleStarThread,
+  searchMatchEvidence = {},
   exitingThreadIds = new Set(),
 }: RowsProps) {
   const { t } = useTranslation();
@@ -574,6 +721,13 @@ function ThreadRows({
       {threads.map((thread) => {
         const message = thread.latest;
         const sourceMessages = concreteThreadMessages(thread);
+        const match = searchMatchEvidence[thread.id];
+        const primaryMessage = match?.primary_message_id
+          ? sourceMessages.find((item) => item.id === match.primary_message_id)
+          : undefined;
+        const selectedThread = primaryMessage
+          ? { ...thread, latest: primaryMessage }
+          : thread;
         const pending = sourceMessages
           .map((item) => pendingActions[item.id])
           .find(Boolean);
@@ -592,8 +746,8 @@ function ThreadRows({
                 : undefined
             }
             disabled={pending?.phase === "exiting"}
-            onClick={() => onOpen(thread)}
-            onDoubleClick={() => onDoubleOpen(thread)}
+            onClick={() => onOpen(selectedThread)}
+            onDoubleClick={() => onDoubleOpen(selectedThread)}
             onContextMenu={(event) => {
               event.preventDefault();
               setContext({ thread, x: event.clientX, y: event.clientY });
@@ -636,8 +790,23 @@ function ThreadRows({
                 {message.subject || t("inbox.noSubject")}
               </span>
               <span className="mail-snippet">
-                {cleanEmailSnippet(message.snippet)}
+                {match?.excerpt
+                  ? cleanEmailSnippet(match.excerpt)
+                  : cleanEmailSnippet(message.snippet)}
               </span>
+              {match ? (
+                <span className="mail-search-match">
+                  {t("search.matchingMessage", {
+                    sender:
+                      primaryMessage?.from_name ||
+                      primaryMessage?.from_address ||
+                      match.primary_message_id ||
+                      t("search.matchUnknown"),
+                  })}
+                  {" · "}
+                  {t("search.matchCount", { count: match.match_count })}
+                </span>
+              ) : null}
             </span>
             <span className="mail-flags">
               <span

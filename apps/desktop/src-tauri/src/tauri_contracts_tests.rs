@@ -1,8 +1,13 @@
 use crate::realtime::{MailArrival, MailHydrated, RealtimeSyncStatus};
 use crate::{MessageContent, MessageContentCommandError, MessageContentErrorKind};
 use chrono::{DateTime, Utc};
-use dakia_core::{Attachment, AttachmentPresentation, MailSummary};
+use dakia_core::{
+    Attachment, AttachmentPresentation, MailSummary, SearchCoverage, SearchCoverageState,
+    SearchErrorCategory, SearchErrorV2, SearchExecutionMode, SearchMatchEvidence, SearchPageV2,
+    SearchRequestV2, SearchScopeV2,
+};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 fn fixture() -> Value {
@@ -41,6 +46,8 @@ fn fixture_message() -> MailSummary {
         unsubscribe_url: None,
         is_read: false,
         is_flagged: false,
+        is_answered: false,
+        is_draft: false,
         has_attachments: false,
         category: None,
         classification_confidence: None,
@@ -185,5 +192,205 @@ fn mail_event_payloads_match_the_shared_fixture_casing_uuid_times_and_nulls() {
     assert_eq!(
         serde_json::to_value(retrying).expect("retrying sync state must serialize"),
         fixture["events"]["mailSyncStateRetrying"]
+    );
+}
+
+#[test]
+fn compose_recipient_validation_command_preserves_field_and_input_shape() {
+    let validation = crate::validate_compose_recipients(
+        vec![
+            "Display Name <person@example.test>".into(),
+            "invalid address".into(),
+        ],
+        vec!["\"quoted local\"@example.test".into()],
+        vec!["user@localhost".into()],
+    );
+    let value = serde_json::to_value(validation).expect("validation response must serialize");
+    assert_eq!(value["to"]["valid"], false);
+    assert_eq!(value["to"]["invalid"], json!(["invalid address"]));
+    assert!(value["cc"]["valid"].is_boolean());
+    assert!(value["bcc"]["valid"].is_boolean());
+    assert!(value["cc"]["invalid"].is_array());
+    assert!(value["bcc"]["invalid"].is_array());
+}
+
+#[test]
+fn contacted_people_change_event_uses_the_cross_window_payload_contract() {
+    assert_eq!(
+        serde_json::to_value(crate::ContactedPeopleChanged {
+            enabled: false,
+            cleared: false,
+        })
+        .unwrap(),
+        json!({ "enabled": false, "cleared": false })
+    );
+    assert_eq!(
+        serde_json::to_value(crate::ContactedPeopleChanged {
+            enabled: true,
+            cleared: true,
+        })
+        .unwrap(),
+        json!({ "enabled": true, "cleared": true })
+    );
+}
+
+#[test]
+fn search_request_uses_the_exact_nested_snake_case_contract() {
+    let request = SearchRequestV2 {
+        raw_query: "from:\"Mara Example\" has:attachment".into(),
+        client_request_id: Some(Uuid::from_u128(10)),
+        account_ids: vec![Uuid::from_u128(11)],
+        scope: SearchScopeV2 {
+            mailbox: Some("Archive::All Mail".into()),
+            include_spam_trash: true,
+        },
+        execution_mode: SearchExecutionMode::Hybrid,
+        page_size: 25,
+        continuation: Some("opaque-search-continuation".into()),
+    };
+
+    assert_eq!(
+        serde_json::to_value(request).expect("search request must serialize for IPC"),
+        json!({
+            "raw_query": "from:\"Mara Example\" has:attachment",
+            "client_request_id": Uuid::from_u128(10),
+            "account_ids": [Uuid::from_u128(11)],
+            "scope": {
+                "mailbox": "Archive::All Mail",
+                "include_spam_trash": true
+            },
+            "execution_mode": "hybrid",
+            "page_size": 25,
+            "continuation": "opaque-search-continuation"
+        })
+    );
+}
+
+#[test]
+fn search_page_preserves_session_revision_continuation_coverage_and_match_evidence() {
+    let account_id = Uuid::from_u128(12);
+    let session_id = Uuid::from_u128(13);
+    let mut match_evidence = BTreeMap::new();
+    match_evidence.insert(
+        "thread-01".into(),
+        SearchMatchEvidence {
+            primary_message_id: Some("message-02".into()),
+            matched_message_ids: vec!["message-01".into(), "message-02".into()],
+            match_count: 2,
+            excerpt: Some("Mara Example attached the report".into()),
+        },
+    );
+    let page = SearchPageV2 {
+        conversations: Vec::new(),
+        match_evidence,
+        coverage: vec![SearchCoverage {
+            account_id,
+            mailbox: Some("INBOX".into()),
+            state: SearchCoverageState::ProviderPartial,
+            detail: Some("More provider results are available".into()),
+        }],
+        continuation: Some("opaque-next-page".into()),
+        session_id,
+        revision: 7,
+    };
+
+    assert_eq!(
+        serde_json::to_value(page).expect("search page must serialize for IPC"),
+        json!({
+            "conversations": [],
+            "match_evidence": {
+                "thread-01": {
+                    "primary_message_id": "message-02",
+                    "matched_message_ids": ["message-01", "message-02"],
+                    "match_count": 2,
+                    "excerpt": "Mara Example attached the report"
+                }
+            },
+            "coverage": [{
+                "account_id": account_id,
+                "mailbox": "INBOX",
+                "state": "provider_partial",
+                "detail": "More provider results are available"
+            }],
+            "continuation": "opaque-next-page",
+            "session_id": session_id,
+            "revision": 7
+        })
+    );
+}
+
+#[test]
+fn search_error_v2_preserves_nullable_and_snake_case_fields() {
+    assert_eq!(
+        serde_json::to_value(SearchErrorV2 {
+            position: Some(5),
+            category: SearchErrorCategory::Unsupported,
+            unsupported_operator: Some("near".into()),
+            message: "This search operator is not supported yet.".into(),
+        })
+        .expect("search error must serialize for IPC"),
+        json!({
+            "position": 5,
+            "category": "unsupported",
+            "unsupported_operator": "near",
+            "message": "This search operator is not supported yet."
+        })
+    );
+
+    assert_eq!(
+        serde_json::to_value(SearchErrorV2 {
+            position: None,
+            category: SearchErrorCategory::Transient,
+            unsupported_operator: None,
+            message: "Search could not be completed. Please try again.".into(),
+        })
+        .expect("nullable search error must serialize for IPC"),
+        json!({
+            "position": null,
+            "category": "transient",
+            "unsupported_operator": null,
+            "message": "Search could not be completed. Please try again."
+        })
+    );
+}
+
+#[test]
+fn contacted_person_suggestion_preserves_account_id_hidden_and_snake_case() {
+    let suggestion = dakia_core::storage::ContactedPersonSuggestion {
+        address: "mara@example.test".into(),
+        display_name: Some("Mara Example".into()),
+        formatted_address: "Mara Example <mara@example.test>".into(),
+        first_contacted_at: "2026-09-01T09:30:00Z".parse().unwrap(),
+        last_contacted_at: "2026-09-11T09:30:00Z".parse().unwrap(),
+        send_count: 6,
+        account_send_count: 4,
+        account_last_contacted_at: Some("2026-09-11T09:30:00Z".parse().unwrap()),
+        account_id: Some("33333333-3333-4333-8333-333333333333".into()),
+        hidden: false,
+    };
+
+    assert_eq!(
+        serde_json::to_value(suggestion).expect("suggestion must serialize for IPC"),
+        json!({
+            "address": "mara@example.test",
+            "display_name": "Mara Example",
+            "formatted_address": "Mara Example <mara@example.test>",
+            "first_contacted_at": "2026-09-01T09:30:00Z",
+            "last_contacted_at": "2026-09-11T09:30:00Z",
+            "send_count": 6,
+            "account_send_count": 4,
+            "account_last_contacted_at": "2026-09-11T09:30:00Z",
+            "account_id": "33333333-3333-4333-8333-333333333333",
+            "hidden": false
+        })
+    );
+}
+
+#[test]
+fn autocomplete_settings_response_is_exact_and_has_no_implicit_fields() {
+    assert_eq!(
+        serde_json::to_value(crate::ContactedPeopleSettings { enabled: false })
+            .expect("autocomplete settings must serialize for IPC"),
+        json!({ "enabled": false })
     );
 }

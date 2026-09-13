@@ -20,6 +20,7 @@ import { ActionStatus } from "./components/ActionStatus";
 import { MailboxNav } from "./components/MailboxNav";
 import { MailList } from "./components/MailList";
 import { Reader } from "./components/Reader";
+import type { SearchPeopleSuggestionContext } from "./components/SearchControls";
 import {
   UpdateBanner,
   type UpdateBannerState,
@@ -37,6 +38,10 @@ import {
 import { replyRecipients } from "./recipients";
 import { confirmNativeAction, showNativeMessage } from "./nativeFeedback";
 import { concreteThreadMessages, groupMessages } from "./threads";
+import {
+  activePeopleSearchFilter,
+  hasExplicitFolderPredicate,
+} from "./searchSyntax";
 import { formatForwardHistory, forwardSubject } from "./forward";
 import { createFeedbackComposeSeed } from "./feedback";
 import { formatReplyHistory } from "./replyHistory";
@@ -63,9 +68,11 @@ import {
   onMailRebuildFinished,
   onMailRebuildProgress,
   onMailSyncState,
+  onSearchProgress,
   onDesktopNotificationAction,
   onNativeMenuAction,
   onNotificationSettingsChanged,
+  onContactedPeopleChanged,
   onSettingsChanged,
   openAccountWindow,
   openSettingsWindow,
@@ -82,6 +89,13 @@ import type {
   MailThread,
   MailSummary,
   NotificationSettings,
+  ContactedPersonSuggestion,
+  SavedSearch,
+  SearchCoverage,
+  SearchErrorV2,
+  SearchMailbox,
+  SearchMatchEvidence,
+  SearchRequestV2,
   SyncResult,
   SyncStatus,
 } from "./types";
@@ -111,6 +125,7 @@ const defaultAi: AiSettings = {
 const mailPageSize = 100;
 const smartPageSize = 3;
 const smartMorePageSize = 20;
+const automaticSearchContinuationTurns = 2;
 const smartSectionIds: SmartSectionId[] = [
   "starred",
   "people",
@@ -125,6 +140,18 @@ type MailViewRequest = {
   query: string;
   mailbox: string;
   view: MailListView;
+};
+
+type SearchV2Session = {
+  sessionId: string;
+  revision: number;
+  continuation: string | null;
+  request: SearchRequestV2;
+};
+
+type SearchErrorState = {
+  query: string;
+  error: SearchErrorV2;
 };
 
 function sameMailView(left: MailViewRequest, right: MailViewRequest) {
@@ -240,12 +267,46 @@ export default function App() {
   const [selected, setSelected] = useState(new Set<string>());
   const [selectedAccountId, setSelectedAccountId] = useState<string>();
   const [mailbox, setMailbox] = useState("INBOX");
+  const [searchFolderCatalogue, setSearchFolderCatalogue] = useState<string[]>([
+    "INBOX",
+  ]);
+  const [observedSearchFolders, setObservedSearchFolders] = useState<string[]>(
+    [],
+  );
+  const [hasSearchFolderCatalogue, setHasSearchFolderCatalogue] =
+    useState(false);
   const [mailListView, setMailListView] = useState<MailListView>(
     () =>
       (localStorage.getItem("dakia.mail-list-view") as MailListView) || "smart",
   );
   const [query, setQuery] = useState("");
   const [debouncedQuery] = useDebouncedValue(query, 220);
+  const [submittedSearch, setSubmittedSearch] = useState<{
+    id: number;
+    query: string;
+  }>();
+  const [searchPeople, setSearchPeople] = useState<ContactedPersonSuggestion[]>(
+    [],
+  );
+  const [searchPeopleContext, setSearchPeopleContext] =
+    useState<SearchPeopleSuggestionContext>({ query: "", revision: 0 });
+  const [contactedPeopleEnabled, setContactedPeopleEnabled] = useState(true);
+  const [peopleRefreshRevision, setPeopleRefreshRevision] = useState(0);
+  const [searchCoverage, setSearchCoverage] = useState<SearchCoverage[]>([]);
+  const [searchError, setSearchError] = useState<SearchErrorState>();
+  const [searchMatchEvidence, setSearchMatchEvidence] = useState<
+    Record<string, SearchMatchEvidence>
+  >({});
+  const [localOnlySearch, setLocalOnlySearch] = useState(
+    () => localStorage.getItem("dakia.search.local-only") === "true",
+  );
+  const [recentSearches, setRecentSearches] = useState<string[]>(() =>
+    readRecentSearches(),
+  );
+  const [savedSearches, setSavedSearches] = useState<SavedSearch[]>(() =>
+    readSavedSearches(),
+  );
+  const [savedSearchScope, setSavedSearchScope] = useState<string[]>();
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
@@ -299,6 +360,7 @@ export default function App() {
   const smartExitTimersRef = useRef(new Map<string, number>());
   const accountsRef = useRef<Account[]>([]);
   const selectedAccountIdRef = useRef<string | undefined>(undefined);
+  const savedSearchScopeRef = useRef<string[] | undefined>(undefined);
   const removedAccountIdsRef = useRef(new Set<string>());
   const accountStateGenerationRef = useRef(0);
   const senderCleanupTargetRef = useRef<SenderCleanupTarget | undefined>(
@@ -310,6 +372,18 @@ export default function App() {
   const activeRef = useRef(active);
   const activeThreadSnapshotRef = useRef(activeThreadSnapshot);
   const selectedRef = useRef(selected);
+  const searchSubmissionIdRef = useRef(0);
+  const remoteSearchProcessedRef = useRef(0);
+  const peopleRequestIdRef = useRef(0);
+  const searchSessionRef = useRef<SearchV2Session | undefined>(undefined);
+  const searchGenerationRef = useRef(0);
+  const searchCoverageRevisionRef = useRef(new Map<string, number>());
+  const searchFolderCatalogueRequestIdRef = useRef(0);
+  const automaticSearchContinuationRef = useRef({
+    sessionId: "",
+    turns: 0,
+  });
+  const cancelledSearchSessionIdsRef = useRef(new Set<string>());
 
   accountsRef.current = accounts;
   selectedAccountIdRef.current = selectedAccountId;
@@ -319,6 +393,38 @@ export default function App() {
   activeRef.current = active;
   activeThreadSnapshotRef.current = activeThreadSnapshot;
   selectedRef.current = selected;
+  savedSearchScopeRef.current = savedSearchScope;
+
+  const refreshSearchFolderCatalogue = useCallback(async () => {
+    const requestId = ++searchFolderCatalogueRequestIdRef.current;
+    try {
+      const mailboxes: SearchMailbox[] = await api.listSearchMailboxes();
+      if (requestId !== searchFolderCatalogueRequestIdRef.current) return;
+      setSearchFolderCatalogue(
+        uniqueSortedFolderPaths([
+          "INBOX",
+          ...mailboxes
+            .filter((mailbox) => mailbox.selectable)
+            .map((mailbox) => mailbox.localPath),
+        ]),
+      );
+      setHasSearchFolderCatalogue(true);
+    } catch {
+      if (requestId === searchFolderCatalogueRequestIdRef.current) {
+        // Older native binaries may not provide the additive catalogue command.
+        // The current visible rows remain a safe, local fallback.
+        setHasSearchFolderCatalogue(false);
+      }
+    }
+  }, []);
+
+  const visibleSearchFolderCatalogue = useMemo(
+    () =>
+      hasSearchFolderCatalogue
+        ? searchFolderCatalogue
+        : uniqueSortedFolderPaths(["INBOX", ...observedSearchFolders]),
+    [hasSearchFolderCatalogue, observedSearchFolders, searchFolderCatalogue],
+  );
 
   useEffect(
     () => () => {
@@ -428,11 +534,169 @@ export default function App() {
     setMailListView(view);
   }, []);
 
+  const cancelSearchSession = useCallback((sessionId: string) => {
+    if (cancelledSearchSessionIdsRef.current.has(sessionId)) return;
+    cancelledSearchSessionIdsRef.current.add(sessionId);
+    const cancel = "cancelSearchV2" in api ? api.cancelSearchV2 : undefined;
+    if (cancel) void cancel(sessionId).catch(() => undefined);
+  }, []);
+
+  const cancelActiveSearch = useCallback(() => {
+    searchGenerationRef.current += 1;
+    const session = searchSessionRef.current;
+    if (!session) return;
+    searchSessionRef.current = undefined;
+    cancelSearchSession(session.sessionId);
+  }, [cancelSearchSession]);
+
+  const changeSearchQuery = useCallback(
+    (value: string) => {
+      if (value !== query) {
+        cancelActiveSearch();
+        searchCoverageRevisionRef.current.clear();
+        setSearchCoverage([]);
+        setSearchMatchEvidence({});
+        setSearchError((current) =>
+          current?.error.category === "parse" ? undefined : current,
+        );
+      }
+      if (!value.trim()) setSubmittedSearch(undefined);
+      setQuery(value);
+    },
+    [cancelActiveSearch, query],
+  );
+
   const markSynced = useCallback(() => {
     const value = new Date().toISOString();
     localStorage.setItem("dakia.last-sync-at", value);
     setLastSyncAt(value);
   }, []);
+
+  const changeLocalOnlySearch = useCallback(
+    (enabled: boolean) => {
+      if (enabled) cancelActiveSearch();
+      localStorage.setItem("dakia.search.local-only", String(enabled));
+      setLocalOnlySearch(enabled);
+    },
+    [cancelActiveSearch],
+  );
+
+  const clearRecentSearches = useCallback(() => {
+    localStorage.removeItem("dakia.search.recent");
+    setRecentSearches([]);
+  }, []);
+
+  const recordRecentSearch = useCallback((rawQuery: string) => {
+    if (!rawQuery.trim()) return;
+    setRecentSearches((current) => {
+      const nextRecent = [
+        rawQuery,
+        ...current.filter((item) => item !== rawQuery),
+      ].slice(0, 20);
+      localStorage.setItem("dakia.search.recent", JSON.stringify(nextRecent));
+      return nextRecent;
+    });
+  }, []);
+
+  const submitSearch = useCallback(
+    (rawQuery: string) => {
+      const next = rawQuery.trim();
+      if (!next) return;
+      cancelActiveSearch();
+      searchCoverageRevisionRef.current.clear();
+      setSearchCoverage([]);
+      setSearchMatchEvidence({});
+      setSearchError((current) =>
+        current?.error.category === "parse" ? undefined : current,
+      );
+      const id = ++searchSubmissionIdRef.current;
+      setSubmittedSearch({ id, query: rawQuery });
+    },
+    [cancelActiveSearch],
+  );
+
+  const saveCurrentSearch = useCallback(() => {
+    if (!query.trim()) return;
+    const name = window.prompt(t("search.savePrompt"));
+    if (!name?.trim()) return;
+    setSavedSearches((current) => {
+      const saved: SavedSearch = {
+        id: crypto.randomUUID(),
+        name: name.trim(),
+        raw_query: query,
+        account_ids:
+          savedSearchScope && savedSearchScope.length
+            ? savedSearchScope
+            : selectedAccountId &&
+                accounts.some(
+                  (account) =>
+                    account.id === selectedAccountId && account.enabled,
+                )
+              ? [selectedAccountId]
+              : accounts
+                  .filter((account) => account.enabled)
+                  .map((account) => account.id),
+        local_only: localOnlySearch,
+        created_at: new Date().toISOString(),
+      };
+      const next = [...current, saved];
+      localStorage.setItem("dakia.search.saved", JSON.stringify(next));
+      return next;
+    });
+  }, [
+    accounts,
+    localOnlySearch,
+    query,
+    savedSearchScope,
+    selectedAccountId,
+    t,
+  ]);
+
+  const removeSavedSearch = useCallback((id: string) => {
+    setSavedSearches((current) => {
+      const next = current.filter((search) => search.id !== id);
+      localStorage.setItem("dakia.search.saved", JSON.stringify(next));
+      return next;
+    });
+  }, []);
+
+  const selectSavedSearch = useCallback(
+    (search: SavedSearch) => {
+      const activeAccountIds = new Set(
+        accounts
+          .filter((account) => account.enabled)
+          .map((account) => account.id),
+      );
+      const scope = search.account_ids.filter((id) => activeAccountIds.has(id));
+      if (scope.length === 1) {
+        setSelectedAccountId(scope[0]);
+      } else if (scope.length > 1) {
+        setSelectedAccountId(undefined);
+      }
+      // Keep the saved scope exactly as it was saved. A disabled or removed
+      // account must never turn this into an all-account search. Keeping the
+      // original IDs also lets the saved search work again if an account is
+      // re-enabled later.
+      setSavedSearchScope(search.account_ids);
+      changeLocalOnlySearch(search.local_only);
+      changeSearchQuery(search.raw_query);
+      if (scope.length) {
+        submitSearch(search.raw_query);
+      } else {
+        cancelActiveSearch();
+        setSubmittedSearch(undefined);
+      }
+    },
+    [
+      accounts,
+      cancelActiveSearch,
+      changeLocalOnlySearch,
+      changeSearchQuery,
+      submitSearch,
+    ],
+  );
+
+  useEffect(() => () => cancelActiveSearch(), [cancelActiveSearch]);
 
   useEffect(() => {
     if (!AI_FEATURES_VISIBLE) return;
@@ -479,13 +743,29 @@ export default function App() {
       .catch(() => undefined);
     return () => dispose();
   }, []);
-  const activeAccounts = useMemo(
-    () =>
-      selectedAccountId
-        ? [selectedAccountId]
-        : accounts.map((account) => account.id),
-    [accounts, selectedAccountId],
-  );
+  useEffect(() => {
+    if (accounts.length) {
+      void refreshSearchFolderCatalogue();
+      return;
+    }
+    searchFolderCatalogueRequestIdRef.current += 1;
+    setSearchFolderCatalogue(["INBOX"]);
+    setHasSearchFolderCatalogue(false);
+  }, [accounts, refreshSearchFolderCatalogue]);
+  const activeAccounts = useMemo(() => {
+    const enabledAccountIds = accounts
+      .filter((account) => account.enabled)
+      .map((account) => account.id);
+    const enabledIds = new Set(enabledAccountIds);
+    const validSavedScope = savedSearchScope?.filter((id) =>
+      enabledIds.has(id),
+    );
+    if (savedSearchScope !== undefined) return validSavedScope ?? [];
+    if (selectedAccountId !== undefined) {
+      return enabledIds.has(selectedAccountId) ? [selectedAccountId] : [];
+    }
+    return enabledAccountIds;
+  }, [accounts, savedSearchScope, selectedAccountId]);
   const currentViewRef = useRef<MailViewRequest>({
     accountIds: activeAccounts,
     query: debouncedQuery,
@@ -512,182 +792,387 @@ export default function App() {
   useEffect(() => {
     void refreshStarredCount(activeAccounts);
   }, [activeAccounts, refreshStarredCount]);
-
-  const loadMessages = useCallback(async (requestedAccountIds?: string[]) => {
-    const requestId = ++loadRequestIdRef.current;
-    const smartRequestId = ++smartLoadRequestIdRef.current;
-    const currentView = {
-      ...currentViewRef.current,
-      accountIds: requestedAccountIds ?? currentViewRef.current.accountIds,
+  useEffect(() => {
+    let current = true;
+    const settings =
+      "contactedPeopleSettings" in api
+        ? api.contactedPeopleSettings
+        : undefined;
+    if (!settings) return;
+    void settings().then(
+      ({ enabled }) => {
+        if (!current) return;
+        setContactedPeopleEnabled(enabled);
+        if (!enabled) {
+          peopleRequestIdRef.current += 1;
+          setSearchPeople([]);
+          setSearchPeopleContext({ query: "", revision: 0 });
+        }
+      },
+      () => undefined,
+    );
+    return () => {
+      current = false;
     };
-    const accountIds = currentView.accountIds;
-    const smartInbox =
-      currentView.view === "smart" &&
-      currentView.mailbox === "INBOX" &&
-      !currentView.query.trim();
-    if (currentView.mailbox === "Outbox") {
-      if (
-        requestId === loadRequestIdRef.current &&
-        sameMailView(currentView, currentViewRef.current)
-      ) {
-        setThreads([]);
-        setSmartSections(emptySmartSections());
-        setLoading(false);
-        setHasMore(false);
-      }
+  }, []);
+  useEffect(() => {
+    const match = activePeopleSearchFilter(debouncedQuery);
+    const requestId = ++peopleRequestIdRef.current;
+    const context: SearchPeopleSuggestionContext = {
+      query: debouncedQuery,
+      filter: match,
+      revision: requestId,
+    };
+    if (!contactedPeopleEnabled || (!match && debouncedQuery.trim())) {
+      setSearchPeople([]);
+      setSearchPeopleContext(context);
       return;
     }
-    if (!accountIds.length) {
-      if (
-        requestId === loadRequestIdRef.current &&
-        sameMailView(currentView, currentViewRef.current)
-      ) {
-        setThreads([]);
-        setLoading(false);
-        setSmartSections(emptySmartSections());
-        setHasMore(false);
-      }
-      return;
-    }
-    setLoading(true);
-    setRemoteSearchUnavailable(false);
-    try {
-      if (smartInbox) {
-        const page = await api.smartInbox(accountIds, smartPageSize);
+    const suggest =
+      "suggestContactedPeople" in api ? api.suggestContactedPeople : undefined;
+    if (!suggest) return;
+    const preferredAccountId = accounts.some(
+      (account) => account.id === selectedAccountId && account.enabled,
+    )
+      ? selectedAccountId
+      : undefined;
+    void suggest(match?.prefix ?? "", preferredAccountId).then(
+      (people) => {
+        if (requestId === peopleRequestIdRef.current) {
+          setSearchPeople(people);
+          setSearchPeopleContext(context);
+        }
+      },
+      () => {
+        if (requestId === peopleRequestIdRef.current) {
+          setSearchPeople([]);
+          setSearchPeopleContext(context);
+        }
+      },
+    );
+  }, [
+    contactedPeopleEnabled,
+    accounts,
+    debouncedQuery,
+    peopleRefreshRevision,
+    selectedAccountId,
+  ]);
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: () => void = () => undefined;
+    void onContactedPeopleChanged(({ enabled }) => {
+      peopleRequestIdRef.current += 1;
+      setSearchPeople([]);
+      setSearchPeopleContext({ query: "", revision: 0 });
+      setContactedPeopleEnabled(enabled);
+      if (enabled) setPeopleRefreshRevision((current) => current + 1);
+    }).then((dispose) => {
+      if (disposed) dispose();
+      else unlisten = dispose;
+    });
+    return () => {
+      disposed = true;
+      unlisten();
+    };
+  }, []);
+
+  const loadMessages = useCallback(
+    async (requestedAccountIds?: string[]) => {
+      const requestId = ++loadRequestIdRef.current;
+      let searchGeneration = searchGenerationRef.current;
+      const smartRequestId = ++smartLoadRequestIdRef.current;
+      const currentView = {
+        ...currentViewRef.current,
+        accountIds: requestedAccountIds ?? currentViewRef.current.accountIds,
+      };
+      const accountIds = currentView.accountIds;
+      const smartInbox =
+        currentView.view === "smart" &&
+        currentView.mailbox === "INBOX" &&
+        !currentView.query.trim();
+      if (currentView.mailbox === "Outbox") {
         if (
           requestId === loadRequestIdRef.current &&
-          smartRequestId === smartLoadRequestIdRef.current &&
           sameMailView(currentView, currentViewRef.current)
         ) {
-          setSmartSections(() => {
-            const next = emptySmartSections();
-            for (const section of page.sections) {
+          setThreads([]);
+          setSmartSections(emptySmartSections());
+          setLoading(false);
+          setHasMore(false);
+        }
+        return;
+      }
+      if (!accountIds.length) {
+        if (
+          requestId === loadRequestIdRef.current &&
+          sameMailView(currentView, currentViewRef.current)
+        ) {
+          setThreads([]);
+          setLoading(false);
+          setSmartSections(emptySmartSections());
+          setHasMore(false);
+        }
+        return;
+      }
+      setLoading(true);
+      setRemoteSearchUnavailable(false);
+      if (submittedSearch?.query !== currentView.query) {
+        cancelActiveSearch();
+        searchCoverageRevisionRef.current.clear();
+        setSearchCoverage([]);
+        setSearchMatchEvidence({});
+        setSearchError((current) =>
+          current?.error.category === "parse" ? undefined : current,
+        );
+        searchGeneration = searchGenerationRef.current;
+      }
+      try {
+        if (smartInbox) {
+          const page = await api.smartInbox(accountIds, smartPageSize);
+          if (
+            requestId === loadRequestIdRef.current &&
+            smartRequestId === smartLoadRequestIdRef.current &&
+            sameMailView(currentView, currentViewRef.current)
+          ) {
+            setSmartSections(() => {
+              const next = emptySmartSections();
+              for (const section of page.sections) {
+                const visible = excludeThreads(
+                  section.conversations,
+                  mailboxActionThreadIdsRef.current,
+                );
+                next[section.id] = {
+                  id: section.id,
+                  threads: senderCleanupTargetRef.current
+                    ? removeSenderCleanupMessages(
+                        visible,
+                        senderCleanupTargetRef.current,
+                      )
+                    : visible,
+                  nextCursor: section.nextCursor,
+                  loadingMore: false,
+                };
+              }
+              return next;
+            });
+            setHasMore(false);
+          }
+          return;
+        }
+        const querySetsMailboxScope = hasExplicitFolderPredicate(
+          currentView.query,
+        );
+        const specialUnread =
+          !querySetsMailboxScope && currentView.mailbox === "unread";
+        const specialFlagged =
+          !querySetsMailboxScope && currentView.mailbox === "starred";
+        const actualMailbox =
+          querySetsMailboxScope ||
+          ["unread", "starred"].includes(currentView.mailbox) ||
+          currentView.mailbox === ""
+            ? undefined
+            : currentView.mailbox;
+        const pageSize = mailPageSize;
+        const submission = submittedSearch;
+        const hasSubmittedCurrentQuery =
+          Boolean(submission) && submission?.query === currentView.query;
+        const v2 = "startSearchV2" in api ? api.startSearchV2 : undefined;
+        const useV2DraftPreview =
+          Boolean(currentView.query.trim()) && !hasSubmittedCurrentQuery && v2;
+        const page = useV2DraftPreview
+          ? undefined
+          : await api.search(
+              currentView.query,
+              accountIds,
+              actualMailbox,
+              specialUnread,
+              specialFlagged,
+              pageSize,
+              null,
+            );
+        if (
+          page &&
+          requestId === loadRequestIdRef.current &&
+          sameMailView(currentView, currentViewRef.current)
+        ) {
+          nextCursorRef.current = page.nextCursor;
+          const visible = excludeThreads(
+            page.conversations,
+            mailboxActionThreadIdsRef.current,
+          );
+          setThreads(
+            senderCleanupTargetRef.current
+              ? removeSenderCleanupMessages(
+                  visible,
+                  senderCleanupTargetRef.current,
+                )
+              : visible,
+          );
+          setHasMore(page.nextCursor !== null);
+          if (hasSubmittedCurrentQuery) {
+            recordRecentSearch(currentView.query);
+          }
+        }
+        const explicitlySubmitted =
+          hasSubmittedCurrentQuery &&
+          submission?.id !== remoteSearchProcessedRef.current;
+        const draftPreview = !hasSubmittedCurrentQuery;
+        if (currentView.query.trim() && (explicitlySubmitted || draftPreview)) {
+          if (explicitlySubmitted) {
+            remoteSearchProcessedRef.current = submission!.id;
+          }
+          try {
+            const request: SearchRequestV2 = {
+              client_request_id: crypto.randomUUID(),
+              raw_query: currentView.query,
+              account_ids: accountIds,
+              scope: { mailbox: actualMailbox ?? null },
+              execution_mode:
+                explicitlySubmitted && !localOnlySearch ? "hybrid" : "local",
+              page_size: 500,
+            };
+            if (v2) {
+              searchSessionRef.current = {
+                sessionId: request.client_request_id!,
+                revision: 0,
+                continuation: null,
+                request,
+              };
+            }
+            const pageV2 = v2 ? await v2(request) : undefined;
+            if (pageV2 && pageV2.session_id !== request.client_request_id) {
+              cancelSearchSession(request.client_request_id!);
+              cancelSearchSession(pageV2.session_id);
+              return;
+            }
+            const remote = pageV2
+              ? pageV2.conversations.flatMap(
+                  (thread) => thread.sourceMessages ?? thread.messages,
+                )
+              : localOnlySearch
+                ? []
+                : await api.searchRemote(
+                    currentView.query,
+                    accountIds,
+                    actualMailbox,
+                    specialUnread,
+                    specialFlagged,
+                  );
+            if (
+              requestId === loadRequestIdRef.current &&
+              searchGeneration === searchGenerationRef.current &&
+              sameMailView(currentView, currentViewRef.current)
+            ) {
+              if (pageV2) {
+                const observedRevision =
+                  searchSessionRef.current?.sessionId === pageV2.session_id
+                    ? searchSessionRef.current.revision
+                    : 0;
+                searchSessionRef.current = {
+                  sessionId: pageV2.session_id,
+                  revision: Math.max(observedRevision, pageV2.revision),
+                  continuation: pageV2.continuation ?? null,
+                  request,
+                };
+                setSearchCoverage((current) =>
+                  mergeSearchCoverage(
+                    current,
+                    pageV2.coverage,
+                    pageV2.revision,
+                    searchCoverageRevisionRef.current,
+                  ),
+                );
+                setSearchMatchEvidence(pageV2.match_evidence ?? {});
+                setHasMore(Boolean(pageV2.continuation));
+              } else {
+                searchSessionRef.current = undefined;
+              }
+              const merged = new Map(
+                draftPreview
+                  ? []
+                  : (page?.conversations ?? []).map((thread) => [
+                      thread.id,
+                      thread,
+                    ]),
+              );
+              const providerThreads = pageV2
+                ? pageV2.conversations
+                : groupMessages(remote);
+              for (const thread of providerThreads) {
+                if (pageV2 || !merged.has(thread.id))
+                  merged.set(thread.id, thread);
+              }
               const visible = excludeThreads(
-                section.conversations,
+                [...merged.values()].sort(
+                  (left, right) =>
+                    new Date(right.latest.received_at).getTime() -
+                    new Date(left.latest.received_at).getTime(),
+                ),
                 mailboxActionThreadIdsRef.current,
               );
-              next[section.id] = {
-                id: section.id,
-                threads: senderCleanupTargetRef.current
+              setThreads(
+                senderCleanupTargetRef.current
                   ? removeSenderCleanupMessages(
                       visible,
                       senderCleanupTargetRef.current,
                     )
                   : visible,
-                nextCursor: section.nextCursor,
-                loadingMore: false,
-              };
+              );
+            } else if (pageV2) {
+              cancelSearchSession(pageV2.session_id);
             }
-            return next;
-          });
-          setHasMore(false);
-        }
-        return;
-      }
-      const specialUnread = currentView.mailbox === "unread";
-      const specialFlagged = currentView.mailbox === "starred";
-      const actualMailbox =
-        ["unread", "starred"].includes(currentView.mailbox) ||
-        currentView.mailbox === ""
-          ? undefined
-          : currentView.mailbox;
-      const pageSize = mailPageSize;
-      const page = await api.search(
-        currentView.query,
-        accountIds,
-        actualMailbox,
-        specialUnread,
-        specialFlagged,
-        pageSize,
-        null,
-      );
-      if (
-        requestId === loadRequestIdRef.current &&
-        sameMailView(currentView, currentViewRef.current)
-      ) {
-        nextCursorRef.current = page.nextCursor;
-        const visible = excludeThreads(
-          page.conversations,
-          mailboxActionThreadIdsRef.current,
-        );
-        setThreads(
-          senderCleanupTargetRef.current
-            ? removeSenderCleanupMessages(
-                visible,
-                senderCleanupTargetRef.current,
-              )
-            : visible,
-        );
-        setHasMore(page.nextCursor !== null);
-      }
-      if (currentView.query.trim()) {
-        try {
-          const remote = await api.searchRemote(
-            currentView.query,
-            accountIds,
-            actualMailbox,
-            specialUnread,
-            specialFlagged,
-          );
-          if (
-            requestId === loadRequestIdRef.current &&
-            sameMailView(currentView, currentViewRef.current)
-          ) {
-            const merged = new Map(
-              page.conversations.map((thread) => [thread.id, thread]),
-            );
-            for (const thread of groupMessages(remote)) {
-              if (!merged.has(thread.id)) merged.set(thread.id, thread);
+          } catch (error) {
+            // A versioned search has an explicit cancellation and revision
+            // contract. Falling back to the legacy command here can revive a
+            // request that was cancelled or superseded while the V2 call was
+            // in flight. Keep local results, and only report an error for the
+            // still-current request.
+            if (
+              requestId === loadRequestIdRef.current &&
+              searchGeneration === searchGenerationRef.current &&
+              sameMailView(currentView, currentViewRef.current)
+            ) {
+              if (isSearchErrorV2(error)) {
+                setSearchError({ query: currentView.query, error });
+              } else if (explicitlySubmitted && v2) {
+                setRemoteSearchUnavailable(true);
+                showError(error);
+              }
             }
-            const visible = excludeThreads(
-              [...merged.values()].sort(
-                (left, right) =>
-                  new Date(right.latest.received_at).getTime() -
-                  new Date(left.latest.received_at).getTime(),
-              ),
-              mailboxActionThreadIdsRef.current,
-            );
-            setThreads(
-              senderCleanupTargetRef.current
-                ? removeSenderCleanupMessages(
-                    visible,
-                    senderCleanupTargetRef.current,
-                  )
-                : visible,
-            );
-          }
-        } catch {
-          // Local catalogue results remain useful when remote search is
-          // unavailable or the device goes offline mid-query.
-          if (
-            requestId === loadRequestIdRef.current &&
-            sameMailView(currentView, currentViewRef.current)
-          ) {
-            setRemoteSearchUnavailable(true);
           }
         }
-      }
-    } catch (error) {
-      if (
-        requestId === loadRequestIdRef.current &&
-        sameMailView(currentView, currentViewRef.current)
-      ) {
-        if (smartInbox) {
-          setSmartSections(emptySmartSections());
-          setRetainedSmartThreads(new Map());
+      } catch (error) {
+        if (
+          requestId === loadRequestIdRef.current &&
+          sameMailView(currentView, currentViewRef.current)
+        ) {
+          if (smartInbox) {
+            setSmartSections(emptySmartSections());
+            setRetainedSmartThreads(new Map());
+          }
+          if (isSearchErrorV2(error)) {
+            setSearchError({ query: currentView.query, error });
+          } else showError(error);
         }
-        showError(error);
+      } finally {
+        if (
+          requestId === loadRequestIdRef.current &&
+          sameMailView(currentView, currentViewRef.current)
+        )
+          setLoading(false);
       }
-    } finally {
-      if (
-        requestId === loadRequestIdRef.current &&
-        sameMailView(currentView, currentViewRef.current)
-      )
-        setLoading(false);
-    }
-  }, []);
+    },
+    [
+      cancelActiveSearch,
+      cancelSearchSession,
+      localOnlySearch,
+      recordRecentSearch,
+      submittedSearch,
+    ],
+  );
   const removeAccountFromMain = useCallback(
     (accountId: string) => {
+      cancelActiveSearch();
       removedAccountIdsRef.current.add(accountId);
       accountStateGenerationRef.current += 1;
       const next = accountsRef.current.filter(
@@ -728,16 +1213,23 @@ export default function App() {
       setOutbox((current) =>
         current.filter((message) => message.account_id !== accountId),
       );
-      const nextAccountIds = selectedAccountStillExists
-        ? [selectedAccountStillExists]
-        : next.map((account) => account.id);
+      const savedScope = savedSearchScopeRef.current;
+      const nextAccountIds = savedScope
+        ? savedScope.filter((id) =>
+            next.some((account) => account.id === id && account.enabled),
+          )
+        : selectedAccountStillExists
+          ? [selectedAccountStillExists]
+          : next
+              .filter((account) => account.enabled)
+              .map((account) => account.id);
       currentViewRef.current = {
         ...currentViewRef.current,
         accountIds: nextAccountIds,
       };
       void loadMessages(nextAccountIds);
     },
-    [loadMessages],
+    [cancelActiveSearch, loadMessages],
   );
   const classifyPending = useCallback(async () => {
     classificationRequestedRef.current = true;
@@ -784,12 +1276,62 @@ export default function App() {
       return;
     }
     const requestId = loadRequestIdRef.current;
+    const searchGeneration = searchGenerationRef.current;
     loadingMoreRef.current = true;
     setLoadingMore(true);
     try {
-      const specialUnread = currentView.mailbox === "unread";
-      const specialFlagged = currentView.mailbox === "starred";
+      const session = searchSessionRef.current;
+      if (
+        session?.continuation &&
+        session.request.raw_query === currentView.query
+      ) {
+        const nextSearch =
+          "nextSearchPageV2" in api ? api.nextSearchPageV2 : undefined;
+        if (!nextSearch) return;
+        const page = await nextSearch({
+          ...session.request,
+          continuation: session.continuation,
+        });
+        if (
+          requestId !== loadRequestIdRef.current ||
+          searchGeneration !== searchGenerationRef.current ||
+          !sameMailView(currentView, currentViewRef.current) ||
+          page.session_id !== session.sessionId ||
+          searchSessionRef.current?.sessionId !== session.sessionId ||
+          page.revision < session.revision
+        ) {
+          return;
+        }
+        searchSessionRef.current = {
+          ...session,
+          revision: page.revision,
+          continuation: page.continuation ?? null,
+        };
+        setHasMore(Boolean(page.continuation));
+        setSearchCoverage((current) =>
+          mergeSearchCoverage(
+            current,
+            page.coverage,
+            page.revision,
+            searchCoverageRevisionRef.current,
+          ),
+        );
+        setSearchMatchEvidence((current) => ({
+          ...current,
+          ...(page.match_evidence ?? {}),
+        }));
+        setThreads((current) => mergeThreads(current, page.conversations));
+        return;
+      }
+      const querySetsMailboxScope = hasExplicitFolderPredicate(
+        currentView.query,
+      );
+      const specialUnread =
+        !querySetsMailboxScope && currentView.mailbox === "unread";
+      const specialFlagged =
+        !querySetsMailboxScope && currentView.mailbox === "starred";
       const actualMailbox =
+        querySetsMailboxScope ||
         ["unread", "starred"].includes(currentView.mailbox) ||
         currentView.mailbox === ""
           ? undefined
@@ -826,6 +1368,46 @@ export default function App() {
         setLoadingMore(false);
     }
   }, [hasMore]);
+  useEffect(() => {
+    const session = searchSessionRef.current;
+    if (
+      !session?.continuation ||
+      !hasMore ||
+      loadingMoreRef.current ||
+      !submittedSearch ||
+      submittedSearch.query !== session.request.raw_query ||
+      session.request.raw_query !== currentViewRef.current.query ||
+      threads.length >= mailPageSize
+    ) {
+      return;
+    }
+
+    const state = automaticSearchContinuationRef.current;
+    if (state.sessionId !== session.sessionId) {
+      state.sessionId = session.sessionId;
+      state.turns = 0;
+    }
+    if (state.turns >= automaticSearchContinuationTurns) return;
+    state.turns += 1;
+
+    // Yield to the browser before requesting another bounded candidate page.
+    // This runs only after explicit submission, never for draft previews, and
+    // leaves the visible Load more control available after the small automatic
+    // allowance is exhausted.
+    const sessionId = session.sessionId;
+    const revision = session.revision;
+    const timer = window.setTimeout(() => {
+      const active = searchSessionRef.current;
+      if (
+        active?.sessionId === sessionId &&
+        active.revision >= revision &&
+        currentViewRef.current.query === session.request.raw_query
+      ) {
+        void loadMoreMessages();
+      }
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [hasMore, loadMoreMessages, submittedSearch, threads.length]);
   const loadMoreSmartSection = useCallback(
     async (id: SmartSectionId) => {
       const currentView = currentViewRef.current;
@@ -900,6 +1482,7 @@ export default function App() {
     let disposeSettings: () => void = () => undefined;
     let disposeNotifications: () => void = () => undefined;
     void onAccountConnected(({ account }) => {
+      cancelActiveSearch();
       accountStateGenerationRef.current += 1;
       setAccounts((current) => {
         const next = [
@@ -912,7 +1495,8 @@ export default function App() {
       // The native backend owns rebuild scheduling and execution. This event
       // is best-effort across windows, so it only updates the visible account
       // list; progress and terminal rebuild events drive the mail reload.
-      void requestInitialNotificationAccess(notificationSettings)
+      void refreshSearchFolderCatalogue()
+        .then(() => requestInitialNotificationAccess(notificationSettings))
         .then(() =>
           loadMessages(
             selectedAccountId
@@ -944,10 +1528,12 @@ export default function App() {
     };
   }, [
     activeAccounts,
+    cancelActiveSearch,
     classifyPending,
     loadMessages,
     markSynced,
     notificationSettings,
+    refreshSearchFolderCatalogue,
     selectedAccountId,
   ]);
   useEffect(() => {
@@ -955,6 +1541,7 @@ export default function App() {
     let unlisten: () => void = () => undefined;
     void onAccountUpdated((updated) => {
       if (removedAccountIdsRef.current.has(updated.id)) return;
+      cancelActiveSearch();
       accountStateGenerationRef.current += 1;
       const index = accountsRef.current.findIndex(
         (account) => account.id === updated.id,
@@ -972,7 +1559,7 @@ export default function App() {
       disposed = true;
       unlisten();
     };
-  }, []);
+  }, [cancelActiveSearch]);
   useEffect(() => {
     let disposed = false;
     let unlisten: () => void = () => undefined;
@@ -995,6 +1582,7 @@ export default function App() {
       setActiveThreadSnapshot(undefined);
       setSelected(new Set());
       void loadMessages().finally(() => {
+        void refreshSearchFolderCatalogue();
         markSynced();
         setSyncStatus(undefined);
       });
@@ -1006,7 +1594,7 @@ export default function App() {
       disposed = true;
       dispose();
     };
-  }, [loadMessages]);
+  }, [loadMessages, refreshSearchFolderCatalogue]);
   useEffect(() => {
     let disposed = false;
     let dispose: () => void = () => undefined;
@@ -1055,6 +1643,43 @@ export default function App() {
   useEffect(() => {
     let disposed = false;
     let unlisten: () => void = () => undefined;
+    void onSearchProgress((progress) => {
+      const activeSession = searchSessionRef.current;
+      // A provider can finish after the user starts another search. Do not let
+      // that old session, or an older revision of this one, alter the coverage
+      // the user is currently reading. Equal revisions are cumulative
+      // per-account and mailbox updates within one search session.
+      if (
+        !activeSession ||
+        progress.sessionId !== activeSession.sessionId ||
+        progress.revision < activeSession.revision
+      ) {
+        return;
+      }
+      searchSessionRef.current = {
+        ...activeSession,
+        revision: progress.revision,
+      };
+      setSearchCoverage((current) =>
+        mergeSearchCoverage(
+          current,
+          progress.coverage,
+          progress.revision,
+          searchCoverageRevisionRef.current,
+        ),
+      );
+    }).then((listener) => {
+      if (disposed) listener();
+      else unlisten = listener;
+    });
+    return () => {
+      disposed = true;
+      unlisten();
+    };
+  }, []);
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: () => void = () => undefined;
     void onComposeSent(() => {
       showStatus(t("feedback.sent"));
       void loadMessages();
@@ -1089,7 +1714,17 @@ export default function App() {
     };
   }, []);
   useEffect(() => {
-    if (!activeAccounts.length) return;
+    if (!activeAccounts.length) {
+      if (savedSearchScope !== undefined || selectedAccountId !== undefined) {
+        setThreads([]);
+        setSmartSections(emptySmartSections());
+        setHasMore(false);
+        setSearchCoverage([]);
+        setSearchMatchEvidence({});
+        setLoading(false);
+      }
+      return;
+    }
     void loadMessages().then(() => {
       if (initialClassificationStartedRef.current) return;
       initialClassificationStartedRef.current = true;
@@ -1099,9 +1734,12 @@ export default function App() {
     activeAccounts,
     classifyPending,
     debouncedQuery,
+    submittedSearch,
     loadMessages,
     mailbox,
     mailListView,
+    savedSearchScope,
+    selectedAccountId,
   ]);
   useEffect(() => {
     let disposed = false;
@@ -1232,7 +1870,7 @@ export default function App() {
       await currentWindow.show();
       await currentWindow.setFocus();
       setMailbox("INBOX");
-      setQuery("");
+      changeSearchQuery("");
       setSelected(new Set());
       setAiResult(undefined);
 
@@ -1279,7 +1917,7 @@ export default function App() {
           await currentWindow.show();
           await currentWindow.setFocus();
           setMailbox("INBOX");
-          setQuery("");
+          changeSearchQuery("");
           selectedAccountIdRef.current = accountId;
           setSelectedAccountId(accountId);
           setActive(undefined);
@@ -1328,6 +1966,12 @@ export default function App() {
       : [];
   const targets = targetThreads.flatMap((thread) => thread.messages);
   const selectAccount = (id: string) => {
+    if (!accounts.some((account) => account.id === id && account.enabled)) {
+      showStatus(t("search.accountUnavailable"), "error");
+      return;
+    }
+    cancelActiveSearch();
+    setSavedSearchScope(undefined);
     selectedAccountIdRef.current = id;
     setSelectedAccountId(id);
     setMailbox("INBOX");
@@ -1337,6 +1981,8 @@ export default function App() {
     setAiResult(undefined);
   };
   const selectMailbox = (value: string) => {
+    cancelActiveSearch();
+    setSavedSearchScope(undefined);
     if (value === "INBOX") {
       selectedAccountIdRef.current = undefined;
       setSelectedAccountId(undefined);
@@ -1361,6 +2007,7 @@ export default function App() {
         activeAccounts.includes(item.id),
       );
       await syncAccounts(targets, setSyncStatus, () => void loadMessages());
+      await refreshSearchFolderCatalogue();
       markSynced();
       await requestInitialNotificationAccess(notificationSettings);
       await loadMessages();
@@ -2527,6 +3174,32 @@ export default function App() {
       onChoose={(enabled) => setAnalytics(setAnalyticsConsent(enabled))}
     />
   );
+  useEffect(() => {
+    const enabledAccountIds = new Set(
+      accounts
+        .filter((account) => account.enabled)
+        .map((account) => account.id),
+    );
+    const discovered = new Set<string>();
+    const addMailbox = (candidate: string, accountId: string) => {
+      if (enabledAccountIds.has(accountId) && isVisibleFolderPath(candidate)) {
+        discovered.add(candidate.trim());
+      }
+    };
+    for (const thread of threads) {
+      for (const message of thread.sourceMessages ?? thread.messages) {
+        addMailbox(message.mailbox, message.account_id);
+      }
+    }
+    for (const section of Object.values(smartSections)) {
+      for (const thread of section.threads) {
+        for (const message of thread.sourceMessages ?? thread.messages) {
+          addMailbox(message.mailbox, message.account_id);
+        }
+      }
+    }
+    setObservedSearchFolders(uniqueSortedFolderPaths([...discovered]));
+  }, [accounts, smartSections, threads]);
   if (!loading && accounts.length === 0)
     return (
       <div className="app-shell">
@@ -2557,6 +3230,9 @@ export default function App() {
           feedbackDisabled={loading}
           outboxCount={outbox.length}
           starredCount={starredCount}
+          savedSearches={savedSearches}
+          onSelectSavedSearch={selectSavedSearch}
+          onRemoveSavedSearch={removeSavedSearch}
         />
         <section className="mail-list-panel" />
         <main className="reader">
@@ -2600,6 +3276,9 @@ export default function App() {
         feedbackDisabled={loading}
         outboxCount={outbox.length}
         starredCount={starredCount}
+        savedSearches={savedSearches}
+        onSelectSavedSearch={selectSavedSearch}
+        onRemoveSavedSearch={removeSavedSearch}
       />
       <MailList
         threads={displayedThreads}
@@ -2610,11 +3289,29 @@ export default function App() {
         loadingMore={loadingMore}
         hasMore={hasMore}
         remoteSearchUnavailable={remoteSearchUnavailable}
+        searchUnavailableReason={
+          savedSearchScope !== undefined && !activeAccounts.length
+            ? t("search.savedUnavailable")
+            : selectedAccountId !== undefined && !activeAccounts.length
+              ? t("search.accountUnavailable")
+              : undefined
+        }
+        searchErrorMessage={
+          searchError?.query === query ? searchError.error.message : undefined
+        }
+        searchCoverage={searchCoverage}
+        searchAccounts={accounts}
+        searchMatchEvidence={searchMatchEvidence}
+        searchPeople={searchPeople}
+        searchPeopleContext={searchPeopleContext}
+        recentSearches={recentSearches}
+        localOnlySearch={localOnlySearch}
         syncStatus={syncStatus}
         classifying={classifying}
         lastSyncAt={lastSyncAt}
         aiConnected={aiConnected}
         mailboxTitle={mailboxTitle}
+        searchFolderCatalogue={visibleSearchFolderCatalogue}
         view={mailListView}
         smartInbox={smartInboxActive}
         smartSections={smartSectionIds.map((id) => {
@@ -2670,7 +3367,11 @@ export default function App() {
             .catch(showError);
         }}
         onToggleStar={(message, starred) => void toggleStar(message, starred)}
-        onQuery={setQuery}
+        onQuery={changeSearchQuery}
+        onSubmitSearch={submitSearch}
+        onClearRecentSearches={clearRecentSearches}
+        onLocalOnlySearchChange={changeLocalOnlySearch}
+        onSaveSearch={saveCurrentSearch}
         onOpen={(thread) => {
           const previousThread = activeThread;
           if (smartInboxActive) {
@@ -2849,7 +3550,11 @@ export default function App() {
   function showError(error: unknown, title = t("errors.generic")) {
     void showNativeMessage(
       title,
-      error instanceof Error ? error.message : String(error),
+      isSearchErrorV2(error)
+        ? error.message
+        : error instanceof Error
+          ? error.message
+          : String(error),
       "error",
     );
   }
@@ -2883,6 +3588,50 @@ function mergeThreads(current: MailThread[], incoming: MailThread[]) {
     (left, right) =>
       new Date(right.latest.received_at).getTime() -
       new Date(left.latest.received_at).getTime(),
+  );
+}
+
+function mergeSearchCoverage(
+  current: SearchCoverage[],
+  incoming: SearchCoverage[],
+  revision: number,
+  revisions: Map<string, number>,
+) {
+  const next = new Map(current.map((item) => [coverageKey(item), item]));
+  for (const item of incoming) {
+    const key = coverageKey(item);
+    const previousRevision = revisions.get(key) ?? -1;
+    if (revision >= previousRevision) {
+      next.set(key, item);
+      revisions.set(key, revision);
+    }
+  }
+  return [...next.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, item]) => item);
+}
+
+function coverageKey(item: SearchCoverage) {
+  // The two local indexes describe distinct coverage and must both remain
+  // visible. Provider states are alternatives for one remote mailbox, so a
+  // newer provider state replaces its older state instead of showing an
+  // impossible pair such as Offline and Provider searched.
+  const source =
+    item.state === "local_catalogue" || item.state === "local_body_index"
+      ? item.state
+      : "provider";
+  return `${item.account_id}\u0000${item.mailbox ?? ""}\u0000${source}`;
+}
+
+function isSearchErrorV2(error: unknown): error is SearchErrorV2 {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as Partial<SearchErrorV2>;
+  return (
+    typeof candidate.message === "string" &&
+    (candidate.category === "parse" ||
+      candidate.category === "unsupported" ||
+      candidate.category === "provider" ||
+      candidate.category === "transient")
   );
 }
 
@@ -3024,4 +3773,60 @@ function readJson<T>(key: string, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+function readRecentSearches() {
+  const value = readStoredJson("dakia.search.recent");
+  return Array.isArray(value) && value.every((item) => typeof item === "string")
+    ? value.slice(0, 20)
+    : [];
+}
+
+function readSavedSearches() {
+  const value = readStoredJson("dakia.search.saved");
+  return Array.isArray(value) && value.every(isSavedSearch) ? value : [];
+}
+
+function readStoredJson(key: string): unknown {
+  try {
+    const value = localStorage.getItem(key);
+    return value ? JSON.parse(value) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function uniqueSortedFolderPaths(candidates: string[]) {
+  return [
+    ...new Set(
+      candidates
+        .filter(isVisibleFolderPath)
+        .map((candidate) => candidate.trim()),
+    ),
+  ].sort((left, right) => left.localeCompare(right));
+}
+
+function isVisibleFolderPath(candidate: string) {
+  const value = candidate.trim();
+  return (
+    Boolean(value) &&
+    !["unread", "starred", "Outbox"].includes(value) &&
+    !/[\u0000-\u001F\u007F]/.test(value) &&
+    !value.includes("::@dakia-") &&
+    !value.startsWith("Mailbox::@dakia-mailbox-v1:")
+  );
+}
+
+function isSavedSearch(value: unknown): value is SavedSearch {
+  if (!value || typeof value !== "object") return false;
+  const search = value as Record<string, unknown>;
+  return (
+    typeof search.id === "string" &&
+    typeof search.name === "string" &&
+    typeof search.raw_query === "string" &&
+    Array.isArray(search.account_ids) &&
+    search.account_ids.every((id) => typeof id === "string") &&
+    typeof search.local_only === "boolean" &&
+    typeof search.created_at === "string"
+  );
 }

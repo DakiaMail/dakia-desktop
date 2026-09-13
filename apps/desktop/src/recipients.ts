@@ -30,6 +30,39 @@ export function splitAddressValues(value: string) {
   return splitHeaderList(value);
 }
 
+/** Returns the canonical address only when this is one complete mailbox. */
+export function recipientAddressIdentity(value: string) {
+  return parseAddress(value)?.address.trim().toLocaleLowerCase();
+}
+
+export function isValidRecipientValue(value: string) {
+  return Boolean(recipientAddressIdentity(value));
+}
+
+/** A comma or semicolon can commit a recipient unless it belongs to a quote. */
+export function hasTrailingRecipientDelimiter(value: string) {
+  let quoted = false;
+  let escaped = false;
+  let angleDepth = 0;
+  for (const character of value.trimEnd()) {
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quoted) {
+      escaped = true;
+      continue;
+    }
+    if (character === '"') quoted = !quoted;
+    if (!quoted) {
+      if (character === "<") angleDepth += 1;
+      if (character === ">") angleDepth = Math.max(0, angleDepth - 1);
+    }
+  }
+  const trimmed = value.trimEnd();
+  return !quoted && angleDepth === 0 && /[,;]$/.test(trimmed);
+}
+
 export function messageRecipients(message: MailSummary): MessageRecipients {
   const from = parseAddressList(message.from_address).slice(0, 1);
   if (from[0] && message.from_name) from[0].name = message.from_name;
@@ -161,7 +194,30 @@ function parseAddress(value: string): MailAddress | undefined {
 }
 
 function isUsableAddress(value: string) {
-  return /^[^\s@<>]+@(?:[^\s@<>]+\.[^\s@<>]+|\[[^\]\s]+\])$/.test(value.trim());
+  const address = value.trim();
+  // This is deliberately a *permissive* presentation check, not a second
+  // SMTP validator. Rust and lettre are authoritative at send time. In
+  // particular, valid RFC mailboxes can have a quoted local part or a local
+  // domain, both of which the previous browser-only regex incorrectly marked
+  // as invalid chips.
+  if (!address || /[\r\n\0]/.test(address)) return false;
+  const at = address.lastIndexOf("@");
+  if (at <= 0 || at === address.length - 1) return false;
+  const local = address.slice(0, at);
+  const domain = address.slice(at + 1);
+  const quotedLocal = /^"(?:[^"\\\r\n]|\\[^\r\n])*"$/.test(local);
+  const dotAtomLocal =
+    !/[\s@<>()\[\],;:]/.test(local) &&
+    !local.startsWith(".") &&
+    !local.endsWith(".") &&
+    !local.includes("..");
+  const domainLiteral = /^\[[^\]\s]+\]$/.test(domain);
+  const domainName =
+    !/[\s@<>()\[\],;:]/.test(domain) &&
+    !domain.startsWith(".") &&
+    !domain.endsWith(".") &&
+    !domain.includes("..");
+  return (quotedLocal || dotAtomLocal) && (domainLiteral || domainName);
 }
 
 function normalizeAddress(value: string) {

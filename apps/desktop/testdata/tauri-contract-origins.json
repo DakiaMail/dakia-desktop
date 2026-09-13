@@ -7,6 +7,7 @@
     "account-updated": "frontend",
     "analytics-consent-changed": "frontend",
     "compose-sent": "frontend",
+    "contacted-people-changed": "native",
     "dakia://dropped-file-error": "native",
     "dakia://dropped-file-receipt": "native",
     "mail-arrived": "native",
@@ -23,6 +24,7 @@
     "reader-target": "frontend",
     "reader-window-failed": "frontend",
     "reader-window-mutated": "frontend",
+    "search-progress": "native",
     "select-account": "frontend",
     "settings-changed": "frontend"
   }

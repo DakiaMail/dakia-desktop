@@ -50,6 +50,12 @@ function renderList(
     onOpen?: Parameters<typeof MailList>[0]["onOpen"];
     onDoubleOpen?: Parameters<typeof MailList>[0]["onDoubleOpen"];
     aiConnected?: boolean;
+    searchCoverage?: Parameters<typeof MailList>[0]["searchCoverage"];
+    searchAccounts?: Parameters<typeof MailList>[0]["searchAccounts"];
+    searchMatchEvidence?: Parameters<typeof MailList>[0]["searchMatchEvidence"];
+    query?: string;
+    hasMore?: boolean;
+    onLoadMore?: () => void;
   } = {},
 ) {
   const handlers = {
@@ -65,11 +71,14 @@ function renderList(
       <MailList
         threads={groupMessages(overrides.messages ?? messages)}
         selected={new Set(["1"])}
-        query=""
+        query={overrides.query ?? ""}
         loading={false}
         loadingMore={false}
-        hasMore={false}
+        hasMore={overrides.hasMore ?? false}
         remoteSearchUnavailable={false}
+        searchCoverage={overrides.searchCoverage}
+        searchAccounts={overrides.searchAccounts}
+        searchMatchEvidence={overrides.searchMatchEvidence}
         classifying={false}
         aiConnected={overrides.aiConnected ?? false}
         mailboxTitle={mailboxTitle}
@@ -92,7 +101,7 @@ function renderList(
         onArchive={vi.fn()}
         onSpam={vi.fn()}
         onSummarize={vi.fn()}
-        onLoadMore={vi.fn()}
+        onLoadMore={overrides.onLoadMore ?? vi.fn()}
         pendingActions={pendingActions}
         actionsDisabled={disabled}
         searchRef={{ current: null }}
@@ -102,6 +111,19 @@ function renderList(
 }
 
 describe("MailList action feedback", () => {
+  it("keeps a keyboard-accessible Load more control visible for an empty page", () => {
+    const onLoadMore = vi.fn();
+    renderList({}, false, "Inbox", {
+      messages: [],
+      hasMore: true,
+      onLoadMore,
+    });
+
+    const loadMore = screen.getByRole("button", { name: "Show more" });
+    fireEvent.click(loadMore);
+    expect(onLoadMore).toHaveBeenCalledOnce();
+  });
+
   it("keeps single-click selection and opens a dedicated reader on double-click", () => {
     const onOpen = vi.fn();
     const onDoubleOpen = vi.fn();
@@ -227,6 +249,70 @@ describe("MailList action feedback", () => {
     expect(screen.queryByText(/color: red/)).not.toBeInTheDocument();
   });
 
+  it("keeps mixed account and mailbox search coverage visible together", () => {
+    renderList({}, false, "Inbox", {
+      searchAccounts: [
+        {
+          id: "account",
+          email: "me@example.com",
+          account_name: "Personal",
+          display_name: "Me",
+          provider_id: "test",
+          auth: { type: "password", username: "me@example.com" },
+          imap_host: "imap.example.com",
+          imap_port: 993,
+          imap_security: "tls",
+          smtp_host: "smtp.example.com",
+          smtp_port: 465,
+          smtp_security: "tls",
+          archive_mailbox: "Archive",
+          spam_mailbox: "Spam",
+          enabled: true,
+        },
+        {
+          id: "work",
+          email: "work@example.com",
+          account_name: "Work",
+          display_name: "Work",
+          provider_id: "test",
+          auth: { type: "password", username: "work@example.com" },
+          imap_host: "imap.example.com",
+          imap_port: 993,
+          imap_security: "tls",
+          smtp_host: "smtp.example.com",
+          smtp_port: 465,
+          smtp_security: "tls",
+          archive_mailbox: "Archive",
+          spam_mailbox: "Spam",
+          enabled: true,
+        },
+      ],
+      searchCoverage: [
+        { account_id: "account", mailbox: "INBOX", state: "provider_searched" },
+        {
+          account_id: "work",
+          mailbox: "Archive",
+          state: "offline",
+          detail: "No connection",
+        },
+        {
+          account_id: "work",
+          mailbox: "Sent",
+          state: "provider_partial",
+        },
+      ],
+      query: "receipt",
+    });
+
+    const coverage = screen.getByRole("status", { name: "Search status" });
+    expect(coverage).toHaveTextContent("Work");
+    expect(coverage).toHaveTextContent("Work couldn’t be searched. Try again.");
+    expect(coverage).not.toHaveTextContent("Personal");
+    expect(coverage).not.toHaveTextContent("INBOX");
+    expect(coverage).not.toHaveTextContent("Provider searched");
+    expect(coverage).not.toHaveTextContent("No connection");
+  });
+
   it("keeps a long mailbox title in a truncatable heading beside Compose", () => {
     const longTitle = "a.very.long.mailbox.address@example.test";
     renderList({}, false, longTitle);
@@ -287,6 +373,35 @@ describe("MailList action feedback", () => {
     ).toBeVisible();
     screen.getByLabelText("Select").click();
     expect(onSelect).toHaveBeenCalledWith(["account:1"], true);
+  });
+
+  it("shows match evidence and opens its exact primary message", () => {
+    const onOpen = vi.fn();
+    renderList({}, false, "Inbox", {
+      onOpen,
+      messages: [
+        messages[0],
+        {
+          ...messages[1],
+          thread_id: messages[0].thread_id,
+          received_at: "2026-07-20T10:00:00Z",
+        },
+      ],
+      searchMatchEvidence: {
+        "account:1": {
+          primary_message_id: "1",
+          matched_message_ids: ["1"],
+          match_count: 1,
+          excerpt: "The exact matching text",
+        },
+      },
+    });
+
+    expect(screen.getByText("The exact matching text")).toBeVisible();
+    fireEvent.click(screen.getByText("Subject 2").closest("button")!);
+    expect(onOpen).toHaveBeenCalledWith(
+      expect.objectContaining({ latest: expect.objectContaining({ id: "1" }) }),
+    );
   });
 
   it("renders Seen last and loads its next page near the scroll end", () => {
