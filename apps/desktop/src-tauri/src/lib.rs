@@ -1,3 +1,5 @@
+mod operations;
+mod outgoing;
 mod realtime;
 mod translation;
 
@@ -8,14 +10,17 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
     Engine,
 };
-use dakia_core::storage::{ConversationTarget, MessageContentFetchAcquire};
+use dakia_core::storage::{
+    ConversationTarget, MessageContentFetchAcquire, MessageRemoteIdentity, SyncRun, SyncRunUpdate,
+};
 use dakia_core::{
     ai::{AiConfig, AiProvider, AiService},
-    mailbox_action_destination, normalize_sender_address, provider, Account, AccountAuth,
-    AccountDraft, Attachment, CachedMessageContent, ComposeMessage, EmailClassificationInput,
-    LocalEmailClassifier, MailConversation, MailConversationPage, MailRebuildJob, MailService,
-    MailSummary, MailboxAction, ModelClassificationUpdate, ProviderPreset, SearchQuery,
-    SenderTrashResult, SmartInboxPage, SmartInboxQuery, Store, SyncProgress, SyncResult,
+    normalize_sender_address, provider, Account, AccountAuth, AccountDraft, Attachment,
+    CachedMessageContent, ComposeMessage, EmailClassificationInput, LocalEmailClassifier,
+    MailConversation, MailConversationPage, MailRebuildJob, MailService, MailSummary,
+    MailboxAction, ModelClassificationUpdate, PreparedOutgoingMessage, ProviderPreset, SearchQuery,
+    SendOutcome, SenderTrashResult, SentCopyOutcome, SentCopyPresence, SentCopyStatus,
+    SmartInboxPage, SmartInboxQuery, Store, SupportedMailbox, SyncProgress, SyncResult,
     UnsubscribeOutcome,
 };
 use secrecy::SecretString;
@@ -43,7 +48,7 @@ use tauri::{
     ipc::Channel,
     menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    DragDropEvent, Emitter, Manager, State, WindowEvent,
+    DragDropEvent, Emitter, Listener, Manager, State, WindowEvent,
 };
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_opener::OpenerExt;
@@ -51,6 +56,7 @@ use tokio::sync::{watch, Mutex as AsyncMutex, Notify, OwnedMutexGuard, Semaphore
 use url::Url;
 use uuid::Uuid;
 
+use outgoing::{ClaimHeartbeat, SubmissionCoordinator};
 use realtime::{RealtimeSyncManager, RealtimeSyncStatus};
 use translation::{
     TranslationDownloadProgress, TranslationLanguageDetection, TranslationModelFiles,
@@ -64,6 +70,10 @@ const CLASSIFICATION_RETRY_DELAYS: [Duration; 2] =
     [Duration::from_millis(100), Duration::from_millis(500)];
 const MAX_EXPORT_FILENAME_BYTES: usize = 255;
 const MAX_DOWNLOAD_COLLISION_SUFFIX_BYTES: usize = " (9999)".len();
+const ACCOUNT_REMOVAL_SUBMISSION_WAIT: Duration = Duration::from_secs(10);
+const OUTGOING_SUBMISSION_CLAIM_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const SENT_COPY_CATALOGUE_REFRESH_LIMIT: u32 = 24;
+const SENT_COPY_CATALOGUE_REFRESH_LOOKBACK_DAYS: i64 = 14;
 
 struct AppState {
     store: Store,
@@ -76,7 +86,14 @@ struct AppState {
     mail_rebuilds: Mutex<HashMap<Uuid, MailRebuildProgress>>,
     mail_rebuild_running: Mutex<HashSet<Uuid>>,
     mail_rebuild_cancellations: MailRebuildCancellations,
+    progressive_sync_cancellations: ProgressiveSyncCancellations,
+    sync_runs_running: Mutex<HashSet<Uuid>>,
+    mutation_drains_running: Mutex<HashSet<Uuid>>,
+    folder_promotions_running: Mutex<HashSet<(Uuid, String)>>,
+    sent_reconcile_retry_running: Mutex<HashSet<Uuid>>,
+    sent_reconcile_poll_running: Mutex<HashSet<Uuid>>,
     account_operations: AccountOperationLocks,
+    submissions: Arc<SubmissionCoordinator>,
     translation_downloads: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
 
@@ -211,6 +228,18 @@ impl MailRebuildCancellations {
         }
     }
 
+    fn clear_request(&self, account_id: Uuid) {
+        if let Some(sender) = self
+            .active
+            .lock()
+            .expect("mail rebuild cancellation lock poisoned")
+            .get(&account_id)
+            .map(|cancellation| cancellation.sender.clone())
+        {
+            sender.send_replace(MailRebuildCancellationDisposition::None);
+        }
+    }
+
     fn disposition(
         &self,
         receiver: &watch::Receiver<MailRebuildCancellationDisposition>,
@@ -245,8 +274,162 @@ impl MailRebuildCancellations {
     }
 }
 
+/// Cancellation for first-Inbox/history/promotion work. These workers make
+/// bounded provider calls, so lifecycle changes can wait for the next command
+/// boundary rather than deleting account state underneath live IMAP work.
+#[derive(Default)]
+struct ProgressiveSyncCancellations {
+    active: Mutex<HashMap<Uuid, ProgressiveSyncCancellation>>,
+}
+
+struct ProgressiveSyncCancellation {
+    sender: watch::Sender<bool>,
+    registrations: usize,
+    blocked: bool,
+}
+
+impl ProgressiveSyncCancellations {
+    fn register(&self, account_id: Uuid) -> watch::Receiver<bool> {
+        let mut active = self
+            .active
+            .lock()
+            .expect("progressive sync cancellation lock poisoned");
+        let entry = active.entry(account_id).or_insert_with(|| {
+            let (sender, _) = watch::channel(false);
+            ProgressiveSyncCancellation {
+                sender,
+                registrations: 0,
+                blocked: false,
+            }
+        });
+        entry.registrations += 1;
+        entry.sender.subscribe()
+    }
+
+    fn cancel(&self, account_id: Uuid) {
+        let mut active = self
+            .active
+            .lock()
+            .expect("progressive sync cancellation lock poisoned");
+        let entry = active.entry(account_id).or_insert_with(|| {
+            let (sender, _) = watch::channel(false);
+            ProgressiveSyncCancellation {
+                sender,
+                registrations: 0,
+                blocked: false,
+            }
+        });
+        entry.blocked = true;
+        entry.sender.send_replace(true);
+    }
+
+    fn resume(&self, account_id: Uuid) {
+        let mut active = self
+            .active
+            .lock()
+            .expect("progressive sync cancellation lock poisoned");
+        if let Some(entry) = active.get_mut(&account_id) {
+            entry.blocked = false;
+            entry.sender.send_replace(false);
+            if entry.registrations == 0 {
+                active.remove(&account_id);
+            }
+        }
+    }
+
+    fn clear(&self, account_id: Uuid) {
+        let mut active = self
+            .active
+            .lock()
+            .expect("progressive sync cancellation lock poisoned");
+        if let Some(entry) = active.get_mut(&account_id) {
+            entry.registrations -= 1;
+            if entry.registrations == 0 && !entry.blocked {
+                active.remove(&account_id);
+            }
+        }
+    }
+}
+
+fn progressive_sync_cancelled(receiver: &watch::Receiver<bool>) -> bool {
+    *receiver.borrow()
+}
+
+async fn wait_for_progressive_sync_quiescence(
+    state: &Arc<AppState>,
+    account_id: Uuid,
+    timeout: Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let initial_running = state
+            .sync_runs_running
+            .lock()
+            .expect("sync run reservation lock poisoned")
+            .contains(&account_id);
+        let promotion_running = state
+            .folder_promotions_running
+            .lock()
+            .expect("folder promotion reservation lock poisoned")
+            .iter()
+            .any(|(id, _)| *id == account_id);
+        if !initial_running && !promotion_running {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 fn normalized_account_email(email: &str) -> String {
     email.trim().to_ascii_lowercase()
+}
+
+fn acceptance_data_dir() -> anyhow::Result<Option<PathBuf>> {
+    let Some(path) = std::env::var_os("DAKIA_ACCEPTANCE_DATA_DIR") else {
+        return Ok(None);
+    };
+    if !cfg!(debug_assertions) {
+        anyhow::bail!("DAKIA_ACCEPTANCE_DATA_DIR is available only in debug builds");
+    }
+    let path = PathBuf::from(path);
+    if !path.is_absolute() {
+        anyhow::bail!("DAKIA_ACCEPTANCE_DATA_DIR must be an absolute path");
+    }
+    std::fs::create_dir_all(&path)?;
+    let path = path.canonicalize()?;
+    if !is_dedicated_acceptance_dir(&path) {
+        anyhow::bail!("DAKIA_ACCEPTANCE_DATA_DIR must name a dedicated directory");
+    }
+    if !path.is_dir() {
+        anyhow::bail!("DAKIA_ACCEPTANCE_DATA_DIR must name a directory");
+    }
+    Ok(Some(path))
+}
+
+fn is_dedicated_acceptance_dir(path: &Path) -> bool {
+    path != Path::new("/") && path != Path::new("/private") && path != Path::new("/private/tmp")
+}
+
+#[cfg(test)]
+mod acceptance_data_dir_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_non_dedicated_acceptance_roots() {
+        for root in [
+            Path::new("/"),
+            Path::new("/private"),
+            Path::new("/private/tmp"),
+        ] {
+            assert!(!is_dedicated_acceptance_dir(root));
+        }
+        assert!(is_dedicated_acceptance_dir(Path::new(
+            "/private/tmp/dakia-acceptance"
+        )));
+    }
 }
 
 fn matching_account_email(account: &Account, email: &str) -> bool {
@@ -1890,9 +2073,9 @@ async fn load_message_content(
         }
     }
 
-    // Background warming and a foreground open share this durable claim. A
-    // foreground request waits for the warmer's cache commit, but takes over
-    // immediately if the warmer failed and released the claim.
+    // A foreground open has its own claim class. It can immediately take over
+    // a background warmer, while remaining serialized with another foreground
+    // fetch of the same message.
     let mut waited = Duration::ZERO;
     let claim = loop {
         match state
@@ -1932,16 +2115,13 @@ async fn load_message_content(
                 });
             }
         }
-        let message = if cached_before_fetch
-            .as_ref()
-            .is_some_and(looks_like_misclassified_text_body)
-        {
-            // PR #42 repairs legacy rows under the account-operation lock so
-            // a concurrent move or action cannot redirect the refetch.
-            refetch_and_persist_message(state, message_id).await?
-        } else {
-            fetch_remote_message(state, message_id).await?
-        };
+        let identity = state
+            .store
+            .capture_message_remote_identity(message_id)
+            .await
+            .map_err(error)?
+            .ok_or_else(|| "Message changed while it was being opened".to_owned())?;
+        let message = fetch_remote_message(state, &identity).await?;
         let cached = CachedMessageContent {
             body_text: message.body_text.clone(),
             body_html: message.body_html.clone(),
@@ -1954,21 +2134,25 @@ async fn load_message_content(
                 .collect(),
         };
         let still_starred =
-            persist_foreground_message_content(&state.store, &message, &cached).await?;
+            persist_foreground_message_content(&state.store, &identity, &message, &cached).await?;
         if !still_starred {
-            if let Err(cache_error) = state
+            let cached_current = state
                 .store
-                .cache_message_content(message_id, false, cached.clone())
+                .cache_message_content_if_current(&identity, false, cached.clone())
                 .await
-            {
-                tracing::warn!(%cache_error, %message_id, "could not persist foreground message cache");
+                .map_err(error)?;
+            if !cached_current {
+                return Err("Message changed while its content was loading".to_owned());
             }
         }
-        state
+        let completed = state
             .store
-            .set_message_content_state(message_id, "complete")
+            .set_message_content_state_if_current(&identity, "complete")
             .await
             .map_err(error)?;
+        if !completed {
+            return Err("Message changed while its content was loading".to_owned());
+        }
         Ok(MessageContent {
             body_text: cached.body_text,
             body_html: cached.body_html,
@@ -2023,7 +2207,14 @@ mod message_content_repair_tests {
             mail_rebuilds: Mutex::new(HashMap::new()),
             mail_rebuild_running: Mutex::new(HashSet::new()),
             mail_rebuild_cancellations: MailRebuildCancellations::default(),
+            progressive_sync_cancellations: ProgressiveSyncCancellations::default(),
+            sync_runs_running: Mutex::new(HashSet::new()),
+            mutation_drains_running: Mutex::new(HashSet::new()),
+            folder_promotions_running: Mutex::new(HashSet::new()),
+            sent_reconcile_retry_running: Mutex::new(HashSet::new()),
+            sent_reconcile_poll_running: Mutex::new(HashSet::new()),
             account_operations: AccountOperationLocks::default(),
+            submissions: Arc::new(SubmissionCoordinator::default()),
             remote_operation_slots: Arc::new(Semaphore::new(MESSAGE_HYDRATION_CONCURRENCY)),
             translation_downloads: Mutex::new(HashMap::new()),
         })
@@ -2129,16 +2320,20 @@ async fn save_attachment(
     message_id: String,
     attachment_id: String,
 ) -> Result<String, String> {
-    let (summary, account) = remote_message_locator(state.inner(), &message_id).await?;
+    let (identity, account) =
+        capture_remote_identity_and_account(state.inner(), &message_id).await?;
     let attachment = MailService::new(state.store.clone())
-        .fetch_attachment(
-            &account,
-            &summary.mailbox,
-            summary.uid as u32,
-            &attachment_id,
-        )
+        .fetch_attachment_for_identity(&account, &identity, &attachment_id)
         .await
         .map_err(error)?;
+    if !state
+        .store
+        .message_remote_identity_is_current(&identity)
+        .await
+        .map_err(error)?
+    {
+        return Err("Message changed while its attachment was loading".to_owned());
+    }
     save_to_downloads(&app, &attachment.attachment, &attachment.bytes).map_err(error)
 }
 
@@ -2148,43 +2343,35 @@ async fn export_message(
     state: State<'_, Arc<AppState>>,
     message_id: String,
 ) -> Result<String, String> {
-    let initial_message = state
-        .store
-        .message(&message_id)
-        .await
-        .map_err(error)?
-        .ok_or_else(|| "Message not found".to_owned())?;
-    let account_id = Uuid::parse_str(&initial_message.account_id).map_err(error)?;
+    let (initial_identity, _initial_account) =
+        capture_remote_identity_and_account(state.inner(), &message_id).await?;
+    let account_id = Uuid::parse_str(&initial_identity.account_id).map_err(error)?;
     let _operation = state.account_operations.acquire(account_id).await;
-    let message = state
-        .store
-        .message(&message_id)
-        .await
-        .map_err(error)?
-        .ok_or_else(|| "Message changed while it was being exported".to_owned())?;
-    if !same_export_identity(&initial_message, &message) {
+    let (identity, account) =
+        capture_remote_identity_and_account(state.inner(), &message_id).await?;
+    if identity != initial_identity {
         return Err("Message changed while it was being exported".to_owned());
     }
-    let account = state
-        .store
-        .account(account_id)
-        .await
-        .map_err(error)?
-        .ok_or_else(|| "Account not found".to_owned())?;
-    let uid = u32::try_from(message.uid).map_err(|_| "Message UID is invalid".to_owned())?;
     let bytes = MailService::new(state.store.clone())
-        .fetch_raw_message(&account, &message.mailbox, uid)
+        .fetch_raw_message_for_identity(&account, &identity)
         .await
         .map_err(error)?;
-    save_eml_to_downloads(&app, &message.subject, &bytes).map_err(error)
-}
-
-fn same_export_identity(before: &MailSummary, after: &MailSummary) -> bool {
-    before.account_id == after.account_id
-        && before.mailbox == after.mailbox
-        && before.uid == after.uid
-        && before.message_id == after.message_id
-        && before.received_at == after.received_at
+    if !state
+        .store
+        .message_remote_identity_is_current(&identity)
+        .await
+        .map_err(error)?
+    {
+        return Err("Message changed while it was being exported".to_owned());
+    }
+    let subject = state
+        .store
+        .message(&message_id)
+        .await
+        .map_err(error)?
+        .map(|message| message.subject)
+        .ok_or_else(|| "Message changed while it was being exported".to_owned())?;
+    save_eml_to_downloads(&app, &subject, &bytes).map_err(error)
 }
 
 #[tauri::command]
@@ -2193,8 +2380,8 @@ async fn save_all_attachments(
     state: State<'_, Arc<AppState>>,
     message_id: String,
 ) -> Result<Vec<String>, String> {
-    let attachments = fetch_full_remote_message(state.inner(), &message_id)
-        .await?
+    let (_, fetched) = fetch_full_remote_message(state.inner(), &message_id).await?;
+    let attachments = fetched
         .attachments
         .into_iter()
         .filter(|item| is_downloadable_attachment(&item.attachment))
@@ -2213,8 +2400,8 @@ async fn forward_attachments(
     state: State<'_, Arc<AppState>>,
     message_id: String,
 ) -> Result<Vec<DroppedAttachment>, String> {
-    let attachments = fetch_full_remote_message(state.inner(), &message_id)
-        .await?
+    let (_, fetched) = fetch_full_remote_message(state.inner(), &message_id).await?;
+    let attachments = fetched
         .attachments
         .into_iter()
         .filter(|item| is_downloadable_attachment(&item.attachment))
@@ -2255,11 +2442,12 @@ fn is_downloadable_attachment(attachment: &Attachment) -> bool {
 /// starred; a fetched provider snapshot must never undo a concurrent unstar.
 async fn persist_foreground_message_content(
     store: &Store,
+    identity: &MessageRemoteIdentity,
     message: &MailSummary,
     content: &CachedMessageContent,
 ) -> Result<bool, String> {
     let exists = store
-        .update_message_attachment_state(&message.id, message.has_attachments)
+        .update_message_attachment_state_if_current(identity, message.has_attachments)
         .await
         .map_err(error)?;
     if !exists {
@@ -2269,7 +2457,7 @@ async fn persist_foreground_message_content(
         return Ok(false);
     }
     store
-        .cache_starred_message_content(&message.id, content.clone())
+        .cache_starred_message_content_if_current(identity, content.clone())
         .await
         .map_err(error)
 }
@@ -2369,6 +2557,10 @@ mod attachment_presentation_command_tests {
         }
         .into_account(provider::by_id("fastmail").expect("Fastmail preset"));
         store.save_account(&account).await.expect("save account");
+        store
+            .save_mailbox_catalog_state(account.id, "INBOX", "INBOX", 1, 1, true)
+            .await
+            .expect("save Inbox catalogue identity");
         account
     }
 
@@ -2412,11 +2604,19 @@ mod attachment_presentation_command_tests {
             .is_none());
 
         let fetched = complete_message(account.id.to_string(), true);
-        assert!(
-            persist_foreground_message_content(&store, &fetched, &cached_content(&fetched))
-                .await
-                .expect("persist authoritative foreground fetch")
-        );
+        let identity = store
+            .capture_message_remote_identity(&message_id)
+            .await
+            .expect("capture identity")
+            .expect("message identity");
+        assert!(persist_foreground_message_content(
+            &store,
+            &identity,
+            &fetched,
+            &cached_content(&fetched)
+        )
+        .await
+        .expect("persist authoritative foreground fetch"));
 
         assert_eq!(
             store
@@ -2458,11 +2658,19 @@ mod attachment_presentation_command_tests {
 
         let mut fetched = complete_message(account.id.to_string(), false);
         fetched.attachments[1].attachment.is_inline = true;
-        assert!(
-            !persist_foreground_message_content(&store, &fetched, &cached_content(&fetched))
-                .await
-                .expect("persist ordinary foreground metadata")
-        );
+        let identity = store
+            .capture_message_remote_identity(&message_id)
+            .await
+            .expect("capture identity")
+            .expect("message identity");
+        assert!(!persist_foreground_message_content(
+            &store,
+            &identity,
+            &fetched,
+            &cached_content(&fetched)
+        )
+        .await
+        .expect("persist ordinary foreground metadata"));
         assert!(
             store
                 .message(&message_id)
@@ -2501,11 +2709,19 @@ mod attachment_presentation_command_tests {
             .set_message_flagged(&message_id, false)
             .await
             .expect("unstar during fetch");
-        assert!(
-            !persist_foreground_message_content(&store, &fetched, &cached_content(&fetched))
-                .await
-                .expect("persist stale fetch without resurrecting the star")
-        );
+        let identity = store
+            .capture_message_remote_identity(&message_id)
+            .await
+            .expect("capture identity")
+            .expect("message identity");
+        assert!(!persist_foreground_message_content(
+            &store,
+            &identity,
+            &fetched,
+            &cached_content(&fetched)
+        )
+        .await
+        .expect("persist stale fetch without resurrecting the star"));
 
         assert!(
             !store
@@ -2530,11 +2746,17 @@ mod attachment_presentation_command_tests {
 
 async fn fetch_remote_message(
     state: &Arc<AppState>,
-    message_id: &str,
+    identity: &MessageRemoteIdentity,
 ) -> Result<MailSummary, String> {
-    let (summary, account) = remote_message_locator(state, message_id).await?;
+    let account_id = Uuid::parse_str(&identity.account_id).map_err(error)?;
+    let account = state
+        .store
+        .account(account_id)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Account not found".to_owned())?;
     MailService::new(state.store.clone())
-        .fetch_message(&account, &summary.mailbox, summary.uid as u32)
+        .fetch_message_for_identity(&account, identity, usize::MAX)
         .await
         .map_err(error)
 }
@@ -2542,83 +2764,41 @@ async fn fetch_remote_message(
 async fn fetch_full_remote_message(
     state: &Arc<AppState>,
     message_id: &str,
-) -> Result<MailSummary, String> {
-    let (summary, account) = remote_message_locator(state, message_id).await?;
-    MailService::new(state.store.clone())
-        .fetch_full_message(&account, &summary.mailbox, summary.uid as u32)
-        .await
-        .map_err(error)
-}
-
-async fn remote_message_locator(
-    state: &Arc<AppState>,
-    message_id: &str,
-) -> Result<(MailSummary, Account), String> {
-    let summary = state
-        .store
-        .messages_by_ids(&[message_id.to_owned()])
-        .await
-        .map_err(error)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| "Message not found".to_owned())?;
-    let account_id = Uuid::parse_str(&summary.account_id).map_err(error)?;
-    let account = state
-        .store
-        .account(account_id)
-        .await
-        .map_err(error)?
-        .ok_or_else(|| "Account not found".to_owned())?;
-    Ok((summary, account))
-}
-
-async fn refetch_and_persist_message(
-    state: &Arc<AppState>,
-    message_id: &str,
-) -> Result<MailSummary, String> {
-    let initial_summary = state
-        .store
-        .messages_by_ids(&[message_id.to_owned()])
-        .await
-        .map_err(error)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| "Message not found".to_owned())?;
-    let account_id = Uuid::parse_str(&initial_summary.account_id).map_err(error)?;
-    let _operation = state.account_operations.acquire(account_id).await;
-    let summary = state
-        .store
-        .messages_by_ids(&[message_id.to_owned()])
-        .await
-        .map_err(error)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| "Message changed while it was being repaired".to_owned())?;
-    if summary.account_id != initial_summary.account_id {
-        return Err("Message changed while it was being repaired".to_owned());
-    }
-    let account = state
-        .store
-        .account(account_id)
-        .await
-        .map_err(error)?
-        .ok_or_else(|| "Account not found".to_owned())?;
+) -> Result<(MessageRemoteIdentity, MailSummary), String> {
+    let (identity, account) = capture_remote_identity_and_account(state, message_id).await?;
     let message = MailService::new(state.store.clone())
-        .fetch_message(&account, &summary.mailbox, summary.uid as u32)
+        .fetch_full_message_for_identity(&account, &identity)
         .await
         .map_err(error)?;
-    let content = CachedMessageContent {
-        body_text: message.body_text.clone(),
-        body_html: message.body_html.clone(),
-        unsubscribe_kind: message.unsubscribe_kind.clone(),
-        attachments: message
-            .attachments
-            .iter()
-            .map(|item| item.attachment.clone())
-            .collect(),
-    };
-    persist_foreground_message_content(&state.store, &message, &content).await?;
-    Ok(message)
+    if !state
+        .store
+        .message_remote_identity_is_current(&identity)
+        .await
+        .map_err(error)?
+    {
+        return Err("Message changed while it was loading".to_owned());
+    }
+    Ok((identity, message))
+}
+
+async fn capture_remote_identity_and_account(
+    state: &Arc<AppState>,
+    message_id: &str,
+) -> Result<(MessageRemoteIdentity, Account), String> {
+    let identity = state
+        .store
+        .capture_message_remote_identity(message_id)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Message not found".to_owned())?;
+    let account_id = Uuid::parse_str(&identity.account_id).map_err(error)?;
+    let account = state
+        .store
+        .account(account_id)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Account not found".to_owned())?;
+    Ok((identity, account))
 }
 
 struct OpenDroppedFile {
@@ -3113,7 +3293,6 @@ fn download_name(filename: &str, counter: usize) -> String {
 #[cfg(test)]
 mod download_tests {
     use super::*;
-    use chrono::Utc;
     use tempfile::tempdir;
 
     #[test]
@@ -3173,44 +3352,21 @@ mod download_tests {
 
     #[test]
     fn export_identity_rejects_uid_reuse_after_a_mailbox_epoch_change() {
-        let before = MailSummary {
-            id: "message".into(),
+        let before = MessageRemoteIdentity {
+            message_id: "message".into(),
             account_id: Uuid::nil().to_string(),
+            account_config_generation: 1,
+            account_config_fingerprint: "fixture".into(),
             mailbox: "INBOX".into(),
+            remote_name: "INBOX".into(),
             uid: 42,
-            message_id: Some("<old@example.test>".into()),
-            in_reply_to: None,
-            reference_ids: None,
-            thread_id: "thread".into(),
-            subject: "Old".into(),
-            from_name: None,
-            from_address: "old@example.test".into(),
-            to_addresses: "me@example.test".into(),
-            cc_addresses: String::new(),
-            bcc_addresses: String::new(),
-            reply_to_addresses: String::new(),
-            received_at: Utc::now(),
-            snippet: String::new(),
-            body_text: String::new(),
-            body_html: None,
-            content_state: "headers_only".into(),
-            unsubscribe_kind: None,
-            unsubscribe_url: None,
-            is_read: false,
-            is_flagged: false,
-            has_attachments: false,
-            category: None,
-            classification_confidence: None,
-            classification_source: None,
-            classification_signals: String::new(),
-            attachments: vec![],
+            uid_validity: 10,
         };
         let mut reused_uid = before.clone();
-        reused_uid.message_id = Some("<new@example.test>".into());
-        reused_uid.received_at += chrono::Duration::seconds(1);
+        reused_uid.uid_validity = 11;
 
-        assert!(same_export_identity(&before, &before));
-        assert!(!same_export_identity(&before, &reused_uid));
+        assert_eq!(before, before);
+        assert_ne!(before, reused_uid);
     }
 }
 
@@ -3411,6 +3567,12 @@ async fn accounts(state: State<'_, Arc<AppState>>) -> Result<Vec<Account>, Strin
     state.store.accounts().await.map_err(error)
 }
 
+async fn release_account_operation_gate(gate: dakia_core::storage::AccountOperationGate) {
+    if let Err(release_error) = gate.release().await {
+        tracing::warn!(error = %release_error, "could not release account operation gate");
+    }
+}
+
 #[tauri::command]
 async fn update_account(
     app: tauri::AppHandle,
@@ -3426,6 +3588,46 @@ async fn update_account(
     if input.imap_host.trim().is_empty() || input.smtp_host.trim().is_empty() {
         return Err("IMAP and SMTP hosts are required".into());
     }
+    let durable_gate = state
+        .store
+        .acquire_account_removal_gate(input.id)
+        .await
+        .map_err(error)?;
+    let durable_gate = durable_gate.ok_or_else(|| {
+        "Account settings are already being changed. Try saving again after the current operation finishes."
+            .to_owned()
+    })?;
+    let cross_process_quiet = match wait_for_cross_process_account_operations(
+        &state.store,
+        input.id,
+        ACCOUNT_REMOVAL_SUBMISSION_WAIT,
+    )
+    .await
+    {
+        Ok(quiet) => quiet,
+        Err(wait_error) => {
+            release_account_operation_gate(durable_gate).await;
+            return Err(error(wait_error));
+        }
+    };
+    if !cross_process_quiet {
+        release_account_operation_gate(durable_gate).await;
+        return Err("Mail is still finishing an account operation. Try saving account settings again after it finishes.".to_owned());
+    }
+    let submission_pause = match state
+        .submissions
+        .pause(input.id, ACCOUNT_REMOVAL_SUBMISSION_WAIT)
+        .await
+    {
+        Ok(pause) => pause,
+        Err(_) => {
+            release_account_operation_gate(durable_gate).await;
+            return Err(
+                "An email is still being submitted. Try saving account settings again after it finishes."
+                    .to_owned(),
+            );
+        }
+    };
     // Ask an existing rebuild to stop before waiting for its account lock. A
     // normal settings or credential update retains the durable job so it can
     // resume with the new connection details.
@@ -3434,13 +3636,41 @@ async fn update_account(
         input.id,
         MailRebuildCancellationDisposition::Retain,
     );
+    state.progressive_sync_cancellations.cancel(input.id);
+    if !wait_for_progressive_sync_quiescence(
+        state.inner(),
+        input.id,
+        ACCOUNT_REMOVAL_SUBMISSION_WAIT,
+    )
+    .await
+    {
+        state.progressive_sync_cancellations.resume(input.id);
+        state.mail_rebuild_cancellations.clear_request(input.id);
+        release_account_operation_gate(durable_gate).await;
+        drop(submission_pause);
+        return Err(
+            "Mail sync is still finishing a provider request. Try saving account settings again after it finishes."
+                .to_owned(),
+        );
+    }
     let _operation = state.account_operations.acquire(input.id).await;
-    let mut account = state
-        .store
-        .account(input.id)
-        .await
-        .map_err(error)?
-        .ok_or_else(|| "Account not found".to_owned())?;
+    let mut account = match state.store.account(input.id).await {
+        Ok(Some(account)) => account,
+        Ok(None) => {
+            state.mail_rebuild_cancellations.clear_request(input.id);
+            state.progressive_sync_cancellations.resume(input.id);
+            release_account_operation_gate(durable_gate).await;
+            drop(submission_pause);
+            return Err("Account not found".to_owned());
+        }
+        Err(failure) => {
+            state.mail_rebuild_cancellations.clear_request(input.id);
+            state.progressive_sync_cancellations.resume(input.id);
+            release_account_operation_gate(durable_gate).await;
+            drop(submission_pause);
+            return Err(error(failure));
+        }
+    };
     let previous_account = account.clone();
     account.account_name = input.account_name.trim().to_owned();
     account.display_name = input.display_name.trim().to_owned();
@@ -3460,6 +3690,10 @@ async fn update_account(
         if let Err(validation_error) =
             validate_legacy_oauth_conversion(&previous_account, &state.realtime.statuses().await)
         {
+            release_account_operation_gate(durable_gate).await;
+            state
+                .progressive_sync_cancellations
+                .resume(previous_account.id);
             resume_scheduled_mail_rebuild(
                 app.clone(),
                 state.inner().clone(),
@@ -3469,12 +3703,20 @@ async fn update_account(
             return Err(validation_error);
         }
     } else if password_was_supplied && !matches!(account.auth, AccountAuth::Password { .. }) {
+        state
+            .progressive_sync_cancellations
+            .resume(previous_account.id);
+        release_account_operation_gate(durable_gate).await;
         resume_scheduled_mail_rebuild(app.clone(), state.inner().clone(), previous_account.clone())
             .await;
         return Err("OAuth accounts can only be converted after authentication fails".into());
     }
     let namespace_changed = !same_mail_namespace(&previous_account, &account);
     if converts_legacy_oauth && namespace_changed {
+        state
+            .progressive_sync_cancellations
+            .resume(previous_account.id);
+        release_account_operation_gate(durable_gate).await;
         resume_scheduled_mail_rebuild(app.clone(), state.inner().clone(), previous_account.clone())
             .await;
         return Err(
@@ -3489,15 +3731,17 @@ async fn update_account(
 
     if converts_legacy_oauth {
         convert_legacy_oauth_to_password(&mut account);
-        if let Err(save_error) = state
-            .store
-            .save_account_with_secret(
+        if let Err(save_error) = durable_gate
+            .save_account_with_secret_and_rebuild(
                 &account,
                 &password_secret_name,
-                password.as_deref().expect("conversion password"),
+                password.as_deref(),
+                None,
+                None,
             )
             .await
         {
+            release_account_operation_gate(durable_gate).await;
             if previous_account.enabled {
                 state
                     .realtime
@@ -3508,6 +3752,18 @@ async fn update_account(
                 .await;
             return Err(error(save_error));
         }
+        if let Err(release_error) = durable_gate.release().await {
+            state.progressive_sync_cancellations.resume(account.id);
+            resume_scheduled_mail_rebuild(app, state.inner().clone(), account.clone()).await;
+            return Err(error(release_error));
+        }
+        state.progressive_sync_cancellations.resume(account.id);
+        resume_sync_run_after_credential_repair(
+            app.clone(),
+            state.inner().clone(),
+            account.clone(),
+        )
+        .await;
         if account.enabled {
             state
                 .realtime
@@ -3517,71 +3773,53 @@ async fn update_account(
         resume_scheduled_mail_rebuild(app, state.inner().clone(), account.clone()).await;
         return Ok(account);
     }
-
-    let previous_password_credential = if password_was_supplied {
-        match state.store.secret(&password_secret_name).await {
-            Ok(credential) => credential,
-            Err(secret_error) => {
-                if namespace_changed {
-                    let _ = state.realtime.reconcile(app.clone()).await;
-                }
-                return Err(error(secret_error));
-            }
-        }
-    } else {
-        None
-    };
-    if let Some(password) = password.as_deref() {
-        if let Err(set_error) = MailService::new(state.store.clone())
-            .credentials()
-            .set_password(&account, password)
-            .await
-        {
-            if namespace_changed {
-                let _ = state.realtime.reconcile(app.clone()).await;
-            }
-            resume_scheduled_mail_rebuild(
-                app.clone(),
-                state.inner().clone(),
-                previous_account.clone(),
-            )
-            .await;
-            return Err(error(set_error));
-        }
-    }
-    if let Err(save_error) = save_account_with_rebuild_intent(
-        state.inner(),
-        &account,
-        namespace_changed,
-        None,
-        &password_secret_name,
-    )
-    .await
+    let rebuild = namespace_changed.then(|| reset_mail_rebuild_job(account.id));
+    if let Err(save_error) = durable_gate
+        .save_account_with_secret_and_rebuild(
+            &account,
+            &password_secret_name,
+            password.as_deref(),
+            rebuild.as_ref(),
+            None,
+        )
+        .await
     {
-        if password_was_supplied {
-            let rollback_mail = MailService::new(state.store.clone());
-            let credentials = rollback_mail.credentials();
-            let rollback = match previous_password_credential {
-                Some(previous) => {
-                    state
-                        .store
-                        .set_secret(&password_secret_name, &previous)
-                        .await
-                }
-                None => credentials.delete(&account).await,
-            };
-            if let Err(rollback_error) = rollback {
-                tracing::error!(account_id = %account.id, error = %rollback_error, "could not roll back password credentials after saving the account failed");
-            }
-        }
+        release_account_operation_gate(durable_gate).await;
+        state
+            .progressive_sync_cancellations
+            .resume(previous_account.id);
         if namespace_changed {
             let _ = state.realtime.reconcile(app.clone()).await;
         }
         resume_scheduled_mail_rebuild(app, state.inner().clone(), previous_account).await;
         return Err(error(save_error));
     }
+    if let Some(rebuild) = rebuild {
+        state
+            .mail_rebuilds
+            .lock()
+            .expect("mail rebuild lock poisoned")
+            .insert(account.id, rebuild.into());
+    }
+    if let Err(release_error) = durable_gate.release().await {
+        state.progressive_sync_cancellations.resume(account.id);
+        resume_scheduled_mail_rebuild(app, state.inner().clone(), account.clone()).await;
+        return Err(error(release_error));
+    }
+    state.progressive_sync_cancellations.resume(account.id);
+    if password_was_supplied {
+        resume_sync_run_after_credential_repair(
+            app.clone(),
+            state.inner().clone(),
+            account.clone(),
+        )
+        .await;
+    }
     if !namespace_changed {
-        state.realtime.reconcile(app.clone()).await.map_err(error)?;
+        let reconcile = state.realtime.reconcile(app.clone()).await.map_err(error);
+        resume_scheduled_mail_rebuild(app, state.inner().clone(), account.clone()).await;
+        reconcile?;
+        return Ok(account);
     }
     resume_scheduled_mail_rebuild(app, state.inner().clone(), account.clone()).await;
     Ok(account)
@@ -3740,31 +3978,98 @@ async fn remove_account(
     state: State<'_, Arc<AppState>>,
     account_id: Uuid,
 ) -> Result<(), String> {
+    // Do not give a rebuild the destructive Remove disposition until SMTP is
+    // quiescent. A bounded wait may fail, and its account must keep the
+    // retained history checkpoint in that case.
+    let durable_gate = state
+        .store
+        .acquire_account_removal_gate(account_id)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Account is already being changed or removed".to_owned())?;
+    if !state
+        .submissions
+        .block_and_wait(account_id, ACCOUNT_REMOVAL_SUBMISSION_WAIT)
+        .await
+    {
+        release_account_operation_gate(durable_gate).await;
+        state.submissions.unblock(account_id);
+        state.mail_rebuild_cancellations.clear_request(account_id);
+        return Err(
+            "An email is still being submitted. Try removing this account again after it finishes."
+                .to_owned(),
+        );
+    }
+    let cross_process_quiet = match wait_for_cross_process_account_operations(
+        &state.store,
+        account_id,
+        ACCOUNT_REMOVAL_SUBMISSION_WAIT,
+    )
+    .await
+    {
+        Ok(quiet) => quiet,
+        Err(failure) => {
+            release_account_operation_gate(durable_gate).await;
+            state.submissions.unblock(account_id);
+            state.mail_rebuild_cancellations.clear_request(account_id);
+            return Err(error(failure));
+        }
+    };
+    if !cross_process_quiet {
+        release_account_operation_gate(durable_gate).await;
+        state.submissions.unblock(account_id);
+        state.mail_rebuild_cancellations.clear_request(account_id);
+        return Err(
+            "Mail is still finishing an account operation. Try removing this account again after it finishes."
+                .to_owned(),
+        );
+    }
     request_mail_rebuild_cancel(
         state.inner(),
         account_id,
         MailRebuildCancellationDisposition::Remove,
     );
+    state.progressive_sync_cancellations.cancel(account_id);
+    if !wait_for_progressive_sync_quiescence(
+        state.inner(),
+        account_id,
+        ACCOUNT_REMOVAL_SUBMISSION_WAIT,
+    )
+    .await
+    {
+        state.progressive_sync_cancellations.resume(account_id);
+        release_account_operation_gate(durable_gate).await;
+        abort_account_removal(&app, state.inner(), account_id, None).await;
+        return Err(
+            "Mail sync is still finishing a provider request. Try removing this account again after it finishes."
+                .to_owned(),
+        );
+    }
     let _operation = state.account_operations.acquire(account_id).await;
-    let account = state
-        .store
-        .account(account_id)
-        .await
-        .map_err(error)?
-        .ok_or_else(|| "Account not found".to_owned())?;
+    let account = match state.store.account(account_id).await {
+        Ok(Some(account)) => account,
+        Ok(None) => {
+            release_account_operation_gate(durable_gate).await;
+            abort_account_removal(&app, state.inner(), account_id, None).await;
+            return Err("Account not found".to_owned());
+        }
+        Err(failure) => {
+            release_account_operation_gate(durable_gate).await;
+            abort_account_removal(&app, state.inner(), account_id, None).await;
+            return Err(error(failure));
+        }
+    };
     // `stop_account` waits for the watcher task to leave IMAP and complete
     // its current storage call before destructive storage work begins.
     state.realtime.stop_account(account_id).await;
-    MailService::new(state.store.clone())
-        .credentials()
-        .delete(&account)
+    let credential_name = format!("dev.dakia.mail:{}:{}", account.id, account.auth.username());
+    if let Err(failure) = durable_gate
+        .delete_account_and_secret(&credential_name)
         .await
-        .map_err(error)?;
-    state
-        .store
-        .delete_account(account_id)
-        .await
-        .map_err(error)?;
+    {
+        abort_account_removal(&app, state.inner(), account_id, Some(account.clone())).await;
+        return Err(error(failure));
+    }
     if let Err(error) = app.emit(
         "account-removed",
         serde_json::json!({ "accountId": account_id }),
@@ -3775,6 +4080,29 @@ async fn remove_account(
         tracing::error!(error = %error, "could not reconcile real-time mail after account removal");
     }
     Ok(())
+}
+
+/// A failed account removal must reopen SMTP and the retained background
+/// work. The removal gate is intentionally left closed only after the account
+/// row has been deleted, when no future operation can use its credentials.
+async fn abort_account_removal(
+    app: &tauri::AppHandle,
+    state: &Arc<AppState>,
+    account_id: Uuid,
+    account: Option<Account>,
+) {
+    state.submissions.unblock(account_id);
+    state.mail_rebuild_cancellations.clear_request(account_id);
+    state.progressive_sync_cancellations.resume(account_id);
+    if let Some(account) = account {
+        state.mail_rebuild_cancellations.clear_request(account.id);
+        resume_scheduled_mail_rebuild(app.clone(), state.clone(), account.clone()).await;
+        schedule_initial_inbox_sync(app.clone(), state.clone(), account.clone()).await;
+        schedule_sent_reconciliation_poll(app.clone(), state.clone(), account.id);
+        if let Err(error) = restart_realtime_if_current(app.clone(), state, account.id).await {
+            tracing::warn!(account_id = %account.id, error = %error, "could not restart realtime after failed account removal");
+        }
+    }
 }
 
 #[tauri::command]
@@ -3821,47 +4149,191 @@ async fn add_account(
     let stored_accounts = state.store.accounts().await.map_err(error)?;
     ensure_account_is_not_connected(&stored_accounts, &account.email)?;
     let _operation = state.account_operations.acquire(account.id).await;
-    state.realtime.stop_account(account.id).await;
-    let mail = MailService::new(state.store.clone());
-    let password_secret_name = credential_secret_name(&account);
-    if let Err(set_error) = mail
-        .credentials()
-        .set_password(&account, &input.password)
+    // Authenticate against a private, ephemeral credential store before this
+    // account is visible to the real catalogue. This keeps a typo, revoked
+    // app password, or bad endpoint from leaving a durable but unusable
+    // account and a restartable sync job behind.
+    let probe_store = Store::in_memory().await.map_err(error)?;
+    let secret_name = credential_secret_name(&account);
+    probe_store
+        .save_account_with_secret(&account, &secret_name, &input.password)
         .await
-    {
-        return Err(error(set_error));
-    }
-    if let Err(save_error) =
-        save_account_with_rebuild_intent(state.inner(), &account, true, None, &password_secret_name)
-            .await
-    {
-        let rollback = mail.credentials().delete(&account).await;
-        if let Err(rollback_error) = rollback {
-            tracing::error!(
-                account_id = %account.id,
-                error = %rollback_error,
-                "could not roll back password credentials after saving the account failed"
-            );
-        }
-        return Err(error(save_error));
-    }
-    resume_scheduled_mail_rebuild(app, state.inner().clone(), account.clone()).await;
+        .map_err(error)?;
+    let probe_mail = MailService::new(probe_store);
+    persist_new_account_after_authenticated_probes(
+        &state.store,
+        &account,
+        &secret_name,
+        &input.password,
+        probe_mail.imap_auth_probe(&account),
+        probe_mail.smtp_auth_probe(&account),
+    )
+    .await
+    .map_err(error)?;
+    schedule_initial_inbox_sync(app.clone(), state.inner().clone(), account.clone()).await;
+    schedule_sent_reconciliation_poll(app, state.inner().clone(), account.id);
     Ok(AccountConnection {
         account,
         reused_existing_account: false,
     })
 }
 
+/// Makes the authenticated account visible only after both read-only provider
+/// probes have completed. Keeping this boundary separate from the Tauri
+/// command gives the failure path one small, testable persistence contract:
+/// failed connection setup leaves no account, credential, or SyncRun behind.
+async fn persist_new_account_after_authenticated_probes<ImapProbe, SmtpProbe>(
+    store: &Store,
+    account: &Account,
+    secret_name: &str,
+    secret: &str,
+    imap_probe: ImapProbe,
+    smtp_probe: SmtpProbe,
+) -> anyhow::Result<SyncRun>
+where
+    ImapProbe: Future<Output = anyhow::Result<()>>,
+    SmtpProbe: Future<Output = anyhow::Result<()>>,
+{
+    imap_probe.await?;
+    smtp_probe.await?;
+    store
+        .create_account_with_secret_and_initial_sync(account, secret_name, secret)
+        .await
+}
+
+#[cfg(test)]
+mod account_connection_persistence_tests {
+    use super::*;
+
+    fn account() -> Account {
+        Account {
+            id: Uuid::new_v4(),
+            email: "new-reader@example.test".into(),
+            account_name: "New reader".into(),
+            display_name: "New reader".into(),
+            provider_id: "custom".into(),
+            auth: AccountAuth::Password {
+                username: "new-reader@example.test".into(),
+            },
+            imap_host: "127.0.0.1".into(),
+            imap_port: 1,
+            imap_security: dakia_core::provider::Security::Tls,
+            smtp_host: "127.0.0.1".into(),
+            smtp_port: 1,
+            smtp_security: dakia_core::provider::Security::Tls,
+            archive_mailbox: "Archive".into(),
+            spam_mailbox: "Spam".into(),
+            enabled: true,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    fn unavailable_loopback_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        port
+    }
+
+    async fn probe_mail(account: &Account, secret: &str) -> MailService {
+        let probe_store = Store::in_memory().await.unwrap();
+        probe_store
+            .save_account_with_secret(account, &credential_secret_name(account), secret)
+            .await
+            .unwrap();
+        MailService::new(probe_store)
+    }
+
+    async fn assert_no_durable_connection(store: &Store, account: &Account) {
+        assert!(store.account(account.id).await.unwrap().is_none());
+        assert!(store.sync_run(account.id).await.unwrap().is_none());
+        assert!(store
+            .secret(&credential_secret_name(account))
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn rejected_loopback_imap_probe_persists_no_account_credential_or_sync_run() {
+        let store = Store::in_memory().await.unwrap();
+        let mut account = account();
+        account.imap_port = unavailable_loopback_port();
+        let secret_name = credential_secret_name(&account);
+        let probe = probe_mail(&account, "fictional-password").await;
+
+        let failure = persist_new_account_after_authenticated_probes(
+            &store,
+            &account,
+            &secret_name,
+            "fictional-password",
+            probe.imap_auth_probe(&account),
+            async { Ok(()) },
+        )
+        .await;
+
+        assert!(failure.is_err());
+        assert_no_durable_connection(&store, &account).await;
+    }
+
+    #[tokio::test]
+    async fn rejected_loopback_smtp_probe_persists_no_account_credential_or_sync_run() {
+        let store = Store::in_memory().await.unwrap();
+        let mut account = account();
+        account.smtp_port = unavailable_loopback_port();
+        let secret_name = credential_secret_name(&account);
+        let probe = probe_mail(&account, "fictional-password").await;
+
+        let failure = persist_new_account_after_authenticated_probes(
+            &store,
+            &account,
+            &secret_name,
+            "fictional-password",
+            async { Ok(()) },
+            probe.smtp_auth_probe(&account),
+        )
+        .await;
+
+        assert!(failure.is_err());
+        assert_no_durable_connection(&store, &account).await;
+    }
+}
+
 #[tauri::command]
 async fn search(
+    app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     query: SearchQuery,
 ) -> Result<MailConversationPage, String> {
-    state
+    let page = state
         .store
         .search_conversation_page(&query)
         .await
-        .map_err(error)
+        .map_err(error)?;
+    if let Some(mailbox) = query.mailbox.filter(|mailbox| !mailbox.trim().is_empty()) {
+        let account_ids = if query.account_ids.is_empty() {
+            state
+                .store
+                .accounts()
+                .await
+                .map_err(error)?
+                .into_iter()
+                .filter(|account| account.enabled)
+                .map(|account| account.id)
+                .collect()
+        } else {
+            query.account_ids
+        };
+        for account_id in account_ids {
+            schedule_folder_history_promotion(
+                app.clone(),
+                state.inner().clone(),
+                account_id,
+                mailbox.clone(),
+            );
+        }
+    }
+    Ok(page)
 }
 
 #[tauri::command]
@@ -3958,75 +4430,73 @@ async fn set_message_category(
 
 #[tauri::command]
 async fn set_message_starred(
+    app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     message_id: String,
     starred: bool,
 ) -> Result<dakia_core::MailSummary, String> {
-    let message = state
+    let initial = state
         .store
         .message(&message_id)
         .await
         .map_err(error)?
         .ok_or_else(|| "Message not found".to_owned())?;
-    let account_id = Uuid::parse_str(&message.account_id).map_err(error)?;
+    let account_id = Uuid::parse_str(&initial.account_id).map_err(error)?;
     let _operation = state.account_operations.acquire(account_id).await;
-    let account = enabled_account_for_operation(state.inner(), account_id).await?;
-    MailService::new(state.store.clone())
-        .set_flagged(&account, &message.mailbox, message.uid as u32, starred)
+    enabled_account_for_operation(state.inner(), account_id).await?;
+    let message = state
+        .store
+        .message(&message_id)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Message changed before it could be starred".to_owned())?;
+    if message.account_id != initial.account_id {
+        return Err("Message changed before it could be starred".to_owned());
+    }
+    let _journal = operations::enqueue_star_mutation(&state.store, &message, starred, None)
         .await
         .map_err(error)?;
+    drop(_operation);
+    schedule_message_mutation_drain(app, state.inner().clone(), account_id);
     state
         .store
-        .set_message_flagged(&message_id, starred)
+        .message(&message_id)
         .await
-        .map_err(error)?;
-    if starred {
-        match MailService::new(state.store.clone())
-            .hydrate_message(&account, &message.mailbox, message.uid as u32)
-            .await
-        {
-            Ok(hydrated) => Ok(hydrated),
-            Err(_) => state
-                .store
-                .message(&message_id)
-                .await
-                .map_err(error)?
-                .ok_or_else(|| "Message not found".to_owned()),
-        }
-    } else {
-        state
-            .store
-            .message(&message_id)
-            .await
-            .map_err(error)?
-            .ok_or_else(|| "Message not found".to_owned())
-    }
+        .map_err(error)?
+        .ok_or_else(|| "Message not found".to_owned())
 }
 
 #[tauri::command]
 async fn set_message_read(
+    app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     message_id: String,
     read: bool,
 ) -> Result<(), String> {
-    let message = state
+    let initial = state
         .store
         .message(&message_id)
         .await
         .map_err(error)?
         .ok_or_else(|| "Message not found".to_owned())?;
-    let account_id = Uuid::parse_str(&message.account_id).map_err(error)?;
+    let account_id = Uuid::parse_str(&initial.account_id).map_err(error)?;
     let _operation = state.account_operations.acquire(account_id).await;
-    let account = enabled_account_for_operation(state.inner(), account_id).await?;
-    MailService::new(state.store.clone())
-        .set_read(&account, &message.mailbox, message.uid as u32, read)
+    enabled_account_for_operation(state.inner(), account_id).await?;
+    let message = state
+        .store
+        .message(&message_id)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Message changed before it could be updated".to_owned())?;
+    if message.account_id != initial.account_id {
+        return Err("Message changed before it could be updated".to_owned());
+    }
+    let _journal = operations::enqueue_read_mutation(&state.store, &message, read, None)
         .await
         .map_err(error)?;
-    state
-        .store
-        .set_message_read(&message_id, read)
-        .await
-        .map_err(error)
+    drop(_operation);
+    schedule_message_mutation_drain(app, state.inner().clone(), account_id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -4357,6 +4827,960 @@ async fn schedule_mail_rebuild(
     Ok(())
 }
 
+/// Starts the backend-owned first-Inbox job. The account is already saved and
+/// usable when this task begins; its success or failure is represented by the
+/// durable SyncRun rather than the account's enabled state.
+async fn schedule_initial_inbox_sync(
+    app: tauri::AppHandle,
+    state: Arc<AppState>,
+    account: Account,
+) {
+    let already_running = !state
+        .sync_runs_running
+        .lock()
+        .expect("sync run reservation lock poisoned")
+        .insert(account.id);
+    if already_running {
+        return;
+    }
+    let mut cancellation = state.progressive_sync_cancellations.register(account.id);
+    tauri::async_runtime::spawn(async move {
+        let account_id = account.id;
+        if let Err(error) =
+            run_initial_inbox_sync(app, state.clone(), account, &mut cancellation).await
+        {
+            tracing::warn!(account_id = %account_id, error = %error, "initial Inbox sync failed");
+        }
+        state
+            .sync_runs_running
+            .lock()
+            .expect("sync run reservation lock poisoned")
+            .remove(&account_id);
+        state.progressive_sync_cancellations.clear(account_id);
+    });
+}
+
+fn sync_retry_delay(account_id: Uuid, attempts: u32) -> Duration {
+    let exponent = attempts.saturating_sub(1).min(5);
+    let seconds = 5_u64.saturating_mul(1_u64 << exponent).min(300);
+    // A stable small offset avoids every retained account retrying together
+    // after the app reconnects without making the persisted schedule opaque.
+    Duration::from_secs(seconds + (account_id.as_u128() as u64 % 5))
+}
+
+fn is_persistent_auth_failure(failure: &str) -> bool {
+    let failure = failure.to_ascii_lowercase();
+    [
+        "invalid credentials",
+        "authentication failed",
+        "authentication rejected",
+        "[auth]",
+        "[noperm]",
+    ]
+    .iter()
+    .any(|needle| failure.contains(needle))
+}
+
+/// Waits for every currently claimed provider action, including mailbox
+/// mutations. A settings change must not let an old IMAP action reconcile
+/// against the newly saved endpoint configuration after another process has
+/// already opened its connection.
+async fn wait_for_cross_process_account_operations(
+    store: &Store,
+    account_id: Uuid,
+    timeout: Duration,
+) -> anyhow::Result<bool> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if store
+            .claimed_account_operations(account_id)
+            .await?
+            .is_empty()
+        {
+            return Ok(true);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(false);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn schedule_sync_retry(
+    app: tauri::AppHandle,
+    state: Arc<AppState>,
+    account: Account,
+    delay: Duration,
+) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(delay).await;
+        schedule_initial_inbox_sync(app, state, account).await;
+    });
+}
+
+enum SyncRunResumeAction {
+    Start,
+    Schedule(Duration),
+    Skip,
+}
+
+fn sync_run_resume_action(
+    run: Option<&SyncRun>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> SyncRunResumeAction {
+    let Some(run) = run else {
+        return SyncRunResumeAction::Start;
+    };
+    match run.outcome.as_str() {
+        "completed" | "paused" => SyncRunResumeAction::Skip,
+        "failed" => match run.next_retry_at {
+            Some(retry_at) if retry_at > now => {
+                let delay = (retry_at - now).to_std().unwrap_or_else(|_| Duration::ZERO);
+                SyncRunResumeAction::Schedule(delay)
+            }
+            _ => SyncRunResumeAction::Start,
+        },
+        // A process can stop between durable publication and the in-memory
+        // worker completing. The run itself is its restart checkpoint.
+        "running" => SyncRunResumeAction::Start,
+        _ => SyncRunResumeAction::Skip,
+    }
+}
+
+/// Restores one retained sync run without ignoring its persisted retry
+/// deadline. Inbox-ready accounts may have realtime running while this waits
+/// to resume their remaining history stages.
+async fn resume_durable_sync_run(app: tauri::AppHandle, state: Arc<AppState>, account: Account) {
+    let run = match state.store.sync_run(account.id).await {
+        Ok(run) => run,
+        Err(fetch_error) => {
+            tracing::warn!(account_id = %account.id, error = %fetch_error, "could not load durable sync run for resume");
+            return;
+        }
+    };
+    match sync_run_resume_action(run.as_ref(), chrono::Utc::now()) {
+        SyncRunResumeAction::Start => schedule_initial_inbox_sync(app, state, account).await,
+        SyncRunResumeAction::Schedule(delay) => schedule_sync_retry(app, state, account, delay),
+        SyncRunResumeAction::Skip => {}
+    }
+}
+
+/// An explicit credential repair authorizes a previously paused initial run
+/// to try again. Other failed runs retain their persisted deadline so merely
+/// reopening account settings cannot create a retry storm.
+async fn resume_sync_run_after_credential_repair(
+    app: tauri::AppHandle,
+    state: Arc<AppState>,
+    account: Account,
+) {
+    match state.store.sync_run(account.id).await {
+        Ok(Some(run)) if run.outcome == "paused" => {
+            if let Err(update_error) = update_sync_run_and_publish(
+                &app,
+                &state,
+                &run,
+                SyncRunUpdate {
+                    outcome: Some("failed"),
+                    next_retry_at: Some(None),
+                    error: Some(None),
+                    ..SyncRunUpdate::default()
+                },
+                None,
+            )
+            .await
+            {
+                tracing::warn!(account_id = %account.id, error = %update_error, "could not resume paused sync run after credential repair");
+                return;
+            }
+        }
+        Ok(_) => {}
+        Err(fetch_error) => {
+            tracing::warn!(account_id = %account.id, error = %fetch_error, "could not inspect sync run after credential repair");
+            return;
+        }
+    }
+    resume_durable_sync_run(app, state, account).await;
+}
+
+#[cfg(test)]
+mod durable_sync_resume_tests {
+    use super::*;
+
+    #[test]
+    fn lifecycle_cancel_blocks_a_retry_that_registers_later() {
+        let cancellations = ProgressiveSyncCancellations::default();
+        let account_id = Uuid::new_v4();
+        cancellations.cancel(account_id);
+        let receiver = cancellations.register(account_id);
+        assert!(progressive_sync_cancelled(&receiver));
+        cancellations.clear(account_id);
+        // The block remains after the worker registration disappears, until
+        // the lifecycle command explicitly resumes this account.
+        let receiver = cancellations.register(account_id);
+        assert!(progressive_sync_cancelled(&receiver));
+        cancellations.clear(account_id);
+        cancellations.resume(account_id);
+        let receiver = cancellations.register(account_id);
+        assert!(!progressive_sync_cancelled(&receiver));
+    }
+
+    fn run(
+        outcome: &str,
+        inbox_ready: bool,
+        next_retry_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> SyncRun {
+        SyncRun {
+            run_id: "run".to_owned(),
+            account_id: Uuid::nil(),
+            stage: "primary_history".to_owned(),
+            inbox_ready,
+            primary_complete: false,
+            secondary_complete: false,
+            deferred_complete: false,
+            content_loading: false,
+            retry_count: 1,
+            outcome: outcome.to_owned(),
+            revision: 3,
+            next_retry_at,
+            error: Some("fixture failure".to_owned()),
+        }
+    }
+
+    #[test]
+    fn retained_future_retry_does_not_restart_early() {
+        let now = chrono::Utc::now();
+        let future = now + chrono::Duration::seconds(30);
+        match sync_run_resume_action(Some(&run("failed", true, Some(future))), now) {
+            SyncRunResumeAction::Schedule(delay) => {
+                assert!(delay >= Duration::from_secs(29));
+                assert!(delay <= Duration::from_secs(30));
+            }
+            _ => panic!("future durable retry must remain delayed"),
+        }
+    }
+
+    #[test]
+    fn retained_history_failure_is_resumable_after_its_deadline() {
+        let now = chrono::Utc::now();
+        let past = now - chrono::Duration::seconds(1);
+        assert!(matches!(
+            sync_run_resume_action(Some(&run("failed", true, Some(past))), now),
+            SyncRunResumeAction::Start
+        ));
+    }
+
+    #[test]
+    fn paused_auth_failure_requires_explicit_credential_repair() {
+        assert!(matches!(
+            sync_run_resume_action(Some(&run("paused", false, None)), chrono::Utc::now()),
+            SyncRunResumeAction::Skip
+        ));
+    }
+
+    #[test]
+    fn deferred_folder_failure_keeps_sync_incomplete_until_its_earliest_retry() {
+        let now = chrono::Utc::now();
+        let later = SyncStageDeferred {
+            next_retry_at: Some(now + chrono::Duration::seconds(30)),
+            user_action_required: false,
+        };
+        let earlier = SyncStageDeferred {
+            next_retry_at: Some(now + chrono::Duration::seconds(10)),
+            user_action_required: true,
+        };
+        let combined = later.merge(earlier);
+        assert!(!combined.is_clear());
+        assert_eq!(combined.next_retry_at, earlier.next_retry_at);
+        assert!(combined.user_action_required);
+    }
+}
+
+/// Drains one account's durable optimistic mutations outside the Tauri
+/// command. Each pass claims at most one operation, so a slow provider cannot
+/// hold the lifecycle lock for an unbounded queue. Retry rows retain their
+/// local result and keep this single account worker alive until they become
+/// due; they must not outlive an arbitrary polling window.
+fn schedule_message_mutation_drain(app: tauri::AppHandle, state: Arc<AppState>, account_id: Uuid) {
+    let already_running = !state
+        .mutation_drains_running
+        .lock()
+        .expect("mutation drain reservation lock poisoned")
+        .insert(account_id);
+    if already_running {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let report = {
+                let _operation = state.account_operations.acquire(account_id).await;
+                let account = match state.store.account(account_id).await {
+                    Ok(Some(account)) if account.enabled => account,
+                    Ok(_) => break,
+                    Err(error) => {
+                        tracing::warn!(account_id = %account_id, error = %error, "could not load account for mutation drain");
+                        break;
+                    }
+                };
+                match operations::drain_message_mutations(
+                    &state.store,
+                    &account,
+                    &Uuid::new_v4().to_string(),
+                    1,
+                )
+                .await
+                {
+                    Ok(report) => report,
+                    Err(error) => {
+                        tracing::warn!(account_id = %account_id, error = %error, "could not drain durable message mutations");
+                        break;
+                    }
+                }
+            };
+
+            for update in &report.updates {
+                let _ = app.emit(
+                    "mail-operation-updated",
+                    serde_json::json!({
+                        "operationId": update.operation_id,
+                        "accountId": update.account_id,
+                        "messageId": update.message_id,
+                        "kind": update.kind,
+                        "status": update.status,
+                        "error": update.error,
+                    }),
+                );
+            }
+
+            if report.claimed > 0 {
+                tokio::task::yield_now().await;
+                continue;
+            }
+            let retry_at = match state.store.next_message_mutation_retry_at(account_id).await {
+                Ok(retry_at) => retry_at,
+                Err(error) => {
+                    tracing::warn!(account_id = %account_id, error = %error, "could not read next durable mutation retry deadline");
+                    break;
+                }
+            };
+            let Some(retry_at) = retry_at else {
+                break;
+            };
+            let delay = (retry_at - chrono::Utc::now())
+                .to_std()
+                .unwrap_or_else(|_| Duration::from_secs(1));
+            tokio::time::sleep(delay.max(Duration::from_secs(1))).await;
+        }
+        state
+            .mutation_drains_running
+            .lock()
+            .expect("mutation drain reservation lock poisoned")
+            .remove(&account_id);
+    });
+}
+
+/// A folder selected in navigation receives one bounded historical page ahead
+/// of deferred folders. Storage generation checks make a stale promotion a
+/// no-op instead of a competing snapshot publication.
+fn schedule_folder_history_promotion(
+    app: tauri::AppHandle,
+    state: Arc<AppState>,
+    account_id: Uuid,
+    local_mailbox: String,
+) {
+    let reservation = (account_id, local_mailbox.clone());
+    let already_running = !state
+        .folder_promotions_running
+        .lock()
+        .expect("folder promotion reservation lock poisoned")
+        .insert(reservation.clone());
+    if already_running {
+        return;
+    }
+    let cancellation = state.progressive_sync_cancellations.register(account_id);
+    tauri::async_runtime::spawn(async move {
+        let result: anyhow::Result<()> = async {
+            if progressive_sync_cancelled(&cancellation) {
+                return Ok(());
+            }
+            let account = state
+                .store
+                .account(account_id)
+                .await?
+                .filter(|account| account.enabled)
+                .ok_or_else(|| anyhow::anyhow!("account is unavailable"))?;
+            if state
+                .store
+                .folder_sync_state(account_id, &local_mailbox)
+                .await?
+                .is_some_and(|folder| folder.headers_complete)
+            {
+                return Ok(());
+            }
+            let service = MailService::new(state.store.clone());
+            let supported = dakia_core::connection_budget::imap_work(
+                dakia_core::connection_budget::ImapPriority::FolderRefresh,
+                service.discover_supported_mailboxes(&account),
+            )
+            .await?;
+            if progressive_sync_cancelled(&cancellation) {
+                return Ok(());
+            }
+            let Some(mailbox) = supported
+                .into_iter()
+                .find(|mailbox| mailbox.local == local_mailbox)
+            else {
+                return Ok(());
+            };
+            let promotion_app = app.clone();
+            dakia_core::connection_budget::imap_work(
+                dakia_core::connection_budget::ImapPriority::FolderRefresh,
+                service.backfill_folder_headers_with_progress(
+                    &account,
+                    &mailbox.local,
+                    &mailbox.remote_name,
+                    50,
+                    move |progress| {
+                        let _ = promotion_app.emit(
+                            "mail-sync-progress",
+                            serde_json::json!({
+                                "accountId": account_id,
+                                "phase": "promoted_folder",
+                                "completed": progress.completed,
+                                "total": progress.total,
+                            }),
+                        );
+                    },
+                ),
+            )
+            .await?;
+            if progressive_sync_cancelled(&cancellation) {
+                return Ok(());
+            }
+            if let Some(run) = state.store.sync_run(account_id).await? {
+                // SyncRun owns the account-wide catalogue revision consumed
+                // by windows. A per-folder revision can be lower than a
+                // previously published Inbox revision and would be ignored.
+                update_sync_run_and_publish(
+                    &app,
+                    &state,
+                    &run,
+                    SyncRunUpdate {
+                        stage: Some(&run.stage),
+                        ..SyncRunUpdate::default()
+                    },
+                    Some(&local_mailbox),
+                )
+                .await?;
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            tracing::debug!(account_id = %account_id, mailbox = %local_mailbox, error = %error, "folder history promotion did not complete");
+        }
+        state
+            .folder_promotions_running
+            .lock()
+            .expect("folder promotion reservation lock poisoned")
+            .remove(&reservation);
+        state.progressive_sync_cancellations.clear(account_id);
+    });
+}
+
+fn emit_catalogue_update(
+    app: &tauri::AppHandle,
+    account_id: Uuid,
+    mailbox: Option<&str>,
+    revision: u64,
+) {
+    let _ = app.emit(
+        "mail-catalogue-updated",
+        serde_json::json!({
+            "accountId": account_id,
+            "mailbox": mailbox,
+            "revision": revision,
+        }),
+    );
+}
+
+async fn update_sync_run_and_publish(
+    app: &tauri::AppHandle,
+    state: &Arc<AppState>,
+    run: &SyncRun,
+    update: SyncRunUpdate<'_>,
+    mailbox: Option<&str>,
+) -> anyhow::Result<SyncRun> {
+    let updated = state.store.update_sync_run(&run.run_id, &update).await?;
+    emit_catalogue_update(app, updated.account_id, mailbox, updated.revision);
+    Ok(updated)
+}
+
+async fn run_initial_inbox_sync(
+    app: tauri::AppHandle,
+    state: Arc<AppState>,
+    requested_account: Account,
+    cancellation: &mut watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    if progressive_sync_cancelled(cancellation) {
+        return Ok(());
+    }
+    let account = match state.store.account(requested_account.id).await? {
+        Some(account) if account.enabled => account,
+        _ => return Ok(()),
+    };
+    let run = match state.store.sync_run(account.id).await? {
+        Some(run) if run.outcome == "running" => run,
+        Some(run)
+            if run.outcome == "failed"
+                && run.next_retry_at.is_some_and(|at| at > chrono::Utc::now()) =>
+        {
+            // Startup and a second window may both notice a retained failed
+            // run. The durable deadline, rather than process lifetime,
+            // controls when it may contact the provider again.
+            return Ok(());
+        }
+        Some(run) if run.outcome == "failed" => {
+            state
+                .store
+                .update_sync_run(
+                    &run.run_id,
+                    &SyncRunUpdate {
+                        outcome: Some("running"),
+                        next_retry_at: Some(None),
+                        error: Some(None),
+                        ..SyncRunUpdate::default()
+                    },
+                )
+                .await?
+        }
+        Some(_) => return Ok(()),
+        None => state.store.create_sync_run(account.id).await?,
+    };
+    if run.inbox_ready {
+        if progressive_sync_cancelled(cancellation) {
+            return Ok(());
+        }
+        restart_realtime_if_current(app.clone(), &state, account.id).await?;
+        return run_sync_schedule(&app, &state, &account, run, cancellation).await;
+    }
+    let progress_app = app.clone();
+    let progress_run = run.clone();
+    let service = MailService::new(state.store.clone());
+    let result = dakia_core::connection_budget::imap_work(
+        dakia_core::connection_budget::ImapPriority::FolderRefresh,
+        service.initial_inbox_with_progress(&account, 50, move |progress| {
+            // Progress callbacks happen before the protocol method returns;
+            // durable state changes remain after a committed header page.
+            let _ = progress_app.emit(
+                "mail-sync-progress",
+                serde_json::json!({
+                    "accountId": account.id,
+                    "runId": progress_run.run_id,
+                    "phase": progress.phase,
+                    "completed": progress.completed,
+                    "total": progress.total,
+                }),
+            );
+        }),
+    )
+    .await;
+    if progressive_sync_cancelled(cancellation) {
+        return Ok(());
+    }
+    match result {
+        Ok(_) => {
+            let run = update_sync_run_and_publish(
+                &app,
+                &state,
+                &run,
+                SyncRunUpdate {
+                    stage: Some("primary_history"),
+                    inbox_ready: Some(true),
+                    ..SyncRunUpdate::default()
+                },
+                Some("INBOX"),
+            )
+            .await?;
+            restart_realtime_if_current(app.clone(), &state, account.id).await?;
+            kick_classification(state.clone());
+            match run_sync_schedule(&app, &state, &account, run.clone(), cancellation).await {
+                Ok(()) => Ok(()),
+                Err(failure) => {
+                    let failure_text = failure.to_string();
+                    let attempts = run.retry_count.saturating_add(1);
+                    let delay = sync_retry_delay(account.id, attempts);
+                    let retry_at = chrono::Utc::now()
+                        + chrono::Duration::from_std(delay).expect("retry delay fits chrono");
+                    update_sync_run_and_publish(
+                        &app,
+                        &state,
+                        &run,
+                        SyncRunUpdate {
+                            retry_count: Some(attempts),
+                            outcome: Some("failed"),
+                            next_retry_at: Some(Some(retry_at)),
+                            error: Some(Some(&failure_text)),
+                            ..SyncRunUpdate::default()
+                        },
+                        None,
+                    )
+                    .await?;
+                    schedule_sync_retry(app.clone(), state.clone(), account.clone(), delay);
+                    Err(failure)
+                }
+            }
+        }
+        Err(failure) => {
+            let retries = run.retry_count.saturating_add(1);
+            let failure_text = failure.to_string();
+            let retry = !is_persistent_auth_failure(&failure_text);
+            let delay = sync_retry_delay(account.id, retries);
+            let retry_at = retry.then(|| {
+                chrono::Utc::now()
+                    + chrono::Duration::from_std(delay).expect("retry delay fits chrono")
+            });
+            update_sync_run_and_publish(
+                &app,
+                &state,
+                &run,
+                SyncRunUpdate {
+                    stage: Some("initial_inbox"),
+                    retry_count: Some(retries),
+                    outcome: Some(if retry { "failed" } else { "paused" }),
+                    next_retry_at: Some(retry_at),
+                    error: Some(Some(&failure_text)),
+                    ..SyncRunUpdate::default()
+                },
+                None,
+            )
+            .await?;
+            if retry {
+                schedule_sync_retry(app.clone(), state.clone(), account.clone(), delay);
+            }
+            Err(failure)
+        }
+    }
+}
+
+async fn run_sync_schedule(
+    app: &tauri::AppHandle,
+    state: &Arc<AppState>,
+    account: &Account,
+    mut run: SyncRun,
+    cancellation: &mut watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    if progressive_sync_cancelled(cancellation) {
+        return Ok(());
+    }
+    // LIST is authoritative for provider special-folder names. Never rebuild
+    // them from a preset here: a server can expose Sent or Archive under a
+    // localized or otherwise noncanonical remote name.
+    let service = MailService::new(state.store.clone());
+    let supported = dakia_core::connection_budget::imap_work(
+        dakia_core::connection_budget::ImapPriority::History,
+        service.discover_supported_mailboxes(account),
+    )
+    .await?;
+    if progressive_sync_cancelled(cancellation) {
+        return Ok(());
+    }
+    let primary = supported
+        .iter()
+        .filter(|mailbox| {
+            mailbox.canonical
+                && !mailbox.deferred
+                && matches!(mailbox.local.as_str(), "INBOX" | "Sent" | "Archive")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let secondary = supported
+        .iter()
+        .filter(|mailbox| {
+            mailbox.canonical && !mailbox.deferred && mailbox.local.as_str() == "Drafts"
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let deferred = supported
+        .iter()
+        .filter(|mailbox| {
+            mailbox.deferred
+                || !mailbox.canonical
+                || matches!(mailbox.local.as_str(), "Spam" | "Trash")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let (next_run, primary_deferred) = backfill_sync_stage(
+        app,
+        state,
+        account,
+        run,
+        "primary_history",
+        &primary,
+        cancellation,
+    )
+    .await?;
+    run = next_run;
+    run = update_sync_run_and_publish(
+        app,
+        state,
+        &run,
+        SyncRunUpdate {
+            primary_complete: Some(primary_deferred.is_clear()),
+            stage: Some("secondary"),
+            ..SyncRunUpdate::default()
+        },
+        None,
+    )
+    .await?;
+    let (next_run, secondary_deferred) = backfill_sync_stage(
+        app,
+        state,
+        account,
+        run,
+        "secondary",
+        &secondary,
+        cancellation,
+    )
+    .await?;
+    run = next_run;
+    run = update_sync_run_and_publish(
+        app,
+        state,
+        &run,
+        SyncRunUpdate {
+            secondary_complete: Some(secondary_deferred.is_clear()),
+            stage: Some("deferred"),
+            ..SyncRunUpdate::default()
+        },
+        None,
+    )
+    .await?;
+    let (next_run, deferred_deferred) = backfill_sync_stage(
+        app,
+        state,
+        account,
+        run,
+        "deferred",
+        &deferred,
+        cancellation,
+    )
+    .await?;
+    run = next_run;
+    let pending = primary_deferred
+        .merge(secondary_deferred)
+        .merge(deferred_deferred);
+    if !pending.is_clear() {
+        let mut outstanding = 0_u32;
+        for mailbox in &supported {
+            outstanding = outstanding.saturating_add(
+                state
+                    .store
+                    .mailbox_header_failure_summary(account.id, &mailbox.local)
+                    .await?
+                    .outstanding,
+            );
+        }
+        let retry_at = pending.next_retry_at;
+        let outcome = if retry_at.is_some() {
+            "failed"
+        } else {
+            "paused"
+        };
+        let error = if pending.user_action_required {
+            "Some message headers need attention before this folder can finish"
+        } else {
+            "Some message headers are waiting for their retry time"
+        };
+        update_sync_run_and_publish(
+            app,
+            state,
+            &run,
+            SyncRunUpdate {
+                deferred_complete: Some(false),
+                retry_count: Some(outstanding),
+                outcome: Some(outcome),
+                next_retry_at: Some(retry_at),
+                error: Some(Some(error)),
+                ..SyncRunUpdate::default()
+            },
+            None,
+        )
+        .await?;
+        if let Some(retry_at) = retry_at {
+            let delay = (retry_at - chrono::Utc::now())
+                .to_std()
+                .unwrap_or(Duration::ZERO);
+            schedule_sync_retry(app.clone(), state.clone(), account.clone(), delay);
+        }
+        return Ok(());
+    }
+    update_sync_run_and_publish(
+        app,
+        state,
+        &run,
+        SyncRunUpdate {
+            deferred_complete: Some(true),
+            stage: Some("complete"),
+            outcome: Some("completed"),
+            ..SyncRunUpdate::default()
+        },
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
+#[derive(Default, Clone, Copy)]
+struct SyncStageDeferred {
+    next_retry_at: Option<chrono::DateTime<chrono::Utc>>,
+    user_action_required: bool,
+}
+
+impl SyncStageDeferred {
+    fn is_clear(self) -> bool {
+        self.next_retry_at.is_none() && !self.user_action_required
+    }
+
+    fn merge(self, other: Self) -> Self {
+        Self {
+            next_retry_at: match (self.next_retry_at, other.next_retry_at) {
+                (Some(left), Some(right)) => Some(left.min(right)),
+                (left, right) => left.or(right),
+            },
+            user_action_required: self.user_action_required || other.user_action_required,
+        }
+    }
+}
+
+async fn backfill_sync_stage(
+    app: &tauri::AppHandle,
+    state: &Arc<AppState>,
+    account: &Account,
+    mut run: SyncRun,
+    stage: &str,
+    mailboxes: &[SupportedMailbox],
+    cancellation: &mut watch::Receiver<bool>,
+) -> anyhow::Result<(SyncRun, SyncStageDeferred)> {
+    let mut deferred = SyncStageDeferred::default();
+    loop {
+        if progressive_sync_cancelled(cancellation) {
+            return Ok((run, deferred));
+        }
+        let mut complete = true;
+        let mut made_progress = false;
+        for mailbox in mailboxes {
+            if progressive_sync_cancelled(cancellation) {
+                return Ok((run, deferred));
+            }
+            if state
+                .store
+                .folder_sync_state(account.id, &mailbox.local)
+                .await?
+                .is_some_and(|folder| folder.headers_complete)
+            {
+                continue;
+            }
+            let summary = state
+                .store
+                .mailbox_header_failure_summary(account.id, &mailbox.local)
+                .await?;
+            if summary.user_action_required > 0
+                || summary
+                    .next_retry_at
+                    .is_some_and(|retry_at| retry_at > chrono::Utc::now())
+            {
+                complete = false;
+                deferred = deferred.merge(SyncStageDeferred {
+                    next_retry_at: summary.next_retry_at,
+                    user_action_required: summary.user_action_required > 0,
+                });
+                continue;
+            }
+            let revision_before = state
+                .store
+                .folder_sync_state(account.id, &mailbox.local)
+                .await?
+                .map(|folder| folder.revision);
+            let progress_app = app.clone();
+            let account_id = account.id;
+            let run_id = run.run_id.clone();
+            let service = MailService::new(state.store.clone());
+            let priority = if stage == "deferred" {
+                dakia_core::connection_budget::ImapPriority::Deferred
+            } else {
+                dakia_core::connection_budget::ImapPriority::History
+            };
+            dakia_core::connection_budget::imap_work(
+                priority,
+                service.backfill_folder_headers_with_progress(
+                    account,
+                    &mailbox.local,
+                    &mailbox.remote_name,
+                    50,
+                    move |progress| {
+                        let _ = progress_app.emit(
+                            "mail-sync-progress",
+                            serde_json::json!({
+                                "accountId": account_id,
+                                "runId": run_id,
+                                "phase": progress.phase,
+                                "completed": progress.completed,
+                                "total": progress.total,
+                            }),
+                        );
+                    },
+                ),
+            )
+            .await?;
+            if progressive_sync_cancelled(cancellation) {
+                return Ok((run, deferred));
+            }
+            let folder = state
+                .store
+                .folder_sync_state(account.id, &mailbox.local)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("folder sync state disappeared"))?;
+            complete &= folder.headers_complete;
+            made_progress |= revision_before.is_none_or(|before| folder.revision > before);
+            let summary = state
+                .store
+                .mailbox_header_failure_summary(account.id, &mailbox.local)
+                .await?;
+            if !folder.headers_complete
+                && (summary.user_action_required > 0
+                    || summary
+                        .next_retry_at
+                        .is_some_and(|retry_at| retry_at > chrono::Utc::now()))
+            {
+                deferred = deferred.merge(SyncStageDeferred {
+                    next_retry_at: summary.next_retry_at,
+                    user_action_required: summary.user_action_required > 0,
+                });
+            }
+            run = update_sync_run_and_publish(
+                app,
+                state,
+                &run,
+                SyncRunUpdate {
+                    stage: Some(stage),
+                    ..SyncRunUpdate::default()
+                },
+                Some(&mailbox.local),
+            )
+            .await?;
+            // Give request-triggered opens and SMTP work a chance to claim
+            // their own connections between bounded header batches.
+            tokio::task::yield_now().await;
+        }
+        if complete {
+            return Ok((run, deferred));
+        }
+        if !made_progress {
+            return Ok((run, deferred));
+        }
+    }
+}
+
 fn reset_mail_rebuild_job(account_id: Uuid) -> MailRebuildJob {
     MailRebuildJob {
         account_id,
@@ -4367,48 +5791,12 @@ fn reset_mail_rebuild_job(account_id: Uuid) -> MailRebuildJob {
     }
 }
 
-async fn save_account_with_rebuild_intent(
-    state: &Arc<AppState>,
-    account: &Account,
-    reset_before_sync: bool,
-    previous_secret_name: Option<&str>,
-    current_secret_name: &str,
-) -> anyhow::Result<()> {
-    if !reset_before_sync {
-        return state.store.save_account(account).await;
-    }
-    let job = reset_mail_rebuild_job(account.id);
-    // The namespace replacement is indivisible: a reconnect can never leave
-    // a changed remote identity saved without its required reset job.
-    if let Some(previous_secret_name) = previous_secret_name {
-        state
-            .store
-            .save_account_with_reset_mail_rebuild_job_and_delete_previous_secret(
-                account,
-                &job,
-                Some(previous_secret_name),
-                current_secret_name,
-            )
-            .await?;
-    } else {
-        state
-            .store
-            .save_account_with_reset_mail_rebuild_job(account, &job)
-            .await?;
-    }
-    state
-        .mail_rebuilds
-        .lock()
-        .expect("mail rebuild lock poisoned")
-        .insert(account.id, job.into());
-    Ok(())
-}
-
 async fn resume_scheduled_mail_rebuild(
     app: tauri::AppHandle,
     state: Arc<AppState>,
     account: Account,
 ) {
+    state.mail_rebuild_cancellations.clear_request(account.id);
     let in_memory = {
         state
             .mail_rebuilds
@@ -4484,10 +5872,10 @@ async fn run_mail_rebuild(
     account: Account,
     reset_before_sync: bool,
 ) -> anyhow::Result<SyncResult> {
-    // Register before waiting on the account lock. Update/remove can request
-    // cancellation while this rebuild is queued behind another operation.
+    // Register before provider work. Account updates/removal can request
+    // cancellation without waiting for a historical IMAP operation, leaving
+    // SMTP and the rest of the lifecycle responsive during backfill.
     let cancel_receiver = state.mail_rebuild_cancellations.register(account.id);
-    let _operation = state.account_operations.acquire(account.id).await;
     let current_account = match state.store.account(account.id).await {
         Err(error) => {
             state.mail_rebuild_cancellations.clear(account.id);
@@ -4506,7 +5894,7 @@ async fn run_mail_rebuild(
             return Err(anyhow::anyhow!("Account not found"));
         }
     };
-    // The durable job is the source of truth while holding the account lock.
+    // The durable job is the source of truth while this worker is active.
     // A queued worker may have captured an older `false` before an update
     // atomically replaced its job with `true`; never downgrade that reset.
     let durable_reset = match state.store.mail_rebuild_jobs().await {
@@ -4714,6 +6102,13 @@ async fn mail_rebuild_status(
         .collect())
 }
 
+/// Reloadable, backend-owned synchronization state. Windows must treat this
+/// SQLite result as authoritative after a reconnect or a missed native event.
+#[tauri::command]
+async fn mail_sync_status(state: State<'_, Arc<AppState>>) -> Result<Vec<SyncRun>, String> {
+    state.store.sync_runs().await.map_err(error)
+}
+
 #[tauri::command]
 async fn sync_account(
     app: tauri::AppHandle,
@@ -4796,146 +6191,1111 @@ async fn sync_account(
     Ok(synced)
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OutgoingSubmission {
+    operation_id: String,
+    status: String,
+    response: Option<String>,
+    persistence_warning: bool,
+}
+
+enum DesktopSubmissionClaim {
+    Claimed(dakia_core::storage::OperationJournalEntry),
+    Finished(OutgoingSubmission),
+}
+
+fn durable_outgoing_submission_outcome(
+    operation: &dakia_core::storage::OperationJournalEntry,
+) -> Result<Option<OutgoingSubmission>, String> {
+    let accepted = operation.smtp_accepted_at.is_some();
+    let outcome = match operation.state.as_str() {
+        "queued" | "submitting" => return Ok(None),
+        "retry" if accepted => OutgoingSubmission {
+            operation_id: operation.operation_id.clone(),
+            status: "sent_copy_pending".to_owned(),
+            response: None,
+            persistence_warning: operation.error.is_some(),
+        },
+        "retry" => OutgoingSubmission {
+            operation_id: operation.operation_id.clone(),
+            status: "queued".to_owned(),
+            response: None,
+            persistence_warning: operation.error.is_some(),
+        },
+        "sent_copy_pending" => OutgoingSubmission {
+            operation_id: operation.operation_id.clone(),
+            status: "sent_copy_pending".to_owned(),
+            response: None,
+            persistence_warning: operation.error.is_some(),
+        },
+        "accepted" | "completed" if accepted => OutgoingSubmission {
+            operation_id: operation.operation_id.clone(),
+            status: "accepted".to_owned(),
+            response: None,
+            persistence_warning: operation.error.is_some(),
+        },
+        "accepted" | "completed" => OutgoingSubmission {
+            operation_id: operation.operation_id.clone(),
+            status: "uncertain".to_owned(),
+            response: None,
+            persistence_warning: true,
+        },
+        "uncertain" => OutgoingSubmission {
+            operation_id: operation.operation_id.clone(),
+            status: "uncertain".to_owned(),
+            response: None,
+            persistence_warning: false,
+        },
+        "rejected" | "permanent_failed" => {
+            return Err(format!(
+                "durable SMTP submission was rejected; do not send again. Operation: {}{}",
+                operation.operation_id,
+                operation
+                    .error
+                    .as_deref()
+                    .map(|failure| format!("; {failure}"))
+                    .unwrap_or_default()
+            ));
+        }
+        state => {
+            return Err(format!(
+                "outgoing submission journal entry has an unexpected state: {state}"
+            ));
+        }
+    };
+    Ok(Some(outcome))
+}
+
+async fn wait_for_owned_outgoing_submission_claim(
+    store: &Store,
+    account_id: Uuid,
+    operation_id: &str,
+    claim_owner: &str,
+) -> Result<DesktopSubmissionClaim, String> {
+    let deadline = Instant::now() + ACCOUNT_REMOVAL_SUBMISSION_WAIT;
+    let mut next_recovery = Instant::now();
+    loop {
+        let now = Instant::now();
+        if now >= next_recovery {
+            // Recover only expired claims. A separate desktop or CLI that is
+            // still heartbeating its SMTP operation must retain its lease.
+            store
+                .mark_interrupted_operations_uncertain(account_id)
+                .await
+                .map_err(error)?;
+            next_recovery = now + Duration::from_secs(1);
+        }
+        let operation = store
+            .operation_journal_entry(operation_id)
+            .await
+            .map_err(error)?
+            .ok_or_else(|| "Durable SMTP submission disappeared".to_owned())?;
+        if let Some(outcome) = durable_outgoing_submission_outcome(&operation)? {
+            return Ok(DesktopSubmissionClaim::Finished(outcome));
+        }
+        if operation.state == "queued" {
+            if let Some(claimed) = store
+                .claim_operation_by_id(operation_id, claim_owner)
+                .await
+                .map_err(error)?
+            {
+                if claimed.kind != "smtp_submission" || claimed.operation_id != operation_id {
+                    return Err(
+                        "outgoing submission journal entry has an unexpected claim".to_owned()
+                    );
+                }
+                return Ok(DesktopSubmissionClaim::Claimed(claimed));
+            }
+        }
+        if Instant::now() >= deadline {
+            return Ok(DesktopSubmissionClaim::Finished(OutgoingSubmission {
+                operation_id: operation_id.to_owned(),
+                status: "queued".to_owned(),
+                response: None,
+                persistence_warning: true,
+            }));
+        }
+        tokio::time::sleep(OUTGOING_SUBMISSION_CLAIM_POLL_INTERVAL).await;
+    }
+}
+
+#[cfg(test)]
+mod outgoing_submission_tests {
+    use super::*;
+
+    async fn account_with_store() -> (Store, Account) {
+        let store = Store::in_memory().await.expect("in-memory store");
+        let account = Account {
+            id: Uuid::new_v4(),
+            email: "outgoing@example.test".to_owned(),
+            account_name: "Outgoing".to_owned(),
+            display_name: "Outgoing".to_owned(),
+            provider_id: "fastmail".to_owned(),
+            auth: AccountAuth::Password {
+                username: "outgoing@example.test".to_owned(),
+            },
+            imap_host: "imap.example.test".to_owned(),
+            imap_port: 993,
+            imap_security: dakia_core::provider::Security::Tls,
+            smtp_host: "smtp.example.test".to_owned(),
+            smtp_port: 465,
+            smtp_security: dakia_core::provider::Security::Tls,
+            archive_mailbox: "Archive".to_owned(),
+            spam_mailbox: "Spam".to_owned(),
+            enabled: true,
+            created_at: chrono::Utc::now(),
+        };
+        store.save_account(&account).await.expect("save account");
+        (store, account)
+    }
+
+    fn operation(
+        state: &str,
+        accepted_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> dakia_core::storage::OperationJournalEntry {
+        let now = chrono::Utc::now();
+        dakia_core::storage::OperationJournalEntry {
+            operation_id: "outgoing-op".to_owned(),
+            account_id: Uuid::nil().to_string(),
+            mailbox: None,
+            uid: None,
+            uid_validity: None,
+            message_id: None,
+            kind: "smtp_submission".to_owned(),
+            payload_json: "{}".to_owned(),
+            local_version: 0,
+            dependency_id: None,
+            state: state.to_owned(),
+            outcome: Some(
+                "an implementation detail that must not change delivery state".to_owned(),
+            ),
+            attempts: 1,
+            next_retry_at: None,
+            error: Some("Sent copy needs attention".to_owned()),
+            smtp_accepted_at: accepted_at,
+            claim_owner: None,
+            claimed_at: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn accepted_marker_drives_recovered_delivery_state() {
+        let accepted_operation = operation("uncertain", Some(chrono::Utc::now()));
+        assert!(unresolved_delivery_was_accepted(&accepted_operation));
+
+        let without_marker = operation("uncertain", None);
+        assert!(!unresolved_delivery_was_accepted(&without_marker));
+    }
+
+    #[test]
+    fn accepted_sent_copy_retry_never_becomes_delivery_uncertain() {
+        let operation = operation("retry", Some(chrono::Utc::now()));
+        let outcome = durable_outgoing_submission_outcome(&operation)
+            .expect("valid durable operation")
+            .expect("finished outcome");
+        assert_eq!(outcome.status, "sent_copy_pending");
+        assert_ne!(outcome.status, "uncertain");
+    }
+
+    #[test]
+    fn only_confirmed_sent_copies_request_a_catalogue_refresh() {
+        // This routing drives the real bounded primary-mailbox fetch in
+        // `reconcile_pending_sent_copies_inner`. Before this path existed, a
+        // completed APPEND was terminal journal state and Sent stayed absent
+        // locally until the periodic warmer happened to run.
+        assert!(completed_sent_copy_requires_catalogue_refresh(
+            "completed",
+            Some("sent_copy_saved")
+        ));
+        assert!(completed_sent_copy_requires_catalogue_refresh(
+            "completed",
+            Some("provider_sent_reconciled")
+        ));
+        assert!(!completed_sent_copy_requires_catalogue_refresh(
+            "uncertain",
+            Some("smtp_accepted_sent_copy_uncertain")
+        ));
+        assert!(!completed_sent_copy_requires_catalogue_refresh(
+            "retry",
+            Some("sent_copy_retry_scheduled")
+        ));
+    }
+
+    #[tokio::test]
+    async fn queued_submission_claims_only_the_callers_durable_draft() {
+        let (store, account) = account_with_store().await;
+        let active = store
+            .enqueue_smtp_submission_and_claim(account.id, r#"{"draft":"active"}"#, "active")
+            .await
+            .expect("stage active submission");
+        let queued = store
+            .enqueue_smtp_submission_and_claim(account.id, r#"{"draft":"queued"}"#, "queued")
+            .await
+            .expect("stage queued submission");
+        assert_eq!(active.state, "submitting");
+        assert_eq!(queued.state, "queued");
+
+        store
+            .complete_claimed_operation(
+                &active.operation_id,
+                "active",
+                "rejected",
+                Some("rejected_before_acceptance"),
+                Some("fixture complete"),
+                None,
+            )
+            .await
+            .expect("finish predecessor");
+
+        match wait_for_owned_outgoing_submission_claim(
+            &store,
+            account.id,
+            &queued.operation_id,
+            "queued",
+        )
+        .await
+        .expect("wait for own submission")
+        {
+            DesktopSubmissionClaim::Claimed(claimed) => {
+                assert_eq!(claimed.operation_id, queued.operation_id);
+                assert_eq!(claimed.state, "submitting");
+            }
+            DesktopSubmissionClaim::Finished(_) => {
+                panic!("the caller's queued submission must be claimed by its owner")
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DurableOutgoingPayload {
+    draft: ComposeMessage,
+    prepared: PreparedOutgoingMessage,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UnresolvedMailOperation {
+    operation_id: String,
+    account_id: String,
+    message_id: Option<String>,
+    kind: String,
+    status: String,
+    outcome: Option<String>,
+    delivery_accepted: bool,
+    error: Option<String>,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+fn unresolved_delivery_was_accepted(
+    operation: &dakia_core::storage::OperationJournalEntry,
+) -> bool {
+    operation.kind == "smtp_submission" && operation.smtp_accepted_at.is_some()
+}
+
+#[tauri::command]
+async fn mail_unresolved_operations(
+    state: State<'_, Arc<AppState>>,
+    account_ids: Option<Vec<Uuid>>,
+) -> Result<Vec<UnresolvedMailOperation>, String> {
+    let account_ids = match account_ids {
+        Some(account_ids) => account_ids,
+        None => state
+            .store
+            .accounts()
+            .await
+            .map_err(error)?
+            .into_iter()
+            .map(|account| account.id)
+            .collect(),
+    };
+    let mut operations = Vec::new();
+    for account_id in account_ids {
+        for operation in state
+            .store
+            .unresolved_operations(account_id)
+            .await
+            .map_err(error)?
+        {
+            let delivery_accepted = unresolved_delivery_was_accepted(&operation);
+            operations.push(UnresolvedMailOperation {
+                operation_id: operation.operation_id,
+                account_id: operation.account_id,
+                message_id: operation.message_id,
+                kind: operation.kind,
+                status: operation.state,
+                outcome: operation.outcome,
+                delivery_accepted,
+                error: operation.error,
+                created_at: operation.created_at,
+            });
+        }
+    }
+    operations.sort_by_key(|operation| operation.created_at);
+    Ok(operations)
+}
+
+/// Returns a saved submission for a recovery-only compose view. It never
+/// returns ordinary drafts and the caller cannot use this command to resend.
+#[tauri::command]
+async fn outgoing_operation_draft(
+    state: State<'_, Arc<AppState>>,
+    operation_id: String,
+) -> Result<ComposeMessage, String> {
+    let operation = state
+        .store
+        .operation_journal_entry(&operation_id)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Outgoing operation not found".to_owned())?;
+    if operation.kind != "smtp_submission"
+        || !matches!(operation.state.as_str(), "uncertain" | "accepted")
+    {
+        return Err("This operation does not have a recoverable outgoing draft".to_owned());
+    }
+    serde_json::from_str::<DurableOutgoingPayload>(&operation.payload_json)
+        .map(|payload| payload.draft)
+        .map_err(error)
+}
+
+fn sent_reconcile_retry_delay(operation_id: &str, attempts: i64) -> Duration {
+    let exponent = u32::try_from(attempts.clamp(0, 6)).unwrap_or(6);
+    let seconds = 5_u64.saturating_mul(1_u64 << exponent).min(300);
+    let jitter = operation_id
+        .bytes()
+        .fold(0_u64, |total, byte| total.saturating_add(u64::from(byte)))
+        % 1_000;
+    Duration::from_secs(seconds) + Duration::from_millis(jitter)
+}
+
+fn sent_reconcile_failure_is_authentication(error: &str) -> bool {
+    is_persistent_auth_failure(error) || error.to_ascii_lowercase().contains("oauth authentication")
+}
+
+fn sent_reconcile_failure_is_retryable(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    [
+        "timeout",
+        "timed out",
+        "temporary",
+        "connection reset",
+        "connection refused",
+        "network is unreachable",
+        "broken pipe",
+        "rate limit",
+        "throttl",
+    ]
+    .iter()
+    .any(|needle| error.contains(needle))
+}
+
+/// One account timer services every due Sent-copy retry. Individual
+/// journal rows carry their own jittered deadline, so a burst of failures
+/// cannot create a burst of IMAP timers or reconnects.
+fn schedule_sent_reconciliation_retry(
+    app: Option<tauri::AppHandle>,
+    state: Arc<AppState>,
+    account_id: Uuid,
+) {
+    let already_running = !state
+        .sent_reconcile_retry_running
+        .lock()
+        .expect("Sent reconciliation retry reservation lock poisoned")
+        .insert(account_id);
+    if already_running {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        // Each row owns its deadline. A restart can arm this timer for a
+        // future row before any IMAP command is due.
+        loop {
+            let retry_at = match state
+                .store
+                .next_sent_reconciliation_retry_at(account_id)
+                .await
+            {
+                Ok(retry_at) => retry_at,
+                Err(error) => {
+                    tracing::warn!(account_id = %account_id, error = %error, "could not read next Sent reconciliation deadline");
+                    break;
+                }
+            };
+            let Some(retry_at) = retry_at else { break };
+            let delay = (retry_at - chrono::Utc::now())
+                .to_std()
+                .unwrap_or_else(|_| Duration::ZERO);
+            tokio::time::sleep(delay).await;
+            reconcile_pending_sent_copies_inner(app.clone(), state.clone(), account_id).await;
+        }
+        state
+            .sent_reconcile_retry_running
+            .lock()
+            .expect("Sent reconciliation retry reservation lock poisoned")
+            .remove(&account_id);
+    });
+}
+
+/// A lightweight durable journal poll observes Sent-copy work submitted by a
+/// concurrent CLI process. Local Tauri events cannot wake this process for a
+/// SQLite write made elsewhere.
+fn schedule_sent_reconciliation_poll(
+    app: tauri::AppHandle,
+    state: Arc<AppState>,
+    account_id: Uuid,
+) {
+    let already_running = !state
+        .sent_reconcile_poll_running
+        .lock()
+        .expect("Sent reconciliation poll reservation lock poisoned")
+        .insert(account_id);
+    if already_running {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            match state.store.account(account_id).await {
+                Ok(Some(account)) if account.enabled => {
+                    if let Err(error) =
+                        operations::recover_interrupted_account_operations(&state.store, account_id)
+                            .await
+                    {
+                        tracing::warn!(account_id = %account_id, error = %error, "could not recover expired cross-process operation claims");
+                    }
+                    schedule_message_mutation_drain(app.clone(), state.clone(), account_id);
+                    reconcile_pending_sent_copies(Some(app.clone()), state.clone(), account_id);
+                }
+                Ok(_) => break,
+                Err(error) => {
+                    tracing::warn!(account_id = %account_id, error = %error, "could not poll cross-process Sent reconciliation work");
+                    break;
+                }
+            }
+        }
+        state
+            .sent_reconcile_poll_running
+            .lock()
+            .expect("Sent reconciliation poll reservation lock poisoned")
+            .remove(&account_id);
+    });
+}
+
+fn reconcile_pending_sent_copies(
+    app: Option<tauri::AppHandle>,
+    state: Arc<AppState>,
+    account_id: Uuid,
+) {
+    tauri::async_runtime::spawn(async move {
+        reconcile_pending_sent_copies_inner(app, state, account_id).await;
+    });
+}
+
+/// Publish the provider copy into the local Sent catalogue as soon as its
+/// durable Sent-copy operation completes. This does not depend on Inbox or
+/// Archive being available, and it can establish Sent for a fresh account.
+async fn refresh_recent_sent_catalogue_after_sent_copy(
+    app: Option<&tauri::AppHandle>,
+    state: &Arc<AppState>,
+    account: &Account,
+) -> anyhow::Result<usize> {
+    let refreshed = dakia_core::connection_budget::imap_work(
+        dakia_core::connection_budget::ImapPriority::Realtime,
+        MailService::new(state.store.clone()).refresh_recent_sent_mailbox(
+            account,
+            chrono::Utc::now() - chrono::Duration::days(SENT_COPY_CATALOGUE_REFRESH_LOOKBACK_DAYS),
+            SENT_COPY_CATALOGUE_REFRESH_LIMIT,
+        ),
+    )
+    .await?;
+    if !refreshed.is_empty() {
+        if let Some(app) = app {
+            // `mail-changed` is the existing committed-catalogue wake-up for
+            // all windows. SyncRun revisions are terminal after a completed
+            // history run, so inventing a revision here would let clients
+            // suppress a real later publication.
+            let _ = app.emit(
+                "mail-changed",
+                serde_json::json!({ "accountId": account.id }),
+            );
+        }
+    }
+    Ok(refreshed.len())
+}
+
+fn completed_sent_copy_requires_catalogue_refresh(state: &str, outcome: Option<&str>) -> bool {
+    state == "completed"
+        && matches!(
+            outcome,
+            Some("sent_copy_saved" | "provider_sent_reconciled")
+        )
+}
+
+async fn reconcile_pending_sent_copies_inner(
+    app: Option<tauri::AppHandle>,
+    state: Arc<AppState>,
+    account_id: Uuid,
+) {
+    let _submission = match state.submissions.acquire(account_id).await {
+        Ok(submission) => submission,
+        Err(_) => return,
+    };
+    let account = match state.store.account(account_id).await {
+        Ok(Some(account)) if account.enabled => account,
+        Ok(_) => return,
+        Err(error) => {
+            tracing::warn!(account_id = %account_id, error = %error, "could not load account for Sent-copy reconciliation");
+            return;
+        }
+    };
+    let provider_reconciliations = match state
+        .store
+        .provider_sent_reconciliation_operations(account_id)
+        .await
+    {
+        Ok(operations) => operations,
+        Err(error) => {
+            tracing::warn!(account_id = %account_id, error = %error, "could not load provider Sent reconciliations");
+            Vec::new()
+        }
+    };
+    let mut provider_retry_scheduled = false;
+    let mut catalogue_refresh_needed = false;
+    for operation in provider_reconciliations {
+        let owner = Uuid::new_v4().to_string();
+        let Some(claimed) = (match state
+            .store
+            .claim_provider_sent_operation(&operation.operation_id, &owner)
+            .await
+        {
+            Ok(claimed) => claimed,
+            Err(error) => {
+                tracing::warn!(operation_id = %operation.operation_id, error = %error, "could not claim provider Sent reconciliation");
+                continue;
+            }
+        }) else {
+            continue;
+        };
+        let _claim_heartbeat = ClaimHeartbeat::start(
+            state.store.clone(),
+            claimed.operation_id.clone(),
+            owner.clone(),
+        );
+        let payload: DurableOutgoingPayload = match serde_json::from_str(&claimed.payload_json) {
+            Ok(payload) => payload,
+            Err(error) => {
+                let _ = state
+                    .store
+                    .complete_claimed_operation(
+                        &claimed.operation_id,
+                        &owner,
+                        "uncertain",
+                        Some("invalid_prepared_outgoing_payload"),
+                        Some(&error.to_string()),
+                        None,
+                    )
+                    .await;
+                continue;
+            }
+        };
+        let (completion, retry_this_operation) = match dakia_core::connection_budget::imap_work(
+            dakia_core::connection_budget::ImapPriority::Realtime,
+            MailService::new(state.store.clone())
+                .reconcile_provider_sent_copy(&account, &payload.prepared),
+        )
+        .await
+        {
+            Ok(SentCopyPresence::Present) => {
+                (("completed", Some("provider_sent_reconciled"), None), false)
+            }
+            Ok(SentCopyPresence::Absent) => {
+                provider_retry_scheduled = true;
+                (
+                    (
+                        "accepted",
+                        Some("provider_sent_reconciliation"),
+                        Some("waiting for the provider Sent copy".to_owned()),
+                    ),
+                    true,
+                )
+            }
+            Err(error) => {
+                let error = error.to_string().chars().take(512).collect::<String>();
+                let retry = !sent_reconcile_failure_is_authentication(&error)
+                    && sent_reconcile_failure_is_retryable(&error);
+                provider_retry_scheduled |= retry;
+                (
+                    (
+                        if retry { "accepted" } else { "uncertain" },
+                        Some(if retry {
+                            "provider_sent_reconciliation"
+                        } else {
+                            "provider_sent_reconciliation_uncertain"
+                        }),
+                        Some(error),
+                    ),
+                    retry,
+                )
+            }
+        };
+        let retry_at = retry_this_operation.then(|| {
+            chrono::Utc::now()
+                + chrono::Duration::from_std(sent_reconcile_retry_delay(
+                    &claimed.operation_id,
+                    claimed.attempts,
+                ))
+                .expect("retry delay fits chrono")
+        });
+        let provider_copy_confirmed =
+            completed_sent_copy_requires_catalogue_refresh(completion.0, completion.1);
+        if let Err(error) = state
+            .store
+            .complete_claimed_operation(
+                &claimed.operation_id,
+                &owner,
+                completion.0,
+                completion.1,
+                completion.2.as_deref(),
+                retry_at,
+            )
+            .await
+        {
+            tracing::warn!(operation_id = %claimed.operation_id, error = %error, "could not record provider Sent reconciliation outcome");
+        } else if provider_copy_confirmed {
+            catalogue_refresh_needed = true;
+        }
+    }
+    let pending = match state.store.pending_operations(account_id).await {
+        Ok(pending) => pending,
+        Err(error) => {
+            tracing::warn!(account_id = %account_id, error = %error, "could not load pending Sent-copy operations");
+            return;
+        }
+    };
+    let mut accepted_submission_recovered = false;
+    for operation in pending
+        .iter()
+        .filter(|operation| operation.kind == "smtp_submission" && operation.state == "queued")
+    {
+        let owner = Uuid::new_v4().to_string();
+        let Some(claimed) = (match state
+            .store
+            .claim_operation_by_id(&operation.operation_id, &owner)
+            .await
+        {
+            Ok(claimed) => claimed,
+            Err(error) => {
+                tracing::warn!(operation_id = %operation.operation_id, error = %error, "could not claim queued SMTP submission");
+                continue;
+            }
+        }) else {
+            continue;
+        };
+        let _claim_heartbeat = ClaimHeartbeat::start(
+            state.store.clone(),
+            claimed.operation_id.clone(),
+            owner.clone(),
+        );
+        let payload: DurableOutgoingPayload = match serde_json::from_str(&claimed.payload_json) {
+            Ok(payload) => payload,
+            Err(error) => {
+                let _ = state
+                    .store
+                    .complete_claimed_operation(
+                        &claimed.operation_id,
+                        &owner,
+                        "permanent_failed",
+                        Some("invalid_prepared_outgoing_payload"),
+                        Some(&error.to_string()),
+                        None,
+                    )
+                    .await;
+                continue;
+            }
+        };
+        let completion = match MailService::new(state.store.clone())
+            .submit_prepared_smtp(&account, &payload.prepared)
+            .await
+        {
+            Ok(SendOutcome::Accepted { sent_copy, .. }) => {
+                accepted_submission_recovered = true;
+                match sent_copy {
+                    SentCopyStatus::ProviderManaged => {
+                        ("accepted", Some("provider_sent_reconciliation"), None)
+                    }
+                    SentCopyStatus::Pending => ("sent_copy_pending", Some("smtp_accepted"), None),
+                }
+            }
+            Ok(SendOutcome::DeliveryUncertain) => {
+                ("uncertain", Some("smtp_delivery_uncertain"), None)
+            }
+            Err(error) => (
+                "rejected",
+                Some("rejected_before_acceptance"),
+                Some(error.to_string()),
+            ),
+        };
+        if let Err(error) = state
+            .store
+            .complete_claimed_operation(
+                &claimed.operation_id,
+                &owner,
+                completion.0,
+                completion.1,
+                completion.2.as_deref(),
+                None,
+            )
+            .await
+        {
+            tracing::warn!(operation_id = %claimed.operation_id, error = %error, "could not record recovered SMTP submission outcome");
+        }
+    }
+    let mut sent_copy_retry_scheduled = false;
+    for operation in pending.into_iter().filter(|operation| {
+        operation.kind == "smtp_submission"
+            && (operation.state == "sent_copy_pending"
+                || (operation.state == "retry"
+                    && operation.outcome.as_deref() == Some("sent_copy_retry_scheduled")))
+    }) {
+        let owner = Uuid::new_v4().to_string();
+        let Some(claimed) = (match state
+            .store
+            .claim_sent_copy_operation(&operation.operation_id, &owner)
+            .await
+        {
+            Ok(claimed) => claimed,
+            Err(error) => {
+                tracing::warn!(operation_id = %operation.operation_id, error = %error, "could not claim Sent-copy operation");
+                continue;
+            }
+        }) else {
+            continue;
+        };
+        let _claim_heartbeat = ClaimHeartbeat::start(
+            state.store.clone(),
+            claimed.operation_id.clone(),
+            owner.clone(),
+        );
+        let payload: DurableOutgoingPayload = match serde_json::from_str(&claimed.payload_json) {
+            Ok(payload) => payload,
+            Err(error) => {
+                let _ = state
+                    .store
+                    .complete_claimed_operation(
+                        &claimed.operation_id,
+                        &owner,
+                        "permanent_failed",
+                        Some("invalid_prepared_outgoing_payload"),
+                        Some(&error.to_string()),
+                        None,
+                    )
+                    .await;
+                continue;
+            }
+        };
+        let result = dakia_core::connection_budget::imap_work(
+            dakia_core::connection_budget::ImapPriority::Realtime,
+            MailService::new(state.store.clone())
+                .save_pending_sent_copy(&account, &payload.prepared),
+        )
+        .await;
+        let completion = match result {
+            Ok(SentCopyOutcome::Saved) => ("completed", Some("sent_copy_saved"), None, None),
+            Ok(SentCopyOutcome::Uncertain) => (
+                "uncertain",
+                Some("smtp_accepted_sent_copy_uncertain"),
+                None,
+                None,
+            ),
+            Err(error) => {
+                let error = error.to_string();
+                if sent_reconcile_failure_is_authentication(&error) {
+                    (
+                        "uncertain",
+                        Some("sent_copy_authentication_required"),
+                        Some(error),
+                        None,
+                    )
+                } else if sent_reconcile_failure_is_retryable(&error) {
+                    sent_copy_retry_scheduled = true;
+                    (
+                        "retry",
+                        Some("sent_copy_retry_scheduled"),
+                        Some(error),
+                        Some(
+                            chrono::Utc::now()
+                                + chrono::Duration::from_std(sent_reconcile_retry_delay(
+                                    &claimed.operation_id,
+                                    claimed.attempts,
+                                ))
+                                .expect("retry delay fits chrono"),
+                        ),
+                    )
+                } else {
+                    (
+                        "uncertain",
+                        Some("sent_copy_reconciliation_uncertain"),
+                        Some(error),
+                        None,
+                    )
+                }
+            }
+        };
+        let sent_copy_saved =
+            completed_sent_copy_requires_catalogue_refresh(completion.0, completion.1);
+        if let Err(error) = state
+            .store
+            .complete_claimed_operation(
+                &claimed.operation_id,
+                &owner,
+                completion.0,
+                completion.1,
+                completion.2.as_deref(),
+                completion.3,
+            )
+            .await
+        {
+            tracing::warn!(operation_id = %claimed.operation_id, error = %error, "could not record Sent-copy reconciliation outcome");
+        } else if sent_copy_saved {
+            catalogue_refresh_needed = true;
+        }
+    }
+    if catalogue_refresh_needed {
+        if let Err(error) =
+            refresh_recent_sent_catalogue_after_sent_copy(app.as_ref(), &state, &account).await
+        {
+            // The Sent copy is already durably complete. Keep it complete and
+            // let the ordinary bounded primary refresh retry catalogue
+            // visibility, rather than risking a second APPEND.
+            tracing::warn!(account_id = %account_id, error = %error, "could not refresh local Sent catalogue after a saved copy");
+        }
+    }
+    if provider_retry_scheduled
+        || sent_copy_retry_scheduled
+        || state
+            .store
+            .next_sent_reconciliation_retry_at(account_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+    {
+        schedule_sent_reconciliation_retry(app.clone(), state.clone(), account_id);
+    }
+    if accepted_submission_recovered {
+        reconcile_pending_sent_copies(app, state.clone(), account_id);
+    }
+}
+
+async fn submit_outgoing_message(
+    app: Option<&tauri::AppHandle>,
+    state: &Arc<AppState>,
+    draft: &ComposeMessage,
+) -> Result<OutgoingSubmission, String> {
+    let _submission = state
+        .submissions
+        .acquire(draft.account_id)
+        .await
+        .map_err(|_| "Account is being removed".to_owned())?;
+    let account = enabled_account_for_operation(state, draft.account_id).await?;
+    let service = MailService::new(state.store.clone());
+    let prepared = service
+        .prepare_outgoing_message(&account, draft)
+        .map_err(error)?;
+    let payload = serde_json::to_string(&DurableOutgoingPayload {
+        draft: draft.clone(),
+        prepared: prepared.clone(),
+    })
+    .map_err(error)?;
+    // The complete, final composer payload is durable before SMTP starts.
+    // A submission that dies after DATA remains fenced as uncertain rather
+    // than becoming a candidate for automatic replay on restart.
+    let claim_owner = Uuid::new_v4().to_string();
+    let claimed = state
+        .store
+        .enqueue_smtp_submission_and_claim(account.id, &payload, &claim_owner)
+        .await
+        .map_err(error)?;
+    let operation_id = claimed.operation_id.clone();
+    let claimed = match claimed.state.as_str() {
+        "submitting" => claimed,
+        "queued" => match wait_for_owned_outgoing_submission_claim(
+            &state.store,
+            account.id,
+            &operation_id,
+            &claim_owner,
+        )
+        .await?
+        {
+            DesktopSubmissionClaim::Claimed(claimed) => claimed,
+            DesktopSubmissionClaim::Finished(outcome) => return Ok(outcome),
+        },
+        status => {
+            return Err(format!(
+                "outgoing submission journal entry has an unexpected state: {status}"
+            ));
+        }
+    };
+    if claimed.operation_id != operation_id || claimed.state != "submitting" {
+        return Err("outgoing submission journal entry has an unexpected claim".to_owned());
+    }
+    let _lease_heartbeat = ClaimHeartbeat::start(
+        state.store.clone(),
+        claimed.operation_id.clone(),
+        claim_owner.clone(),
+    );
+    match service.submit_prepared_smtp(&account, &prepared).await {
+        Ok(SendOutcome::Accepted {
+            response,
+            sent_copy,
+        }) => {
+            let (status, outcome) = match sent_copy {
+                SentCopyStatus::ProviderManaged => ("accepted", "provider_sent_reconciliation"),
+                SentCopyStatus::Pending => ("sent_copy_pending", "smtp_accepted"),
+            };
+            let persisted = match state
+                .store
+                .complete_claimed_operation(
+                    &claimed.operation_id,
+                    &claim_owner,
+                    status,
+                    Some(outcome),
+                    None,
+                    None,
+                )
+                .await
+            {
+                Ok(()) => true,
+                Err(error) => {
+                    // SMTP already accepted the message. Returning an
+                    // ordinary error here would invite a duplicate send.
+                    // Keep the durable row fenced as `submitting`; startup
+                    // will expose it as uncertainty before any worker runs.
+                    tracing::error!(
+                        operation_id = %claimed.operation_id,
+                        error = %error,
+                        "could not persist SMTP acceptance outcome"
+                    );
+                    false
+                }
+            };
+            if persisted {
+                reconcile_pending_sent_copies(app.cloned(), state.clone(), account.id);
+            }
+            Ok(OutgoingSubmission {
+                operation_id: claimed.operation_id,
+                status: if persisted {
+                    status.to_owned()
+                } else {
+                    // SMTP has already returned 250. The local journal needs
+                    // attention, but delivery is not uncertain and compose
+                    // must never encourage a duplicate send.
+                    "accepted".to_owned()
+                },
+                response: Some(response),
+                persistence_warning: !persisted,
+            })
+        }
+        Ok(SendOutcome::DeliveryUncertain) => {
+            if let Err(error) = state
+                .store
+                .complete_claimed_operation(
+                    &claimed.operation_id,
+                    &claim_owner,
+                    "uncertain",
+                    Some("smtp_delivery_uncertain"),
+                    None,
+                    None,
+                )
+                .await
+            {
+                tracing::error!(
+                    operation_id = %claimed.operation_id,
+                    error = %error,
+                    "could not persist uncertain SMTP outcome"
+                );
+            }
+            Ok(OutgoingSubmission {
+                operation_id: claimed.operation_id,
+                status: "uncertain".to_owned(),
+                response: None,
+                persistence_warning: false,
+            })
+        }
+        Err(failure) => {
+            let failure_text = failure.to_string();
+            state
+                .store
+                .complete_claimed_operation(
+                    &claimed.operation_id,
+                    &claim_owner,
+                    "rejected",
+                    Some("rejected_before_acceptance"),
+                    Some(&failure_text),
+                    None,
+                )
+                .await
+                .map_err(error)?;
+            Err(error(failure))
+        }
+    }
+}
+
+#[tauri::command]
+async fn send_message_outcome(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    draft: ComposeMessage,
+) -> Result<OutgoingSubmission, String> {
+    submit_outgoing_message(Some(&app), state.inner(), &draft).await
+}
+
+/// Compatibility command for windows that have not yet switched to the
+/// durable outcome contract. An uncertain delivery returns successfully so
+/// the old composer cannot encourage a duplicate resend.
 #[tauri::command]
 async fn send_message(
+    app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     draft: ComposeMessage,
 ) -> Result<String, String> {
-    let _operation = state.account_operations.acquire(draft.account_id).await;
-    let account = enabled_account_for_operation(state.inner(), draft.account_id).await?;
-    MailService::new(state.store.clone())
-        .send(&account, &draft)
-        .await
-        .map_err(error)
+    let outcome = submit_outgoing_message(Some(&app), state.inner(), &draft).await?;
+    Ok(outcome.response.unwrap_or(outcome.status))
 }
 
 #[tauri::command]
 async fn apply_mailbox_action(
+    app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
-    account_id: Uuid,
-    mailbox: String,
-    uid: u32,
+    message_id: String,
     action: MailboxAction,
 ) -> Result<(), String> {
-    let _operation = state.account_operations.acquire(account_id).await;
-    let account = enabled_account_for_operation(state.inner(), account_id).await?;
-    require_permanent_delete_locator(&state.store, account_id, &mailbox, uid, action).await?;
-    let destination_uid = MailService::new(state.store.clone())
-        .apply_action(&account, &mailbox, uid, action)
-        .await
-        .map_err(error)?;
-    state
+    let initial = state
         .store
-        .move_message(
-            account.id,
-            &mailbox,
-            uid,
-            mailbox_action_destination(action).unwrap_or_default(),
-            destination_uid,
-        )
-        .await
-        .map_err(error)
-}
-
-async fn require_permanent_delete_locator(
-    store: &Store,
-    account_id: Uuid,
-    mailbox: &str,
-    uid: u32,
-    action: MailboxAction,
-) -> Result<(), String> {
-    if !matches!(action, MailboxAction::Delete) {
-        return Ok(());
-    }
-    store
-        .message_by_locator(account_id, mailbox, uid)
+        .message(&message_id)
         .await
         .map_err(error)?
         .ok_or_else(|| "Message is no longer available in this mailbox".to_owned())?;
-    Ok(())
-}
-
-#[cfg(test)]
-mod permanent_delete_command_tests {
-    use super::*;
-    use chrono::Utc;
-
-    fn message(account_id: Uuid, mailbox: &str, uid: u32) -> MailSummary {
-        MailSummary {
-            id: format!("{account_id}:{mailbox}:{uid}"),
-            account_id: account_id.to_string(),
-            mailbox: mailbox.into(),
-            uid: i64::from(uid),
-            message_id: Some(format!("<{uid}@example.test>")),
-            in_reply_to: None,
-            reference_ids: None,
-            thread_id: format!("thread-{uid}"),
-            subject: "Permanent delete locator".into(),
-            from_name: None,
-            from_address: "sender@example.test".into(),
-            to_addresses: "reader@example.test".into(),
-            cc_addresses: String::new(),
-            bcc_addresses: String::new(),
-            reply_to_addresses: String::new(),
-            received_at: Utc::now(),
-            snippet: String::new(),
-            body_text: String::new(),
-            body_html: None,
-            content_state: "headers_only".into(),
-            unsubscribe_kind: None,
-            unsubscribe_url: None,
-            is_read: false,
-            is_flagged: false,
-            has_attachments: false,
-            category: None,
-            classification_confidence: None,
-            classification_source: None,
-            classification_signals: String::new(),
-            attachments: vec![],
-        }
-    }
-
-    #[tokio::test]
-    async fn permanent_delete_requires_the_exact_local_account_mailbox_and_uid() {
-        let store = Store::in_memory().await.expect("in-memory store");
-        let account_id = Uuid::new_v4();
-        let other_account_id = Uuid::new_v4();
-        store
-            .upsert_messages(&[message(account_id, "INBOX", 42)])
-            .await
-            .expect("save message");
-
-        require_permanent_delete_locator(&store, account_id, "INBOX", 42, MailboxAction::Delete)
-            .await
-            .expect("exact locator is accepted");
-        for (candidate_account, candidate_mailbox, candidate_uid) in [
-            (other_account_id, "INBOX", 42),
-            (account_id, "Archive", 42),
-            (account_id, "INBOX", 41),
-        ] {
-            assert!(
-                require_permanent_delete_locator(
-                    &store,
-                    candidate_account,
-                    candidate_mailbox,
-                    candidate_uid,
-                    MailboxAction::Delete,
-                )
-                .await
-                .is_err(),
-                "a crossed or absent locator must fail before IMAP"
-            );
-        }
-        require_permanent_delete_locator(
-            &store,
-            other_account_id,
-            "INBOX",
-            42,
-            MailboxAction::Trash,
-        )
+    let account_id = Uuid::parse_str(&initial.account_id).map_err(error)?;
+    let _operation = state.account_operations.acquire(account_id).await;
+    enabled_account_for_operation(state.inner(), account_id).await?;
+    let message = state
+        .store
+        .message(&message_id)
         .await
-        .expect("ordinary Trash behavior remains unchanged");
+        .map_err(error)?
+        .ok_or_else(|| "Message is no longer available in this mailbox".to_owned())?;
+    if message.account_id != initial.account_id {
+        return Err("Message changed before the action could be queued".to_owned());
     }
+    let _journal = operations::enqueue_mailbox_action(&state.store, &message, action, None)
+        .await
+        .map_err(error)?;
+    drop(_operation);
+    schedule_message_mutation_drain(app, state.inner().clone(), account_id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -4957,7 +7317,7 @@ async fn unsubscribe_message(
     let account_id = Uuid::parse_str(&message.account_id).map_err(error)?;
     let mut cleanup_target = sender_cleanup_target(&message, account_id);
     let _operation = state.account_operations.acquire(account_id).await;
-    let account = enabled_account_for_operation(state.inner(), account_id).await?;
+    let _account = enabled_account_for_operation(state.inner(), account_id).await?;
     let service = MailService::new(state.store.clone());
     let outcome = match service.unsubscribe(&message).await {
         Ok(outcome) => outcome,
@@ -4966,7 +7326,13 @@ async fn unsubscribe_message(
         // metadata so a later valid fallback in the header can be selected.
         // Never retry a one-click POST: its failure may be ambiguous.
         Err(_) if message.unsubscribe_kind.as_deref() != Some("one_click") => {
-            let refreshed = fetch_remote_message(state.inner(), &message_id).await?;
+            let identity = state
+                .store
+                .capture_message_remote_identity(&message_id)
+                .await
+                .map_err(error)?
+                .ok_or_else(|| "Message changed while it was being refreshed".to_owned())?;
+            let refreshed = fetch_remote_message(state.inner(), &identity).await?;
             cleanup_target = sender_cleanup_target(&refreshed, account_id);
             service.unsubscribe(&refreshed).await.map_err(error)?
         }
@@ -4980,10 +7346,11 @@ async fn unsubscribe_message(
         }
         UnsubscribeOutcome::Mailto { to, subject, body } => {
             let draft = unsubscribe_email(account_id, to, subject, body)?;
-            MailService::new(state.store.clone())
-                .send(&account, &draft)
-                .await
-                .map_err(error)?;
+            drop(_operation);
+            let submission = submit_outgoing_message(Some(&app), state.inner(), &draft).await?;
+            if submission.status == "uncertain" {
+                return Err("The unsubscribe email may have been delivered, but Dakia could not confirm it. It will not be sent again automatically.".to_owned());
+            }
             Ok(UnsubscribeResult::Completed { cleanup_target })
         }
     }
@@ -4991,16 +7358,63 @@ async fn unsubscribe_message(
 
 #[tauri::command]
 async fn trash_messages_from_sender(
+    app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     account_id: Uuid,
     sender_address: String,
 ) -> Result<SenderTrashResult, String> {
-    let _operation = state.account_operations.acquire(account_id).await;
+    let sender_address = normalize_sender_address(&sender_address)
+        .ok_or_else(|| "Sender email address is invalid".to_owned())?;
     let account = enabled_account_for_operation(state.inner(), account_id).await?;
-    MailService::new(state.store.clone())
-        .trash_messages_from_sender(&account, &sender_address)
+    // Discovery is read-only and receipt-fenced in core. It materializes
+    // matching provider rows that have not yet reached the progressive local
+    // catalogue, then returns stable local message IDs for durable action
+    // enqueueing. Do not hold the lifecycle lock across this bounded provider
+    // scan: update or removal can invalidate its receipts instead.
+    let candidates = dakia_core::connection_budget::imap_work(
+        dakia_core::connection_budget::ImapPriority::History,
+        MailService::new(state.store.clone())
+            .discover_messages_from_sender(&account, &sender_address),
+    )
+    .await
+    .map_err(error)?;
+    let matched = candidates.len();
+    let _operation = state.account_operations.acquire(account_id).await;
+    // Re-check after the network scan. Every candidate still goes through the
+    // atomic identity capture below, which rejects a replaced mailbox or a
+    // removed account without touching a recycled UID.
+    enabled_account_for_operation(state.inner(), account_id).await?;
+    let mut moved = 0;
+    let mut failed = 0;
+    for candidate in candidates {
+        let message = candidate.message;
+        match operations::enqueue_mailbox_action_for_identity(
+            &state.store,
+            &candidate.remote_identity,
+            MailboxAction::Trash,
+            None,
+        )
         .await
-        .map_err(error)
+        {
+            Ok(_) => moved += 1,
+            Err(queue_error) => {
+                // A replacement generation can invalidate an individual
+                // locator while a sender cleanup is being queued. Other
+                // messages remain independently durable and optimistic.
+                tracing::warn!(account_id = %account_id, message_id = %message.id, error = %queue_error, "could not queue sender cleanup mailbox action");
+                failed += 1;
+            }
+        }
+    }
+    drop(_operation);
+    if moved > 0 {
+        schedule_message_mutation_drain(app, state.inner().clone(), account_id);
+    }
+    Ok(SenderTrashResult {
+        matched,
+        moved,
+        failed,
+    })
 }
 
 #[tauri::command]
@@ -5328,7 +7742,16 @@ pub fn run() {
             install_app_menu(app).map_err(|error| anyhow::anyhow!("app menu: {error}"))?;
             let release_smoke_test = std::env::var_os("DAKIA_RELEASE_SMOKE_TEST").as_deref()
                 == Some(std::ffi::OsStr::new("1"));
-            let data_dir = if release_smoke_test {
+            let acceptance_data_dir = acceptance_data_dir()?;
+            if release_smoke_test && acceptance_data_dir.is_some() {
+                return Err(anyhow::anyhow!(
+                    "DAKIA_ACCEPTANCE_DATA_DIR cannot be used with release smoke tests"
+                )
+                .into());
+            }
+            let data_dir = if let Some(data_dir) = acceptance_data_dir {
+                data_dir
+            } else if release_smoke_test {
                 std::env::var_os("DAKIA_RELEASE_SMOKE_DATA_DIR")
                     .map(std::path::PathBuf::from)
                     .ok_or_else(|| {
@@ -5352,6 +7775,15 @@ pub fn run() {
             let state = tauri::async_runtime::block_on(async {
                 let store = Store::open(data_dir.join("dakia.db")).await?;
                 let classifier = LocalEmailClassifier::from_dir(&classifier_dir)?;
+                store.migrate_mail_rebuild_jobs_to_sync_runs().await?;
+                store.recover_orphan_account_operation_gates().await?;
+                for account in store.accounts().await? {
+                    // A process can die after SMTP DATA but before a final
+                    // response or journal transition. Fence every retained
+                    // submission at startup before any background worker can
+                    // inspect pending operations.
+                    operations::recover_interrupted_account_operations(&store, account.id).await?;
+                }
                 let mail_rebuilds = store
                     .mail_rebuild_jobs()
                     .await?
@@ -5368,12 +7800,26 @@ pub fn run() {
                     mail_rebuilds: Mutex::new(mail_rebuilds),
                     mail_rebuild_running: Mutex::new(HashSet::new()),
                     mail_rebuild_cancellations: MailRebuildCancellations::default(),
+                    progressive_sync_cancellations: ProgressiveSyncCancellations::default(),
+                    sync_runs_running: Mutex::new(HashSet::new()),
+                    mutation_drains_running: Mutex::new(HashSet::new()),
+                    folder_promotions_running: Mutex::new(HashSet::new()),
+                    sent_reconcile_retry_running: Mutex::new(HashSet::new()),
+                    sent_reconcile_poll_running: Mutex::new(HashSet::new()),
                     account_operations: AccountOperationLocks::default(),
+                    submissions: Arc::new(SubmissionCoordinator::default()),
                     remote_operation_slots: Arc::new(Semaphore::new(MESSAGE_HYDRATION_CONCURRENCY)),
                     translation_downloads: Mutex::new(HashMap::new()),
                 }))
             })?;
             app.manage(state.clone());
+            if cfg!(debug_assertions)
+                && std::env::var("DAKIA_ACCEPTANCE_METRICS").as_deref() == Ok("1")
+            {
+                app.listen("dakia:mail-publication-metric", |event| {
+                    println!("DAKIA_METRIC {}", event.payload());
+                });
+            }
             let classification_state = Arc::downgrade(&state);
             state
                 .realtime
@@ -5393,43 +7839,61 @@ pub fn run() {
             let realtime_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 kick_classification(state.clone());
-                let rebuilding: HashMap<_, _> = state
-                    .mail_rebuilds
-                    .lock()
-                    .expect("mail rebuild lock poisoned")
-                    .iter()
-                    .map(|(account_id, job)| (*account_id, job.reset_before_sync))
-                    .collect();
                 match state.store.accounts().await {
                     Ok(accounts) => {
                         for account in accounts {
-                            if let Some(reset_before_sync) = rebuilding.get(&account.id) {
-                                let rebuild_app = realtime_app.clone();
-                                let rebuild_state = state.clone();
-                                let reset_before_sync = *reset_before_sync;
-                                if !reserve_mail_rebuild(&rebuild_state, account.id) {
-                                    continue;
-                                }
-                                tauri::async_runtime::spawn(async move {
-                                    if let Err(error) = run_mail_rebuild(
-                                        rebuild_app,
-                                        rebuild_state,
-                                        account,
-                                        reset_before_sync,
-                                    )
-                                    .await
-                                    {
-                                        tracing::error!(
-                                            error = %error,
-                                            "could not resume interrupted mail rebuild"
-                                        );
+                            if account.enabled {
+                                reconcile_pending_sent_copies(
+                                    Some(realtime_app.clone()),
+                                    state.clone(),
+                                    account.id,
+                                );
+                                schedule_sent_reconciliation_poll(
+                                    realtime_app.clone(),
+                                    state.clone(),
+                                    account.id,
+                                );
+                                schedule_message_mutation_drain(
+                                    realtime_app.clone(),
+                                    state.clone(),
+                                    account.id,
+                                );
+                                match state.store.sync_run(account.id).await {
+                                    Ok(Some(run)) if run.inbox_ready => {
+                                        // Header visibility and historical
+                                        // backfill are independent durable
+                                        // milestones. Start realtime now, but
+                                        // also restore any failed/running
+                                        // history run at its persisted due
+                                        // time.
+                                        state
+                                            .realtime
+                                            .start_account(realtime_app.clone(), account.clone())
+                                            .await;
+                                        resume_durable_sync_run(
+                                            realtime_app.clone(),
+                                            state.clone(),
+                                            account,
+                                        )
+                                        .await;
                                     }
-                                });
-                            } else if account.enabled {
-                                state
-                                    .realtime
-                                    .start_account(realtime_app.clone(), account)
-                                    .await;
+                                    Ok(_) => {
+                                        // The first short EXAMINE/FETCH owns
+                                        // the initial UID namespace before
+                                        // realtime begins writing it.
+                                        resume_durable_sync_run(
+                                            realtime_app.clone(),
+                                            state.clone(),
+                                            account,
+                                        )
+                                        .await;
+                                    }
+                                    Err(error) => tracing::warn!(
+                                        account_id = %account.id,
+                                        error = %error,
+                                        "could not load native sync status"
+                                    ),
+                                }
                             }
                         }
                     }
@@ -5480,8 +7944,12 @@ pub fn run() {
             record_notification_delivered,
             hydrate_message,
             mail_rebuild_status,
+            mail_sync_status,
+            mail_unresolved_operations,
             sync_account,
             send_message,
+            send_message_outcome,
+            outgoing_operation_draft,
             apply_mailbox_action,
             unsubscribe_message,
             trash_messages_from_sender,

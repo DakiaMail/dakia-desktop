@@ -1,5 +1,12 @@
 import { useDebouncedValue, useHotkeys } from "@mantine/hooks";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -57,9 +64,12 @@ import {
   onAccountRemoved,
   onAccountUpdated,
   onMailArrived,
+  onMailCatalogueUpdated,
   onMailChanged,
+  onMailContentActivity,
   onMailHydrated,
   onMailIndexRebuilt,
+  onMailOperationUpdated,
   onMailRebuildFinished,
   onMailRebuildProgress,
   onMailSyncState,
@@ -76,6 +86,8 @@ import type {
   AiSettings,
   MailListView,
   MailCursor,
+  MailCatalogueUpdated,
+  MailOperationUpdated,
   MailRebuildProgress,
   SmartSection,
   SmartSectionId,
@@ -84,6 +96,9 @@ import type {
   NotificationSettings,
   SyncResult,
   SyncStatus,
+  MailSyncStatus,
+  OutgoingOperationDraft,
+  UnresolvedMailOperation,
 } from "./types";
 import {
   checkForUpdate,
@@ -98,6 +113,7 @@ import {
   type AnalyticsSettings,
 } from "./analytics";
 import { AnalyticsConsentDialog } from "./components/AnalyticsConsentDialog";
+import { mailPublicationMetrics } from "./mailPublicationMetrics";
 
 const defaultAi: AiSettings = {
   provider: "ollama",
@@ -113,6 +129,7 @@ const smartPageSize = 3;
 const smartMorePageSize = 20;
 const smartSectionIds: SmartSectionId[] = [
   "starred",
+  "unsorted",
   "people",
   "transactions",
   "notifications",
@@ -251,6 +268,7 @@ export default function App() {
   const [hasMore, setHasMore] = useState(false);
   const [remoteSearchUnavailable, setRemoteSearchUnavailable] = useState(false);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>();
+  const [syncCoverage, setSyncCoverage] = useState<MailSyncStatus[]>([]);
   const [classifying, setClassifying] = useState(false);
   const [lastSyncAt, setLastSyncAt] = useState<string | undefined>(
     () => localStorage.getItem("dakia.last-sync-at") ?? undefined,
@@ -297,6 +315,14 @@ export default function App() {
   const classificationRequestedRef = useRef(false);
   const manualUpdateCheckInFlightRef = useRef(false);
   const smartExitTimersRef = useRef(new Map<string, number>());
+  const syncStatusRequestIdRef = useRef(0);
+  const syncCoverageRefreshTimerRef = useRef<number | undefined>(undefined);
+  const unresolvedOperationsRequestIdRef = useRef(0);
+  const surfacedUnresolvedOperationIdsRef = useRef(new Set<string>());
+  const catalogueRevisionsRef = useRef(new Map<string, number>());
+  const catalogueEventRevisionsRef = useRef(new Map<string, number>());
+  const catalogueReloadTimerRef = useRef<number | undefined>(undefined);
+  const catalogueReloadAccountIdsRef = useRef(new Set<string>());
   const accountsRef = useRef<Account[]>([]);
   const selectedAccountIdRef = useRef<string | undefined>(undefined);
   const removedAccountIdsRef = useRef(new Set<string>());
@@ -310,6 +336,7 @@ export default function App() {
   const activeRef = useRef(active);
   const activeThreadSnapshotRef = useRef(activeThreadSnapshot);
   const selectedRef = useRef(selected);
+  const selectedThreadMessageIdsRef = useRef(new Map<string, Set<string>>());
 
   accountsRef.current = accounts;
   selectedAccountIdRef.current = selectedAccountId;
@@ -323,6 +350,12 @@ export default function App() {
   useEffect(
     () => () => {
       smartExitTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+      if (catalogueReloadTimerRef.current !== undefined) {
+        window.clearTimeout(catalogueReloadTimerRef.current);
+      }
+      if (syncCoverageRefreshTimerRef.current !== undefined) {
+        window.clearTimeout(syncCoverageRefreshTimerRef.current);
+      }
     },
     [],
   );
@@ -509,57 +542,206 @@ export default function App() {
       // The message list remains usable if a count refresh fails offline.
     }
   }, []);
+  const refreshSyncCoverage = useCallback(async () => {
+    // During a rolling desktop upgrade an older backend may not expose this
+    // read-only status command yet. Mail queries remain usable in that case.
+    if (typeof api.mailSyncStatus !== "function") return;
+    const requestId = ++syncStatusRequestIdRef.current;
+    try {
+      const status = await api.mailSyncStatus();
+      if (requestId !== syncStatusRequestIdRef.current) return;
+      for (const item of status) {
+        const known = catalogueRevisionsRef.current.get(item.accountId) ?? -1;
+        if (item.revision > known) {
+          catalogueRevisionsRef.current.set(item.accountId, item.revision);
+        }
+      }
+      setSyncCoverage(status);
+    } catch {
+      // Status describes remaining work only. A transient failure must not
+      // replace already visible mail with an error state.
+    }
+  }, []);
+  const queueSyncCoverageRefresh = useCallback(() => {
+    if (syncCoverageRefreshTimerRef.current !== undefined) return;
+    syncCoverageRefreshTimerRef.current = window.setTimeout(() => {
+      syncCoverageRefreshTimerRef.current = undefined;
+      void refreshSyncCoverage();
+    }, 40);
+  }, [refreshSyncCoverage]);
+  const openRecoveredOutgoingOperation = useCallback(
+    async (operation: UnresolvedMailOperation) => {
+      try {
+        const draft: OutgoingOperationDraft = await api.outgoingOperationDraft(
+          operation.operationId,
+        );
+        openComposeWindow({
+          accountId: draft.accountId,
+          to: draft.to.join(", "),
+          cc: draft.cc.join(", "),
+          bcc: draft.bcc.join(", "),
+          subject: draft.subject,
+          body: draft.bodyText,
+          bodyHtml: draft.bodyHtml ?? undefined,
+          inReplyTo: draft.inReplyTo ?? undefined,
+          references: draft.references ?? undefined,
+          attachments: draft.attachments,
+          recoveryOutcome: operation.deliveryAccepted
+            ? "smtp_accepted_sent_copy_uncertain"
+            : "smtp_delivery_uncertain",
+        });
+      } catch (error) {
+        showError(error);
+      }
+    },
+    [],
+  );
+  const refreshUnresolvedOperations = useCallback(
+    async (accountIds?: string[]) => {
+      if (typeof api.mailUnresolvedOperations !== "function") return;
+      const requestId = ++unresolvedOperationsRequestIdRef.current;
+      try {
+        const operations = await api.mailUnresolvedOperations(accountIds);
+        if (requestId !== unresolvedOperationsRequestIdRef.current) return;
+        const knownAccounts = new Set(accountsRef.current.map(({ id }) => id));
+        const next = operations.find(
+          (operation) =>
+            knownAccounts.has(operation.accountId) &&
+            !surfacedUnresolvedOperationIdsRef.current.has(
+              operation.operationId,
+            ) &&
+            operation.kind === "smtp_submission" &&
+            operation.status === "uncertain",
+        );
+        if (next) {
+          surfacedUnresolvedOperationIdsRef.current.add(next.operationId);
+          showStatus(
+            t(
+              next.deliveryAccepted
+                ? "feedback.sentCopyUncertain"
+                : "feedback.deliveryUncertain",
+            ),
+            "error",
+            {
+              label: t("feedback.viewSavedMessage"),
+              onAction: () => void openRecoveredOutgoingOperation(next),
+            },
+          );
+          return;
+        }
+        const uncertainMutation = operations.find(
+          (operation) =>
+            knownAccounts.has(operation.accountId) &&
+            !surfacedUnresolvedOperationIdsRef.current.has(
+              operation.operationId,
+            ) &&
+            operation.kind !== "smtp_submission" &&
+            operation.status === "uncertain",
+        );
+        if (uncertainMutation) {
+          surfacedUnresolvedOperationIdsRef.current.add(
+            uncertainMutation.operationId,
+          );
+          showStatus(t("feedback.operationUncertain"), "error");
+          return;
+        }
+        const failed = operations.find(
+          (operation) =>
+            knownAccounts.has(operation.accountId) &&
+            !surfacedUnresolvedOperationIdsRef.current.has(
+              operation.operationId,
+            ) &&
+            operation.status !== "uncertain",
+        );
+        if (failed) {
+          surfacedUnresolvedOperationIdsRef.current.add(failed.operationId);
+          showStatus(t("feedback.operationFailed"), "error");
+        }
+      } catch {
+        // A recovery-status lookup must not turn the existing mailbox into an
+        // error state. It retries on the next reconnect or window mount.
+      }
+    },
+    [openRecoveredOutgoingOperation, showStatus, t],
+  );
   useEffect(() => {
     void refreshStarredCount(activeAccounts);
   }, [activeAccounts, refreshStarredCount]);
-
-  const loadMessages = useCallback(async (requestedAccountIds?: string[]) => {
-    const requestId = ++loadRequestIdRef.current;
-    const smartRequestId = ++smartLoadRequestIdRef.current;
-    const currentView = {
-      ...currentViewRef.current,
-      accountIds: requestedAccountIds ?? currentViewRef.current.accountIds,
+  useEffect(() => {
+    void refreshSyncCoverage();
+  }, [accounts, refreshSyncCoverage]);
+  useEffect(() => {
+    if (!accountsLoaded || !accounts.length) return;
+    void refreshUnresolvedOperations(accounts.map((account) => account.id));
+  }, [accounts, accountsLoaded, refreshUnresolvedOperations]);
+  useEffect(() => {
+    let disposed = false;
+    let dispose: () => void = () => undefined;
+    void onMailContentActivity(() => queueSyncCoverageRefresh())
+      .then((unlisten) => {
+        if (disposed) unlisten();
+        else dispose = unlisten;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      dispose();
     };
-    const accountIds = currentView.accountIds;
-    const smartInbox =
-      currentView.view === "smart" &&
-      currentView.mailbox === "INBOX" &&
-      !currentView.query.trim();
-    if (currentView.mailbox === "Outbox") {
-      if (
-        requestId === loadRequestIdRef.current &&
-        sameMailView(currentView, currentViewRef.current)
-      ) {
-        setThreads([]);
-        setSmartSections(emptySmartSections());
-        setLoading(false);
-        setHasMore(false);
-      }
-      return;
-    }
-    if (!accountIds.length) {
-      if (
-        requestId === loadRequestIdRef.current &&
-        sameMailView(currentView, currentViewRef.current)
-      ) {
-        setThreads([]);
-        setLoading(false);
-        setSmartSections(emptySmartSections());
-        setHasMore(false);
-      }
-      return;
-    }
-    setLoading(true);
-    setRemoteSearchUnavailable(false);
-    try {
-      if (smartInbox) {
-        const page = await api.smartInbox(accountIds, smartPageSize);
+  }, [queueSyncCoverageRefresh]);
+
+  const loadMessages = useCallback(
+    async (
+      requestedAccountIds?: string[],
+      catalogueReloadAccountIds: readonly string[] = [],
+    ) => {
+      const requestId = ++loadRequestIdRef.current;
+      const smartRequestId = ++smartLoadRequestIdRef.current;
+      const currentView = {
+        ...currentViewRef.current,
+        accountIds: requestedAccountIds ?? currentViewRef.current.accountIds,
+      };
+      const accountIds = currentView.accountIds;
+      const smartInbox =
+        currentView.view === "smart" &&
+        currentView.mailbox === "INBOX" &&
+        !currentView.query.trim();
+      let cataloguePublicationArmed = false;
+      if (currentView.mailbox === "Outbox") {
         if (
           requestId === loadRequestIdRef.current &&
-          smartRequestId === smartLoadRequestIdRef.current &&
           sameMailView(currentView, currentViewRef.current)
         ) {
-          setSmartSections(() => {
+          setThreads([]);
+          setSmartSections(emptySmartSections());
+          setLoading(false);
+          setHasMore(false);
+          mailPublicationMetrics.armVisibleRows([], catalogueReloadAccountIds);
+        }
+        return;
+      }
+      if (!accountIds.length) {
+        if (
+          requestId === loadRequestIdRef.current &&
+          sameMailView(currentView, currentViewRef.current)
+        ) {
+          setThreads([]);
+          setLoading(false);
+          setSmartSections(emptySmartSections());
+          setHasMore(false);
+          mailPublicationMetrics.armVisibleRows([], catalogueReloadAccountIds);
+        }
+        return;
+      }
+      setLoading(true);
+      setRemoteSearchUnavailable(false);
+      try {
+        if (smartInbox) {
+          const page = await api.smartInbox(accountIds, smartPageSize);
+          if (
+            requestId === loadRequestIdRef.current &&
+            smartRequestId === smartLoadRequestIdRef.current &&
+            sameMailView(currentView, currentViewRef.current)
+          ) {
             const next = emptySmartSections();
             for (const section of page.sections) {
               const visible = excludeThreads(
@@ -578,114 +760,133 @@ export default function App() {
                 loadingMore: false,
               };
             }
-            return next;
-          });
-          setHasMore(false);
+            setSmartSections(next);
+            mailPublicationMetrics.armVisibleRows(
+              Object.values(next)
+                .flatMap((section) => section.threads)
+                .map((thread) => thread.latest.account_id),
+              catalogueReloadAccountIds,
+            );
+            cataloguePublicationArmed = true;
+            setHasMore(false);
+          }
+          return;
         }
-        return;
-      }
-      const specialUnread = currentView.mailbox === "unread";
-      const specialFlagged = currentView.mailbox === "starred";
-      const actualMailbox =
-        ["unread", "starred"].includes(currentView.mailbox) ||
-        currentView.mailbox === ""
-          ? undefined
-          : currentView.mailbox;
-      const pageSize = mailPageSize;
-      const page = await api.search(
-        currentView.query,
-        accountIds,
-        actualMailbox,
-        specialUnread,
-        specialFlagged,
-        pageSize,
-        null,
-      );
-      if (
-        requestId === loadRequestIdRef.current &&
-        sameMailView(currentView, currentViewRef.current)
-      ) {
-        nextCursorRef.current = page.nextCursor;
-        const visible = excludeThreads(
-          page.conversations,
-          mailboxActionThreadIdsRef.current,
+        const specialUnread = currentView.mailbox === "unread";
+        const specialFlagged = currentView.mailbox === "starred";
+        const actualMailbox =
+          ["unread", "starred"].includes(currentView.mailbox) ||
+          currentView.mailbox === ""
+            ? undefined
+            : currentView.mailbox;
+        const pageSize = mailPageSize;
+        const page = await api.search(
+          currentView.query,
+          accountIds,
+          actualMailbox,
+          specialUnread,
+          specialFlagged,
+          pageSize,
+          null,
         );
-        setThreads(
-          senderCleanupTargetRef.current
+        if (
+          requestId === loadRequestIdRef.current &&
+          sameMailView(currentView, currentViewRef.current)
+        ) {
+          nextCursorRef.current = page.nextCursor;
+          const visible = excludeThreads(
+            page.conversations,
+            mailboxActionThreadIdsRef.current,
+          );
+          const published = senderCleanupTargetRef.current
             ? removeSenderCleanupMessages(
                 visible,
                 senderCleanupTargetRef.current,
               )
-            : visible,
-        );
-        setHasMore(page.nextCursor !== null);
-      }
-      if (currentView.query.trim()) {
-        try {
-          const remote = await api.searchRemote(
-            currentView.query,
-            accountIds,
-            actualMailbox,
-            specialUnread,
-            specialFlagged,
+            : visible;
+          setThreads(published);
+          mailPublicationMetrics.armVisibleRows(
+            published.map((thread) => thread.latest.account_id),
+            catalogueReloadAccountIds,
           );
-          if (
-            requestId === loadRequestIdRef.current &&
-            sameMailView(currentView, currentViewRef.current)
-          ) {
-            const merged = new Map(
-              page.conversations.map((thread) => [thread.id, thread]),
+          cataloguePublicationArmed = true;
+          setHasMore(page.nextCursor !== null);
+        }
+        if (currentView.query.trim()) {
+          try {
+            const remote = await api.searchRemote(
+              currentView.query,
+              accountIds,
+              actualMailbox,
+              specialUnread,
+              specialFlagged,
             );
-            for (const thread of groupMessages(remote)) {
-              if (!merged.has(thread.id)) merged.set(thread.id, thread);
-            }
-            const visible = excludeThreads(
-              [...merged.values()].sort(
-                (left, right) =>
-                  new Date(right.latest.received_at).getTime() -
-                  new Date(left.latest.received_at).getTime(),
-              ),
-              mailboxActionThreadIdsRef.current,
-            );
-            setThreads(
-              senderCleanupTargetRef.current
+            if (
+              requestId === loadRequestIdRef.current &&
+              sameMailView(currentView, currentViewRef.current)
+            ) {
+              const merged = new Map(
+                page.conversations.map((thread) => [thread.id, thread]),
+              );
+              for (const thread of groupMessages(remote)) {
+                if (!merged.has(thread.id)) merged.set(thread.id, thread);
+              }
+              const visible = excludeThreads(
+                [...merged.values()].sort(
+                  (left, right) =>
+                    new Date(right.latest.received_at).getTime() -
+                    new Date(left.latest.received_at).getTime(),
+                ),
+                mailboxActionThreadIdsRef.current,
+              );
+              const published = senderCleanupTargetRef.current
                 ? removeSenderCleanupMessages(
                     visible,
                     senderCleanupTargetRef.current,
                   )
-                : visible,
-            );
-          }
-        } catch {
-          // Local catalogue results remain useful when remote search is
-          // unavailable or the device goes offline mid-query.
-          if (
-            requestId === loadRequestIdRef.current &&
-            sameMailView(currentView, currentViewRef.current)
-          ) {
-            setRemoteSearchUnavailable(true);
+                : visible;
+              setThreads(published);
+              mailPublicationMetrics.armVisibleRows(
+                published.map((thread) => thread.latest.account_id),
+              );
+            }
+          } catch {
+            // Local catalogue results remain useful when remote search is
+            // unavailable or the device goes offline mid-query.
+            if (
+              requestId === loadRequestIdRef.current &&
+              sameMailView(currentView, currentViewRef.current)
+            ) {
+              setRemoteSearchUnavailable(true);
+            }
           }
         }
-      }
-    } catch (error) {
-      if (
-        requestId === loadRequestIdRef.current &&
-        sameMailView(currentView, currentViewRef.current)
-      ) {
-        if (smartInbox) {
-          setSmartSections(emptySmartSections());
-          setRetainedSmartThreads(new Map());
+      } catch (error) {
+        if (
+          requestId === loadRequestIdRef.current &&
+          sameMailView(currentView, currentViewRef.current)
+        ) {
+          if (smartInbox) {
+            setSmartSections(emptySmartSections());
+            setRetainedSmartThreads(new Map());
+          }
+          showError(error);
         }
-        showError(error);
+      } finally {
+        // A stale navigation or failed query has no matching React commit. Do
+        // not let its event time attach to a later, unrelated list publication.
+        if (!cataloguePublicationArmed && catalogueReloadAccountIds.length) {
+          mailPublicationMetrics.armVisibleRows([], catalogueReloadAccountIds);
+        }
+        if (
+          requestId === loadRequestIdRef.current &&
+          sameMailView(currentView, currentViewRef.current)
+        )
+          setLoading(false);
       }
-    } finally {
-      if (
-        requestId === loadRequestIdRef.current &&
-        sameMailView(currentView, currentViewRef.current)
-      )
-        setLoading(false);
-    }
-  }, []);
+    },
+    [],
+  );
   const removeAccountFromMain = useCallback(
     (accountId: string) => {
       removedAccountIdsRef.current.add(accountId);
@@ -900,6 +1101,7 @@ export default function App() {
     let disposeSettings: () => void = () => undefined;
     let disposeNotifications: () => void = () => undefined;
     void onAccountConnected(({ account }) => {
+      mailPublicationMetrics.beginAccountConnection(account.id);
       accountStateGenerationRef.current += 1;
       setAccounts((current) => {
         const next = [
@@ -921,7 +1123,10 @@ export default function App() {
           ),
         )
         .catch(showError)
-        .finally(() => void classifyPending());
+        .finally(() => {
+          void classifyPending();
+          void refreshUnresolvedOperations([account.id]);
+        });
     }).then((unlisten) => {
       if (disposed) unlisten();
       else disposeAccount = unlisten;
@@ -948,6 +1153,7 @@ export default function App() {
     loadMessages,
     markSynced,
     notificationSettings,
+    refreshUnresolvedOperations,
     selectedAccountId,
   ]);
   useEffect(() => {
@@ -1055,8 +1261,20 @@ export default function App() {
   useEffect(() => {
     let disposed = false;
     let unlisten: () => void = () => undefined;
-    void onComposeSent(() => {
-      showStatus(t("feedback.sent"));
+    void onComposeSent((outcome) => {
+      if (outcome?.status === "queued") {
+        showStatus(t("feedback.sendQueued"));
+        void refreshUnresolvedOperations();
+        void refreshSyncCoverage();
+      } else if (outcome?.status === "sent_copy_pending") {
+        showStatus(t("feedback.sentCopyPending"));
+      } else if (outcome?.persistenceWarning) {
+        showStatus(t("feedback.sentPersistencePending"));
+      } else if (outcome?.status === "uncertain") {
+        showStatus(t("feedback.deliveryUncertain"), "error");
+      } else {
+        showStatus(t("feedback.sent"));
+      }
       void loadMessages();
     }).then((dispose) => {
       if (disposed) dispose();
@@ -1066,7 +1284,13 @@ export default function App() {
       disposed = true;
       unlisten();
     };
-  }, [loadMessages, showStatus, t]);
+  }, [
+    loadMessages,
+    refreshSyncCoverage,
+    refreshUnresolvedOperations,
+    showStatus,
+    t,
+  ]);
   useEffect(() => {
     let disposed = false;
     let unlisten: () => void = () => undefined;
@@ -1151,12 +1375,92 @@ export default function App() {
       unlisteners.forEach((unlisten) => unlisten());
     };
   }, [classifyPending, loadMessages, markSynced, notificationSettings, t]);
+  useEffect(() => {
+    let disposed = false;
+    let dispose: () => void = () => undefined;
+    const queueCommittedCatalogueReload = (update: MailCatalogueUpdated) => {
+      const revision =
+        catalogueEventRevisionsRef.current.get(update.accountId) ?? -1;
+      if (update.revision <= revision) return;
+      catalogueEventRevisionsRef.current.set(update.accountId, update.revision);
+      mailPublicationMetrics.beginCatalogue(update);
+      catalogueReloadAccountIdsRef.current.add(update.accountId);
+      void refreshSyncCoverage();
+      if (catalogueReloadTimerRef.current !== undefined) return;
+      catalogueReloadTimerRef.current = window.setTimeout(() => {
+        catalogueReloadTimerRef.current = undefined;
+        const accountIds = [...catalogueReloadAccountIdsRef.current];
+        catalogueReloadAccountIdsRef.current.clear();
+        void loadMessages(undefined, accountIds).catch(showError);
+      }, 40);
+    };
+    void onMailCatalogueUpdated(queueCommittedCatalogueReload)
+      .then((unlisten) => {
+        if (disposed) unlisten();
+        else dispose = unlisten;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      dispose();
+    };
+  }, [loadMessages, refreshSyncCoverage]);
+  useEffect(() => {
+    let disposed = false;
+    let dispose: () => void = () => undefined;
+    const reconcileOperation = (update: MailOperationUpdated) => {
+      if (update.status === "retry" || update.status === "completed") return;
+      // The local operation journal is authoritative after a terminal worker
+      // result. Reloading through the normal view guard restores only what the
+      // backend could safely roll back and cannot revive an old query.
+      if (update.status === "permanent_failed") {
+        showStatus(t("feedback.operationFailed"), "error");
+      } else {
+        showStatus(t("feedback.operationUncertain"), "error");
+      }
+      void loadMessages().catch(showError);
+      void refreshStarredCount(activeAccounts);
+      void refreshUnresolvedOperations();
+    };
+    void onMailOperationUpdated(reconcileOperation)
+      .then((unlisten) => {
+        if (disposed) unlisten();
+        else dispose = unlisten;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      dispose();
+    };
+  }, [
+    activeAccounts,
+    loadMessages,
+    refreshStarredCount,
+    refreshUnresolvedOperations,
+    t,
+  ]);
 
   const smartInboxActive =
     mailListView === "smart" && mailbox === "INBOX" && !query.trim();
+  const visibleSmartSections = useMemo(
+    () =>
+      smartSectionIds.map((id) => {
+        const section = smartSections[id];
+        const retained = [...retainedSmartThreads.values()]
+          .filter((item) => item.sectionId === id)
+          .map((item) => item.thread)
+          .filter(
+            (thread) => !section.threads.some((item) => item.id === thread.id),
+          );
+        return retained.length
+          ? { ...section, threads: mergeThreads(section.threads, retained) }
+          : section;
+      }),
+    [retainedSmartThreads, smartSections],
+  );
   const smartThreads = useMemo(
-    () => smartSectionIds.flatMap((id) => smartSections[id].threads),
-    [smartSections],
+    () => visibleSmartSections.flatMap((section) => section.threads),
+    [visibleSmartSections],
   );
   const displayedThreads =
     mailbox === "Outbox"
@@ -1164,6 +1468,19 @@ export default function App() {
       : smartInboxActive
         ? smartThreads
         : threads;
+
+  useLayoutEffect(() => {
+    const visibleAccountIds = new Set(
+      [
+        ...document.querySelectorAll<HTMLElement>(
+          ".mail-list-panel .mail-item[data-account-id]",
+        ),
+      ]
+        .map((element) => element.dataset.accountId)
+        .filter((accountId): accountId is string => Boolean(accountId)),
+    );
+    mailPublicationMetrics.publishCommittedRows(visibleAccountIds);
+  }, [displayedThreads]);
 
   useEffect(() => {
     const matchingThread = active
@@ -1194,6 +1511,46 @@ export default function App() {
         ) ??
         thread.latest
       );
+    });
+  }, [displayedThreads]);
+
+  useEffect(() => {
+    // Historical indexing can merge a provisional conversation into a stable
+    // thread ID. Preserve a bulk selection through that remap by anchoring it
+    // to concrete message identities instead of the temporary thread key.
+    setSelected((current) => {
+      if (!current.size) return current;
+      const next = new Set(current);
+      let changed = false;
+      for (const threadId of current) {
+        const anchoredIds = selectedThreadMessageIdsRef.current.get(threadId);
+        const replacement =
+          displayedThreads.find((thread) => thread.id === threadId) ??
+          (anchoredIds
+            ? displayedThreads.find((thread) =>
+                concreteThreadMessages(thread).some((message) =>
+                  anchoredIds.has(message.id),
+                ),
+              )
+            : undefined);
+        if (!replacement) {
+          next.delete(threadId);
+          selectedThreadMessageIdsRef.current.delete(threadId);
+          changed = true;
+          continue;
+        }
+        const messageIds = new Set(
+          concreteThreadMessages(replacement).map((message) => message.id),
+        );
+        if (replacement.id !== threadId) {
+          next.delete(threadId);
+          next.add(replacement.id);
+          selectedThreadMessageIdsRef.current.delete(threadId);
+          changed = true;
+        }
+        selectedThreadMessageIdsRef.current.set(replacement.id, messageIds);
+      }
+      return changed ? next : current;
     });
   }, [displayedThreads]);
 
@@ -1242,12 +1599,12 @@ export default function App() {
       selectedAccountIdRef.current = accountId;
       setSelectedAccountId(accountId);
       if (!accountIds.length) return;
-      const inbox = await api.search("", accountIds, "INBOX");
-      nextCursorRef.current = inbox.nextCursor;
-      setHasMore(inbox.nextCursor !== null);
-      setThreads(inbox.conversations);
       setActive(undefined);
       setActiveThreadSnapshot(undefined);
+      // Let the state transition publish the next view before querying it.
+      // This keeps a late notification reload from restoring a former search
+      // or account scope over a newer user navigation.
+      window.setTimeout(() => void loadMessages(), 0);
     };
     void Promise.all([
       onNotificationAction(openNotification).then((listener) =>
@@ -1263,7 +1620,7 @@ export default function App() {
       disposed = true;
       dispose();
     };
-  }, [accounts]);
+  }, [accounts, loadMessages]);
 
   useEffect(() => {
     let dispose: () => void = () => undefined;
@@ -1284,10 +1641,9 @@ export default function App() {
           setSelectedAccountId(accountId);
           setActive(undefined);
           setActiveThreadSnapshot(undefined);
-          const inbox = await api.search("", [accountId], "INBOX");
-          setThreads(inbox.conversations);
-          nextCursorRef.current = inbox.nextCursor;
-          setHasMore(inbox.nextCursor !== null);
+          // The normal guarded loader owns publication after the account
+          // switch. A direct query here could finish after another navigation.
+          window.setTimeout(() => void loadMessages(), 0);
         } catch (error) {
           showError(error);
         }
@@ -1347,12 +1703,27 @@ export default function App() {
     setActiveThreadSnapshot(undefined);
     setAiResult(undefined);
   };
-  const select = (ids: string[], checked: boolean) =>
+  const select = (ids: string[], checked: boolean) => {
+    const byId = new Map(displayedThreads.map((thread) => [thread.id, thread]));
+    for (const id of ids) {
+      if (!checked) {
+        selectedThreadMessageIdsRef.current.delete(id);
+        continue;
+      }
+      const thread = byId.get(id);
+      if (thread) {
+        selectedThreadMessageIdsRef.current.set(
+          id,
+          new Set(concreteThreadMessages(thread).map((message) => message.id)),
+        );
+      }
+    }
     setSelected((current) => {
       const next = new Set(current);
       for (const id of ids) checked ? next.add(id) : next.delete(id);
       return next;
     });
+  };
 
   const sync = async () => {
     if (syncStatus) return;
@@ -1457,16 +1828,7 @@ export default function App() {
 
     const resultsPromise = Promise.allSettled(
       actionThreads.map(({ messages }) =>
-        Promise.all(
-          messages.map((message) =>
-            api.action(
-              message.account_id,
-              message.mailbox,
-              message.uid,
-              action,
-            ),
-          ),
-        ),
+        Promise.all(messages.map((message) => api.action(message.id, action))),
       ),
     );
     const results = await resultsPromise;
@@ -1528,7 +1890,7 @@ export default function App() {
       );
       await wait(reducedMotion ? 0 : 260);
     } else {
-      showStatus(actionOutcome(t, action, succeeded, 0));
+      showStatus(t("feedback.changeQueued"));
     }
 
     setPendingActions((current) => {
@@ -1568,12 +1930,7 @@ export default function App() {
             .find((thread) => thread.id !== activeThread.id))
         : undefined;
     try {
-      await api.action(
-        message.account_id,
-        message.mailbox,
-        message.uid,
-        "delete",
-      );
+      await api.action(message.id, "delete");
       // Prevent an in-flight fetch that still contains this locator from
       // restoring the message after the server has deleted it. Do this only
       // after success so a failed delete cannot strand an invalidated load in
@@ -1635,7 +1992,7 @@ export default function App() {
         });
       }
       setAiResult(undefined);
-      showStatus(t("feedback.permanentDeleteSuccess"));
+      showStatus(t("feedback.changeQueued"));
       await loadMessages();
     } catch {
       showStatus(t("feedback.permanentDeleteFailed"), "error");
@@ -1906,9 +2263,7 @@ export default function App() {
       );
       showStatus(t("feedback.starFailed", { count: failed.size }), "error");
     } else {
-      showStatus(
-        t(flagged ? "feedback.starSuccess" : "feedback.unstarSuccess"),
-      );
+      showStatus(t("feedback.changeQueued"));
     }
     await refreshStarredCount(activeAccounts);
     actionBusyRef.current = false;
@@ -1955,9 +2310,7 @@ export default function App() {
                 ...current[id],
                 threads:
                   read && !["starred", "seen"].includes(id)
-                    ? sectionThreads.filter(
-                        (item) => item.unread || item.id === thread.id,
-                      )
+                    ? sectionThreads.filter((item) => item.unread)
                     : !read && id === "seen"
                       ? sectionThreads.filter((item) => item.unread)
                       : sectionThreads,
@@ -1972,6 +2325,10 @@ export default function App() {
       if (retained) {
         next.set(thread.id, {
           ...retained,
+          sectionId:
+            read && !["starred", "seen"].includes(retained.sectionId)
+              ? "seen"
+              : retained.sectionId,
           thread: updateThreadReadState(retained.thread, ids, read),
         });
       }
@@ -2060,7 +2417,7 @@ export default function App() {
       return;
     }
     if (!silent) {
-      showStatus(t(read ? "feedback.readSuccess" : "feedback.unreadSuccess"));
+      showStatus(t("feedback.changeQueued"));
     }
     for (const id of ids) {
       if (readMutationByMessageRef.current.get(id) === mutationGeneration)
@@ -2610,26 +2967,22 @@ export default function App() {
         loadingMore={loadingMore}
         hasMore={hasMore}
         remoteSearchUnavailable={remoteSearchUnavailable}
+        searchCoverageIncomplete={syncCoverage.some(
+          (status) =>
+            activeAccounts.includes(status.accountId) &&
+            !status.primaryComplete,
+        )}
         syncStatus={syncStatus}
+        syncCoverage={syncCoverage.filter((status) =>
+          activeAccounts.includes(status.accountId),
+        )}
         classifying={classifying}
         lastSyncAt={lastSyncAt}
         aiConnected={aiConnected}
         mailboxTitle={mailboxTitle}
         view={mailListView}
         smartInbox={smartInboxActive}
-        smartSections={smartSectionIds.map((id) => {
-          const section = smartSections[id];
-          const retained = [...retainedSmartThreads.values()]
-            .filter((item) => item.sectionId === id)
-            .map((item) => item.thread)
-            .filter(
-              (thread) =>
-                !section.threads.some((item) => item.id === thread.id),
-            );
-          return retained.length
-            ? { ...section, threads: mergeThreads(section.threads, retained) }
-            : section;
-        })}
+        smartSections={visibleSmartSections}
         exitingThreadIds={exitingSmartThreadIds}
         onViewChange={changeMailListView}
         onCategorize={(message, category) => {

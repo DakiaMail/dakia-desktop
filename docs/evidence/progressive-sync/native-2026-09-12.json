@@ -1,0 +1,67 @@
+{
+  "nativeExecutable": {
+    "source": "/private/tmp/dakia-progressive-acceptance/target/debug/dakia-desktop",
+    "wrapper": "/private/tmp/dakia-progressive-acceptance/Dakia Progressive Acceptance.app/Contents/MacOS/dakia-desktop",
+    "copiedSha256": "90c9f0ac2e4a0eaf8d75c7719873b958c2b476a904bf73befc49b7c892c22b37"
+  },
+  "webview": "127.0.0.1:1420/",
+  "sendPid": 87000,
+  "readerRetestPid": 88806,
+  "operation": {
+    "operation_id": "818318da-c4e9-45cd-b108-c0254217ecea",
+    "account_id": "bd9a8a01-af40-4994-9e12-a978b2c0a2c0",
+    "mailbox": null,
+    "uid": null,
+    "uid_validity": null,
+    "message_id": null,
+    "kind": "smtp_submission",
+    "local_version": 0,
+    "dependency_id": null,
+    "state": "completed",
+    "outcome": "sent_copy_saved",
+    "attempts": 2,
+    "next_retry_at": null,
+    "error": null,
+    "smtp_accepted_at": "2026-09-12T20:50:58.812742+00:00",
+    "claim_owner": null,
+    "claimed_at": null,
+    "claimed_from_state": null,
+    "created_at": "2026-09-12T20:50:58.640780+00:00",
+    "updated_at": "2026-09-12T20:50:59.008492+00:00"
+  },
+  "preparedMessageId": "<sjqdIyQ63Yu3tzUpNhKYy7qm4zI4kJLfFNKb@mbpro.local>",
+  "preparedBytes": 1010,
+  "preparedSha256": "aae93055841df8f077ebea4e2746b8270fea06eee781c5a9b2ef62ba1a2c5edd",
+  "protocolOutcomes": [
+    {
+      "protocol": "smtp",
+      "event": "accepted",
+      "bytes": 1012
+    },
+    {
+      "protocol": "imap",
+      "event": "append",
+      "bytes": 1010,
+      "folder": "Sent",
+      "uid": 181,
+      "messageId": "<sjqdIyQ63Yu3tzUpNhKYy7qm4zI4kJLfFNKb@mbpro.local>"
+    }
+  ],
+  "localSentBeforeOpeningFolder": [
+    {
+      "id": "bd9a8a01-af40-4994-9e12-a978b2c0a2c0:Sent:181:uv:4242",
+      "mailbox": "Sent",
+      "uid": 181,
+      "message_id": "<sjqdIyQ63Yu3tzUpNhKYy7qm4zI4kJLfFNKb@mbpro.local>",
+      "subject": "Native final Sent verification"
+    }
+  ],
+  "readerRetest": {
+    "fixtureCorrectedMimeSections": true,
+    "providerEntryRestoredBySetupAppend": true,
+    "additionalSmtpSubmission": false,
+    "visibleBody": "This fictional message verifies automatic Sent publication during mailbox synchronization.",
+    "cachedContentState": "complete"
+  },
+  "timingLimit": "197 ms initial DOM-row measurement was briefly covered by optional statistics dialog, so unobstructed first-visible timing is unmeasured."
+}

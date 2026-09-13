@@ -1,4 +1,6 @@
-use crate::{account::Account, provider, AccountAuth, AccountId};
+use crate::{
+    account::Account, mail_metrics::PublicationTransactionTimer, provider, AccountAuth, AccountId,
+};
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use chrono::{DateTime, Utc};
@@ -54,6 +56,11 @@ const CLASSIFICATION_REVISION_ACTIVITY_SECONDS: i64 = 90;
 /// short grace period beyond that before a crashed process's lease may be
 /// replaced, while preserving fresh claims across concurrently open processes.
 const MESSAGE_CONTENT_FETCH_LEASE_SECONDS: i64 = 90;
+/// Account deletion waits only for a bounded SMTP safe point. The shared
+/// database gate expires if its owner crashes, so a live account is never
+/// permanently stranded behind an abandoned removal attempt.
+const ACCOUNT_REMOVAL_GATE_LEASE_SECONDS: i64 = 120;
+const OPERATION_CLAIM_LEASE_SECONDS: i64 = 90;
 const MAILBOX_SNAPSHOT_REPLACEMENT_PUBLISH_BATCH_SIZE: i64 = 100;
 /// All stores opened by this process share a fetch-claim owner. This lets a
 /// second connection respect work already in flight, while a new process can
@@ -70,6 +77,129 @@ fn message_content_fetch_owner() -> &'static str {
 pub struct Store {
     pool: SqlitePool,
     vault_key: Arc<[u8; VAULT_KEY_LEN]>,
+}
+
+/// Keeps one submitted operation lease live while its owner is inside a
+/// provider call. Dropping the guard aborts the heartbeat; terminal journal
+/// transitions still remain the caller's explicit responsibility.
+pub struct OperationClaimHeartbeat {
+    task: tokio::task::JoinHandle<()>,
+}
+
+pub struct OAuthRefreshLease {
+    store: Store,
+    secret_name: String,
+    owner: String,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for OAuthRefreshLease {
+    fn drop(&mut self) {
+        self.task.abort();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let (store, name, owner) = (
+                self.store.clone(),
+                self.secret_name.clone(),
+                self.owner.clone(),
+            );
+            runtime.spawn(async move {
+                let _ = sqlx::query(
+                    "DELETE FROM oauth_refresh_leases WHERE secret_name = ? AND owner = ?",
+                )
+                .bind(name)
+                .bind(owner)
+                .execute(&store.pool)
+                .await;
+            });
+        }
+    }
+}
+
+/// Owner-scoped durable account-removal gate. The lease is renewed while a
+/// caller drains in-flight work; expiry is only a crash fallback.
+pub struct AccountOperationGate {
+    store: Store,
+    account_id: AccountId,
+    owner: String,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for AccountOperationGate {
+    fn drop(&mut self) {
+        self.task.abort();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let store = self.store.clone();
+            let account_id = self.account_id;
+            let owner = self.owner.clone();
+            runtime.spawn(async move {
+                let _ = store.release_account_removal_gate(account_id, &owner).await;
+            });
+        }
+    }
+}
+
+impl AccountOperationGate {
+    pub async fn release(self) -> Result<()> {
+        self.task.abort();
+        self.store
+            .release_account_removal_gate(self.account_id, &self.owner)
+            .await
+            .map(|_| ())
+    }
+
+    /// Publishes configuration, credential rotation and replacement intent as
+    /// one owner-fenced commit. Readers can never see old endpoints paired
+    /// with the new credential, including if a process dies during the update.
+    pub async fn save_account_with_secret_and_rebuild(
+        &self,
+        account: &Account,
+        secret_name: &str,
+        secret: Option<&str>,
+        rebuild: Option<&MailRebuildJob>,
+        previous_secret_name: Option<&str>,
+    ) -> Result<()> {
+        if account.id != self.account_id || rebuild.is_some_and(|job| job.account_id != account.id)
+        {
+            return Err(anyhow!("Account update does not match its ownership claim"));
+        }
+        let mut tx = self.store.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let owned: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM account_removal_gates WHERE account_id = ? AND owner = ? AND expires_at > ?)")
+            .bind(self.account_id.to_string()).bind(&self.owner).bind(Utc::now()).fetch_one(&mut *tx).await?;
+        if !owned {
+            tx.rollback().await?;
+            return Err(anyhow!("Account update ownership expired; try again"));
+        }
+        save_account_in_transaction(&mut tx, account).await?;
+        if let Some(secret) = secret {
+            let nonce = random_bytes::<VAULT_NONCE_LEN>()?;
+            let ciphertext = encrypt_secret(&self.store.vault_key, nonce, secret_name, secret)?;
+            sqlx::query("INSERT INTO credentials(name, nonce, ciphertext, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET nonce=excluded.nonce, ciphertext=excluded.ciphertext, updated_at=excluded.updated_at")
+                .bind(secret_name).bind(nonce.as_slice()).bind(ciphertext).bind(Utc::now()).execute(&mut *tx).await?;
+        }
+        if let Some(job) = rebuild {
+            save_mail_rebuild_job_in_transaction(&mut tx, job).await?;
+        }
+        if let Some(previous) = previous_secret_name.filter(|name| *name != secret_name) {
+            sqlx::query("DELETE FROM credentials WHERE name = ?")
+                .bind(previous)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn delete_account_and_secret(self, secret_name: &str) -> Result<()> {
+        self.store
+            .delete_account_and_secret_with_removal_gate(self.account_id, secret_name, &self.owner)
+            .await
+    }
+}
+
+impl Drop for OperationClaimHeartbeat {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -124,7 +254,28 @@ pub struct MailboxChangedSinceFlags<'a> {
     pub flags: &'a [(u32, bool, bool)],
 }
 
-type MailboxSnapshotGenerationState = (String, i64, i64, Option<i64>, Option<String>);
+/// Per-UID mutation versions captured before a CONDSTORE command. The delta
+/// publication compares these inside its write transaction.
+#[derive(Debug, Clone)]
+pub struct ChangedSinceWriteReceipt {
+    pub account_id: AccountId,
+    pub account_config_generation: i64,
+    pub account_config_fingerprint: String,
+    pub mailbox: String,
+    pub remote_name: String,
+    pub uid_validity: u32,
+    pub local_mutation_versions: Vec<ProviderMessageVersion>,
+}
+
+type MailboxSnapshotGenerationState = (
+    String,
+    i64,
+    i64,
+    Option<i64>,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+);
 
 /// Cancellation-safe ownership of one provider body fetch. Dropping the
 /// owning future schedules claim release so later readers do not wait for a
@@ -135,6 +286,21 @@ pub struct MessageContentFetchClaim {
     owner: String,
     renewal: tokio::task::JoinHandle<()>,
     released: bool,
+}
+
+/// Immutable remote locator captured immediately before an on-demand IMAP
+/// fetch. Every content writer must present this receipt so a UID reused by a
+/// later UIDVALIDITY namespace cannot receive bytes from the old message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromRow)]
+pub struct MessageRemoteIdentity {
+    pub message_id: String,
+    pub account_id: String,
+    pub account_config_generation: i64,
+    pub account_config_fingerprint: String,
+    pub mailbox: String,
+    pub remote_name: String,
+    pub uid: i64,
+    pub uid_validity: i64,
 }
 
 /// Outcome of attempting to own one provider body fetch.
@@ -242,6 +408,112 @@ pub struct ExpectedMessageFlags {
     pub is_flagged: bool,
 }
 
+/// Namespace and local flag versions captured immediately before a provider
+/// fetch. A later commit compares both values in the same write transaction.
+#[derive(Debug, Clone)]
+pub struct ProviderWriteReceipt {
+    pub account_id: AccountId,
+    /// The exact persisted account transport configuration used to open the
+    /// provider connection. A later endpoint/auth change invalidates this
+    /// receipt even if another server happens to use the same UIDVALIDITY.
+    pub account_config_generation: i64,
+    pub account_config_fingerprint: String,
+    pub mailbox: String,
+    pub remote_name: String,
+    pub uid_validity: u32,
+    pub expected_flags: Vec<ExpectedMessageFlags>,
+    pub local_mutation_versions: Vec<ProviderMessageVersion>,
+}
+
+/// Account transport configuration captured before provider I/O.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountProviderReceipt {
+    pub account_id: AccountId,
+    pub config_generation: i64,
+    pub config_fingerprint: String,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct ProviderMessageVersion {
+    pub uid: i64,
+    pub version: i64,
+}
+
+/// Durable bounded-range state for periodic Gmail label reconciliation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GmailLabelReconciliationCursor {
+    pub cursor_uid: Option<u32>,
+    pub span: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct GmailInboxMembershipReceipt {
+    pub account_id: AccountId,
+    pub gmail_message_id: String,
+    observed_at: Option<DateTime<Utc>>,
+    memberships: Vec<GmailInboxMembershipVersion>,
+}
+
+/// Account-wide Inbox membership epoch captured before a Gmail header fetch.
+/// It fences first-time X-GM-MSGID observations, when no per-ID receipt exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GmailInboxMembershipEpochReceipt {
+    pub account_id: AccountId,
+    pub epoch: i64,
+}
+
+/// A Gmail identity and label observation for an already-published local row.
+#[derive(Debug, Clone)]
+pub struct GmailMessageObservation {
+    pub local_message_id: String,
+    pub gmail_message_id: String,
+    pub labels: Vec<String>,
+}
+
+/// Gmail labels associated with one UID in a provider header batch. Storage
+/// resolves the canonical local ID only after the batch is published.
+#[derive(Debug, Clone)]
+pub struct GmailProviderObservation {
+    pub uid: u32,
+    pub gmail_message_id: String,
+    pub labels: Vec<String>,
+}
+
+/// Immutable destination locator returned by COPYUID. A UID is never enough
+/// to address the destination because a later UIDVALIDITY namespace can reuse
+/// the same number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MoveDestinationLocator {
+    pub uid_validity: u32,
+    pub uid: u32,
+}
+
+impl From<u32> for MoveDestinationLocator {
+    fn from(uid: u32) -> Self {
+        Self {
+            uid_validity: 0,
+            uid,
+        }
+    }
+}
+
+impl From<crate::mail::MoveDestination> for MoveDestinationLocator {
+    fn from(destination: crate::mail::MoveDestination) -> Self {
+        Self {
+            uid_validity: destination.uid_validity,
+            uid: destination.uid,
+        }
+    }
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct GmailInboxMembershipVersion {
+    message_id: String,
+    uid: i64,
+    uid_validity: i64,
+    version: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct MailboxSyncState {
     pub initialized: bool,
@@ -344,6 +616,10 @@ pub struct MailboxSnapshotGeneration {
     pub initial_exists: i64,
     pub uid_next: Option<i64>,
     pub highest_modseq: Option<String>,
+    /// Present only for generations started from an exact provider Account.
+    /// A changed endpoint or principal invalidates all later publications.
+    pub account_config_generation: Option<i64>,
+    pub account_config_fingerprint: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -358,7 +634,173 @@ pub struct MailboxSyncFailure {
     pub uid: i64,
     pub stage: String,
     pub error: String,
+    pub error_class: String,
+    pub attempt_count: i64,
+    pub next_retry_at: Option<DateTime<Utc>>,
+    pub user_action_required: bool,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MailboxFailureSummary {
+    pub outstanding: u32,
+    pub retryable: u32,
+    pub user_action_required: u32,
+    pub next_retry_at: Option<DateTime<Utc>>,
+}
+
+/// Durable progress for one scheduled folder. Discovery and header coverage
+/// are intentionally separate: a complete UID inventory does not mean every
+/// header was fetched successfully.
+#[derive(Debug, Clone, FromRow)]
+pub struct FolderSyncState {
+    pub account_id: String,
+    pub mailbox: String,
+    pub remote_name: String,
+    pub uid_validity: i64,
+    /// Opaque generation fence. A worker must return this value with every
+    /// page so an old UID namespace can never write into its replacement.
+    pub generation: String,
+    /// Inclusive UID boundary captured at discovery start. Rows above it are
+    /// realtime work and are never candidates for absence reconciliation.
+    pub upper_boundary: Option<i64>,
+    /// Descending historical cursor. It is advanced atomically with each
+    /// successfully committed header page.
+    pub cursor: Option<i64>,
+    pub discovery_complete: bool,
+    pub headers_complete: bool,
+    pub local_mutation_version: i64,
+    pub revision: i64,
+    pub retry_after: Option<DateTime<Utc>>,
+    /// Present only for generations started from an exact provider Account.
+    /// A changed endpoint or principal invalidates all later publications.
+    pub account_config_generation: Option<i64>,
+    pub account_config_fingerprint: Option<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// An account-wide backend-owned sync run. It records independently usable
+/// milestones so a background failure cannot make an authenticated account or
+/// already committed headers look unavailable.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncRun {
+    pub run_id: String,
+    pub account_id: AccountId,
+    pub stage: String,
+    pub inbox_ready: bool,
+    pub primary_complete: bool,
+    pub secondary_complete: bool,
+    pub deferred_complete: bool,
+    pub content_loading: bool,
+    pub retry_count: u32,
+    pub outcome: String,
+    pub revision: u64,
+    pub next_retry_at: Option<DateTime<Utc>>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SyncRunUpdate<'a> {
+    pub stage: Option<&'a str>,
+    pub inbox_ready: Option<bool>,
+    pub primary_complete: Option<bool>,
+    pub secondary_complete: Option<bool>,
+    pub deferred_complete: Option<bool>,
+    pub content_loading: Option<bool>,
+    pub retry_count: Option<u32>,
+    pub outcome: Option<&'a str>,
+    pub next_retry_at: Option<Option<DateTime<Utc>>>,
+    pub error: Option<Option<&'a str>>,
+}
+
+/// Immutable remote locator captured for a user-facing mutation. A missing
+/// UIDVALIDITY is allowed only for local-only operations such as SMTP staging.
+#[derive(Debug, Clone)]
+pub struct OperationTarget<'a> {
+    pub mailbox: Option<&'a str>,
+    pub uid: Option<u32>,
+    pub uid_validity: Option<u64>,
+    pub message_id: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct OperationJournalEntry {
+    pub operation_id: String,
+    pub account_id: String,
+    pub mailbox: Option<String>,
+    pub uid: Option<i64>,
+    pub uid_validity: Option<i64>,
+    pub message_id: Option<String>,
+    pub kind: String,
+    pub payload_json: String,
+    pub local_version: i64,
+    pub dependency_id: Option<String>,
+    pub state: String,
+    pub outcome: Option<String>,
+    pub attempts: i64,
+    pub next_retry_at: Option<DateTime<Utc>>,
+    pub error: Option<String>,
+    #[sqlx(default)]
+    pub smtp_accepted_at: Option<DateTime<Utc>>,
+    /// Present only while another process owns the provider attempt.  Exposed
+    /// so account lifecycle work can wait for every active remote mutation,
+    /// not only SMTP submission.
+    #[sqlx(default)]
+    pub claim_owner: Option<String>,
+    #[sqlx(default)]
+    pub claimed_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+type SyncRunRow = (
+    String,
+    String,
+    String,
+    bool,
+    bool,
+    bool,
+    bool,
+    bool,
+    i64,
+    String,
+    i64,
+    Option<DateTime<Utc>>,
+    Option<String>,
+);
+
+fn sync_run_from_row(row: SyncRunRow) -> Result<SyncRun> {
+    let (
+        run_id,
+        account_id,
+        stage,
+        inbox_ready,
+        primary_complete,
+        secondary_complete,
+        deferred_complete,
+        content_loading,
+        retry_count,
+        outcome,
+        revision,
+        next_retry_at,
+        error,
+    ) = row;
+    Ok(SyncRun {
+        run_id,
+        account_id: AccountId::parse_str(&account_id)?,
+        stage,
+        inbox_ready,
+        primary_complete,
+        secondary_complete,
+        deferred_complete,
+        content_loading,
+        retry_count: u32::try_from(retry_count).context("sync run retry count is invalid")?,
+        outcome,
+        revision: u64::try_from(revision).context("sync run revision is invalid")?,
+        next_retry_at,
+        error,
+    })
 }
 
 /// Display metadata for an attachment. Bytes stay in the local store and are
@@ -664,8 +1106,9 @@ impl Store {
         .fetch_one(&self.pool)
         .await?;
         for statement in [
-            "CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, data TEXT NOT NULL, created_at TEXT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, data TEXT NOT NULL, config_generation INTEGER NOT NULL DEFAULT 1, config_fingerprint TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)",
             "CREATE TABLE IF NOT EXISTS credentials (name TEXT PRIMARY KEY, nonce BLOB NOT NULL, ciphertext BLOB NOT NULL, updated_at TEXT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS oauth_refresh_leases (secret_name TEXT PRIMARY KEY REFERENCES credentials(name) ON DELETE CASCADE, owner TEXT NOT NULL, expires_at TEXT NOT NULL)",
             "CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, account_id TEXT NOT NULL, mailbox TEXT NOT NULL, uid INTEGER NOT NULL, message_id TEXT, in_reply_to TEXT, reference_ids TEXT, thread_id TEXT NOT NULL, threading_scanned INTEGER NOT NULL DEFAULT 1, recipient_headers_scanned INTEGER NOT NULL DEFAULT 1, subject TEXT NOT NULL, from_name TEXT, from_address TEXT NOT NULL, to_addresses TEXT NOT NULL, cc_addresses TEXT NOT NULL DEFAULT '', bcc_addresses TEXT NOT NULL DEFAULT '', reply_to_addresses TEXT NOT NULL DEFAULT '', received_at TEXT NOT NULL, snippet TEXT NOT NULL, body_text TEXT NOT NULL, unsubscribe_kind TEXT, unsubscribe_url TEXT, unsubscribe_scanned INTEGER NOT NULL DEFAULT 0, is_read INTEGER NOT NULL DEFAULT 0, is_flagged INTEGER NOT NULL DEFAULT 0, has_attachments INTEGER NOT NULL DEFAULT 0, category TEXT, classification_confidence REAL, classification_source TEXT, classification_signals TEXT NOT NULL DEFAULT '', UNIQUE(account_id, mailbox, uid))",
             "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(subject, from_name, from_address, to_addresses, body_text, content='messages', content_rowid='rowid')",
             "CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN INSERT INTO messages_fts(rowid, subject, from_name, from_address, to_addresses, body_text) VALUES (new.rowid, new.subject, new.from_name, new.from_address, new.to_addresses, new.body_text); END",
@@ -682,15 +1125,32 @@ impl Store {
             "CREATE INDEX IF NOT EXISTS message_content_cache_lru ON message_content_cache(last_accessed, message_id)",
             "CREATE TABLE IF NOT EXISTS message_content_fetches (message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, claimed_at TEXT NOT NULL, claim_owner TEXT NOT NULL DEFAULT '')",
             "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
-            "CREATE TABLE IF NOT EXISTS mailbox_catalog_state (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, remote_name TEXT NOT NULL, uid_validity INTEGER NOT NULL, remote_total INTEGER NOT NULL DEFAULT 0, historical_complete INTEGER NOT NULL DEFAULT 0, uid_next INTEGER, highest_modseq TEXT, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox))",
-            "CREATE TABLE IF NOT EXISTS mailbox_snapshot_generations (account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, mailbox TEXT NOT NULL, generation TEXT NOT NULL, remote_name TEXT NOT NULL, uid_validity INTEGER NOT NULL, initial_exists INTEGER NOT NULL, uid_next INTEGER, highest_modseq TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox, generation))",
-            "CREATE TABLE IF NOT EXISTS mailbox_snapshot_items (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, generation TEXT NOT NULL, uid INTEGER NOT NULL, is_read INTEGER NOT NULL, is_flagged INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox, generation, uid), FOREIGN KEY(account_id, mailbox, generation) REFERENCES mailbox_snapshot_generations(account_id, mailbox, generation) ON DELETE CASCADE)",
+            "CREATE TABLE IF NOT EXISTS mailbox_catalog_state (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, remote_name TEXT NOT NULL, uid_validity INTEGER NOT NULL, remote_total INTEGER NOT NULL DEFAULT 0, historical_complete INTEGER NOT NULL DEFAULT 0, uid_next INTEGER, highest_modseq TEXT, provider_config_generation INTEGER, provider_config_fingerprint TEXT, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox))",
+            "CREATE TABLE IF NOT EXISTS mailbox_snapshot_generations (account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, mailbox TEXT NOT NULL, generation TEXT NOT NULL, remote_name TEXT NOT NULL, uid_validity INTEGER NOT NULL, initial_exists INTEGER NOT NULL, uid_next INTEGER, highest_modseq TEXT, account_config_generation INTEGER, account_config_fingerprint TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox, generation))",
+            "CREATE TABLE IF NOT EXISTS mailbox_snapshot_items (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, generation TEXT NOT NULL, uid INTEGER NOT NULL, is_read INTEGER NOT NULL, is_flagged INTEGER NOT NULL, local_mutation_version INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox, generation, uid), FOREIGN KEY(account_id, mailbox, generation) REFERENCES mailbox_snapshot_generations(account_id, mailbox, generation) ON DELETE CASCADE)",
             "CREATE TABLE IF NOT EXISTS mailbox_snapshot_messages (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, generation TEXT NOT NULL, uid INTEGER NOT NULL, message_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox, generation, uid), FOREIGN KEY(account_id, mailbox, generation) REFERENCES mailbox_snapshot_generations(account_id, mailbox, generation) ON DELETE CASCADE)",
             "CREATE TABLE IF NOT EXISTS mailbox_snapshot_replacement_outcomes (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, generation TEXT NOT NULL, uid INTEGER NOT NULL, outcome TEXT NOT NULL CHECK(outcome IN ('message', 'excluded')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox, generation, uid), FOREIGN KEY(account_id, mailbox, generation) REFERENCES mailbox_snapshot_generations(account_id, mailbox, generation) ON DELETE CASCADE)",
             "CREATE INDEX IF NOT EXISTS mailbox_snapshot_items_generation_uid ON mailbox_snapshot_items(account_id, mailbox, generation, uid DESC)",
             "CREATE TABLE IF NOT EXISTS mailbox_sync_failures (account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, mailbox TEXT NOT NULL, uid INTEGER NOT NULL, stage TEXT NOT NULL, error TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox, uid))",
             "CREATE TABLE IF NOT EXISTS mail_rebuild_jobs (account_id TEXT PRIMARY KEY, phase TEXT NOT NULL, completed INTEGER NOT NULL DEFAULT 0, total INTEGER, reset_before_sync INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS sync_runs (run_id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, stage TEXT NOT NULL, inbox_ready INTEGER NOT NULL DEFAULT 0, primary_complete INTEGER NOT NULL DEFAULT 0, secondary_complete INTEGER NOT NULL DEFAULT 0, deferred_complete INTEGER NOT NULL DEFAULT 0, content_loading INTEGER NOT NULL DEFAULT 0, retry_count INTEGER NOT NULL DEFAULT 0, outcome TEXT NOT NULL DEFAULT 'running', revision INTEGER NOT NULL DEFAULT 0, next_retry_at TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS sync_runs_one_active_per_account ON sync_runs(account_id) WHERE outcome = 'running'",
+            "CREATE TABLE IF NOT EXISTS folder_sync_state (account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, mailbox TEXT NOT NULL, remote_name TEXT NOT NULL, uid_validity INTEGER NOT NULL, generation TEXT NOT NULL, upper_boundary INTEGER, cursor INTEGER, discovery_complete INTEGER NOT NULL DEFAULT 0, headers_complete INTEGER NOT NULL DEFAULT 0, local_mutation_version INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 0, retry_after TEXT, account_config_generation INTEGER, account_config_fingerprint TEXT, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox))",
+            "CREATE TABLE IF NOT EXISTS folder_sync_discovery (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, generation TEXT NOT NULL, uid INTEGER NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox, generation, uid), FOREIGN KEY(account_id, mailbox) REFERENCES folder_sync_state(account_id, mailbox) ON DELETE CASCADE)",
+            "CREATE INDEX IF NOT EXISTS folder_sync_discovery_pending ON folder_sync_discovery(account_id, mailbox, generation, uid DESC)",
+            "CREATE TABLE IF NOT EXISTS folder_sync_header_outcomes (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, generation TEXT NOT NULL, uid INTEGER NOT NULL, completed_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox, generation, uid), FOREIGN KEY(account_id, mailbox, generation, uid) REFERENCES folder_sync_discovery(account_id, mailbox, generation, uid) ON DELETE CASCADE)",
+            "CREATE TABLE IF NOT EXISTS mailbox_mutation_fences (account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, mailbox TEXT NOT NULL, uid INTEGER NOT NULL, uid_validity INTEGER, version INTEGER NOT NULL, operation_id TEXT, created_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox, uid))",
+            "CREATE TABLE IF NOT EXISTS mailbox_mutation_versions (account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, mailbox TEXT NOT NULL, uid INTEGER NOT NULL, uid_validity INTEGER NOT NULL, version INTEGER NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox, uid, uid_validity))",
+            "CREATE TABLE IF NOT EXISTS operation_journal (operation_id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, mailbox TEXT, uid INTEGER, uid_validity INTEGER, message_id TEXT, kind TEXT NOT NULL, payload_json TEXT NOT NULL, local_version INTEGER NOT NULL, dependency_id TEXT REFERENCES operation_journal(operation_id), state TEXT NOT NULL, outcome TEXT, attempts INTEGER NOT NULL DEFAULT 0, next_retry_at TEXT, error TEXT, smtp_accepted_at TEXT, claim_owner TEXT, claimed_at TEXT, claimed_from_state TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS operation_message_backups (operation_id TEXT PRIMARY KEY REFERENCES operation_journal(operation_id) ON DELETE CASCADE, message_id TEXT NOT NULL, original_mailbox TEXT NOT NULL, original_uid INTEGER NOT NULL, message_json TEXT NOT NULL, created_at TEXT NOT NULL)",
+            "CREATE INDEX IF NOT EXISTS operation_journal_ready ON operation_journal(account_id, state, next_retry_at, created_at)",
+            "CREATE TABLE IF NOT EXISTS gmail_logical_messages (account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, gmail_message_id TEXT NOT NULL, labels_json TEXT NOT NULL, observed_at TEXT NOT NULL, PRIMARY KEY(account_id, gmail_message_id))",
+            "CREATE TABLE IF NOT EXISTS gmail_message_memberships (account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, gmail_message_id TEXT NOT NULL, PRIMARY KEY(account_id, message_id), FOREIGN KEY(account_id, gmail_message_id) REFERENCES gmail_logical_messages(account_id, gmail_message_id) ON DELETE CASCADE)",
+            "CREATE TABLE IF NOT EXISTS gmail_label_reconciliation_state (account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, mailbox TEXT NOT NULL, cursor_uid INTEGER, span INTEGER NOT NULL DEFAULT 64, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox))",
+            "CREATE TABLE IF NOT EXISTS gmail_inbox_membership_epochs (account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE, epoch INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS message_temporal_observations (account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, internal_date TEXT NOT NULL, message_date TEXT, observed_at TEXT NOT NULL, PRIMARY KEY(account_id, message_id))",
             "CREATE TABLE IF NOT EXISTS deleted_account_tombstones (account_id TEXT PRIMARY KEY, deleted_at TEXT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS account_removal_gates (account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE, owner TEXT NOT NULL, blocked_at TEXT NOT NULL, expires_at TEXT NOT NULL)",
             "CREATE TABLE IF NOT EXISTS sent_correspondents (account_id TEXT NOT NULL, address TEXT NOT NULL COLLATE NOCASE, PRIMARY KEY(account_id, address))",
         ] {
             sqlx::query(statement)
@@ -716,6 +1176,7 @@ impl Store {
             sqlx::query_as("PRAGMA table_info(mailbox_catalog_state)")
                 .fetch_all(&self.pool)
                 .await?;
+        let mut added_catalog_provider_stamp = false;
         if !catalog_columns.iter().any(|column| column.1 == "uid_next") {
             sqlx::query("ALTER TABLE mailbox_catalog_state ADD COLUMN uid_next INTEGER")
                 .execute(&self.pool)
@@ -728,6 +1189,28 @@ impl Store {
             sqlx::query("ALTER TABLE mailbox_catalog_state ADD COLUMN highest_modseq TEXT")
                 .execute(&self.pool)
                 .await?;
+        }
+        if !catalog_columns
+            .iter()
+            .any(|column| column.1 == "provider_config_generation")
+        {
+            sqlx::query(
+                "ALTER TABLE mailbox_catalog_state ADD COLUMN provider_config_generation INTEGER",
+            )
+            .execute(&self.pool)
+            .await?;
+            added_catalog_provider_stamp = true;
+        }
+        if !catalog_columns
+            .iter()
+            .any(|column| column.1 == "provider_config_fingerprint")
+        {
+            sqlx::query(
+                "ALTER TABLE mailbox_catalog_state ADD COLUMN provider_config_fingerprint TEXT",
+            )
+            .execute(&self.pool)
+            .await?;
+            added_catalog_provider_stamp = true;
         }
         // A CLI and the desktop can open this database concurrently. Preserve
         // every fresh lease regardless of process owner; only work old enough
@@ -744,6 +1227,7 @@ impl Store {
         for statement in [
             "CREATE TRIGGER IF NOT EXISTS accounts_require_new_identity BEFORE INSERT ON accounts WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
             "CREATE TRIGGER IF NOT EXISTS accounts_updates_require_live_identity BEFORE UPDATE ON accounts WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS account_removal_gates_require_live_account BEFORE INSERT ON account_removal_gates WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
             "CREATE TRIGGER IF NOT EXISTS messages_require_account BEFORE INSERT ON messages WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
             "CREATE TRIGGER IF NOT EXISTS mailbox_sync_state_require_account BEFORE INSERT ON mailbox_sync_state WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
             "CREATE TRIGGER IF NOT EXISTS mailbox_action_tombstones_require_account BEFORE INSERT ON mailbox_action_tombstones WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
@@ -754,12 +1238,123 @@ impl Store {
             "CREATE TRIGGER IF NOT EXISTS mailbox_snapshot_replacement_outcomes_require_account BEFORE INSERT ON mailbox_snapshot_replacement_outcomes WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
             "CREATE TRIGGER IF NOT EXISTS mailbox_sync_failures_require_account BEFORE INSERT ON mailbox_sync_failures WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
             "CREATE TRIGGER IF NOT EXISTS mail_rebuild_jobs_require_account BEFORE INSERT ON mail_rebuild_jobs WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS sync_runs_require_account BEFORE INSERT ON sync_runs WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS folder_sync_state_require_account BEFORE INSERT ON folder_sync_state WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS folder_sync_discovery_require_account BEFORE INSERT ON folder_sync_discovery WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS mailbox_mutation_fences_require_account BEFORE INSERT ON mailbox_mutation_fences WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS operation_journal_require_account BEFORE INSERT ON operation_journal WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS gmail_logical_messages_require_account BEFORE INSERT ON gmail_logical_messages WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS gmail_message_memberships_require_account BEFORE INSERT ON gmail_message_memberships WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS gmail_label_reconciliation_state_require_account BEFORE INSERT ON gmail_label_reconciliation_state WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS gmail_inbox_epoch_after_insert AFTER INSERT ON messages WHEN NEW.mailbox = 'INBOX' AND EXISTS (SELECT 1 FROM accounts WHERE id = NEW.account_id) BEGIN INSERT INTO gmail_inbox_membership_epochs(account_id, epoch, updated_at) VALUES (NEW.account_id, 1, CURRENT_TIMESTAMP) ON CONFLICT(account_id) DO UPDATE SET epoch = epoch + 1, updated_at = CURRENT_TIMESTAMP; END",
+            "CREATE TRIGGER IF NOT EXISTS gmail_inbox_epoch_after_delete AFTER DELETE ON messages WHEN OLD.mailbox = 'INBOX' AND EXISTS (SELECT 1 FROM accounts WHERE id = OLD.account_id) BEGIN INSERT INTO gmail_inbox_membership_epochs(account_id, epoch, updated_at) VALUES (OLD.account_id, 1, CURRENT_TIMESTAMP) ON CONFLICT(account_id) DO UPDATE SET epoch = epoch + 1, updated_at = CURRENT_TIMESTAMP; END",
+            "CREATE TRIGGER IF NOT EXISTS gmail_inbox_epoch_after_update AFTER UPDATE OF mailbox ON messages WHEN OLD.mailbox IS NOT NEW.mailbox AND (OLD.mailbox = 'INBOX' OR NEW.mailbox = 'INBOX') AND EXISTS (SELECT 1 FROM accounts WHERE id = NEW.account_id) BEGIN INSERT INTO gmail_inbox_membership_epochs(account_id, epoch, updated_at) VALUES (NEW.account_id, 1, CURRENT_TIMESTAMP) ON CONFLICT(account_id) DO UPDATE SET epoch = epoch + 1, updated_at = CURRENT_TIMESTAMP; END",
+            "CREATE TRIGGER IF NOT EXISTS message_temporal_observations_require_account BEFORE INSERT ON message_temporal_observations WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
             "CREATE TRIGGER IF NOT EXISTS sent_correspondents_require_account BEFORE INSERT ON sent_correspondents WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
         ] {
             sqlx::query(statement)
                 .execute(&self.pool)
                 .await
                 .with_context(|| format!("account deletion guard migration failed: {statement}"))?;
+        }
+        // `CREATE TRIGGER IF NOT EXISTS` cannot revise a trigger installed by
+        // an earlier desktop version. Restrict epoch changes to actual Inbox
+        // membership transitions, not ordinary flag/content updates.
+        sqlx::query("DROP TRIGGER IF EXISTS gmail_inbox_epoch_after_update")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("CREATE TRIGGER gmail_inbox_epoch_after_update AFTER UPDATE OF mailbox ON messages WHEN OLD.mailbox IS NOT NEW.mailbox AND (OLD.mailbox = 'INBOX' OR NEW.mailbox = 'INBOX') AND EXISTS (SELECT 1 FROM accounts WHERE id = NEW.account_id) BEGIN INSERT INTO gmail_inbox_membership_epochs(account_id, epoch, updated_at) VALUES (NEW.account_id, 1, CURRENT_TIMESTAMP) ON CONFLICT(account_id) DO UPDATE SET epoch = epoch + 1, updated_at = CURRENT_TIMESTAMP; END")
+            .execute(&self.pool)
+            .await?;
+        let removal_gate_columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
+            sqlx::query_as("PRAGMA table_info(account_removal_gates)")
+                .fetch_all(&self.pool)
+                .await?;
+        if !removal_gate_columns
+            .iter()
+            .any(|column| column.1 == "expires_at")
+        {
+            sqlx::query("ALTER TABLE account_removal_gates ADD COLUMN expires_at TEXT")
+                .execute(&self.pool)
+                .await?;
+            // Existing gates predate the lease protocol. Treat them as
+            // expired so an application upgrade cannot strand a live account
+            // after a prior process crashed during account removal.
+            sqlx::query(
+                "UPDATE account_removal_gates SET expires_at = blocked_at WHERE expires_at IS NULL",
+            )
+            .execute(&self.pool)
+            .await?;
+        }
+        if !removal_gate_columns
+            .iter()
+            .any(|column| column.1 == "owner")
+        {
+            sqlx::query(
+                "ALTER TABLE account_removal_gates ADD COLUMN owner TEXT NOT NULL DEFAULT ''",
+            )
+            .execute(&self.pool)
+            .await?;
+        }
+        let gmail_cursor_columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
+            sqlx::query_as("PRAGMA table_info(gmail_label_reconciliation_state)")
+                .fetch_all(&self.pool)
+                .await?;
+        if !gmail_cursor_columns.iter().any(|column| column.1 == "span") {
+            sqlx::query("ALTER TABLE gmail_label_reconciliation_state ADD COLUMN span INTEGER NOT NULL DEFAULT 64")
+                .execute(&self.pool)
+                .await?;
+        }
+        let journal_columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
+            sqlx::query_as("PRAGMA table_info(operation_journal)")
+                .fetch_all(&self.pool)
+                .await?;
+        if !journal_columns
+            .iter()
+            .any(|column| column.1 == "smtp_accepted_at")
+        {
+            sqlx::query("ALTER TABLE operation_journal ADD COLUMN smtp_accepted_at TEXT")
+                .execute(&self.pool)
+                .await?;
+        }
+        for (table, replacement) in [
+            (
+                "gmail_message_memberships",
+                "CREATE TABLE gmail_message_memberships_rebuilt (account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, gmail_message_id TEXT NOT NULL, PRIMARY KEY(account_id, message_id), FOREIGN KEY(account_id, gmail_message_id) REFERENCES gmail_logical_messages(account_id, gmail_message_id) ON DELETE CASCADE)",
+            ),
+            (
+                "message_temporal_observations",
+                "CREATE TABLE message_temporal_observations_rebuilt (account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, internal_date TEXT NOT NULL, message_date TEXT, observed_at TEXT NOT NULL, PRIMARY KEY(account_id, message_id))",
+            ),
+        ] {
+            let schema: Option<String> = sqlx::query_scalar(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            )
+            .bind(table)
+            .fetch_optional(&self.pool)
+            .await?;
+            if schema.is_some_and(|value| !value.to_ascii_uppercase().contains("ON UPDATE CASCADE")) {
+                let rebuilt = format!("{table}_rebuilt");
+                let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+                sqlx::query(replacement).execute(&mut *tx).await?;
+                sqlx::query(&format!("INSERT INTO {rebuilt} SELECT * FROM {table}"))
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query(&format!("DROP TABLE {table}"))
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query(&format!("ALTER TABLE {rebuilt} RENAME TO {table}"))
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+            }
+        }
+        // Rebuilding legacy child tables drops their table-owned guards.
+        for statement in [
+            "CREATE TRIGGER IF NOT EXISTS gmail_message_memberships_require_account BEFORE INSERT ON gmail_message_memberships WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS message_temporal_observations_require_account BEFORE INSERT ON message_temporal_observations WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+        ] {
+            sqlx::query(statement).execute(&self.pool).await?;
         }
         self.cleanup_orphaned_account_state().await?;
         let columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
@@ -780,6 +1375,81 @@ impl Store {
             )
             .execute(&self.pool)
             .await?;
+        }
+        let account_columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
+            sqlx::query_as("PRAGMA table_info(accounts)")
+                .fetch_all(&self.pool)
+                .await?;
+        if !account_columns
+            .iter()
+            .any(|column| column.1 == "config_generation")
+        {
+            sqlx::query(
+                "ALTER TABLE accounts ADD COLUMN config_generation INTEGER NOT NULL DEFAULT 1",
+            )
+            .execute(&self.pool)
+            .await?;
+        }
+        if !account_columns
+            .iter()
+            .any(|column| column.1 == "config_fingerprint")
+        {
+            sqlx::query(
+                "ALTER TABLE accounts ADD COLUMN config_fingerprint TEXT NOT NULL DEFAULT ''",
+            )
+            .execute(&self.pool)
+            .await?;
+        }
+        let accounts_without_fingerprint: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, data FROM accounts WHERE config_fingerprint = ''")
+                .fetch_all(&self.pool)
+                .await?;
+        for (id, data) in accounts_without_fingerprint {
+            // Older cache-only fixtures can contain a skeletal `{}` account
+            // row. It has never represented a usable provider connection, so
+            // leave it unfingerprinted rather than making database migration
+            // fail before its stale content-fetch lease can be recovered.
+            if let Ok(account) = deserialize_account(&data) {
+                sqlx::query("UPDATE accounts SET config_fingerprint = ? WHERE id = ?")
+                    .bind(account_provider_config_fingerprint(&account)?)
+                    .bind(id)
+                    .execute(&self.pool)
+                    .await?;
+            }
+        }
+        // Legacy catalogues were written before the provider-generation
+        // fence existed. Do this only after upgrading the accounts table,
+        // because old desktop databases lack these account columns.
+        if added_catalog_provider_stamp {
+            sqlx::query("UPDATE mailbox_catalog_state SET provider_config_generation = (SELECT config_generation FROM accounts WHERE accounts.id = mailbox_catalog_state.account_id), provider_config_fingerprint = (SELECT config_fingerprint FROM accounts WHERE accounts.id = mailbox_catalog_state.account_id) WHERE provider_config_generation IS NULL AND EXISTS (SELECT 1 FROM accounts WHERE accounts.id = mailbox_catalog_state.account_id)")
+                .execute(&self.pool)
+                .await?;
+        }
+        for table in ["folder_sync_state", "mailbox_snapshot_generations"] {
+            let columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
+                sqlx::query_as(&format!("PRAGMA table_info({table})"))
+                    .fetch_all(&self.pool)
+                    .await?;
+            if !columns
+                .iter()
+                .any(|column| column.1 == "account_config_generation")
+            {
+                sqlx::query(&format!(
+                    "ALTER TABLE {table} ADD COLUMN account_config_generation INTEGER"
+                ))
+                .execute(&self.pool)
+                .await?;
+            }
+            if !columns
+                .iter()
+                .any(|column| column.1 == "account_config_fingerprint")
+            {
+                sqlx::query(&format!(
+                    "ALTER TABLE {table} ADD COLUMN account_config_fingerprint TEXT"
+                ))
+                .execute(&self.pool)
+                .await?;
+            }
         }
         let rebuild_job_columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
             sqlx::query_as("PRAGMA table_info(mail_rebuild_jobs)")
@@ -829,6 +1499,61 @@ impl Store {
             sqlx::query("ALTER TABLE mailbox_sync_state ADD COLUMN highest_uid INTEGER")
                 .execute(&self.pool)
                 .await?;
+        }
+        let failure_columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
+            sqlx::query_as("PRAGMA table_info(mailbox_sync_failures)")
+                .fetch_all(&self.pool)
+                .await?;
+        for (name, definition) in [
+            ("error_class", "TEXT NOT NULL DEFAULT 'temporary'"),
+            ("attempt_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("next_retry_at", "TEXT"),
+            ("user_action_required", "INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            if !failure_columns.iter().any(|column| column.1 == name) {
+                sqlx::query(&format!(
+                    "ALTER TABLE mailbox_sync_failures ADD COLUMN {name} {definition}"
+                ))
+                .execute(&self.pool)
+                .await?;
+            }
+        }
+        for (table, name, definition) in [
+            ("mailbox_mutation_fences", "uid_validity", "INTEGER"),
+            (
+                "mailbox_snapshot_items",
+                "local_mutation_version",
+                "INTEGER NOT NULL DEFAULT 0",
+            ),
+        ] {
+            let columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
+                sqlx::query_as(&format!("PRAGMA table_info({table})"))
+                    .fetch_all(&self.pool)
+                    .await?;
+            if !columns.iter().any(|column| column.1 == name) {
+                sqlx::query(&format!(
+                    "ALTER TABLE {table} ADD COLUMN {name} {definition}"
+                ))
+                .execute(&self.pool)
+                .await?;
+            }
+        }
+        let operation_columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
+            sqlx::query_as("PRAGMA table_info(operation_journal)")
+                .fetch_all(&self.pool)
+                .await?;
+        for (name, definition) in [
+            ("claim_owner", "TEXT"),
+            ("claimed_at", "TEXT"),
+            ("claimed_from_state", "TEXT"),
+        ] {
+            if !operation_columns.iter().any(|column| column.1 == name) {
+                sqlx::query(&format!(
+                    "ALTER TABLE operation_journal ADD COLUMN {name} {definition}"
+                ))
+                .execute(&self.pool)
+                .await?;
+            }
         }
         if !sync_columns.iter().any(|column| column.1 == "uid_validity") {
             sqlx::query("ALTER TABLE mailbox_sync_state ADD COLUMN uid_validity INTEGER")
@@ -1463,6 +2188,121 @@ impl Store {
             .transpose()
     }
 
+    /// Reads endpoint configuration and its credential from one SQLite
+    /// snapshot. An old provider worker must never authenticate to an old
+    /// endpoint using a password saved for newly configured account settings.
+    pub async fn secret_for_account(
+        &self,
+        account: &Account,
+        name: &str,
+    ) -> Result<Option<String>> {
+        let row: Option<(String, Option<Vec<u8>>, Option<Vec<u8>>)> = sqlx::query_as(
+            "SELECT account.data, credential.nonce, credential.ciphertext FROM accounts AS account LEFT JOIN credentials AS credential ON credential.name = ? WHERE account.id = ? AND NOT EXISTS (SELECT 1 FROM account_removal_gates AS gate WHERE gate.account_id = account.id AND gate.expires_at > ?)",
+        ).bind(name).bind(account.id.to_string()).bind(Utc::now()).fetch_optional(&self.pool).await?;
+        let Some((data, nonce, ciphertext)) = row else {
+            return Err(anyhow!(
+                "Account settings changed; reload the account before trying again"
+            ));
+        };
+        let current = deserialize_account(&data)?;
+        let mut expected = account.clone();
+        expected.ensure_account_name();
+        if serde_json::to_value(current)? != serde_json::to_value(expected)? {
+            return Err(anyhow!(
+                "Account settings changed; reload the account before trying again"
+            ));
+        }
+        match (nonce, ciphertext) {
+            (Some(nonce), Some(ciphertext)) => {
+                decrypt_secret(&self.vault_key, &nonce, name, ciphertext).map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Publishes a refresh only if both the account settings and the exact
+    /// token snapshot used for that refresh still match. A concurrent account
+    /// update or another process's token rotation cannot be overwritten.
+    pub async fn acquire_oauth_refresh_lease(
+        &self,
+        account: &Account,
+        name: &str,
+    ) -> Result<Option<OAuthRefreshLease>> {
+        let owner = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now();
+        let claimed = sqlx::query("INSERT INTO oauth_refresh_leases(secret_name, owner, expires_at) SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM accounts WHERE id = ?) AND EXISTS (SELECT 1 FROM credentials WHERE name = ?) AND NOT EXISTS (SELECT 1 FROM account_removal_gates WHERE account_id = ? AND expires_at > ?) ON CONFLICT(secret_name) DO UPDATE SET owner = excluded.owner, expires_at = excluded.expires_at WHERE oauth_refresh_leases.expires_at <= ?")
+            .bind(name).bind(&owner).bind(now + chrono::Duration::seconds(120))
+            .bind(account.id.to_string()).bind(name).bind(account.id.to_string()).bind(now).bind(now)
+            .execute(&self.pool).await?.rows_affected() == 1;
+        if !claimed {
+            return Ok(None);
+        }
+        let (store, renewal_name, renewal_owner) = (self.clone(), name.to_owned(), owner.clone());
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                let renewed = sqlx::query("UPDATE oauth_refresh_leases SET expires_at = ? WHERE secret_name = ? AND owner = ?")
+                    .bind(Utc::now() + chrono::Duration::seconds(120)).bind(&renewal_name).bind(&renewal_owner).execute(&store.pool).await;
+                if !matches!(renewed, Ok(result) if result.rows_affected() == 1) {
+                    break;
+                }
+            }
+        });
+        Ok(Some(OAuthRefreshLease {
+            store: self.clone(),
+            secret_name: name.to_owned(),
+            owner,
+            task,
+        }))
+    }
+
+    pub async fn replace_oauth_secret_for_account(
+        &self,
+        account: &Account,
+        name: &str,
+        expected_secret: &str,
+        replacement: &str,
+        lease: &OAuthRefreshLease,
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let owns_lease: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM oauth_refresh_leases WHERE secret_name = ? AND owner = ? AND expires_at > ?)")
+            .bind(name).bind(&lease.owner).bind(Utc::now()).fetch_one(&mut *tx).await?;
+        if lease.secret_name != name || !owns_lease {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        let row: Option<(String, Vec<u8>, Vec<u8>)> = sqlx::query_as(
+            "SELECT account.data, credential.nonce, credential.ciphertext FROM accounts AS account JOIN credentials AS credential ON credential.name = ? WHERE account.id = ? AND NOT EXISTS (SELECT 1 FROM account_removal_gates AS gate WHERE gate.account_id = account.id AND gate.expires_at > ?)",
+        ).bind(name).bind(account.id.to_string()).bind(Utc::now()).fetch_optional(&mut *tx).await?;
+        let Some((data, nonce, ciphertext)) = row else {
+            tx.rollback().await?;
+            return Ok(false);
+        };
+        let current = deserialize_account(&data)?;
+        let mut expected = account.clone();
+        expected.ensure_account_name();
+        if !matches!(current.auth, AccountAuth::OAuth2 { .. })
+            || serde_json::to_value(current)? != serde_json::to_value(expected)?
+            || decrypt_secret(&self.vault_key, &nonce, name, ciphertext)? != expected_secret
+        {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        let nonce = random_bytes::<VAULT_NONCE_LEN>()?;
+        let ciphertext = encrypt_secret(&self.vault_key, nonce, name, replacement)?;
+        sqlx::query(
+            "UPDATE credentials SET nonce = ?, ciphertext = ?, updated_at = ? WHERE name = ?",
+        )
+        .bind(nonce.as_slice())
+        .bind(ciphertext)
+        .bind(Utc::now())
+        .bind(name)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
     pub async fn delete_secret(&self, name: &str) -> Result<()> {
         sqlx::query("DELETE FROM credentials WHERE name = ?")
             .bind(name)
@@ -1568,15 +2408,48 @@ impl Store {
             .bind(Utc::now())
             .execute(&mut *tx)
             .await?;
-        sqlx::query("INSERT INTO accounts(id, email, data, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET email=excluded.email, data=excluded.data")
-            .bind(account.id.to_string())
-            .bind(&account.email)
-            .bind(serde_json::to_string(account)?)
-            .bind(account.created_at)
-            .execute(&mut *tx)
-            .await?;
+        save_account_in_transaction(&mut tx, account).await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Creates a newly authenticated account and its durable initial sync.
+    /// Authentication is performed before calling this method. The account,
+    /// encrypted credential and restartable Inbox intent become visible in
+    /// one commit, so a crash cannot leave an account without its initial job.
+    pub async fn create_account_with_secret_and_initial_sync(
+        &self,
+        account: &Account,
+        secret_name: &str,
+        secret: &str,
+    ) -> Result<SyncRun> {
+        let nonce = random_bytes::<VAULT_NONCE_LEN>()?;
+        let ciphertext = encrypt_secret(&self.vault_key, nonce, secret_name, secret)?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM accounts WHERE id = ? OR LOWER(TRIM(email)) = LOWER(TRIM(?)))")
+            .bind(account.id.to_string()).bind(&account.email).fetch_one(&mut *tx).await?;
+        if exists {
+            tx.rollback().await?;
+            return Err(anyhow!("This email account is already connected"));
+        }
+        save_account_in_transaction(&mut tx, account).await?;
+        sqlx::query(
+            "INSERT INTO credentials(name, nonce, ciphertext, updated_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(secret_name)
+        .bind(nonce.as_slice())
+        .bind(ciphertext)
+        .bind(Utc::now())
+        .execute(&mut *tx)
+        .await?;
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now();
+        sqlx::query("INSERT INTO sync_runs(run_id, account_id, stage, inbox_ready, primary_complete, secondary_complete, deferred_complete, content_loading, retry_count, outcome, revision, next_retry_at, error, created_at, updated_at) VALUES (?, ?, 'initial_inbox', 0, 0, 0, 0, 0, 0, 'running', 0, NULL, NULL, ?, ?)")
+            .bind(&run_id).bind(account.id.to_string()).bind(now).bind(now).execute(&mut *tx).await?;
+        tx.commit().await?;
+        self.sync_run_by_id(&run_id)
+            .await?
+            .ok_or_else(|| anyhow!("created initial sync run is missing"))
     }
 
     /// Stores refreshed OAuth credentials only while the durable account still
@@ -1665,8 +2538,1725 @@ impl Store {
         Ok(())
     }
 
+    /// Starts one backend-owned sync run, or returns the interrupted active
+    /// run for the account so an app restart resumes rather than duplicates
+    /// scheduling work.
+    pub async fn create_sync_run(&self, account_id: AccountId) -> Result<SyncRun> {
+        let account_id_text = account_id.to_string();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let active: Option<String> = sqlx::query_scalar("SELECT run_id FROM sync_runs WHERE account_id = ? AND outcome = 'running' ORDER BY revision DESC LIMIT 1")
+            .bind(&account_id_text).fetch_optional(&mut *tx).await?;
+        if let Some(active) = active {
+            tx.commit().await?;
+            return self
+                .sync_run_by_id(&active)
+                .await?
+                .ok_or_else(|| anyhow!("active sync run is missing"));
+        }
+        let revision: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(revision), -1) + 1 FROM sync_runs WHERE account_id = ?",
+        )
+        .bind(&account_id_text)
+        .fetch_one(&mut *tx)
+        .await?;
+        sqlx::query("INSERT INTO sync_runs(run_id, account_id, stage, inbox_ready, primary_complete, secondary_complete, deferred_complete, content_loading, retry_count, outcome, revision, next_retry_at, error, created_at, updated_at) VALUES (?, ?, 'initial_inbox', 0, 0, 0, 0, 0, 0, 'running', ?, NULL, NULL, ?, ?)")
+            .bind(&run_id)
+            .bind(&account_id_text)
+            .bind(revision)
+            .bind(now)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        self.sync_run_by_id(&run_id)
+            .await?
+            .ok_or_else(|| anyhow!("created sync run is missing"))
+    }
+
+    /// Returns the active run when present, otherwise the most recently
+    /// updated terminal run. The backend can therefore restore status after a
+    /// missed publication event.
+    pub async fn sync_run(&self, account_id: AccountId) -> Result<Option<SyncRun>> {
+        let row: Option<SyncRunRow> = sqlx::query_as("SELECT run_id, account_id, stage, inbox_ready, primary_complete, secondary_complete, deferred_complete, EXISTS(SELECT 1 FROM message_content_fetches AS fetch JOIN messages AS message ON message.id = fetch.message_id WHERE message.account_id = sync_runs.account_id AND fetch.claimed_at > ?) AS content_loading, retry_count, outcome, revision, next_retry_at, error FROM sync_runs WHERE account_id = ? ORDER BY CASE outcome WHEN 'running' THEN 0 ELSE 1 END, updated_at DESC LIMIT 1")
+            .bind(Utc::now() - chrono::Duration::seconds(MESSAGE_CONTENT_FETCH_LEASE_SECONDS))
+            .bind(account_id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(sync_run_from_row).transpose()
+    }
+
+    pub async fn sync_runs(&self) -> Result<Vec<SyncRun>> {
+        let rows: Vec<SyncRunRow> = sqlx::query_as("SELECT run_id, account_id, stage, inbox_ready, primary_complete, secondary_complete, deferred_complete, EXISTS(SELECT 1 FROM message_content_fetches AS fetch JOIN messages AS message ON message.id = fetch.message_id WHERE message.account_id = ranked.account_id AND fetch.claimed_at > ?) AS content_loading, retry_count, outcome, revision, next_retry_at, error FROM (SELECT run_id, account_id, stage, inbox_ready, primary_complete, secondary_complete, deferred_complete, retry_count, outcome, revision, next_retry_at, error, ROW_NUMBER() OVER (PARTITION BY account_id ORDER BY revision DESC, updated_at DESC, run_id DESC) AS rank FROM sync_runs) AS ranked WHERE rank = 1 ORDER BY account_id")
+            .bind(Utc::now() - chrono::Duration::seconds(MESSAGE_CONTENT_FETCH_LEASE_SECONDS))
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter().map(sync_run_from_row).collect()
+    }
+
+    /// Converts retained pre-run rebuild checkpoints once. The old row has no
+    /// safe per-folder cursor, so the new run restarts at its first bounded
+    /// Inbox stage while preserving the already committed catalogue instead
+    /// of invoking the destructive legacy reset path.
+    pub async fn migrate_mail_rebuild_jobs_to_sync_runs(&self) -> Result<Vec<SyncRun>> {
+        let jobs = self.mail_rebuild_jobs().await?;
+        if jobs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let now = Utc::now();
+        for job in &jobs {
+            let run_id = uuid::Uuid::new_v4().to_string();
+            sqlx::query("INSERT OR IGNORE INTO sync_runs(run_id, account_id, stage, inbox_ready, primary_complete, secondary_complete, deferred_complete, content_loading, retry_count, outcome, revision, next_retry_at, error, created_at, updated_at) VALUES (?, ?, 'initial_inbox', 0, 0, 0, 0, 0, 0, 'running', 0, NULL, ?, ?, ?)")
+                .bind(run_id).bind(job.account_id.to_string()).bind(format!("migrated legacy rebuild checkpoint: {}", job.phase)).bind(now).bind(now)
+                .execute(&mut *tx).await?;
+            sqlx::query("DELETE FROM mail_rebuild_jobs WHERE account_id = ?")
+                .bind(job.account_id.to_string())
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        let migrated = self.sync_runs().await?;
+        let account_ids: HashSet<AccountId> = jobs.into_iter().map(|job| job.account_id).collect();
+        Ok(migrated
+            .into_iter()
+            .filter(|run| account_ids.contains(&run.account_id) && run.outcome == "running")
+            .collect())
+    }
+
+    pub async fn update_sync_run(
+        &self,
+        run_id: &str,
+        update: &SyncRunUpdate<'_>,
+    ) -> Result<SyncRun> {
+        let retry_after_supplied = update.next_retry_at.is_some();
+        let next_retry_at = update.next_retry_at.flatten();
+        let error_supplied = update.error.is_some();
+        let error = update.error.flatten();
+        let changed = sqlx::query("UPDATE sync_runs SET stage = COALESCE(?, stage), inbox_ready = COALESCE(?, inbox_ready), primary_complete = COALESCE(?, primary_complete), secondary_complete = COALESCE(?, secondary_complete), deferred_complete = COALESCE(?, deferred_complete), content_loading = COALESCE(?, content_loading), retry_count = COALESCE(?, retry_count), outcome = COALESCE(?, outcome), next_retry_at = CASE WHEN ? THEN ? ELSE next_retry_at END, error = CASE WHEN ? THEN ? ELSE error END, revision = revision + 1, updated_at = ? WHERE run_id = ? AND outcome = 'running'")
+            .bind(update.stage)
+            .bind(update.inbox_ready)
+            .bind(update.primary_complete)
+            .bind(update.secondary_complete)
+            .bind(update.deferred_complete)
+            .bind(update.content_loading)
+            .bind(update.retry_count.map(i64::from))
+            .bind(update.outcome)
+            .bind(retry_after_supplied)
+            .bind(next_retry_at)
+            .bind(error_supplied)
+            .bind(error)
+            .bind(Utc::now())
+            .bind(run_id)
+            .execute(&self.pool)
+            .await?;
+        if changed.rows_affected() != 1 {
+            return Err(anyhow!("sync run is not active"));
+        }
+        self.sync_run_by_id(run_id)
+            .await?
+            .ok_or_else(|| anyhow!("updated sync run is missing"))
+    }
+
+    async fn sync_run_by_id(&self, run_id: &str) -> Result<Option<SyncRun>> {
+        let row: Option<SyncRunRow> = sqlx::query_as("SELECT run_id, account_id, stage, inbox_ready, primary_complete, secondary_complete, deferred_complete, content_loading, retry_count, outcome, revision, next_retry_at, error FROM sync_runs WHERE run_id = ?")
+            .bind(run_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(sync_run_from_row).transpose()
+    }
+
+    /// Starts or resumes a folder scan. A UIDVALIDITY mismatch replaces only
+    /// temporary discovery state: committed mail remains readable until the
+    /// replacement snapshot is proven complete.
+    pub async fn begin_folder_sync(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        remote_name: &str,
+        uid_validity: u32,
+        upper_boundary: Option<u32>,
+    ) -> Result<FolderSyncState> {
+        self.begin_folder_sync_inner(
+            account_id,
+            mailbox,
+            remote_name,
+            uid_validity,
+            upper_boundary,
+            None,
+        )
+        .await
+    }
+
+    /// Captures the exact account configuration before folder-provider I/O.
+    /// All later publications of this generation are rejected if that account
+    /// changes endpoint, principal, or provider configuration.
+    pub async fn begin_folder_sync_for_account(
+        &self,
+        account: &Account,
+        mailbox: &str,
+        remote_name: &str,
+        uid_validity: u32,
+        upper_boundary: Option<u32>,
+    ) -> Result<FolderSyncState> {
+        let receipt = self
+            .capture_account_provider_receipt(account)
+            .await?
+            .ok_or_else(|| anyhow!("account provider configuration is no longer current"))?;
+        self.begin_folder_sync_with_provider_receipt(
+            &receipt,
+            mailbox,
+            remote_name,
+            uid_validity,
+            upper_boundary,
+        )
+        .await
+    }
+
+    /// Begins a folder generation using a receipt captured before IMAP I/O.
+    pub async fn begin_folder_sync_with_provider_receipt(
+        &self,
+        receipt: &AccountProviderReceipt,
+        mailbox: &str,
+        remote_name: &str,
+        uid_validity: u32,
+        upper_boundary: Option<u32>,
+    ) -> Result<FolderSyncState> {
+        self.begin_folder_sync_inner(
+            receipt.account_id,
+            mailbox,
+            remote_name,
+            uid_validity,
+            upper_boundary,
+            Some(receipt),
+        )
+        .await
+    }
+
+    async fn begin_folder_sync_inner(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        remote_name: &str,
+        uid_validity: u32,
+        upper_boundary: Option<u32>,
+        receipt: Option<&AccountProviderReceipt>,
+    ) -> Result<FolderSyncState> {
+        let account_id = account_id.to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if let Some(receipt) = receipt {
+            ensure_account_provider_receipt_current_in_transaction(&mut tx, receipt).await?;
+        }
+        let existing: Option<FolderSyncState> = sqlx::query_as("SELECT account_id, mailbox, remote_name, uid_validity, generation, upper_boundary, cursor, discovery_complete, headers_complete, local_mutation_version, revision, retry_after, account_config_generation, account_config_fingerprint, updated_at FROM folder_sync_state WHERE account_id = ? AND mailbox = ?")
+            .bind(&account_id)
+            .bind(mailbox)
+            .fetch_optional(&mut *tx)
+            .await?;
+        if let Some(existing) = existing {
+            if existing.remote_name == remote_name
+                && existing.uid_validity == i64::from(uid_validity)
+                && receipt.is_none_or(|receipt| {
+                    folder_sync_state_matches_provider_receipt(&existing, receipt)
+                })
+            {
+                tx.commit().await?;
+                return Ok(existing);
+            }
+        }
+        let generation = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now();
+        sqlx::query("INSERT INTO folder_sync_state(account_id, mailbox, remote_name, uid_validity, generation, upper_boundary, cursor, discovery_complete, headers_complete, local_mutation_version, revision, retry_after, account_config_generation, account_config_fingerprint, updated_at) VALUES (?, ?, ?, ?, ?, ?, NULL, 0, 0, 0, 0, NULL, ?, ?, ?) ON CONFLICT(account_id, mailbox) DO UPDATE SET remote_name=excluded.remote_name, uid_validity=excluded.uid_validity, generation=excluded.generation, upper_boundary=excluded.upper_boundary, cursor=NULL, discovery_complete=0, headers_complete=0, revision=folder_sync_state.revision+1, retry_after=NULL, account_config_generation=excluded.account_config_generation, account_config_fingerprint=excluded.account_config_fingerprint, updated_at=excluded.updated_at")
+            .bind(&account_id)
+            .bind(mailbox)
+            .bind(remote_name)
+            .bind(i64::from(uid_validity))
+            .bind(&generation)
+            .bind(upper_boundary.map(i64::from))
+            .bind(receipt.map(|receipt| receipt.config_generation))
+            .bind(receipt.map(|receipt| receipt.config_fingerprint.as_str()))
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        let state: FolderSyncState = sqlx::query_as("SELECT account_id, mailbox, remote_name, uid_validity, generation, upper_boundary, cursor, discovery_complete, headers_complete, local_mutation_version, revision, retry_after, account_config_generation, account_config_fingerprint, updated_at FROM folder_sync_state WHERE account_id = ? AND mailbox = ?")
+            .bind(&account_id)
+            .bind(mailbox)
+            .fetch_one(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(state)
+    }
+
+    pub async fn folder_sync_state(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+    ) -> Result<Option<FolderSyncState>> {
+        Ok(sqlx::query_as("SELECT account_id, mailbox, remote_name, uid_validity, generation, upper_boundary, cursor, discovery_complete, headers_complete, local_mutation_version, revision, retry_after, account_config_generation, account_config_fingerprint, updated_at FROM folder_sync_state WHERE account_id = ? AND mailbox = ?")
+            .bind(account_id.to_string())
+            .bind(mailbox)
+            .fetch_optional(&self.pool)
+            .await?)
+    }
+
+    /// Commits one complete discovery response. The cursor is not advanced on
+    /// an interrupted response because callers invoke this only after tagged
+    /// OK, keeping the temporary UID evidence resumable and bounded.
+    pub async fn stage_folder_discovery_page(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        expected_generation: &str,
+        expected_revision: u64,
+        uids: &[u32],
+        next_cursor: Option<u32>,
+        complete: bool,
+    ) -> Result<u64> {
+        if uids.contains(&0) {
+            return Err(anyhow!("folder discovery contains UID 0"));
+        }
+        let account_id = account_id.to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let publication_timer = PublicationTransactionTimer::start();
+        let state: Option<(String, Option<i64>, i64, Option<i64>, Option<String>)> = sqlx::query_as("SELECT generation, upper_boundary, revision, account_config_generation, account_config_fingerprint FROM folder_sync_state WHERE account_id = ? AND mailbox = ? AND generation = ? AND revision = ?")
+            .bind(&account_id)
+            .bind(mailbox)
+            .bind(expected_generation)
+            .bind(i64::try_from(expected_revision)?)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some((generation, upper_boundary, revision, config_generation, config_fingerprint)) =
+            state
+        else {
+            tx.rollback().await?;
+            return Err(anyhow!("folder sync state is not active"));
+        };
+        ensure_stored_provider_receipt_current_in_transaction(
+            &mut tx,
+            &account_id,
+            config_generation,
+            config_fingerprint.as_deref(),
+        )
+        .await?;
+        if uids
+            .iter()
+            .any(|uid| upper_boundary.is_some_and(|boundary| i64::from(*uid) > boundary))
+        {
+            tx.rollback().await?;
+            return Err(anyhow!(
+                "folder discovery exceeds its captured UID boundary"
+            ));
+        }
+        let now = Utc::now();
+        for uid in uids {
+            sqlx::query("INSERT OR IGNORE INTO folder_sync_discovery(account_id, mailbox, generation, uid, created_at) VALUES (?, ?, ?, ?, ?)")
+                .bind(&account_id).bind(mailbox).bind(&generation).bind(i64::from(*uid)).bind(now)
+                .execute(&mut *tx).await?;
+        }
+        let updated = sqlx::query("UPDATE folder_sync_state SET cursor = ?, discovery_complete = ?, revision = revision + 1, updated_at = ? WHERE account_id = ? AND mailbox = ? AND generation = ? AND revision = ?")
+            .bind(next_cursor.map(i64::from)).bind(complete).bind(now).bind(&account_id).bind(mailbox).bind(&generation).bind(revision)
+            .execute(&mut *tx).await?;
+        if updated.rows_affected() != 1 {
+            tx.rollback().await?;
+            return Err(anyhow!("folder sync state changed while staging discovery"));
+        }
+        tx.commit().await?;
+        publication_timer.committed();
+        Ok(u64::try_from(revision + 1)?)
+    }
+
+    pub async fn folder_discovered_uids_needing_headers(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        limit: usize,
+    ) -> Result<Vec<u32>> {
+        let limit = i64::try_from(limit.clamp(1, 500))?;
+        let rows: Vec<i64> = sqlx::query_scalar("SELECT discovery.uid FROM folder_sync_discovery AS discovery JOIN folder_sync_state AS state ON state.account_id = discovery.account_id AND state.mailbox = discovery.mailbox AND state.generation = discovery.generation LEFT JOIN folder_sync_header_outcomes AS outcome ON outcome.account_id = discovery.account_id AND outcome.mailbox = discovery.mailbox AND outcome.generation = discovery.generation AND outcome.uid = discovery.uid LEFT JOIN mailbox_sync_failures AS failure ON failure.account_id = discovery.account_id AND failure.mailbox = discovery.mailbox AND failure.uid = discovery.uid AND failure.stage = 'headers' WHERE discovery.account_id = ? AND discovery.mailbox = ? AND outcome.uid IS NULL AND (failure.uid IS NULL OR (failure.user_action_required = 0 AND (failure.next_retry_at IS NULL OR failure.next_retry_at <= ?))) ORDER BY discovery.uid DESC LIMIT ?")
+            .bind(account_id.to_string()).bind(mailbox).bind(Utc::now()).bind(limit).fetch_all(&self.pool).await?;
+        rows.into_iter()
+            .map(|uid| u32::try_from(uid).context("stored discovered UID is invalid"))
+            .collect()
+    }
+
+    /// Reports unresolved discovered headers even when their retry schedule
+    /// deliberately keeps them out of the next fetch page. Callers must not
+    /// mark a folder header pass complete merely because no UID is due now.
+    pub async fn folder_has_unresolved_headers(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+    ) -> Result<bool> {
+        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM folder_sync_discovery AS discovery JOIN folder_sync_state AS state ON state.account_id = discovery.account_id AND state.mailbox = discovery.mailbox AND state.generation = discovery.generation LEFT JOIN folder_sync_header_outcomes AS outcome ON outcome.account_id = discovery.account_id AND outcome.mailbox = discovery.mailbox AND outcome.generation = discovery.generation AND outcome.uid = discovery.uid WHERE discovery.account_id = ? AND discovery.mailbox = ? AND outcome.uid IS NULL)")
+            .bind(account_id.to_string()).bind(mailbox).fetch_one(&self.pool).await?)
+    }
+
+    /// Publishes a parsed header page and advances the durable folder revision
+    /// in the same transaction. The revision is the event fence callers use
+    /// to ignore stale catalogue publications.
+    pub async fn commit_folder_header_batch(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        expected_generation: &str,
+        expected_revision: u64,
+        messages: &[MailSummary],
+        next_cursor: Option<u32>,
+        headers_complete: bool,
+    ) -> Result<u64> {
+        self.commit_folder_header_batch_inner(
+            account_id,
+            mailbox,
+            expected_generation,
+            expected_revision,
+            messages,
+            next_cursor,
+            headers_complete,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Publishes an IMAP header response using the account receipt captured
+    /// before that response was fetched.
+    pub async fn commit_folder_header_batch_with_provider_receipt(
+        &self,
+        receipt: &AccountProviderReceipt,
+        mailbox: &str,
+        expected_generation: &str,
+        expected_revision: u64,
+        messages: &[MailSummary],
+        next_cursor: Option<u32>,
+        headers_complete: bool,
+    ) -> Result<u64> {
+        self.commit_folder_header_batch_inner(
+            receipt.account_id,
+            mailbox,
+            expected_generation,
+            expected_revision,
+            messages,
+            next_cursor,
+            headers_complete,
+            Some(receipt),
+            None,
+        )
+        .await
+    }
+
+    /// Convenience form for code which retains the exact Account used for
+    /// the provider request.
+    pub async fn commit_folder_header_batch_for_account(
+        &self,
+        account: &Account,
+        mailbox: &str,
+        expected_generation: &str,
+        expected_revision: u64,
+        messages: &[MailSummary],
+        next_cursor: Option<u32>,
+        headers_complete: bool,
+    ) -> Result<u64> {
+        let receipt = self
+            .capture_account_provider_receipt(account)
+            .await?
+            .ok_or_else(|| anyhow!("account provider configuration is no longer current"))?;
+        self.commit_folder_header_batch_with_provider_receipt(
+            &receipt,
+            mailbox,
+            expected_generation,
+            expected_revision,
+            messages,
+            next_cursor,
+            headers_complete,
+        )
+        .await
+    }
+
+    /// Atomically publishes a folder header batch and its Gmail identities.
+    /// The Gmail Inbox epoch is checked before any header insert, so these
+    /// headers cannot invalidate their own pre-fetch receipt.
+    pub async fn commit_folder_header_batch_with_gmail_observations(
+        &self,
+        receipt: &AccountProviderReceipt,
+        gmail_receipt: &GmailInboxMembershipEpochReceipt,
+        mailbox: &str,
+        expected_generation: &str,
+        expected_revision: u64,
+        messages: &[MailSummary],
+        observations: &[GmailProviderObservation],
+        next_cursor: Option<u32>,
+        headers_complete: bool,
+    ) -> Result<u64> {
+        if gmail_receipt.account_id != receipt.account_id {
+            return Err(anyhow!("Gmail epoch receipt belongs to another account"));
+        }
+        let mut observed_uids = HashSet::new();
+        let mut gmail_ids = HashSet::new();
+        for observation in observations {
+            if observation.uid == 0 || observation.gmail_message_id.trim().is_empty() {
+                return Err(anyhow!("Gmail header observation is invalid"));
+            }
+            if !observed_uids.insert(observation.uid)
+                || !gmail_ids.insert(observation.gmail_message_id.as_str())
+            {
+                return Err(anyhow!(
+                    "a Gmail header batch cannot repeat a UID or Gmail identity"
+                ));
+            }
+        }
+        self.commit_folder_header_batch_inner(
+            receipt.account_id,
+            mailbox,
+            expected_generation,
+            expected_revision,
+            messages,
+            next_cursor,
+            headers_complete,
+            Some(receipt),
+            Some((gmail_receipt, observations)),
+        )
+        .await
+    }
+
+    async fn commit_folder_header_batch_inner(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        expected_generation: &str,
+        expected_revision: u64,
+        messages: &[MailSummary],
+        next_cursor: Option<u32>,
+        headers_complete: bool,
+        receipt: Option<&AccountProviderReceipt>,
+        gmail_observations: Option<(
+            &GmailInboxMembershipEpochReceipt,
+            &[GmailProviderObservation],
+        )>,
+    ) -> Result<u64> {
+        let account_id_text = account_id.to_string();
+        if messages
+            .iter()
+            .any(|message| message.account_id != account_id_text || message.mailbox != mailbox)
+        {
+            return Err(anyhow!(
+                "folder header batch message does not match its mailbox"
+            ));
+        }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let publication_timer = PublicationTransactionTimer::start();
+        let state: Option<(String, Option<i64>, String, i64, Option<i64>, Option<String>)> = sqlx::query_as("SELECT generation, upper_boundary, remote_name, uid_validity, account_config_generation, account_config_fingerprint FROM folder_sync_state WHERE account_id = ? AND mailbox = ? AND generation = ? AND revision = ?")
+            .bind(&account_id_text).bind(mailbox).bind(expected_generation).bind(i64::try_from(expected_revision)?)
+            .fetch_optional(&mut *tx).await?;
+        let Some((
+            generation,
+            upper_boundary,
+            remote_name,
+            uid_validity,
+            config_generation,
+            config_fingerprint,
+        )) = state
+        else {
+            tx.rollback().await?;
+            return Err(anyhow!("folder sync revision is stale"));
+        };
+        ensure_stored_provider_receipt_current_in_transaction(
+            &mut tx,
+            &account_id_text,
+            config_generation,
+            config_fingerprint.as_deref(),
+        )
+        .await?;
+        if let Some(receipt) = receipt {
+            ensure_account_provider_receipt_current_in_transaction(&mut tx, receipt).await?;
+            if receipt.account_id.to_string() != account_id_text
+                || config_generation != Some(receipt.config_generation)
+                || config_fingerprint.as_deref() != Some(receipt.config_fingerprint.as_str())
+            {
+                tx.rollback().await?;
+                return Err(anyhow!(
+                    "folder sync generation belongs to another provider configuration"
+                ));
+            }
+        }
+        if let Some((gmail_receipt, _)) = gmail_observations {
+            let current_epoch: Option<i64> = sqlx::query_scalar(
+                "SELECT epoch FROM gmail_inbox_membership_epochs WHERE account_id = ?",
+            )
+            .bind(&account_id_text)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if current_epoch.unwrap_or(0) != gmail_receipt.epoch {
+                tx.rollback().await?;
+                return Err(anyhow!(
+                    "Gmail Inbox membership changed during header fetch"
+                ));
+            }
+        }
+        let committed_uid_validity: Option<i64> = sqlx::query_scalar(
+            "SELECT uid_validity FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ?",
+        )
+        .bind(&account_id_text)
+        .bind(mailbox)
+        .fetch_optional(&mut *tx)
+        .await?
+        .flatten();
+        if committed_uid_validity.is_some_and(|current| current != uid_validity) {
+            tx.rollback().await?;
+            return Err(anyhow!(
+                "folder generation UIDVALIDITY is older than the committed mailbox namespace"
+            ));
+        }
+        if messages.iter().any(|message| {
+            message.uid <= 0 || upper_boundary.is_some_and(|boundary| message.uid > boundary)
+        }) {
+            tx.rollback().await?;
+            return Err(anyhow!(
+                "folder header batch exceeds its captured UID boundary"
+            ));
+        }
+        for message in messages {
+            let discovered: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM folder_sync_discovery WHERE account_id = ? AND mailbox = ? AND generation = ? AND uid = ?)")
+                .bind(&account_id_text).bind(mailbox).bind(&generation).bind(message.uid)
+                .fetch_one(&mut *tx).await?;
+            if !discovered {
+                tx.rollback().await?;
+                return Err(anyhow!(
+                    "header UID was not discovered in the active folder generation"
+                ));
+            }
+            persist_message(&mut tx, message).await?;
+            sqlx::query("INSERT INTO folder_sync_header_outcomes(account_id, mailbox, generation, uid, completed_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(account_id, mailbox, generation, uid) DO UPDATE SET completed_at=excluded.completed_at")
+                .bind(&account_id_text).bind(mailbox).bind(&generation).bind(message.uid).bind(Utc::now())
+                .execute(&mut *tx).await?;
+        }
+        if let Some((_gmail_receipt, observations)) = gmail_observations {
+            let message_uids: HashSet<i64> = messages.iter().map(|message| message.uid).collect();
+            if observations
+                .iter()
+                .any(|observation| !message_uids.contains(&i64::from(observation.uid)))
+            {
+                tx.rollback().await?;
+                return Err(anyhow!(
+                    "Gmail header observation does not match a published header"
+                ));
+            }
+            let now = Utc::now();
+            for observation in observations {
+                let local_message_id: Option<String> = sqlx::query_scalar(
+                    "SELECT id FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?",
+                )
+                .bind(&account_id_text)
+                .bind(mailbox)
+                .bind(i64::from(observation.uid))
+                .fetch_optional(&mut *tx)
+                .await?;
+                let Some(local_message_id) = local_message_id else {
+                    tx.rollback().await?;
+                    return Err(anyhow!(
+                        "published Gmail header has no canonical local message"
+                    ));
+                };
+                sqlx::query("INSERT INTO gmail_logical_messages(account_id, gmail_message_id, labels_json, observed_at) VALUES (?, ?, ?, ?) ON CONFLICT(account_id, gmail_message_id) DO UPDATE SET labels_json=excluded.labels_json, observed_at=excluded.observed_at")
+                    .bind(&account_id_text)
+                    .bind(&observation.gmail_message_id)
+                    .bind(serde_json::to_string(&observation.labels)?)
+                    .bind(now)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query("INSERT INTO gmail_message_memberships(account_id, message_id, gmail_message_id) VALUES (?, ?, ?) ON CONFLICT(account_id, message_id) DO UPDATE SET gmail_message_id=excluded.gmail_message_id")
+                    .bind(&account_id_text)
+                    .bind(&local_message_id)
+                    .bind(&observation.gmail_message_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            for observation in observations {
+                if observation
+                    .labels
+                    .iter()
+                    .any(|label| label.eq_ignore_ascii_case("\\Inbox"))
+                {
+                    continue;
+                }
+                let ids: Vec<String> = sqlx::query_scalar("SELECT message.id FROM gmail_message_memberships AS membership JOIN messages AS message ON message.id = membership.message_id WHERE membership.account_id = ? AND membership.gmail_message_id = ? AND message.mailbox = 'INBOX'")
+                    .bind(&account_id_text)
+                    .bind(&observation.gmail_message_id)
+                    .fetch_all(&mut *tx)
+                    .await?;
+                for id in ids {
+                    sqlx::query("DELETE FROM messages WHERE id = ?")
+                        .bind(id)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+            }
+            // Inbox insert/delete triggers may already advance the epoch. An
+            // explicit bump also fences a labels-only observation batch.
+            sqlx::query("INSERT INTO gmail_inbox_membership_epochs(account_id, epoch, updated_at) VALUES (?, 1, ?) ON CONFLICT(account_id) DO UPDATE SET epoch=epoch+1, updated_at=excluded.updated_at")
+                .bind(&account_id_text)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+        }
+        // First headers make a folder usable immediately. Historical coverage
+        // remains false until discovery and retry queues complete, but remote
+        // actions can resolve this committed locator without a separate write.
+        sqlx::query("INSERT INTO mailbox_catalog_state(account_id, mailbox, remote_name, uid_validity, remote_total, historical_complete, uid_next, highest_modseq, provider_config_generation, provider_config_fingerprint, updated_at) VALUES (?, ?, ?, ?, 0, 0, NULL, NULL, ?, ?, ?) ON CONFLICT(account_id, mailbox) DO UPDATE SET remote_name=excluded.remote_name, uid_validity=excluded.uid_validity, historical_complete=0, provider_config_generation=excluded.provider_config_generation, provider_config_fingerprint=excluded.provider_config_fingerprint, updated_at=excluded.updated_at")
+            .bind(&account_id_text).bind(mailbox).bind(&remote_name).bind(uid_validity).bind(config_generation).bind(&config_fingerprint).bind(Utc::now())
+            .execute(&mut *tx).await?;
+        let updated = sqlx::query("UPDATE folder_sync_state SET cursor = ?, headers_complete = ?, revision = revision + 1, updated_at = ? WHERE account_id = ? AND mailbox = ? AND generation = ? AND revision = ?")
+            .bind(next_cursor.map(i64::from)).bind(headers_complete).bind(Utc::now()).bind(&account_id_text).bind(mailbox).bind(&generation).bind(i64::try_from(expected_revision)?)
+            .execute(&mut *tx).await?;
+        if updated.rows_affected() != 1 {
+            tx.rollback().await?;
+            return Err(anyhow!(
+                "folder sync state changed while publishing headers"
+            ));
+        }
+        tx.commit().await?;
+        publication_timer.committed();
+        Ok(expected_revision + 1)
+    }
+
+    /// Atomically creates the durable record which authorizes an optimistic
+    /// local mutation. Remote workers must use this immutable locator rather
+    /// than whichever row happens to be selected when they eventually run.
+    pub async fn enqueue_operation(
+        &self,
+        account_id: AccountId,
+        kind: &str,
+        target: OperationTarget<'_>,
+        payload_json: &str,
+        dependency_id: Option<&str>,
+    ) -> Result<OperationJournalEntry> {
+        if kind.trim().is_empty() {
+            return Err(anyhow!("operation kind is required"));
+        }
+        serde_json::from_str::<serde_json::Value>(payload_json)
+            .context("operation payload must be valid JSON")?;
+        if target.uid == Some(0)
+            || target.mailbox.is_some() != target.uid.is_some()
+            || target.uid_validity.is_some() != target.uid.is_some()
+        {
+            return Err(anyhow!(
+                "operation target has an invalid mailbox UID locator"
+            ));
+        }
+        let account_id_text = account_id.to_string();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let account_live: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM accounts WHERE id = ? AND NOT EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = ?) AND NOT EXISTS (SELECT 1 FROM account_removal_gates WHERE account_id = ? AND expires_at > ?))")
+            .bind(&account_id_text).bind(&account_id_text).bind(&account_id_text).bind(Utc::now()).fetch_one(&mut *tx).await?;
+        if !account_live {
+            tx.rollback().await?;
+            return Err(anyhow!("account was removed"));
+        }
+        let local_version = if let (Some(mailbox), Some(uid)) = (target.mailbox, target.uid) {
+            sqlx::query("UPDATE folder_sync_state SET local_mutation_version = local_mutation_version + 1, revision = revision + 1, updated_at = ? WHERE account_id = ? AND mailbox = ?")
+                .bind(Utc::now()).bind(&account_id_text).bind(mailbox).execute(&mut *tx).await?;
+            let uid_validity = target
+                .uid_validity
+                .map(|value| i64::try_from(value))
+                .transpose()?;
+            let version: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) + 1 FROM mailbox_mutation_versions WHERE account_id = ? AND mailbox = ? AND uid = ? AND uid_validity IS ?")
+                .bind(&account_id_text).bind(mailbox).bind(i64::from(uid)).bind(uid_validity).fetch_one(&mut *tx).await?;
+            if let Some(uid_validity) = uid_validity {
+                sqlx::query("INSERT INTO mailbox_mutation_versions(account_id, mailbox, uid, uid_validity, version, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(account_id, mailbox, uid, uid_validity) DO UPDATE SET version=excluded.version, updated_at=excluded.updated_at")
+                    .bind(&account_id_text).bind(mailbox).bind(i64::from(uid)).bind(uid_validity).bind(version).bind(Utc::now()).execute(&mut *tx).await?;
+            }
+            sqlx::query("INSERT INTO mailbox_mutation_fences(account_id, mailbox, uid, uid_validity, version, operation_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(account_id, mailbox, uid) DO UPDATE SET uid_validity=excluded.uid_validity, version=excluded.version, operation_id=excluded.operation_id, created_at=excluded.created_at")
+                .bind(&account_id_text).bind(mailbox).bind(i64::from(uid)).bind(uid_validity).bind(version).bind(&operation_id).bind(Utc::now()).execute(&mut *tx).await?;
+            version
+        } else {
+            0
+        };
+        let now = Utc::now();
+        sqlx::query("INSERT INTO operation_journal(operation_id, account_id, mailbox, uid, uid_validity, message_id, kind, payload_json, local_version, dependency_id, state, outcome, attempts, next_retry_at, error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', NULL, 0, NULL, NULL, ?, ?)")
+            .bind(&operation_id).bind(&account_id_text).bind(target.mailbox).bind(target.uid.map(i64::from)).bind(target.uid_validity.map(|value| i64::try_from(value)).transpose()?).bind(target.message_id).bind(kind).bind(payload_json).bind(local_version).bind(dependency_id).bind(now).bind(now)
+            .execute(&mut *tx).await?;
+        tx.commit().await?;
+        self.operation_journal_entry(&operation_id)
+            .await?
+            .ok_or_else(|| anyhow!("created operation is missing"))
+    }
+
+    /// Atomically stages and leases a direct SMTP submission. This prevents a
+    /// concurrent desktop drain from taking the queued row between a CLI
+    /// command's durable prepare step and its first SMTP attempt.
+    pub async fn enqueue_smtp_submission_and_claim(
+        &self,
+        account_id: AccountId,
+        payload_json: &str,
+        claim_owner: &str,
+    ) -> Result<OperationJournalEntry> {
+        if claim_owner.trim().is_empty() {
+            return Err(anyhow!("operation claim owner is required"));
+        }
+        serde_json::from_str::<serde_json::Value>(payload_json)
+            .context("operation payload must be valid JSON")?;
+        let account_id_text = account_id.to_string();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let account_live: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM accounts WHERE id = ? AND NOT EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = ?) AND NOT EXISTS (SELECT 1 FROM account_removal_gates WHERE account_id = ? AND expires_at > ?))")
+            .bind(&account_id_text)
+            .bind(&account_id_text)
+            .bind(&account_id_text)
+            .bind(now)
+            .fetch_one(&mut *tx)
+            .await?;
+        if !account_live {
+            tx.rollback().await?;
+            return Err(anyhow!("account is unavailable for submission"));
+        }
+        let active: Option<String> = sqlx::query_scalar("SELECT operation_id FROM operation_journal WHERE account_id = ? AND kind = 'smtp_submission' AND state = 'submitting' ORDER BY claimed_at LIMIT 1")
+            .bind(&account_id_text).fetch_optional(&mut *tx).await?;
+        let queued_before: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM operation_journal WHERE account_id = ? AND kind = 'smtp_submission' AND smtp_accepted_at IS NULL AND state IN ('queued', 'retry'))")
+            .bind(&account_id_text)
+            .fetch_one(&mut *tx)
+            .await?;
+        let claimed = active.is_none() && !queued_before;
+        sqlx::query("INSERT INTO operation_journal(operation_id, account_id, mailbox, uid, uid_validity, message_id, kind, payload_json, local_version, dependency_id, state, outcome, attempts, next_retry_at, error, claim_owner, claimed_at, claimed_from_state, created_at, updated_at) VALUES (?, ?, NULL, NULL, NULL, NULL, 'smtp_submission', ?, 0, NULL, ?, NULL, ?, NULL, NULL, ?, ?, ?, ?, ?)")
+            .bind(&operation_id)
+            .bind(&account_id_text)
+            .bind(payload_json)
+            .bind(if claimed { "submitting" } else { "queued" })
+            .bind(if claimed { 1 } else { 0 })
+            .bind(claimed.then_some(claim_owner))
+            .bind(claimed.then_some(now))
+            .bind(claimed.then_some("queued"))
+            .bind(now)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        let operation = self
+            .operation_journal_entry(&operation_id)
+            .await?
+            .ok_or_else(|| anyhow!("created SMTP operation is missing"))?;
+        if claimed {
+            Self::record_first_smtp_claim_wait(&operation);
+        }
+        Ok(operation)
+    }
+
+    /// Resolves a visible message and its currently committed UID namespace
+    /// under one SQLite write lease before journaling the operation. Command
+    /// handlers must prefer this to constructing a locator from an earlier UI
+    /// read, because a UIDVALIDITY replacement can recycle the same number.
+    pub async fn enqueue_message_operation_by_id(
+        &self,
+        account_id: AccountId,
+        message_id: &str,
+        kind: &str,
+        payload_json: &str,
+        dependency_id: Option<&str>,
+    ) -> Result<OperationJournalEntry> {
+        self.enqueue_message_operation_with_expected_identity(
+            account_id,
+            message_id,
+            None,
+            kind,
+            payload_json,
+            dependency_id,
+        )
+        .await
+    }
+
+    /// Atomically journals a mutation only if the UI receipt still names the
+    /// exact committed provider locator. A UIDVALIDITY replacement therefore
+    /// fails the command instead of redirecting it to a recycled UID.
+    pub async fn enqueue_message_operation_for_identity(
+        &self,
+        identity: &MessageRemoteIdentity,
+        kind: &str,
+        payload_json: &str,
+        dependency_id: Option<&str>,
+    ) -> Result<OperationJournalEntry> {
+        self.enqueue_message_operation_with_expected_identity(
+            AccountId::parse_str(&identity.account_id)?,
+            &identity.message_id,
+            Some(identity),
+            kind,
+            payload_json,
+            dependency_id,
+        )
+        .await
+    }
+
+    async fn enqueue_message_operation_with_expected_identity(
+        &self,
+        account_id: AccountId,
+        message_id: &str,
+        expected_identity: Option<&MessageRemoteIdentity>,
+        kind: &str,
+        payload_json: &str,
+        dependency_id: Option<&str>,
+    ) -> Result<OperationJournalEntry> {
+        if kind.trim().is_empty() {
+            return Err(anyhow!("operation kind is required"));
+        }
+        serde_json::from_str::<serde_json::Value>(payload_json)
+            .context("operation payload must be valid JSON")?;
+        let account_id_text = account_id.to_string();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let locator: Option<(String, i64, i64)> = sqlx::query_as("SELECT message.mailbox, message.uid, catalogue.uid_validity FROM messages AS message JOIN mailbox_catalog_state AS catalogue ON catalogue.account_id = message.account_id AND catalogue.mailbox = message.mailbox JOIN accounts AS account ON account.id = message.account_id WHERE message.id = ? AND message.account_id = ? AND catalogue.provider_config_generation = account.config_generation AND catalogue.provider_config_fingerprint = account.config_fingerprint AND NOT EXISTS (SELECT 1 FROM account_removal_gates AS removal WHERE removal.account_id = message.account_id AND removal.expires_at > ?) AND (? IS NULL OR (message.mailbox = ? AND message.uid = ? AND catalogue.remote_name = ? AND catalogue.uid_validity = ? AND account.config_generation = ? AND account.config_fingerprint = ?)) AND NOT EXISTS (SELECT 1 FROM mailbox_snapshot_generations AS replacement WHERE replacement.account_id = message.account_id AND replacement.mailbox = message.mailbox AND replacement.uid_validity != catalogue.uid_validity)")
+            .bind(message_id).bind(&account_id_text).bind(Utc::now()).bind(expected_identity.map(|_| 1_i64)).bind(expected_identity.map(|identity| identity.mailbox.as_str())).bind(expected_identity.map(|identity| identity.uid)).bind(expected_identity.map(|identity| identity.remote_name.as_str())).bind(expected_identity.map(|identity| identity.uid_validity)).bind(expected_identity.map(|identity| identity.account_config_generation)).bind(expected_identity.map(|identity| identity.account_config_fingerprint.as_str())).fetch_optional(&mut *tx).await?;
+        let Some((mailbox, uid, uid_validity)) = locator else {
+            tx.rollback().await?;
+            return Err(anyhow!("message has no committed remote locator"));
+        };
+        let local_version: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) + 1 FROM mailbox_mutation_versions WHERE account_id = ? AND mailbox = ? AND uid = ? AND uid_validity = ?")
+            .bind(&account_id_text).bind(&mailbox).bind(uid).bind(uid_validity).fetch_one(&mut *tx).await?;
+        sqlx::query("UPDATE folder_sync_state SET local_mutation_version = local_mutation_version + 1, revision = revision + 1, updated_at = ? WHERE account_id = ? AND mailbox = ?")
+            .bind(Utc::now()).bind(&account_id_text).bind(&mailbox).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO mailbox_mutation_versions(account_id, mailbox, uid, uid_validity, version, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(account_id, mailbox, uid, uid_validity) DO UPDATE SET version=excluded.version, updated_at=excluded.updated_at")
+            .bind(&account_id_text).bind(&mailbox).bind(uid).bind(uid_validity).bind(local_version).bind(Utc::now()).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO mailbox_mutation_fences(account_id, mailbox, uid, uid_validity, version, operation_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(account_id, mailbox, uid) DO UPDATE SET uid_validity=excluded.uid_validity, version=excluded.version, operation_id=excluded.operation_id, created_at=excluded.created_at")
+            .bind(&account_id_text).bind(&mailbox).bind(uid).bind(uid_validity).bind(local_version).bind(&operation_id).bind(Utc::now()).execute(&mut *tx).await?;
+        let now = Utc::now();
+        sqlx::query("INSERT INTO operation_journal(operation_id, account_id, mailbox, uid, uid_validity, message_id, kind, payload_json, local_version, dependency_id, state, outcome, attempts, next_retry_at, error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', NULL, 0, NULL, NULL, ?, ?)")
+            .bind(&operation_id).bind(&account_id_text).bind(&mailbox).bind(uid).bind(uid_validity).bind(message_id).bind(kind).bind(payload_json).bind(local_version).bind(dependency_id).bind(now).bind(now)
+            .execute(&mut *tx).await?;
+        tx.commit().await?;
+        self.operation_journal_entry(&operation_id)
+            .await?
+            .ok_or_else(|| anyhow!("created message operation is missing"))
+    }
+
+    /// Captures prior flags, writes the durable operation/fence, and applies
+    /// the optimistic flag values under one SQLite lease. The journal payload
+    /// contains both prior values and immutable remote locator data, so a
+    /// worker never builds rollback state from an earlier UI read.
+    pub async fn enqueue_and_apply_flag_mutation_for_identity(
+        &self,
+        identity: &MessageRemoteIdentity,
+        kind: &str,
+        is_read: Option<bool>,
+        is_flagged: Option<bool>,
+        dependency_id: Option<&str>,
+    ) -> Result<OperationJournalEntry> {
+        if kind.trim().is_empty() || (is_read.is_none() && is_flagged.is_none()) {
+            return Err(anyhow!("flag mutation requires kind and a flag value"));
+        }
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let row: Option<(bool, bool)> = sqlx::query_as("SELECT message.is_read, message.is_flagged FROM messages AS message JOIN mailbox_catalog_state AS catalogue ON catalogue.account_id = message.account_id AND catalogue.mailbox = message.mailbox JOIN accounts AS account ON account.id = message.account_id WHERE message.id = ? AND message.account_id = ? AND message.mailbox = ? AND message.uid = ? AND catalogue.remote_name = ? AND catalogue.uid_validity = ? AND account.config_generation = ? AND account.config_fingerprint = ? AND catalogue.provider_config_generation = account.config_generation AND catalogue.provider_config_fingerprint = account.config_fingerprint AND NOT EXISTS (SELECT 1 FROM account_removal_gates AS removal WHERE removal.account_id = message.account_id AND removal.expires_at > ?) AND NOT EXISTS (SELECT 1 FROM mailbox_snapshot_generations AS replacement WHERE replacement.account_id = message.account_id AND replacement.mailbox = message.mailbox AND replacement.uid_validity != catalogue.uid_validity)")
+            .bind(&identity.message_id).bind(&identity.account_id).bind(&identity.mailbox).bind(identity.uid).bind(&identity.remote_name).bind(identity.uid_validity).bind(identity.account_config_generation).bind(&identity.account_config_fingerprint).bind(Utc::now())
+            .fetch_optional(&mut *tx).await?;
+        let Some((previous_read, previous_flagged)) = row else {
+            tx.rollback().await?;
+            return Err(anyhow!("message remote identity is stale"));
+        };
+        let version: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) + 1 FROM mailbox_mutation_versions WHERE account_id = ? AND mailbox = ? AND uid = ? AND uid_validity = ?")
+            .bind(&identity.account_id).bind(&identity.mailbox).bind(identity.uid).bind(identity.uid_validity).fetch_one(&mut *tx).await?;
+        let now = Utc::now();
+        sqlx::query("INSERT INTO mailbox_mutation_versions(account_id, mailbox, uid, uid_validity, version, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(account_id, mailbox, uid, uid_validity) DO UPDATE SET version=excluded.version, updated_at=excluded.updated_at")
+            .bind(&identity.account_id).bind(&identity.mailbox).bind(identity.uid).bind(identity.uid_validity).bind(version).bind(now).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO mailbox_mutation_fences(account_id, mailbox, uid, uid_validity, version, operation_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(account_id, mailbox, uid) DO UPDATE SET uid_validity=excluded.uid_validity, version=excluded.version, operation_id=excluded.operation_id, created_at=excluded.created_at")
+            .bind(&identity.account_id).bind(&identity.mailbox).bind(identity.uid).bind(identity.uid_validity).bind(version).bind(&operation_id).bind(now).execute(&mut *tx).await?;
+        let payload_json = serde_json::json!({
+            "messageId": &identity.message_id,
+            "mailbox": &identity.mailbox,
+            "remoteMailbox": &identity.remote_name,
+            "uid": identity.uid,
+            "uidValidity": identity.uid_validity,
+            "previousRead": previous_read,
+            "previousFlagged": previous_flagged,
+            "isRead": is_read,
+            "isFlagged": is_flagged,
+        })
+        .to_string();
+        sqlx::query("INSERT INTO operation_journal(operation_id, account_id, mailbox, uid, uid_validity, message_id, kind, payload_json, local_version, dependency_id, state, outcome, attempts, next_retry_at, error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', NULL, 0, NULL, NULL, ?, ?)")
+            .bind(&operation_id).bind(&identity.account_id).bind(&identity.mailbox).bind(identity.uid).bind(identity.uid_validity).bind(&identity.message_id).bind(kind).bind(payload_json).bind(version).bind(dependency_id).bind(now).bind(now).execute(&mut *tx).await?;
+        sqlx::query("UPDATE messages SET is_read = COALESCE(?, is_read), is_flagged = COALESCE(?, is_flagged) WHERE id = ?")
+            .bind(is_read).bind(is_flagged).bind(&identity.message_id).execute(&mut *tx).await?;
+        tx.commit().await?;
+        self.operation_journal_entry(&operation_id)
+            .await?
+            .ok_or_else(|| anyhow!("created flag mutation is missing"))
+    }
+
+    /// Atomically captures the full source row, journals a mailbox action,
+    /// installs its namespace fence, and moves the row into an operation-owned
+    /// hidden membership. A restart therefore retains enough state to either
+    /// finish the remote-confirmed action or restore the exact visible row.
+    pub async fn enqueue_and_apply_mailbox_action_for_identity(
+        &self,
+        identity: &MessageRemoteIdentity,
+        action: crate::mail::MailboxAction,
+        dependency_id: Option<&str>,
+    ) -> Result<OperationJournalEntry> {
+        self.enqueue_and_apply_mailbox_action_inner(identity, action, dependency_id, None)
+            .await
+    }
+
+    /// Atomically applies the local mailbox-action projection and leases it
+    /// to the direct caller, so no background drain can win the interval
+    /// between a CLI command's optimistic update and its provider request.
+    pub async fn enqueue_and_apply_mailbox_action_and_claim_for_identity(
+        &self,
+        identity: &MessageRemoteIdentity,
+        action: crate::mail::MailboxAction,
+        dependency_id: Option<&str>,
+        claim_owner: &str,
+    ) -> Result<OperationJournalEntry> {
+        if claim_owner.trim().is_empty() {
+            return Err(anyhow!("operation claim owner is required"));
+        }
+        self.enqueue_and_apply_mailbox_action_inner(
+            identity,
+            action,
+            dependency_id,
+            Some(claim_owner),
+        )
+        .await
+    }
+
+    async fn enqueue_and_apply_mailbox_action_inner(
+        &self,
+        identity: &MessageRemoteIdentity,
+        action: crate::mail::MailboxAction,
+        dependency_id: Option<&str>,
+        claim_owner: Option<&str>,
+    ) -> Result<OperationJournalEntry> {
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        const MESSAGE_SQL: &str = "SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE id = ? AND account_id = ? AND mailbox = ? AND uid = ?";
+        let message: Option<MailSummary> = sqlx::query_as(MESSAGE_SQL)
+            .bind(&identity.message_id)
+            .bind(&identity.account_id)
+            .bind(&identity.mailbox)
+            .bind(identity.uid)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(message) = message else {
+            tx.rollback().await?;
+            return Err(anyhow!("message remote identity is stale"));
+        };
+        let identity_current: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM mailbox_catalog_state AS catalogue JOIN accounts AS account ON account.id = catalogue.account_id WHERE catalogue.account_id = ? AND catalogue.mailbox = ? AND catalogue.remote_name = ? AND catalogue.uid_validity = ? AND account.config_generation = ? AND account.config_fingerprint = ? AND catalogue.provider_config_generation = account.config_generation AND catalogue.provider_config_fingerprint = account.config_fingerprint AND NOT EXISTS (SELECT 1 FROM account_removal_gates AS removal WHERE removal.account_id = catalogue.account_id AND removal.expires_at > ?) AND NOT EXISTS (SELECT 1 FROM mailbox_snapshot_generations AS replacement WHERE replacement.account_id = catalogue.account_id AND replacement.mailbox = catalogue.mailbox AND replacement.uid_validity != catalogue.uid_validity))")
+            .bind(&identity.account_id).bind(&identity.mailbox).bind(&identity.remote_name).bind(identity.uid_validity).bind(identity.account_config_generation).bind(&identity.account_config_fingerprint).bind(Utc::now()).fetch_one(&mut *tx).await?;
+        if !identity_current {
+            tx.rollback().await?;
+            return Err(anyhow!("message remote identity is stale"));
+        }
+        let version: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) + 1 FROM mailbox_mutation_versions WHERE account_id = ? AND mailbox = ? AND uid = ? AND uid_validity = ?")
+            .bind(&identity.account_id).bind(&identity.mailbox).bind(identity.uid).bind(identity.uid_validity).fetch_one(&mut *tx).await?;
+        let now = Utc::now();
+        sqlx::query("INSERT INTO mailbox_mutation_versions(account_id, mailbox, uid, uid_validity, version, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(account_id, mailbox, uid, uid_validity) DO UPDATE SET version=excluded.version, updated_at=excluded.updated_at")
+            .bind(&identity.account_id).bind(&identity.mailbox).bind(identity.uid).bind(identity.uid_validity).bind(version).bind(now).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO mailbox_mutation_fences(account_id, mailbox, uid, uid_validity, version, operation_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(account_id, mailbox, uid) DO UPDATE SET uid_validity=excluded.uid_validity, version=excluded.version, operation_id=excluded.operation_id, created_at=excluded.created_at")
+            .bind(&identity.account_id).bind(&identity.mailbox).bind(identity.uid).bind(identity.uid_validity).bind(version).bind(&operation_id).bind(now).execute(&mut *tx).await?;
+        let payload_json = serde_json::json!({ "mutation": "mailbox_action", "action": action, "remoteMailbox": &identity.remote_name }).to_string();
+        let state = if claim_owner.is_some() {
+            "submitting"
+        } else {
+            "queued"
+        };
+        sqlx::query("INSERT INTO operation_journal(operation_id, account_id, mailbox, uid, uid_validity, message_id, kind, payload_json, local_version, dependency_id, state, outcome, attempts, next_retry_at, error, claim_owner, claimed_at, claimed_from_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'mailbox_action', ?, ?, ?, ?, NULL, ?, NULL, NULL, ?, ?, ?, ?, ?)")
+            .bind(&operation_id).bind(&identity.account_id).bind(&identity.mailbox).bind(identity.uid).bind(identity.uid_validity).bind(&identity.message_id).bind(payload_json).bind(version).bind(dependency_id).bind(state).bind(if claim_owner.is_some() { 1 } else { 0 }).bind(claim_owner).bind(claim_owner.map(|_| now)).bind(claim_owner.map(|_| "queued")).bind(now).bind(now).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO operation_message_backups(operation_id, message_id, original_mailbox, original_uid, message_json, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+            .bind(&operation_id).bind(&message.id).bind(&identity.mailbox).bind(identity.uid).bind(serde_json::to_string(&message)?).bind(now).execute(&mut *tx).await?;
+        sqlx::query("INSERT OR REPLACE INTO mailbox_action_tombstones(account_id, mailbox, uid, created_at) VALUES (?, ?, ?, ?)")
+            .bind(&identity.account_id).bind(&identity.mailbox).bind(identity.uid).bind(now).execute(&mut *tx).await?;
+        sqlx::query("UPDATE messages SET mailbox = ? WHERE id = ?")
+            .bind(format!("__pending_action__:{operation_id}"))
+            .bind(&message.id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        self.operation_journal_entry(&operation_id)
+            .await?
+            .ok_or_else(|| anyhow!("created mailbox action is missing"))
+    }
+
+    /// Restores an optimistic mailbox action from its transactionally captured
+    /// backup and terminalizes the matching lease in the same commit.
+    pub async fn rollback_and_complete_claimed_mailbox_action(
+        &self,
+        operation_id: &str,
+        claim_owner: &str,
+        error: &str,
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let backup: Option<(String, String, i64, String, String)> = sqlx::query_as("SELECT backup.message_id, backup.original_mailbox, backup.original_uid, backup.message_json, operation.account_id FROM operation_message_backups AS backup JOIN operation_journal AS operation ON operation.operation_id = backup.operation_id WHERE backup.operation_id = ? AND operation.state = 'submitting' AND operation.claim_owner = ? AND operation.kind = 'mailbox_action'")
+            .bind(operation_id).bind(claim_owner).fetch_optional(&mut *tx).await?;
+        let Some((message_id, mailbox, uid, message_json, account_id)) = backup else {
+            tx.commit().await?;
+            return Ok(false);
+        };
+        let restored = sqlx::query("UPDATE messages SET mailbox = ?, uid = ? WHERE id = ?")
+            .bind(&mailbox)
+            .bind(uid)
+            .bind(&message_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        if restored == 0 {
+            let message: MailSummary =
+                serde_json::from_str(&message_json).context("decode mailbox-action backup")?;
+            persist_message(&mut tx, &message).await?;
+        }
+        sqlx::query("DELETE FROM mailbox_action_tombstones WHERE account_id = ? AND mailbox = ? AND uid = ?")
+            .bind(&account_id).bind(&mailbox).bind(uid).execute(&mut *tx).await?;
+        let completed = sqlx::query("UPDATE operation_journal SET state = 'permanent_failed', outcome = 'local_rollback_completed', error = ?, next_retry_at = NULL, claim_owner = NULL, claimed_at = NULL, claimed_from_state = NULL, updated_at = ? WHERE operation_id = ? AND state = 'submitting' AND claim_owner = ?")
+            .bind(error).bind(Utc::now()).bind(operation_id).bind(claim_owner).execute(&mut *tx).await?;
+        if completed.rows_affected() != 1 {
+            tx.rollback().await?;
+            return Err(anyhow!("operation claim is stale or missing"));
+        }
+        sqlx::query("DELETE FROM mailbox_mutation_fences WHERE operation_id = ?")
+            .bind(operation_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM operation_message_backups WHERE operation_id = ?")
+            .bind(operation_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    pub async fn operation_journal_entry(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<OperationJournalEntry>> {
+        Ok(sqlx::query_as("SELECT operation_id, account_id, mailbox, uid, uid_validity, message_id, kind, payload_json, local_version, dependency_id, state, outcome, attempts, next_retry_at, error, smtp_accepted_at, created_at, updated_at FROM operation_journal WHERE operation_id = ?")
+            .bind(operation_id).fetch_optional(&self.pool).await?)
+    }
+
+    /// Returns independently runnable operations in stable local-version
+    /// order. Dependencies are filtered in SQL so a failure in one mailbox
+    /// does not block unrelated account work.
+    pub async fn pending_operations(
+        &self,
+        account_id: AccountId,
+    ) -> Result<Vec<OperationJournalEntry>> {
+        Ok(sqlx::query_as("SELECT operation_id, account_id, mailbox, uid, uid_validity, message_id, kind, payload_json, local_version, dependency_id, state, outcome, attempts, next_retry_at, error, smtp_accepted_at, created_at, updated_at FROM operation_journal AS operation WHERE account_id = ? AND operation.state IN ('queued', 'retry', 'sent_copy_pending') AND (operation.next_retry_at IS NULL OR operation.next_retry_at <= ?) AND (operation.dependency_id IS NULL OR EXISTS (SELECT 1 FROM operation_journal AS dependency WHERE dependency.operation_id = operation.dependency_id AND dependency.state = 'completed')) AND NOT EXISTS (SELECT 1 FROM operation_journal AS earlier WHERE earlier.account_id = operation.account_id AND earlier.mailbox = operation.mailbox AND earlier.uid = operation.uid AND earlier.local_version < operation.local_version AND earlier.state NOT IN ('completed', 'rejected', 'permanent_failed', 'uncertain')) ORDER BY COALESCE(operation.mailbox, ''), operation.local_version, operation.created_at")
+            .bind(account_id.to_string()).bind(Utc::now()).fetch_all(&self.pool).await?)
+    }
+
+    /// Lists accepted SMTP operations that still need a provider Sent-folder
+    /// reconciliation. These rows are intentionally absent from the normal
+    /// drain because no worker may resend their SMTP transport.
+    pub async fn provider_sent_reconciliation_operations(
+        &self,
+        account_id: AccountId,
+    ) -> Result<Vec<OperationJournalEntry>> {
+        Ok(sqlx::query_as("SELECT operation_id, account_id, mailbox, uid, uid_validity, message_id, kind, payload_json, local_version, dependency_id, state, outcome, attempts, next_retry_at, error, smtp_accepted_at, created_at, updated_at FROM operation_journal WHERE account_id = ? AND state = 'accepted' AND outcome = 'provider_sent_reconciliation' AND (next_retry_at IS NULL OR next_retry_at <= ?) ORDER BY created_at")
+            .bind(account_id.to_string()).bind(Utc::now()).fetch_all(&self.pool).await?)
+    }
+
+    /// Durable failures and ambiguous outcomes for startup replay and UI
+    /// recovery. UIDVALIDITY replacement keeps these visible to callers.
+    pub async fn unresolved_operations(
+        &self,
+        account_id: AccountId,
+    ) -> Result<Vec<OperationJournalEntry>> {
+        Ok(sqlx::query_as("SELECT operation_id, account_id, mailbox, uid, uid_validity, message_id, kind, payload_json, local_version, dependency_id, state, outcome, attempts, next_retry_at, error, smtp_accepted_at, created_at, updated_at FROM operation_journal WHERE account_id = ? AND state IN ('uncertain', 'rejected', 'permanent_failed') ORDER BY updated_at DESC, operation_id DESC")
+            .bind(account_id.to_string()).fetch_all(&self.pool).await?)
+    }
+
+    /// Returns the next scheduled retry for a message mutation, including a
+    /// future retry. Callers can install one bounded wake-up instead of
+    /// repeatedly polling the journal.
+    pub async fn next_message_mutation_retry_at(
+        &self,
+        account_id: AccountId,
+    ) -> Result<Option<DateTime<Utc>>> {
+        Ok(sqlx::query_scalar("SELECT MIN(next_retry_at) FROM operation_journal WHERE account_id = ? AND kind IN ('message_read', 'message_star', 'mailbox_action') AND state IN ('queued', 'retry') AND next_retry_at IS NOT NULL")
+            .bind(account_id.to_string())
+            .fetch_one(&self.pool)
+            .await?)
+    }
+
+    /// Returns the next delayed Sent-copy or provider-Sent reconciliation for
+    /// one account, including future deadlines so startup can arm one timer.
+    pub async fn next_sent_reconciliation_retry_at(
+        &self,
+        account_id: AccountId,
+    ) -> Result<Option<DateTime<Utc>>> {
+        Ok(sqlx::query_scalar("SELECT MIN(next_retry_at) FROM operation_journal WHERE account_id = ? AND kind = 'smtp_submission' AND next_retry_at IS NOT NULL AND ((state = 'accepted' AND outcome = 'provider_sent_reconciliation') OR state = 'sent_copy_pending' OR (state = 'retry' AND outcome = 'sent_copy_retry_scheduled'))")
+            .bind(account_id.to_string())
+            .fetch_one(&self.pool)
+            .await?)
+    }
+
+    /// Changes the durable transport outcome after a remote attempt. Ambiguous
+    /// SMTP and APPEND outcomes stay fenced and are never silently retried.
+    pub async fn update_operation_outcome(
+        &self,
+        operation_id: &str,
+        state: &str,
+        outcome: Option<&str>,
+        error: Option<&str>,
+        next_retry_at: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        if !matches!(
+            state,
+            "queued"
+                | "retry"
+                | "submitting"
+                | "accepted"
+                | "sent_copy_pending"
+                | "completed"
+                | "rejected"
+                | "permanent_failed"
+                | "uncertain"
+        ) {
+            return Err(anyhow!("invalid operation state"));
+        }
+        let changed = sqlx::query("UPDATE operation_journal SET state = ?, outcome = ?, error = ?, next_retry_at = ?, attempts = attempts + 1, updated_at = ? WHERE operation_id = ?")
+            .bind(state).bind(outcome).bind(error).bind(next_retry_at).bind(Utc::now()).bind(operation_id)
+            .execute(&self.pool).await?;
+        if changed.rows_affected() != 1 {
+            return Err(anyhow!("operation journal entry is missing"));
+        }
+        Ok(())
+    }
+
+    /// Releases a local-mutation fence only after reconciliation has observed
+    /// the authoritative provider state or restored the local state after a
+    /// permanent failure.
+    pub async fn resolve_local_mailbox_mutation(&self, operation_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM mailbox_mutation_fences WHERE operation_id = ?")
+            .bind(operation_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Restores optimistic flags only while this exact operation still owns
+    /// the locator fence and its UIDVALIDITY namespace remains current. A
+    /// replacement cannot receive an old operation's rollback.
+    pub async fn rollback_message_flags_if_current_operation(
+        &self,
+        operation_id: &str,
+        previous_read: Option<bool>,
+        previous_flagged: Option<bool>,
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let restored = sqlx::query("UPDATE messages SET is_read = COALESCE(?, is_read), is_flagged = COALESCE(?, is_flagged) WHERE id = (SELECT message_id FROM operation_journal WHERE operation_id = ?) AND EXISTS (SELECT 1 FROM operation_journal AS operation JOIN mailbox_mutation_fences AS fence ON fence.operation_id = operation.operation_id JOIN mailbox_catalog_state AS catalogue ON catalogue.account_id = operation.account_id AND catalogue.mailbox = operation.mailbox WHERE operation.operation_id = ? AND messages.account_id = operation.account_id AND messages.mailbox = operation.mailbox AND messages.uid = operation.uid AND catalogue.uid_validity = operation.uid_validity)")
+            .bind(previous_read).bind(previous_flagged).bind(operation_id).bind(operation_id)
+            .execute(&mut *tx).await?.rows_affected();
+        if restored == 1 {
+            sqlx::query("DELETE FROM mailbox_mutation_fences WHERE operation_id = ?")
+                .bind(operation_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(restored == 1)
+    }
+
+    /// Permanently fails a claimed optimistic flag mutation and restores its
+    /// prior flags in the same transaction. A crash can therefore never leave
+    /// a rolled-back UI paired with a live `submitting` journal fence.
+    pub async fn rollback_and_complete_claimed_message_flags(
+        &self,
+        operation_id: &str,
+        claim_owner: &str,
+        previous_read: Option<bool>,
+        previous_flagged: Option<bool>,
+        outcome: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let restored = sqlx::query("UPDATE messages SET is_read = COALESCE(?, is_read), is_flagged = COALESCE(?, is_flagged) WHERE id = (SELECT message_id FROM operation_journal WHERE operation_id = ?) AND EXISTS (SELECT 1 FROM operation_journal AS operation JOIN mailbox_mutation_fences AS fence ON fence.operation_id = operation.operation_id AND fence.uid_validity = operation.uid_validity JOIN mailbox_catalog_state AS catalogue ON catalogue.account_id = operation.account_id AND catalogue.mailbox = operation.mailbox WHERE operation.operation_id = ? AND operation.state = 'submitting' AND operation.claim_owner = ? AND messages.account_id = operation.account_id AND messages.mailbox = operation.mailbox AND messages.uid = operation.uid AND catalogue.uid_validity = operation.uid_validity)")
+            .bind(previous_read).bind(previous_flagged).bind(operation_id).bind(operation_id).bind(claim_owner)
+            .execute(&mut *tx).await?.rows_affected() == 1;
+        let completed = sqlx::query("UPDATE operation_journal SET state = 'permanent_failed', outcome = ?, error = ?, next_retry_at = NULL, claim_owner = NULL, claimed_at = NULL, claimed_from_state = NULL, updated_at = ? WHERE operation_id = ? AND state = 'submitting' AND claim_owner = ?")
+            .bind(outcome).bind(error).bind(Utc::now()).bind(operation_id).bind(claim_owner)
+            .execute(&mut *tx).await?;
+        if completed.rows_affected() != 1 {
+            tx.rollback().await?;
+            return Err(anyhow!("operation claim is stale or missing"));
+        }
+        sqlx::query("DELETE FROM mailbox_mutation_fences WHERE operation_id = ?")
+            .bind(operation_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(restored)
+    }
+
+    /// Stores Gmail's provider-stable identity and the exact observed labels.
+    /// Archive filtering must consult this observation rather than treating an
+    /// old Inbox label as permanent truth.
+    /// Captures a shared Inbox epoch before issuing any Gmail header FETCH.
+    /// The receipt remains valid only until any Inbox membership, flags, or
+    /// logical label observation is committed for this account.
+    pub async fn capture_gmail_inbox_membership_epoch(
+        &self,
+        account_id: AccountId,
+    ) -> Result<GmailInboxMembershipEpochReceipt> {
+        let account_id_text = account_id.to_string();
+        let live: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM accounts WHERE id = ? AND NOT EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = ?))")
+            .bind(&account_id_text).bind(&account_id_text).fetch_one(&self.pool).await?;
+        if !live {
+            return Err(anyhow!("account was removed"));
+        }
+        let epoch: Option<i64> = sqlx::query_scalar(
+            "SELECT epoch FROM gmail_inbox_membership_epochs WHERE account_id = ?",
+        )
+        .bind(&account_id_text)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(GmailInboxMembershipEpochReceipt {
+            account_id,
+            epoch: epoch.unwrap_or(0),
+        })
+    }
+
+    /// Atomically applies every Gmail observation from one header FETCH.
+    /// The account-wide receipt is captured before the request, when
+    /// X-GM-MSGID is not available yet. Any intervening Inbox membership or
+    /// local mutation invalidates the whole batch rather than applying stale
+    /// labels or deleting a newly restored Inbox locator.
+    pub async fn observe_gmail_messages_with_epoch(
+        &self,
+        receipt: &GmailInboxMembershipEpochReceipt,
+        observations: &[GmailMessageObservation],
+    ) -> Result<bool> {
+        if observations.is_empty() {
+            return Ok(true);
+        }
+        let account_id = receipt.account_id.to_string();
+        let mut seen_gmail_ids = std::collections::HashSet::new();
+        for observation in observations {
+            if observation.gmail_message_id.trim().is_empty() {
+                return Err(anyhow!("Gmail message identity is required"));
+            }
+            if !seen_gmail_ids.insert(observation.gmail_message_id.as_str()) {
+                return Err(anyhow!(
+                    "a Gmail observation batch cannot contain the same identity twice"
+                ));
+            }
+        }
+
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let epoch: Option<i64> = sqlx::query_scalar(
+            "SELECT epoch FROM gmail_inbox_membership_epochs WHERE account_id = ?",
+        )
+        .bind(&account_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if epoch.unwrap_or(0) != receipt.epoch {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+
+        let now = Utc::now();
+        for observation in observations {
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ? AND account_id = ?)",
+            )
+            .bind(&observation.local_message_id)
+            .bind(&account_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if !exists {
+                tx.rollback().await?;
+                return Ok(false);
+            }
+            sqlx::query("INSERT INTO gmail_logical_messages(account_id, gmail_message_id, labels_json, observed_at) VALUES (?, ?, ?, ?) ON CONFLICT(account_id, gmail_message_id) DO UPDATE SET labels_json=excluded.labels_json, observed_at=excluded.observed_at")
+                .bind(&account_id).bind(&observation.gmail_message_id).bind(serde_json::to_string(&observation.labels)?).bind(now).execute(&mut *tx).await?;
+            sqlx::query("INSERT INTO gmail_message_memberships(account_id, message_id, gmail_message_id) VALUES (?, ?, ?) ON CONFLICT(account_id, message_id) DO UPDATE SET gmail_message_id=excluded.gmail_message_id")
+                .bind(&account_id).bind(&observation.local_message_id).bind(&observation.gmail_message_id).execute(&mut *tx).await?;
+        }
+
+        for observation in observations {
+            if observation
+                .labels
+                .iter()
+                .any(|label| label.eq_ignore_ascii_case("\\Inbox"))
+            {
+                continue;
+            }
+            let ids: Vec<String> = sqlx::query_scalar("SELECT message.id FROM gmail_message_memberships AS membership JOIN messages AS message ON message.id = membership.message_id WHERE membership.account_id = ? AND membership.gmail_message_id = ? AND message.mailbox = 'INBOX'")
+                .bind(&account_id).bind(&observation.gmail_message_id).fetch_all(&mut *tx).await?;
+            for id in &ids {
+                for table in [
+                    "message_content_fetches",
+                    "message_content_cache",
+                    "starred_attachment_metadata",
+                    "starred_message_bodies",
+                    "attachments",
+                ] {
+                    let statement = format!("DELETE FROM {table} WHERE message_id = ?");
+                    sqlx::query(&statement).bind(id).execute(&mut *tx).await?;
+                }
+                sqlx::query("DELETE FROM messages WHERE id = ?")
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+        // The membership triggers may already have advanced this epoch. One
+        // explicit bump still invalidates an otherwise label-only batch.
+        sqlx::query("INSERT INTO gmail_inbox_membership_epochs(account_id, epoch, updated_at) VALUES (?, 1, ?) ON CONFLICT(account_id) DO UPDATE SET epoch=epoch+1, updated_at=excluded.updated_at")
+            .bind(&account_id).bind(now).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    pub async fn observe_gmail_message_with_epoch(
+        &self,
+        receipt: &GmailInboxMembershipEpochReceipt,
+        local_message_id: &str,
+        gmail_message_id: &str,
+        labels: &[String],
+    ) -> Result<bool> {
+        self.observe_gmail_messages_with_epoch(
+            receipt,
+            &[GmailMessageObservation {
+                local_message_id: local_message_id.to_owned(),
+                gmail_message_id: gmail_message_id.to_owned(),
+                labels: labels.to_vec(),
+            }],
+        )
+        .await
+    }
+
+    pub async fn observe_gmail_message(
+        &self,
+        account_id: AccountId,
+        local_message_id: &str,
+        gmail_message_id: &str,
+        labels: &[String],
+    ) -> Result<()> {
+        let receipt = self
+            .capture_gmail_inbox_membership_epoch(account_id)
+            .await?;
+        if self
+            .observe_gmail_message_with_epoch(&receipt, local_message_id, gmail_message_id, labels)
+            .await?
+        {
+            Ok(())
+        } else {
+            Err(anyhow!("Gmail Inbox membership changed during observation"))
+        }
+    }
+
+    /// Applies a Gmail label observation to physical Inbox membership. When a
+    /// stable Gmail message no longer has `\\Inbox`, only its INBOX locator is
+    /// removed; All Mail, Sent, and archive copies remain untouched.
+    pub async fn reconcile_gmail_inbox_membership(
+        &self,
+        account_id: AccountId,
+        gmail_message_id: &str,
+        labels: &[String],
+    ) -> Result<usize> {
+        let had_inbox = !labels
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case("\\Inbox"));
+        let receipt = self
+            .capture_gmail_inbox_membership_receipt(account_id, gmail_message_id)
+            .await?;
+        let before = receipt.memberships.len();
+        Ok(usize::from(
+            self.reconcile_gmail_inbox_membership_with_receipt(&receipt, labels)
+                .await?,
+        ) * usize::from(had_inbox)
+            * before)
+    }
+
+    /// Captures every Inbox physical locator and its mutation version before
+    /// an All Mail labels fetch. A later reconciliation rejects the entire
+    /// deletion if any membership changed after this capture.
+    pub async fn capture_gmail_inbox_membership_receipt(
+        &self,
+        account_id: AccountId,
+        gmail_message_id: &str,
+    ) -> Result<GmailInboxMembershipReceipt> {
+        let account_id_text = account_id.to_string();
+        let observed_at: Option<DateTime<Utc>> = sqlx::query_scalar("SELECT observed_at FROM gmail_logical_messages WHERE account_id = ? AND gmail_message_id = ?")
+            .bind(&account_id_text).bind(gmail_message_id).fetch_optional(&self.pool).await?;
+        let memberships = sqlx::query_as("SELECT message.id AS message_id, message.uid, catalogue.uid_validity, COALESCE(version.version, 0) AS version FROM gmail_message_memberships AS membership JOIN messages AS message ON message.id = membership.message_id AND message.account_id = membership.account_id JOIN mailbox_catalog_state AS catalogue ON catalogue.account_id = message.account_id AND catalogue.mailbox = message.mailbox LEFT JOIN mailbox_mutation_versions AS version ON version.account_id = message.account_id AND version.mailbox = message.mailbox AND version.uid = message.uid AND version.uid_validity = catalogue.uid_validity WHERE membership.account_id = ? AND membership.gmail_message_id = ? AND message.mailbox = 'INBOX'")
+            .bind(&account_id_text).bind(gmail_message_id).fetch_all(&self.pool).await?;
+        Ok(GmailInboxMembershipReceipt {
+            account_id,
+            gmail_message_id: gmail_message_id.to_owned(),
+            observed_at,
+            memberships,
+        })
+    }
+
+    /// Applies a fetched Gmail label observation only if every captured Inbox
+    /// membership still has the same UID namespace and local mutation version.
+    /// `false` leaves both labels and memberships unchanged for a later retry.
+    pub async fn reconcile_gmail_inbox_membership_with_receipt(
+        &self,
+        receipt: &GmailInboxMembershipReceipt,
+        labels: &[String],
+    ) -> Result<bool> {
+        if receipt.gmail_message_id.trim().is_empty() {
+            return Err(anyhow!("Gmail message identity is required"));
+        }
+        let account_id = receipt.account_id.to_string();
+        let gmail_message_id = &receipt.gmail_message_id;
+        let labels_json = serde_json::to_string(labels)?;
+        let has_inbox = labels
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case("\\Inbox"));
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let labels_current: bool = sqlx::query_scalar("SELECT CASE WHEN ? IS NULL THEN NOT EXISTS (SELECT 1 FROM gmail_logical_messages WHERE account_id = ? AND gmail_message_id = ?) ELSE EXISTS (SELECT 1 FROM gmail_logical_messages WHERE account_id = ? AND gmail_message_id = ? AND observed_at = ?) END")
+            .bind(receipt.observed_at).bind(&account_id).bind(gmail_message_id).bind(&account_id).bind(gmail_message_id).bind(receipt.observed_at).fetch_one(&mut *tx).await?;
+        if !labels_current {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        for membership in &receipt.memberships {
+            let current: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages AS message JOIN mailbox_catalog_state AS catalogue ON catalogue.account_id = message.account_id AND catalogue.mailbox = message.mailbox WHERE message.id = ? AND message.account_id = ? AND message.mailbox = 'INBOX' AND message.uid = ? AND catalogue.uid_validity = ? AND COALESCE((SELECT version FROM mailbox_mutation_versions WHERE account_id = message.account_id AND mailbox = message.mailbox AND uid = message.uid AND uid_validity = catalogue.uid_validity), 0) = ? AND NOT EXISTS (SELECT 1 FROM mailbox_mutation_fences AS fence WHERE fence.account_id = message.account_id AND fence.mailbox = message.mailbox AND fence.uid = message.uid AND fence.uid_validity = catalogue.uid_validity))")
+                .bind(&membership.message_id).bind(&account_id).bind(membership.uid).bind(membership.uid_validity).bind(membership.version).fetch_one(&mut *tx).await?;
+            if !current {
+                tx.rollback().await?;
+                return Ok(false);
+            }
+        }
+        sqlx::query("INSERT INTO gmail_logical_messages(account_id, gmail_message_id, labels_json, observed_at) VALUES (?, ?, ?, ?) ON CONFLICT(account_id, gmail_message_id) DO UPDATE SET labels_json=excluded.labels_json, observed_at=excluded.observed_at")
+            .bind(&account_id).bind(gmail_message_id).bind(labels_json).bind(Utc::now()).execute(&mut *tx).await?;
+        if has_inbox {
+            tx.commit().await?;
+            return Ok(true);
+        }
+        let ids: Vec<String> = receipt
+            .memberships
+            .iter()
+            .map(|membership| membership.message_id.clone())
+            .collect();
+        for id in &ids {
+            for table in [
+                "message_content_fetches",
+                "message_content_cache",
+                "starred_attachment_metadata",
+                "starred_message_bodies",
+                "attachments",
+            ] {
+                let statement = format!("DELETE FROM {table} WHERE message_id = ?");
+                sqlx::query(&statement).bind(id).execute(&mut *tx).await?;
+            }
+        }
+        let deleted = if ids.is_empty() {
+            0
+        } else {
+            let placeholders = vec!["?"; ids.len()].join(",");
+            let statement = format!("DELETE FROM messages WHERE id IN ({placeholders})");
+            let mut query = sqlx::query(&statement);
+            for id in &ids {
+                query = query.bind(id);
+            }
+            query.execute(&mut *tx).await?.rows_affected()
+        };
+        tx.commit().await?;
+        Ok(deleted == u64::try_from(ids.len())?)
+    }
+
+    /// Returns the durable rotating UID cursor for bounded Gmail label
+    /// reconciliation. `None` means begin a fresh pass from the newest
+    /// eligible locator.
+    pub async fn gmail_label_reconciliation_cursor(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+    ) -> Result<Option<u32>> {
+        let cursor: Option<i64> = sqlx::query_scalar(
+            "SELECT cursor_uid FROM gmail_label_reconciliation_state WHERE account_id = ? AND mailbox = ?",
+        )
+        .bind(account_id.to_string())
+        .bind(mailbox)
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten();
+        cursor
+            .map(|value| u32::try_from(value).context("stored Gmail label cursor is invalid"))
+            .transpose()
+    }
+
+    /// Returns both the durable cursor and the bounded range span. A missing
+    /// row starts at 64 UIDs; protocol may grow only after a tagged-OK empty
+    /// range and reset after any observed result.
+    pub async fn gmail_label_reconciliation_cursor_with_span(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+    ) -> Result<GmailLabelReconciliationCursor> {
+        let row: Option<(Option<i64>, i64)> = sqlx::query_as(
+            "SELECT cursor_uid, span FROM gmail_label_reconciliation_state WHERE account_id = ? AND mailbox = ?",
+        )
+        .bind(account_id.to_string())
+        .bind(mailbox)
+        .fetch_optional(&self.pool)
+        .await?;
+        let (cursor_uid, span) = row.unwrap_or((None, 64));
+        Ok(GmailLabelReconciliationCursor {
+            cursor_uid: cursor_uid
+                .map(|value| u32::try_from(value).context("stored Gmail label cursor is invalid"))
+                .transpose()?,
+            span: u32::try_from(span).context("stored Gmail label span is invalid")?,
+        })
+    }
+
+    /// Advances the durable Gmail label reconciliation cursor after a fully
+    /// observed bounded page. Passing `None` records the completed pass and
+    /// makes the next scheduled pass begin from the newest locator again.
+    pub async fn advance_gmail_label_reconciliation_cursor(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        next: Option<u32>,
+    ) -> Result<()> {
+        let account_id = account_id.to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let account_live: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM accounts WHERE id = ? AND NOT EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = ?))")
+            .bind(&account_id)
+            .bind(&account_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if !account_live {
+            tx.rollback().await?;
+            return Err(anyhow!("account was removed"));
+        }
+        sqlx::query("INSERT INTO gmail_label_reconciliation_state(account_id, mailbox, cursor_uid, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(account_id, mailbox) DO UPDATE SET cursor_uid=excluded.cursor_uid, updated_at=excluded.updated_at")
+            .bind(&account_id)
+            .bind(mailbox)
+            .bind(next.map(i64::from))
+            .bind(Utc::now())
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Atomically persists the next sparse-safe cursor and range span after a
+    /// complete Gmail label observation page.
+    pub async fn advance_gmail_label_reconciliation_cursor_with_span(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        next: Option<u32>,
+        span: u32,
+    ) -> Result<()> {
+        if !(1..=65_536).contains(&span) {
+            return Err(anyhow!("Gmail label reconciliation span is invalid"));
+        }
+        let account_id = account_id.to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let account_live: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM accounts WHERE id = ? AND NOT EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = ?))")
+            .bind(&account_id)
+            .bind(&account_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if !account_live {
+            tx.rollback().await?;
+            return Err(anyhow!("account was removed"));
+        }
+        sqlx::query("INSERT INTO gmail_label_reconciliation_state(account_id, mailbox, cursor_uid, span, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(account_id, mailbox) DO UPDATE SET cursor_uid=excluded.cursor_uid, span=excluded.span, updated_at=excluded.updated_at")
+            .bind(&account_id)
+            .bind(mailbox)
+            .bind(next.map(i64::from))
+            .bind(i64::from(span))
+            .bind(Utc::now())
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn gmail_message_labels(
+        &self,
+        account_id: AccountId,
+        local_message_id: &str,
+    ) -> Result<Option<Vec<String>>> {
+        let labels: Option<String> = sqlx::query_scalar("SELECT logical.labels_json FROM gmail_message_memberships AS membership JOIN gmail_logical_messages AS logical ON logical.account_id = membership.account_id AND logical.gmail_message_id = membership.gmail_message_id WHERE membership.account_id = ? AND membership.message_id = ?")
+            .bind(account_id.to_string()).bind(local_message_id).fetch_optional(&self.pool).await?;
+        labels
+            .map(|value| serde_json::from_str(&value).context("stored Gmail labels are invalid"))
+            .transpose()
+    }
+
+    /// Retains the provider INTERNALDATE separately from the parsed RFC 5322
+    /// Date. The former is stable mailbox ordering evidence; the latter stays
+    /// available for display without forcing legacy catalogue migrations.
+    pub async fn observe_message_dates(
+        &self,
+        account_id: AccountId,
+        local_message_id: &str,
+        internal_date: DateTime<Utc>,
+        message_date: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let account_id = account_id.to_string();
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ? AND account_id = ?)",
+        )
+        .bind(local_message_id)
+        .bind(&account_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if !exists {
+            return Err(anyhow!(
+                "message date observation does not match the account message"
+            ));
+        }
+        sqlx::query("INSERT INTO message_temporal_observations(account_id, message_id, internal_date, message_date, observed_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(account_id, message_id) DO UPDATE SET internal_date=excluded.internal_date, message_date=excluded.message_date, observed_at=excluded.observed_at")
+            .bind(account_id).bind(local_message_id).bind(internal_date).bind(message_date).bind(Utc::now())
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
     pub async fn delete_account(&self, id: AccountId) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        self.delete_account_inner(id, None, None).await
+    }
+
+    /// Deletes an account and its account-owned encrypted credential in the
+    /// same SQLite transaction. If either deletion cannot be recorded, both
+    /// the account and secret remain available for recovery.
+    pub async fn delete_account_and_secret(&self, id: AccountId, secret_name: &str) -> Result<()> {
+        if secret_name.trim().is_empty() {
+            return Err(anyhow!("account credential name is required"));
+        }
+        self.delete_account_inner(id, Some(secret_name), None).await
+    }
+
+    pub async fn delete_account_and_secret_with_removal_gate(
+        &self,
+        id: AccountId,
+        secret_name: &str,
+        owner: &str,
+    ) -> Result<()> {
+        if secret_name.trim().is_empty() || owner.trim().is_empty() {
+            return Err(anyhow!(
+                "account credential name and removal owner are required"
+            ));
+        }
+        self.delete_account_inner(id, Some(secret_name), Some(owner))
+            .await
+    }
+
+    async fn delete_account_inner(
+        &self,
+        id: AccountId,
+        secret_name: Option<&str>,
+        expected_owner: Option<&str>,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let now = Utc::now();
+        sqlx::query("INSERT INTO account_removal_gates(account_id, owner, blocked_at, expires_at) SELECT ?, 'delete', ?, ? WHERE EXISTS (SELECT 1 FROM accounts WHERE id = ?) ON CONFLICT(account_id) DO NOTHING")
+            .bind(id.to_string())
+            .bind(now)
+            .bind(now + chrono::Duration::seconds(ACCOUNT_REMOVAL_GATE_LEASE_SECONDS))
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        if let Some(owner) = expected_owner {
+            let owns_gate: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM account_removal_gates WHERE account_id = ? AND owner = ? AND expires_at > ?)")
+                .bind(id.to_string()).bind(owner).bind(now).fetch_one(&mut *tx).await?;
+            if !owns_gate {
+                tx.rollback().await?;
+                return Err(anyhow!("account removal lease was lost"));
+            }
+        }
         sqlx::query("INSERT INTO deleted_account_tombstones(account_id, deleted_at) VALUES (?, ?) ON CONFLICT(account_id) DO UPDATE SET deleted_at=excluded.deleted_at")
             .bind(id.to_string())
             .bind(Utc::now())
@@ -1676,6 +4266,21 @@ impl Store {
             .bind(id.to_string())
             .execute(&mut *tx)
             .await?;
+        for table in [
+            "sync_runs",
+            "folder_sync_state",
+            "mailbox_mutation_fences",
+            "operation_journal",
+            "gmail_message_memberships",
+            "gmail_logical_messages",
+            "gmail_label_reconciliation_state",
+            "message_temporal_observations",
+        ] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE account_id = ?"))
+                .bind(id.to_string())
+                .execute(&mut *tx)
+                .await?;
+        }
         sqlx::query("DELETE FROM mailbox_catalog_state WHERE account_id = ?")
             .bind(id.to_string())
             .execute(&mut *tx)
@@ -1704,12 +4309,142 @@ impl Store {
             .bind(id.to_string())
             .execute(&mut *tx)
             .await?;
+        if let Some(secret_name) = secret_name {
+            sqlx::query("DELETE FROM credentials WHERE name = ?")
+                .bind(secret_name)
+                .execute(&mut *tx)
+                .await?;
+        }
         sqlx::query("DELETE FROM accounts WHERE id = ?")
             .bind(id.to_string())
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Atomically blocks every durable operation claim for an account before
+    /// a caller waits for any in-flight SMTP attempt. The row is shared by
+    /// desktop and CLI processes using the same database, so a second process
+    /// cannot claim a queued submission while removal is in progress.
+    pub async fn begin_account_removal(&self, id: AccountId) -> Result<bool> {
+        let account_id = id.to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let account_live: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM accounts WHERE id = ? AND NOT EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = ?))")
+            .bind(&account_id)
+            .bind(&account_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if !account_live {
+            tx.commit().await?;
+            return Ok(false);
+        }
+        let now = Utc::now();
+        sqlx::query("INSERT INTO account_removal_gates(account_id, owner, blocked_at, expires_at) VALUES (?, 'legacy-account-removal', ?, ?) ON CONFLICT(account_id) DO UPDATE SET owner=excluded.owner, blocked_at=excluded.blocked_at, expires_at=excluded.expires_at")
+            .bind(&account_id)
+            .bind(now)
+            .bind(now + chrono::Duration::seconds(ACCOUNT_REMOVAL_GATE_LEASE_SECONDS))
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Acquires an owner-scoped removal gate only when no other live owner
+    /// holds it. New lifecycle code should use this instead of the legacy
+    /// account-only helper.
+    pub async fn begin_account_removal_with_owner(
+        &self,
+        id: AccountId,
+        owner: &str,
+    ) -> Result<bool> {
+        if owner.trim().is_empty() {
+            return Err(anyhow!("account removal owner is required"));
+        }
+        let account_id = id.to_string();
+        let now = Utc::now();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let claimed = sqlx::query("INSERT INTO account_removal_gates(account_id, owner, blocked_at, expires_at) SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM accounts WHERE id = ? AND NOT EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = ?)) ON CONFLICT(account_id) DO UPDATE SET owner=excluded.owner, blocked_at=excluded.blocked_at, expires_at=excluded.expires_at WHERE account_removal_gates.expires_at <= ? OR account_removal_gates.owner = excluded.owner")
+            .bind(&account_id).bind(owner).bind(now).bind(now + chrono::Duration::seconds(ACCOUNT_REMOVAL_GATE_LEASE_SECONDS)).bind(&account_id).bind(&account_id).bind(now)
+            .execute(&mut *tx).await?.rows_affected();
+        tx.commit().await?;
+        Ok(claimed == 1)
+    }
+
+    pub async fn renew_account_removal_gate(&self, id: AccountId, owner: &str) -> Result<bool> {
+        Ok(sqlx::query("UPDATE account_removal_gates SET expires_at = ? WHERE account_id = ? AND owner = ? AND expires_at > ?")
+            .bind(Utc::now() + chrono::Duration::seconds(ACCOUNT_REMOVAL_GATE_LEASE_SECONDS))
+            .bind(id.to_string()).bind(owner).bind(Utc::now())
+            .execute(&self.pool).await?.rows_affected() == 1)
+    }
+
+    pub async fn release_account_removal_gate(&self, id: AccountId, owner: &str) -> Result<bool> {
+        Ok(
+            sqlx::query("DELETE FROM account_removal_gates WHERE account_id = ? AND owner = ?")
+                .bind(id.to_string())
+                .bind(owner)
+                .execute(&self.pool)
+                .await?
+                .rows_affected()
+                == 1,
+        )
+    }
+
+    pub async fn acquire_account_removal_gate(
+        &self,
+        id: AccountId,
+    ) -> Result<Option<AccountOperationGate>> {
+        let owner = uuid::Uuid::new_v4().to_string();
+        if !self.begin_account_removal_with_owner(id, &owner).await? {
+            return Ok(None);
+        }
+        let store = self.clone();
+        let heartbeat_owner = owner.clone();
+        let task = tokio::spawn(async move {
+            let interval = Duration::from_secs(
+                u64::try_from(ACCOUNT_REMOVAL_GATE_LEASE_SECONDS / 3).unwrap_or(40),
+            );
+            loop {
+                tokio::time::sleep(interval).await;
+                match store.renew_account_removal_gate(id, &heartbeat_owner).await {
+                    Ok(true) => {}
+                    Ok(false) | Err(_) => break,
+                }
+            }
+        });
+        Ok(Some(AccountOperationGate {
+            store: self.clone(),
+            account_id: id,
+            owner,
+            task,
+        }))
+    }
+
+    /// Reopens the durable operation queue when account removal is abandoned.
+    /// A deleted account keeps its irreversible tombstone and cannot be
+    /// reopened through this API.
+    pub async fn cancel_account_removal(&self, id: AccountId) -> Result<bool> {
+        let account_id = id.to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let released = sqlx::query("DELETE FROM account_removal_gates WHERE account_id = ? AND NOT EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = ?)")
+            .bind(&account_id)
+            .bind(&account_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        tx.commit().await?;
+        Ok(released == 1)
+    }
+
+    /// Clears only expired removal leases for still-live accounts. It is safe
+    /// to call during startup from either desktop or CLI because an active
+    /// removal has a future expiry and remains blocked.
+    pub async fn recover_orphan_account_operation_gates(&self) -> Result<u64> {
+        Ok(sqlx::query("DELETE FROM account_removal_gates WHERE expires_at <= ? AND EXISTS (SELECT 1 FROM accounts WHERE accounts.id = account_removal_gates.account_id) AND NOT EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = account_removal_gates.account_id)")
+            .bind(Utc::now())
+            .execute(&self.pool)
+            .await?
+            .rows_affected())
     }
 
     /// Deletes only provider-derived local mail state for an account. Account
@@ -1727,6 +4462,14 @@ impl Store {
             "DELETE FROM mailbox_sync_failures WHERE account_id = ?",
             "DELETE FROM mailbox_sync_state WHERE account_id = ?",
             "DELETE FROM mailbox_action_tombstones WHERE account_id = ?",
+            "DELETE FROM sync_runs WHERE account_id = ?",
+            "DELETE FROM folder_sync_state WHERE account_id = ?",
+            "DELETE FROM mailbox_mutation_fences WHERE account_id = ?",
+            "DELETE FROM operation_journal WHERE account_id = ?",
+            "DELETE FROM gmail_message_memberships WHERE account_id = ?",
+            "DELETE FROM gmail_logical_messages WHERE account_id = ?",
+            "DELETE FROM gmail_label_reconciliation_state WHERE account_id = ?",
+            "DELETE FROM message_temporal_observations WHERE account_id = ?",
             "DELETE FROM sent_correspondents WHERE account_id = ?",
             "DELETE FROM messages WHERE account_id = ?",
         ] {
@@ -1760,6 +4503,533 @@ impl Store {
         }
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Commits provider metadata only while the mailbox is still the exact
+    /// namespace selected before FETCH. Realtime and bounded catalogue
+    /// workers must use this instead of an unfenced catalogue upsert.
+    ///
+    /// `false` means a UIDVALIDITY change, remote-name remap, or replacement
+    /// generation won the race. No message from the stale response was
+    /// written.
+    pub async fn commit_provider_messages_if_current(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        remote_name: &str,
+        uid_validity: u32,
+        messages: &[MailSummary],
+    ) -> Result<bool> {
+        let account_id = account_id.to_string();
+        if messages
+            .iter()
+            .any(|message| message.account_id != account_id || message.mailbox != mailbox)
+        {
+            return Err(anyhow!(
+                "provider batch message does not match the requested account or mailbox"
+            ));
+        }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let current: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM mailbox_catalog_state AS catalogue JOIN accounts AS account ON account.id = catalogue.account_id WHERE catalogue.account_id = ? AND catalogue.mailbox = ? AND catalogue.remote_name = ? AND catalogue.uid_validity = ? AND catalogue.provider_config_generation = account.config_generation AND catalogue.provider_config_fingerprint = account.config_fingerprint AND NOT EXISTS (SELECT 1 FROM mailbox_snapshot_generations AS replacement WHERE replacement.account_id = catalogue.account_id AND replacement.mailbox = catalogue.mailbox AND replacement.uid_validity != catalogue.uid_validity))")
+            .bind(&account_id).bind(mailbox).bind(remote_name).bind(i64::from(uid_validity))
+            .fetch_one(&mut *tx).await?;
+        if !current {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        for message in messages {
+            let mut message = message.clone();
+            if let Some(canonical_id) = sqlx::query_scalar::<_, String>(
+                "SELECT id FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?",
+            )
+            .bind(&account_id)
+            .bind(mailbox)
+            .bind(message.uid)
+            .fetch_optional(&mut *tx)
+            .await?
+            {
+                message.id = canonical_id;
+            } else {
+                message.id = uidvalidity_message_id(
+                    AccountId::parse_str(&account_id)?,
+                    mailbox,
+                    u32::try_from(message.uid).context("provider message UID is invalid")?,
+                    uid_validity,
+                );
+            }
+            for attachment in &mut message.attachments {
+                attachment.attachment.message_id = message.id.clone();
+            }
+            persist_message_with_flag_policy(
+                &mut tx,
+                &message,
+                FlagUpdatePolicy::ProviderAuthoritative,
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Establishes the immutable catalogue identity for a legacy profile
+    /// before its first fenced provider write. It only creates an absent row;
+    /// a different existing namespace or any pending replacement is rejected.
+    pub async fn ensure_mailbox_catalog_identity(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        remote_name: &str,
+        uid_validity: u32,
+    ) -> Result<bool> {
+        let account_id = account_id.to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let replacement_pending: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM mailbox_snapshot_generations WHERE account_id = ? AND mailbox = ? AND uid_validity != ?)")
+            .bind(&account_id).bind(mailbox).bind(i64::from(uid_validity)).fetch_one(&mut *tx).await?;
+        if replacement_pending {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        let existing: Option<(String, i64, Option<i64>, Option<String>)> = sqlx::query_as("SELECT remote_name, uid_validity, provider_config_generation, provider_config_fingerprint FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ?")
+            .bind(&account_id).bind(mailbox).fetch_optional(&mut *tx).await?;
+        if let Some((existing_remote, existing_uid_validity, generation, fingerprint)) = existing {
+            let current: Option<(i64, String)> = sqlx::query_as(
+                "SELECT config_generation, config_fingerprint FROM accounts WHERE id = ?",
+            )
+            .bind(&account_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            return Ok(
+                current.is_some_and(|(current_generation, current_fingerprint)| {
+                    existing_remote == remote_name
+                        && existing_uid_validity == i64::from(uid_validity)
+                        && generation == Some(current_generation)
+                        && fingerprint.as_deref() == Some(current_fingerprint.as_str())
+                }),
+            );
+        }
+        let account_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM accounts WHERE id = ? AND NOT EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = ?))")
+            .bind(&account_id).bind(&account_id).fetch_one(&mut *tx).await?;
+        if !account_exists {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        sqlx::query("INSERT INTO mailbox_catalog_state(account_id, mailbox, remote_name, uid_validity, remote_total, historical_complete, uid_next, highest_modseq, provider_config_generation, provider_config_fingerprint, updated_at) SELECT ?, ?, ?, ?, 0, 0, NULL, NULL, config_generation, config_fingerprint, ? FROM accounts WHERE id = ?")
+            .bind(&account_id).bind(mailbox).bind(remote_name).bind(i64::from(uid_validity)).bind(Utc::now()).bind(&account_id).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Establishes a missing catalogue namespace from the exact Account that
+    /// opened the IMAP connection. Existing rows whose provider stamp was
+    /// invalidated by an account update are deliberately not revived here:
+    /// they need an authenticated header/snapshot publication first.
+    pub async fn ensure_mailbox_catalog_identity_for_account(
+        &self,
+        account: &Account,
+        mailbox: &str,
+        remote_name: &str,
+        uid_validity: u32,
+    ) -> Result<bool> {
+        let Some(receipt) = self.capture_account_provider_receipt(account).await? else {
+            return Ok(false);
+        };
+        let account_id = account.id.to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if ensure_account_provider_receipt_current_in_transaction(&mut tx, &receipt)
+            .await
+            .is_err()
+        {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        let existing: Option<(String, i64, Option<i64>, Option<String>)> = sqlx::query_as("SELECT remote_name, uid_validity, provider_config_generation, provider_config_fingerprint FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ?")
+            .bind(&account_id)
+            .bind(mailbox)
+            .fetch_optional(&mut *tx)
+            .await?;
+        if let Some((existing_remote, existing_uid_validity, generation, fingerprint)) = existing {
+            tx.commit().await?;
+            return Ok(existing_remote == remote_name
+                && existing_uid_validity == i64::from(uid_validity)
+                && generation == Some(receipt.config_generation)
+                && fingerprint.as_deref() == Some(receipt.config_fingerprint.as_str()));
+        }
+        let replacement_pending: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM mailbox_snapshot_generations WHERE account_id = ? AND mailbox = ? AND uid_validity != ?)")
+            .bind(&account_id).bind(mailbox).bind(i64::from(uid_validity)).fetch_one(&mut *tx).await?;
+        if replacement_pending {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        sqlx::query("INSERT INTO mailbox_catalog_state(account_id, mailbox, remote_name, uid_validity, remote_total, historical_complete, uid_next, highest_modseq, provider_config_generation, provider_config_fingerprint, updated_at) VALUES (?, ?, ?, ?, 0, 0, NULL, NULL, ?, ?, ?)")
+            .bind(&account_id).bind(mailbox).bind(remote_name).bind(i64::from(uid_validity)).bind(receipt.config_generation).bind(&receipt.config_fingerprint).bind(Utc::now()).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Captures the namespace and per-UID local flags before opening IMAP.
+    /// Pass the returned receipt to [`Self::commit_provider_messages_with_receipt`]
+    /// after FETCH so a completed optimistic mutation still wins over an old
+    /// provider response.
+    /// Compatibility capture for code that has not retained the Account used
+    /// for the connection. Provider callers must use
+    /// [`Self::capture_provider_write_receipt_for_account`] before IMAP I/O.
+    pub async fn capture_provider_write_receipt(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        remote_name: &str,
+        uid_validity: u32,
+        uids: &[u32],
+    ) -> Result<Option<ProviderWriteReceipt>> {
+        let Some(account) = self.account(account_id).await? else {
+            return Ok(None);
+        };
+        self.capture_provider_write_receipt_for_account(
+            &account,
+            mailbox,
+            remote_name,
+            uid_validity,
+            uids,
+        )
+        .await
+    }
+
+    /// Captures a provider write fence from the exact Account used to open the
+    /// IMAP connection. An account endpoint/auth change after this point makes
+    /// the later commit fail, even if the new provider has coincidentally equal
+    /// mailbox names and UIDVALIDITY values.
+    pub async fn capture_provider_write_receipt_for_account(
+        &self,
+        account: &Account,
+        mailbox: &str,
+        remote_name: &str,
+        uid_validity: u32,
+        uids: &[u32],
+    ) -> Result<Option<ProviderWriteReceipt>> {
+        let account_id = account.id;
+        let account_id_text = account_id.to_string();
+        let Some(account_receipt) = self.capture_account_provider_receipt(account).await? else {
+            return Ok(None);
+        };
+        let current: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM mailbox_catalog_state AS catalogue WHERE catalogue.account_id = ? AND catalogue.mailbox = ? AND catalogue.remote_name = ? AND catalogue.uid_validity = ? AND catalogue.provider_config_generation = ? AND catalogue.provider_config_fingerprint = ? AND NOT EXISTS (SELECT 1 FROM mailbox_snapshot_generations AS replacement WHERE replacement.account_id = catalogue.account_id AND replacement.mailbox = catalogue.mailbox AND replacement.uid_validity != catalogue.uid_validity))")
+            .bind(&account_id_text).bind(mailbox).bind(remote_name).bind(i64::from(uid_validity)).bind(account_receipt.config_generation).bind(&account_receipt.config_fingerprint)
+            .fetch_one(&self.pool).await?;
+        if !current {
+            return Ok(None);
+        }
+        let expected_flags = self
+            .capture_recent_catalogue_expected_flags(account_id, mailbox, uids)
+            .await?;
+        let local_mutation_versions = if uids.is_empty() {
+            Vec::new()
+        } else {
+            let placeholders = vec!["?"; uids.len()].join(",");
+            let sql = format!(
+                "SELECT uid, version FROM mailbox_mutation_versions WHERE account_id = ? AND mailbox = ? AND uid_validity = ? AND uid IN ({placeholders})"
+            );
+            let mut query = sqlx::query_as::<_, ProviderMessageVersion>(&sql)
+                .bind(&account_id_text)
+                .bind(mailbox)
+                .bind(i64::from(uid_validity));
+            for uid in uids {
+                query = query.bind(i64::from(*uid));
+            }
+            query.fetch_all(&self.pool).await?
+        };
+        Ok(Some(ProviderWriteReceipt {
+            account_id,
+            account_config_generation: account_receipt.config_generation,
+            account_config_fingerprint: account_receipt.config_fingerprint,
+            mailbox: mailbox.to_owned(),
+            remote_name: remote_name.to_owned(),
+            uid_validity,
+            expected_flags,
+            local_mutation_versions,
+        }))
+    }
+
+    /// Captures the exact persisted transport configuration of an already
+    /// connected provider Account. Folder/snapshot writers which do not carry
+    /// a per-page provider receipt must retain this before their first IMAP
+    /// command and reject publication when it is no longer current.
+    pub async fn capture_account_provider_receipt(
+        &self,
+        account: &Account,
+    ) -> Result<Option<AccountProviderReceipt>> {
+        let account_id = account.id.to_string();
+        let config_fingerprint = account_provider_config_fingerprint(account)?;
+        let config_generation: Option<i64> = sqlx::query_scalar(
+            "SELECT config_generation FROM accounts WHERE id = ? AND config_fingerprint = ? AND NOT EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = ?)",
+        )
+        .bind(&account_id)
+        .bind(&config_fingerprint)
+        .bind(&account_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(
+            config_generation.map(|config_generation| AccountProviderReceipt {
+                account_id: account.id,
+                config_generation,
+                config_fingerprint,
+            }),
+        )
+    }
+
+    /// Tests an account receipt inside the caller's provider publication
+    /// boundary. `false` requires discarding that old connection's response.
+    pub async fn account_provider_receipt_is_current(
+        &self,
+        receipt: &AccountProviderReceipt,
+    ) -> Result<bool> {
+        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM accounts WHERE id = ? AND config_generation = ? AND config_fingerprint = ? AND NOT EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = ?))")
+            .bind(receipt.account_id.to_string())
+            .bind(receipt.config_generation)
+            .bind(&receipt.config_fingerprint)
+            .bind(receipt.account_id.to_string())
+            .fetch_one(&self.pool).await?)
+    }
+
+    /// Fenced provider publication for a receipt captured before FETCH. The
+    /// operation is all-or-nothing: a stale namespace produces `false`, while
+    /// a local mutation after capture preserves its newer flags.
+    /// Fenced provider publication for a receipt captured before FETCH. The
+    /// operation is all-or-nothing: a stale namespace produces `false`, while
+    /// a local mutation after capture preserves its newer flags.
+    pub async fn commit_provider_messages_with_receipt(
+        &self,
+        receipt: &ProviderWriteReceipt,
+        messages: &[MailSummary],
+    ) -> Result<bool> {
+        self.commit_provider_messages_with_receipt_inner(receipt, messages, None)
+            .await
+    }
+
+    /// Publishes parsed provider headers and their Gmail stable identities in
+    /// one immediate transaction. The Gmail epoch is checked before the
+    /// header rows are written, so this batch's own Inbox inserts cannot make
+    /// a valid pre-FETCH observation look stale.
+    pub async fn commit_provider_messages_with_receipt_and_gmail_observations(
+        &self,
+        receipt: &ProviderWriteReceipt,
+        messages: &[MailSummary],
+        gmail_receipt: &GmailInboxMembershipEpochReceipt,
+        observations: &[GmailProviderObservation],
+    ) -> Result<bool> {
+        if gmail_receipt.account_id != receipt.account_id {
+            return Err(anyhow!("Gmail epoch receipt belongs to another account"));
+        }
+        self.commit_provider_messages_with_receipt_inner(
+            receipt,
+            messages,
+            Some((gmail_receipt, observations)),
+        )
+        .await
+    }
+
+    async fn commit_provider_messages_with_receipt_inner(
+        &self,
+        receipt: &ProviderWriteReceipt,
+        messages: &[MailSummary],
+        gmail_observations: Option<(
+            &GmailInboxMembershipEpochReceipt,
+            &[GmailProviderObservation],
+        )>,
+    ) -> Result<bool> {
+        let account_id = receipt.account_id.to_string();
+        if messages
+            .iter()
+            .any(|message| message.account_id != account_id || message.mailbox != receipt.mailbox)
+        {
+            return Err(anyhow!("provider batch does not match its write receipt"));
+        }
+        let expected_by_locator: HashMap<(&str, &str, i64), (bool, bool)> = receipt
+            .expected_flags
+            .iter()
+            .map(|expected| {
+                (
+                    (
+                        expected.account_id.as_str(),
+                        expected.mailbox.as_str(),
+                        expected.uid,
+                    ),
+                    (expected.is_read, expected.is_flagged),
+                )
+            })
+            .collect();
+        let expected_versions: HashMap<i64, i64> = receipt
+            .local_mutation_versions
+            .iter()
+            .map(|version| (version.uid, version.version))
+            .collect();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let current: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM mailbox_catalog_state AS catalogue WHERE catalogue.account_id = ? AND catalogue.mailbox = ? AND catalogue.remote_name = ? AND catalogue.uid_validity = ? AND catalogue.provider_config_generation = ? AND catalogue.provider_config_fingerprint = ? AND EXISTS (SELECT 1 FROM accounts AS account WHERE account.id = catalogue.account_id AND account.config_generation = ? AND account.config_fingerprint = ?) AND NOT EXISTS (SELECT 1 FROM mailbox_snapshot_generations AS replacement WHERE replacement.account_id = catalogue.account_id AND replacement.mailbox = catalogue.mailbox AND replacement.uid_validity != catalogue.uid_validity))")
+            .bind(&account_id).bind(&receipt.mailbox).bind(&receipt.remote_name).bind(i64::from(receipt.uid_validity)).bind(receipt.account_config_generation).bind(&receipt.account_config_fingerprint).bind(receipt.account_config_generation).bind(&receipt.account_config_fingerprint)
+            .fetch_one(&mut *tx).await?;
+        if !current {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        if let Some((gmail_receipt, observations)) = gmail_observations {
+            let current_epoch: Option<i64> = sqlx::query_scalar(
+                "SELECT epoch FROM gmail_inbox_membership_epochs WHERE account_id = ?",
+            )
+            .bind(&account_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if current_epoch.unwrap_or(0) != gmail_receipt.epoch
+                || observations.iter().any(|observation| {
+                    observation.uid == 0 || observation.gmail_message_id.trim().is_empty()
+                })
+            {
+                tx.rollback().await?;
+                return Ok(false);
+            }
+        }
+        for message in messages {
+            let mut message = message.clone();
+            if let Some(canonical_id) = sqlx::query_scalar::<_, String>(
+                "SELECT id FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?",
+            )
+            .bind(&account_id)
+            .bind(&receipt.mailbox)
+            .bind(message.uid)
+            .fetch_optional(&mut *tx)
+            .await?
+            {
+                message.id = canonical_id;
+            } else {
+                message.id = uidvalidity_message_id(
+                    receipt.account_id,
+                    &receipt.mailbox,
+                    u32::try_from(message.uid).context("provider message UID is invalid")?,
+                    receipt.uid_validity,
+                );
+            }
+            for attachment in &mut message.attachments {
+                attachment.attachment.message_id = message.id.clone();
+            }
+            let current_version: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM mailbox_mutation_versions WHERE account_id = ? AND mailbox = ? AND uid = ? AND uid_validity = ?")
+                .bind(&account_id).bind(&receipt.mailbox).bind(message.uid).bind(i64::from(receipt.uid_validity)).fetch_one(&mut *tx).await?;
+            let version_matches =
+                current_version == expected_versions.get(&message.uid).copied().unwrap_or(0);
+            persist_message_with_flag_policy(
+                &mut tx,
+                &message,
+                if version_matches {
+                    FlagUpdatePolicy::CompareAndSwap(
+                        expected_by_locator
+                            .get(&(
+                                message.account_id.as_str(),
+                                message.mailbox.as_str(),
+                                message.uid,
+                            ))
+                            .copied(),
+                    )
+                } else {
+                    FlagUpdatePolicy::PreserveLocal
+                },
+            )
+            .await?;
+        }
+        if let Some((_gmail_receipt, observations)) = gmail_observations {
+            let now = Utc::now();
+            for observation in observations {
+                let local_message_id: Option<String> = sqlx::query_scalar(
+                    "SELECT id FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?",
+                )
+                .bind(&account_id)
+                .bind(&receipt.mailbox)
+                .bind(i64::from(observation.uid))
+                .fetch_optional(&mut *tx)
+                .await?;
+                let Some(local_message_id) = local_message_id else {
+                    tx.rollback().await?;
+                    return Ok(false);
+                };
+                sqlx::query("INSERT INTO gmail_logical_messages(account_id, gmail_message_id, labels_json, observed_at) VALUES (?, ?, ?, ?) ON CONFLICT(account_id, gmail_message_id) DO UPDATE SET labels_json=excluded.labels_json, observed_at=excluded.observed_at")
+                    .bind(&account_id).bind(&observation.gmail_message_id).bind(serde_json::to_string(&observation.labels)?).bind(now).execute(&mut *tx).await?;
+                sqlx::query("INSERT INTO gmail_message_memberships(account_id, message_id, gmail_message_id) VALUES (?, ?, ?) ON CONFLICT(account_id, message_id) DO UPDATE SET gmail_message_id=excluded.gmail_message_id")
+                    .bind(&account_id).bind(&local_message_id).bind(&observation.gmail_message_id).execute(&mut *tx).await?;
+            }
+            for observation in observations {
+                if observation
+                    .labels
+                    .iter()
+                    .any(|label| label.eq_ignore_ascii_case("\\Inbox"))
+                {
+                    continue;
+                }
+                let ids: Vec<String> = sqlx::query_scalar("SELECT message.id FROM gmail_message_memberships AS membership JOIN messages AS message ON message.id = membership.message_id WHERE membership.account_id = ? AND membership.gmail_message_id = ? AND message.mailbox = 'INBOX'")
+                    .bind(&account_id)
+                    .bind(&observation.gmail_message_id)
+                    .fetch_all(&mut *tx)
+                    .await?;
+                for id in ids {
+                    sqlx::query("DELETE FROM messages WHERE id = ?")
+                        .bind(id)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+            }
+            sqlx::query("INSERT INTO gmail_inbox_membership_epochs(account_id, epoch, updated_at) VALUES (?, 1, ?) ON CONFLICT(account_id) DO UPDATE SET epoch=epoch+1, updated_at=excluded.updated_at")
+                .bind(&account_id).bind(now).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Captures per-UID local mutation versions before a CONDSTORE command.
+    pub async fn capture_changed_since_write_receipt(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        remote_name: &str,
+        uid_validity: u32,
+        uids: &[u32],
+    ) -> Result<Option<ChangedSinceWriteReceipt>> {
+        let receipt = self
+            .capture_provider_write_receipt(account_id, mailbox, remote_name, uid_validity, uids)
+            .await?;
+        Ok(receipt.map(|receipt| ChangedSinceWriteReceipt {
+            account_id: receipt.account_id,
+            account_config_generation: receipt.account_config_generation,
+            account_config_fingerprint: receipt.account_config_fingerprint,
+            mailbox: receipt.mailbox,
+            remote_name: receipt.remote_name,
+            uid_validity: receipt.uid_validity,
+            local_mutation_versions: receipt.local_mutation_versions,
+        }))
+    }
+
+    /// Account-bound CONDSTORE receipt. Use this with the Account that opened
+    /// the IMAP connection, before issuing the delta command.
+    pub async fn capture_changed_since_write_receipt_for_account(
+        &self,
+        account: &Account,
+        mailbox: &str,
+        remote_name: &str,
+        uid_validity: u32,
+        uids: &[u32],
+    ) -> Result<Option<ChangedSinceWriteReceipt>> {
+        let receipt = self
+            .capture_provider_write_receipt_for_account(
+                account,
+                mailbox,
+                remote_name,
+                uid_validity,
+                uids,
+            )
+            .await?;
+        Ok(receipt.map(|receipt| ChangedSinceWriteReceipt {
+            account_id: receipt.account_id,
+            account_config_generation: receipt.account_config_generation,
+            account_config_fingerprint: receipt.account_config_fingerprint,
+            mailbox: receipt.mailbox,
+            remote_name: receipt.remote_name,
+            uid_validity: receipt.uid_validity,
+            local_mutation_versions: receipt.local_mutation_versions,
+        }))
     }
 
     /// Publishes catalogue metadata from a replacement UIDVALIDITY namespace.
@@ -2113,17 +5383,47 @@ impl Store {
         remote_total: usize,
         historical_complete: bool,
     ) -> Result<()> {
-        sqlx::query("INSERT INTO mailbox_catalog_state(account_id, mailbox, remote_name, uid_validity, remote_total, historical_complete, uid_next, highest_modseq, updated_at) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?) ON CONFLICT(account_id, mailbox) DO UPDATE SET remote_name=excluded.remote_name, uid_validity=excluded.uid_validity, remote_total=excluded.remote_total, historical_complete=excluded.historical_complete, updated_at=excluded.updated_at")
+        sqlx::query("INSERT INTO mailbox_catalog_state(account_id, mailbox, remote_name, uid_validity, remote_total, historical_complete, uid_next, highest_modseq, provider_config_generation, provider_config_fingerprint, updated_at) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, (SELECT config_generation FROM accounts WHERE id = ?), (SELECT config_fingerprint FROM accounts WHERE id = ?), ?) ON CONFLICT(account_id, mailbox) DO UPDATE SET remote_name=excluded.remote_name, uid_validity=excluded.uid_validity, remote_total=excluded.remote_total, historical_complete=excluded.historical_complete, provider_config_generation=excluded.provider_config_generation, provider_config_fingerprint=excluded.provider_config_fingerprint, updated_at=excluded.updated_at")
             .bind(account_id.to_string())
             .bind(mailbox)
             .bind(remote_name)
             .bind(uid_validity)
             .bind(remote_total as i64)
             .bind(historical_complete)
+            .bind(account_id.to_string())
+            .bind(account_id.to_string())
             .bind(Utc::now())
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    /// Updates catalogue progress only if the namespace captured before a
+    /// provider fetch is still the committed namespace. This is intentionally
+    /// separate from provider-header publication because callers may learn
+    /// EXISTS or completion metadata after their last bounded batch.
+    pub async fn save_mailbox_catalog_state_if_current(
+        &self,
+        receipt: &ProviderWriteReceipt,
+        remote_total: usize,
+        historical_complete: bool,
+    ) -> Result<bool> {
+        let updated = sqlx::query("UPDATE mailbox_catalog_state SET remote_total = ?, historical_complete = ?, updated_at = ? WHERE account_id = ? AND mailbox = ? AND remote_name = ? AND uid_validity = ? AND provider_config_generation = ? AND provider_config_fingerprint = ? AND EXISTS (SELECT 1 FROM accounts AS account WHERE account.id = mailbox_catalog_state.account_id AND account.config_generation = ? AND account.config_fingerprint = ?) AND NOT EXISTS (SELECT 1 FROM mailbox_snapshot_generations AS replacement WHERE replacement.account_id = mailbox_catalog_state.account_id AND replacement.mailbox = mailbox_catalog_state.mailbox AND replacement.uid_validity != mailbox_catalog_state.uid_validity)")
+            .bind(i64::try_from(remote_total).context("remote mailbox total is invalid")?)
+            .bind(historical_complete)
+            .bind(Utc::now())
+            .bind(receipt.account_id.to_string())
+            .bind(&receipt.mailbox)
+            .bind(&receipt.remote_name)
+            .bind(i64::from(receipt.uid_validity))
+            .bind(receipt.account_config_generation)
+            .bind(&receipt.account_config_fingerprint)
+            .bind(receipt.account_config_generation)
+            .bind(&receipt.account_config_fingerprint)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        Ok(updated == 1)
     }
 
     pub async fn reset_mailbox_catalog(&self, account_id: AccountId, mailbox: &str) -> Result<()> {
@@ -2310,22 +5610,10 @@ impl Store {
             .is_some_and(|(stored, current)| stored != current);
         if changed {
             let mut tx = self.pool.begin().await?;
-            // Locators are scoped by UIDVALIDITY. Keep committed metadata
-            // visible until the replacement generation succeeds, but never
-            // let cached bodies or attachment bytes from the old namespace be
-            // served for a recycled UID.
-            for statement in [
-                "DELETE FROM message_content_cache WHERE message_id IN (SELECT id FROM messages WHERE account_id = ? AND mailbox = ?)",
-                "DELETE FROM starred_message_bodies WHERE message_id IN (SELECT id FROM messages WHERE account_id = ? AND mailbox = ?)",
-                "DELETE FROM starred_attachment_metadata WHERE message_id IN (SELECT id FROM messages WHERE account_id = ? AND mailbox = ?)",
-                "DELETE FROM attachments WHERE message_id IN (SELECT id FROM messages WHERE account_id = ? AND mailbox = ?)",
-            ] {
-                sqlx::query(statement)
-                    .bind(&account_id)
-                    .bind(mailbox)
-                    .execute(&mut *tx)
-                    .await?;
-            }
+            // Keep the old namespace readable while its replacement is
+            // staged. Fenced receipt writes reject the old locator as soon as
+            // the replacement exists, and final publication removes the old
+            // rows and their dependent caches atomically.
             let current_uid_validity = uid_validity.and_then(|value| i64::try_from(value).ok());
             let replacement_generation_matches = match current_uid_validity {
                 Some(current_uid_validity) => sqlx::query_scalar::<_, bool>(
@@ -2416,6 +5704,58 @@ impl Store {
         Ok(())
     }
 
+    /// Captures a content-fetch receipt under the currently committed mailbox
+    /// namespace. Call this before opening IMAP, then pass it to the fenced
+    /// content commit methods below.
+    pub async fn capture_message_remote_identity(
+        &self,
+        message_id: &str,
+    ) -> Result<Option<MessageRemoteIdentity>> {
+        Ok(sqlx::query_as("SELECT message.id AS message_id, message.account_id, account.config_generation AS account_config_generation, account.config_fingerprint AS account_config_fingerprint, message.mailbox, catalogue.remote_name, message.uid, catalogue.uid_validity FROM messages AS message JOIN mailbox_catalog_state AS catalogue ON catalogue.account_id = message.account_id AND catalogue.mailbox = message.mailbox JOIN accounts AS account ON account.id = message.account_id WHERE message.id = ? AND catalogue.provider_config_generation = account.config_generation AND catalogue.provider_config_fingerprint = account.config_fingerprint")
+            .bind(message_id)
+            .fetch_optional(&self.pool)
+            .await?)
+    }
+
+    /// Resolves the persisted local id for one exact committed IMAP locator.
+    /// UID numbers are only meaningful inside UIDVALIDITY, so callers that
+    /// receive a later FETCH result must use this instead of reconstructing a
+    /// legacy account/mailbox/UID id.
+    pub async fn canonical_message_id_for_locator(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        uid: u32,
+        uid_validity: u32,
+    ) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar("SELECT message.id FROM messages AS message JOIN mailbox_catalog_state AS catalogue ON catalogue.account_id = message.account_id AND catalogue.mailbox = message.mailbox JOIN accounts AS account ON account.id = message.account_id WHERE message.account_id = ? AND message.mailbox = ? AND message.uid = ? AND catalogue.uid_validity = ? AND catalogue.provider_config_generation = account.config_generation AND catalogue.provider_config_fingerprint = account.config_fingerprint AND NOT EXISTS (SELECT 1 FROM mailbox_snapshot_generations AS replacement WHERE replacement.account_id = message.account_id AND replacement.mailbox = message.mailbox AND replacement.uid_validity != catalogue.uid_validity)")
+            .bind(account_id.to_string()).bind(mailbox).bind(i64::from(uid)).bind(i64::from(uid_validity))
+            .fetch_optional(&self.pool).await?)
+    }
+
+    pub async fn message_remote_identity_is_current(
+        &self,
+        identity: &MessageRemoteIdentity,
+    ) -> Result<bool> {
+        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages AS message JOIN mailbox_catalog_state AS catalogue ON catalogue.account_id = message.account_id AND catalogue.mailbox = message.mailbox JOIN accounts AS account ON account.id = message.account_id WHERE message.id = ? AND message.account_id = ? AND account.config_generation = ? AND account.config_fingerprint = ? AND catalogue.provider_config_generation = account.config_generation AND catalogue.provider_config_fingerprint = account.config_fingerprint AND message.mailbox = ? AND message.uid = ? AND catalogue.remote_name = ? AND catalogue.uid_validity = ? AND NOT EXISTS (SELECT 1 FROM mailbox_snapshot_generations AS replacement WHERE replacement.account_id = message.account_id AND replacement.mailbox = message.mailbox AND replacement.uid_validity != catalogue.uid_validity))")
+            .bind(&identity.message_id).bind(&identity.account_id).bind(identity.account_config_generation).bind(&identity.account_config_fingerprint).bind(&identity.mailbox).bind(identity.uid).bind(&identity.remote_name).bind(identity.uid_validity)
+            .fetch_one(&self.pool).await?)
+    }
+
+    pub async fn set_message_content_state_if_current(
+        &self,
+        identity: &MessageRemoteIdentity,
+        state: &str,
+    ) -> Result<bool> {
+        if !matches!(state, "headers_only" | "hydrating" | "complete" | "failed") {
+            return Err(anyhow!("invalid message content state"));
+        }
+        let updated = sqlx::query("UPDATE messages SET content_state = ? WHERE id = ? AND account_id = ? AND mailbox = ? AND uid = ? AND EXISTS (SELECT 1 FROM accounts AS account WHERE account.id = messages.account_id AND account.config_generation = ? AND account.config_fingerprint = ?) AND EXISTS (SELECT 1 FROM mailbox_catalog_state AS catalogue WHERE catalogue.account_id = messages.account_id AND catalogue.mailbox = messages.mailbox AND catalogue.remote_name = ? AND catalogue.uid_validity = ? AND catalogue.provider_config_generation = ? AND catalogue.provider_config_fingerprint = ?) AND NOT EXISTS (SELECT 1 FROM mailbox_snapshot_generations AS replacement WHERE replacement.account_id = messages.account_id AND replacement.mailbox = messages.mailbox AND replacement.uid_validity != ?)")
+            .bind(state).bind(&identity.message_id).bind(&identity.account_id).bind(&identity.mailbox).bind(identity.uid).bind(identity.account_config_generation).bind(&identity.account_config_fingerprint).bind(&identity.remote_name).bind(identity.uid_validity).bind(identity.account_config_generation).bind(&identity.account_config_fingerprint).bind(identity.uid_validity)
+            .execute(&self.pool).await?.rows_affected();
+        Ok(updated == 1)
+    }
+
     pub async fn claim_message_hydration(&self, id: &str) -> Result<bool> {
         let result = sqlx::query("UPDATE messages SET content_state = 'hydrating' WHERE id = ? AND content_state IN ('headers_only', 'failed')")
             .bind(id)
@@ -2489,6 +5829,410 @@ impl Store {
             .await?)
     }
 
+    /// Claims one operation before any SMTP or IMAP side effect. The immediate
+    /// transaction makes the state transition a compare-and-swap, preventing
+    /// two workers from submitting the same queued message or APPEND.
+    pub async fn claim_pending_operation(
+        &self,
+        account_id: AccountId,
+        claim_owner: &str,
+    ) -> Result<Option<OperationJournalEntry>> {
+        if claim_owner.trim().is_empty() {
+            return Err(anyhow!("operation claim owner is required"));
+        }
+        let account_id = account_id.to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let candidate: Option<OperationJournalEntry> = sqlx::query_as("SELECT operation_id, account_id, mailbox, uid, uid_validity, message_id, kind, payload_json, local_version, dependency_id, state, outcome, attempts, next_retry_at, error, smtp_accepted_at, created_at, updated_at FROM operation_journal AS operation WHERE account_id = ? AND NOT EXISTS (SELECT 1 FROM deleted_account_tombstones AS removed WHERE removed.account_id = operation.account_id) AND NOT EXISTS (SELECT 1 FROM account_removal_gates AS removal WHERE removal.account_id = operation.account_id AND removal.expires_at > ?) AND operation.state IN ('queued', 'retry', 'sent_copy_pending') AND (operation.kind <> 'smtp_submission' OR NOT EXISTS (SELECT 1 FROM operation_journal AS active_smtp WHERE active_smtp.account_id = operation.account_id AND active_smtp.kind = 'smtp_submission' AND active_smtp.state = 'submitting')) AND (operation.next_retry_at IS NULL OR operation.next_retry_at <= ?) AND (operation.dependency_id IS NULL OR EXISTS (SELECT 1 FROM operation_journal AS dependency WHERE dependency.operation_id = operation.dependency_id AND dependency.state = 'completed')) AND NOT EXISTS (SELECT 1 FROM operation_journal AS earlier WHERE earlier.account_id = operation.account_id AND earlier.mailbox = operation.mailbox AND earlier.uid = operation.uid AND earlier.local_version < operation.local_version AND earlier.state NOT IN ('completed', 'rejected', 'permanent_failed', 'uncertain')) ORDER BY COALESCE(operation.mailbox, ''), operation.local_version, operation.created_at LIMIT 1")
+            .bind(&account_id).bind(Utc::now()).bind(Utc::now()).fetch_optional(&mut *tx).await?;
+        let Some(candidate) = candidate else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let claimed = sqlx::query("UPDATE operation_journal SET state = 'submitting', claim_owner = ?, claimed_at = ?, claimed_from_state = state, attempts = attempts + 1, updated_at = ? WHERE operation_id = ? AND state = ? AND claim_owner IS NULL AND NOT EXISTS (SELECT 1 FROM deleted_account_tombstones AS removed WHERE removed.account_id = operation_journal.account_id) AND NOT EXISTS (SELECT 1 FROM account_removal_gates AS removal WHERE removal.account_id = operation_journal.account_id AND removal.expires_at > ?)")
+            .bind(claim_owner).bind(Utc::now()).bind(Utc::now()).bind(&candidate.operation_id).bind(&candidate.state).bind(Utc::now())
+            .execute(&mut *tx).await?;
+        if claimed.rows_affected() != 1 {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        tx.commit().await?;
+        let operation = self
+            .operation_journal_entry(&candidate.operation_id)
+            .await?;
+        if let Some(operation) = operation.as_ref() {
+            Self::record_first_smtp_claim_wait(operation);
+        }
+        Ok(operation)
+    }
+
+    /// Claims only a known Sent-copy operation. This is deliberately narrower
+    /// than the generic queue drain: recovery must never auto-submit a queued
+    /// or ambiguous SMTP message while trying to reconcile its Sent copy.
+    pub async fn claim_sent_copy_operation(
+        &self,
+        operation_id: &str,
+        claim_owner: &str,
+    ) -> Result<Option<OperationJournalEntry>> {
+        if claim_owner.trim().is_empty() {
+            return Err(anyhow!("operation claim owner is required"));
+        }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let claimed = sqlx::query("UPDATE operation_journal SET state = 'submitting', claim_owner = ?, claimed_at = ?, claimed_from_state = state, attempts = attempts + 1, updated_at = ? WHERE operation_id = ? AND (state = 'sent_copy_pending' OR (state = 'retry' AND outcome = 'sent_copy_retry_scheduled')) AND claim_owner IS NULL AND NOT EXISTS (SELECT 1 FROM deleted_account_tombstones AS removed WHERE removed.account_id = operation_journal.account_id) AND NOT EXISTS (SELECT 1 FROM account_removal_gates AS removal WHERE removal.account_id = operation_journal.account_id AND removal.expires_at > ?)")
+            .bind(claim_owner).bind(Utc::now()).bind(Utc::now()).bind(operation_id).bind(Utc::now())
+            .execute(&mut *tx).await?;
+        if claimed.rows_affected() != 1 {
+            tx.commit().await?;
+            return Ok(None);
+        }
+        tx.commit().await?;
+        self.operation_journal_entry(operation_id).await
+    }
+
+    /// Claims only a provider-side Sent reconciliation already known to have
+    /// accepted SMTP delivery. It cannot accidentally submit a queued send.
+    pub async fn claim_provider_sent_operation(
+        &self,
+        operation_id: &str,
+        claim_owner: &str,
+    ) -> Result<Option<OperationJournalEntry>> {
+        if claim_owner.trim().is_empty() {
+            return Err(anyhow!("operation claim owner is required"));
+        }
+        let claimed = sqlx::query("UPDATE operation_journal SET state = 'submitting', claim_owner = ?, claimed_at = ?, claimed_from_state = 'accepted', attempts = attempts + 1, updated_at = ? WHERE operation_id = ? AND state = 'accepted' AND outcome = 'provider_sent_reconciliation' AND claim_owner IS NULL AND NOT EXISTS (SELECT 1 FROM deleted_account_tombstones AS removed WHERE removed.account_id = operation_journal.account_id) AND NOT EXISTS (SELECT 1 FROM account_removal_gates AS removal WHERE removal.account_id = operation_journal.account_id AND removal.expires_at > ?)")
+            .bind(claim_owner).bind(Utc::now()).bind(Utc::now()).bind(operation_id).bind(Utc::now())
+            .execute(&self.pool).await?;
+        if claimed.rows_affected() != 1 {
+            return Ok(None);
+        }
+        self.operation_journal_entry(operation_id).await
+    }
+
+    /// Claims one explicitly selected SMTP submission. It never drains an
+    /// unrelated queue item and only permits a known safe pre-submit state.
+    pub async fn claim_operation_by_id(
+        &self,
+        operation_id: &str,
+        claim_owner: &str,
+    ) -> Result<Option<OperationJournalEntry>> {
+        if claim_owner.trim().is_empty() {
+            return Err(anyhow!("operation claim owner is required"));
+        }
+        let updated = sqlx::query("UPDATE operation_journal SET state = 'submitting', claim_owner = ?, claimed_at = ?, claimed_from_state = state, attempts = attempts + 1, updated_at = ? WHERE operation_id = ? AND state IN ('queued', 'retry') AND claim_owner IS NULL AND NOT EXISTS (SELECT 1 FROM deleted_account_tombstones AS removed WHERE removed.account_id = operation_journal.account_id) AND NOT EXISTS (SELECT 1 FROM account_removal_gates AS removal WHERE removal.account_id = operation_journal.account_id AND removal.expires_at > ?) AND (kind <> 'smtp_submission' OR (NOT EXISTS (SELECT 1 FROM operation_journal AS active_smtp WHERE active_smtp.account_id = operation_journal.account_id AND active_smtp.kind = 'smtp_submission' AND active_smtp.state = 'submitting') AND NOT EXISTS (SELECT 1 FROM operation_journal AS earlier_smtp WHERE earlier_smtp.account_id = operation_journal.account_id AND earlier_smtp.kind = 'smtp_submission' AND earlier_smtp.smtp_accepted_at IS NULL AND earlier_smtp.state NOT IN ('accepted', 'completed', 'rejected', 'permanent_failed', 'uncertain') AND (earlier_smtp.created_at < operation_journal.created_at OR (earlier_smtp.created_at = operation_journal.created_at AND earlier_smtp.operation_id < operation_journal.operation_id)))))")
+            .bind(claim_owner).bind(Utc::now()).bind(Utc::now()).bind(operation_id).bind(Utc::now())
+            .execute(&self.pool).await?;
+        if updated.rows_affected() != 1 {
+            return Ok(None);
+        }
+        let operation = self.operation_journal_entry(operation_id).await?;
+        if let Some(operation) = operation.as_ref() {
+            Self::record_first_smtp_claim_wait(operation);
+        }
+        Ok(operation)
+    }
+
+    fn record_first_smtp_claim_wait(operation: &OperationJournalEntry) {
+        if operation.kind == "smtp_submission"
+            && operation.state == "submitting"
+            && operation.attempts == 1
+            && operation.smtp_accepted_at.is_none()
+        {
+            crate::mail_metrics::record_submission_queue_wait(
+                Utc::now()
+                    .signed_duration_since(operation.created_at)
+                    .to_std()
+                    .unwrap_or_default(),
+            );
+        }
+    }
+
+    /// Lists currently leased SMTP submissions for account-removal
+    /// coordination. The caller may wait for these known operations to reach
+    /// a durable outcome before removing credentials; this read never claims
+    /// or changes their delivery state.
+    pub async fn claimed_smtp_operations(
+        &self,
+        account_id: AccountId,
+    ) -> Result<Vec<OperationJournalEntry>> {
+        Ok(sqlx::query_as("SELECT operation_id, account_id, mailbox, uid, uid_validity, message_id, kind, payload_json, local_version, dependency_id, state, outcome, attempts, next_retry_at, error, smtp_accepted_at, created_at, updated_at FROM operation_journal WHERE account_id = ? AND kind = 'smtp_submission' AND state = 'submitting' ORDER BY claimed_at, operation_id")
+            .bind(account_id.to_string())
+            .fetch_all(&self.pool)
+            .await?)
+    }
+
+    /// Lists every active provider lease for one account. Account updates and
+    /// removal must wait for mailbox actions as well as SMTP, otherwise an
+    /// old connection can finish after the account settings change.
+    pub async fn claimed_account_operations(
+        &self,
+        account_id: AccountId,
+    ) -> Result<Vec<OperationJournalEntry>> {
+        Ok(sqlx::query_as("SELECT operation_id, account_id, mailbox, uid, uid_validity, message_id, kind, payload_json, local_version, dependency_id, state, outcome, attempts, next_retry_at, error, smtp_accepted_at, claim_owner, claimed_at, created_at, updated_at FROM operation_journal WHERE account_id = ? AND state = 'submitting' ORDER BY claimed_at, operation_id")
+            .bind(account_id.to_string())
+            .fetch_all(&self.pool)
+            .await?)
+    }
+
+    /// Renews a live operation lease while a worker is inside an unbounded
+    /// provider call. Recovery only touches claims whose heartbeat has
+    /// expired, so another process cannot steal an active CLI submission.
+    pub async fn renew_operation_claim(
+        &self,
+        operation_id: &str,
+        claim_owner: &str,
+    ) -> Result<bool> {
+        Ok(sqlx::query("UPDATE operation_journal SET claimed_at = ?, updated_at = ? WHERE operation_id = ? AND state = 'submitting' AND claim_owner = ?")
+            .bind(Utc::now())
+            .bind(Utc::now())
+            .bind(operation_id)
+            .bind(claim_owner)
+            .execute(&self.pool)
+            .await?
+            .rows_affected() == 1)
+    }
+
+    pub fn heartbeat_operation_claim(
+        &self,
+        operation_id: impl Into<String>,
+        claim_owner: impl Into<String>,
+    ) -> OperationClaimHeartbeat {
+        let store = self.clone();
+        let operation_id = operation_id.into();
+        let claim_owner = claim_owner.into();
+        let task = tokio::spawn(async move {
+            let interval =
+                Duration::from_secs(u64::try_from(OPERATION_CLAIM_LEASE_SECONDS / 3).unwrap_or(30));
+            loop {
+                tokio::time::sleep(interval).await;
+                match store
+                    .renew_operation_claim(&operation_id, &claim_owner)
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) | Err(_) => break,
+                }
+            }
+        });
+        OperationClaimHeartbeat { task }
+    }
+
+    pub async fn next_operation_claim_expiry_at(
+        &self,
+        account_id: AccountId,
+    ) -> Result<Option<DateTime<Utc>>> {
+        Ok(sqlx::query_scalar::<_, Option<DateTime<Utc>>>("SELECT MIN(claimed_at) FROM operation_journal WHERE account_id = ? AND state = 'submitting' AND claimed_at IS NOT NULL")
+            .bind(account_id.to_string()).fetch_one(&self.pool).await?
+            .map(|claimed_at| claimed_at + chrono::Duration::seconds(OPERATION_CLAIM_LEASE_SECONDS)))
+    }
+
+    /// Completes only the lease owner which performed the remote attempt.
+    /// `uncertain` intentionally retains the lease/fence for reconciliation
+    /// instead of allowing an automatic resend after a process crash.
+    pub async fn complete_claimed_operation(
+        &self,
+        operation_id: &str,
+        claim_owner: &str,
+        state: &str,
+        outcome: Option<&str>,
+        error: Option<&str>,
+        next_retry_at: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        if !matches!(
+            state,
+            "retry"
+                | "accepted"
+                | "sent_copy_pending"
+                | "completed"
+                | "rejected"
+                | "permanent_failed"
+                | "uncertain"
+        ) {
+            return Err(anyhow!("invalid claimed operation state"));
+        }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let now = Utc::now();
+        let changed = sqlx::query("UPDATE operation_journal SET state = ?, outcome = ?, error = ?, next_retry_at = ?, smtp_accepted_at = CASE WHEN ? = 'accepted' OR (? = 'sent_copy_pending' AND kind = 'smtp_submission') THEN COALESCE(smtp_accepted_at, ?) ELSE smtp_accepted_at END, claim_owner = CASE WHEN ? = 'uncertain' THEN claim_owner ELSE NULL END, claimed_at = CASE WHEN ? = 'uncertain' THEN claimed_at ELSE NULL END, claimed_from_state = CASE WHEN ? = 'uncertain' THEN claimed_from_state ELSE NULL END, updated_at = ? WHERE operation_id = ? AND state = 'submitting' AND claim_owner = ?")
+            .bind(state).bind(outcome).bind(error).bind(next_retry_at).bind(state).bind(state).bind(now).bind(state).bind(state).bind(state).bind(now).bind(operation_id).bind(claim_owner)
+            .execute(&mut *tx).await?;
+        if changed.rows_affected() != 1 {
+            tx.rollback().await?;
+            return Err(anyhow!("operation claim is stale or missing"));
+        }
+        if matches!(state, "completed" | "rejected" | "permanent_failed") {
+            sqlx::query("DELETE FROM mailbox_mutation_fences WHERE operation_id = ?")
+                .bind(operation_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Atomically projects a provider-confirmed move/delete and terminalizes
+    /// the exact journal lease. Workers must call this after the remote OK;
+    /// it closes the crash window between local membership reconciliation and
+    /// releasing the operation fence.
+    pub async fn reconcile_and_complete_claimed_mailbox_action<D>(
+        &self,
+        operation_id: &str,
+        claim_owner: &str,
+        destination_mailbox: &str,
+        destination: Option<D>,
+    ) -> Result<bool>
+    where
+        D: Into<MoveDestinationLocator>,
+    {
+        let destination = destination.map(Into::into);
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let operation: Option<(String, String, i64, i64, String)> = sqlx::query_as("SELECT account_id, mailbox, uid, uid_validity, message_id FROM operation_journal WHERE operation_id = ? AND state = 'submitting' AND claim_owner = ? AND kind = 'mailbox_action' AND message_id IS NOT NULL")
+            .bind(operation_id).bind(claim_owner).fetch_optional(&mut *tx).await?;
+        let Some((account_id, source_mailbox, source_uid, uid_validity, message_id)) = operation
+        else {
+            tx.commit().await?;
+            return Ok(false);
+        };
+        let current: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ? AND uid_validity = ?)")
+            .bind(&account_id).bind(&source_mailbox).bind(uid_validity).fetch_one(&mut *tx).await?;
+        if !current {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        let pending_mailbox = format!("__pending_action__:{operation_id}");
+        let source_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE id = ? AND account_id = ? AND mailbox IN (?, ?))")
+            .bind(&message_id)
+            .bind(&account_id)
+            .bind(&source_mailbox)
+            .bind(&pending_mailbox)
+            .fetch_one(&mut *tx)
+            .await?;
+        if !source_exists {
+            tx.rollback().await?;
+            return Err(anyhow!("mailbox action source row is missing"));
+        }
+        sqlx::query("INSERT OR REPLACE INTO mailbox_action_tombstones(account_id, mailbox, uid, created_at) VALUES (?, ?, ?, ?)")
+            .bind(&account_id).bind(&source_mailbox).bind(source_uid).bind(Utc::now()).execute(&mut *tx).await?;
+        if let Some(destination) = destination {
+            let destination_uid = destination.uid;
+            // Only the legacy `u32` compatibility conversion uses zero as an
+            // unspecified namespace. New provider COPYUID callers always
+            // supply a non-zero UIDVALIDITY and never take this branch.
+            let destination_uid_validity = if destination.uid_validity == 0 {
+                sqlx::query_scalar::<_, Option<i64>>(
+                    "SELECT uid_validity FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ?",
+                )
+                .bind(&account_id)
+                .bind(destination_mailbox)
+                .fetch_one(&mut *tx)
+                .await?
+                .and_then(|value| u32::try_from(value).ok())
+            } else {
+                Some(destination.uid_validity)
+            };
+            for table in [
+                "message_content_cache",
+                "starred_attachment_metadata",
+                "starred_message_bodies",
+                "message_content_fetches",
+            ] {
+                let statement = format!("DELETE FROM {table} WHERE message_id = ?");
+                sqlx::query(&statement)
+                    .bind(&message_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            sqlx::query("DELETE FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?")
+                .bind(&account_id)
+                .bind(destination_mailbox)
+                .bind(i64::from(destination_uid))
+                .execute(&mut *tx)
+                .await?;
+            let destination_namespace_current = destination_uid_validity.is_some_and(|uid_validity| {
+                // The exact namespace is rechecked in this same write
+                // transaction before a locally addressable destination row.
+                destination.uid_validity == 0 || destination.uid_validity == uid_validity
+            }) && sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ? AND uid_validity = ?)")
+                .bind(&account_id).bind(destination_mailbox).bind(i64::from(destination_uid_validity.unwrap())).fetch_one(&mut *tx).await?;
+            if !destination_namespace_current {
+                // COPYUID is authoritative about the remote move, but this
+                // local catalogue has not selected that exact namespace yet.
+                // Delete the source projection and let later authenticated
+                // destination sync create its UIDVALIDITY-scoped row.
+                let deleted = sqlx::query(
+                    "DELETE FROM messages WHERE id = ? AND account_id = ? AND mailbox IN (?, ?)",
+                )
+                .bind(&message_id)
+                .bind(&account_id)
+                .bind(&source_mailbox)
+                .bind(&pending_mailbox)
+                .execute(&mut *tx)
+                .await?;
+                if deleted.rows_affected() != 1 {
+                    tx.rollback().await?;
+                    return Err(anyhow!(
+                        "mailbox action source row changed before reconciliation"
+                    ));
+                }
+            } else {
+                let destination_id = uidvalidity_message_id(
+                    AccountId::parse_str(&account_id)?,
+                    destination_mailbox,
+                    destination_uid,
+                    destination_uid_validity.expect("current destination namespace"),
+                );
+                let moved = sqlx::query("UPDATE messages SET id = ?, mailbox = ?, uid = ? WHERE id = ? AND account_id = ? AND mailbox IN (?, ?)")
+                .bind(destination_id).bind(destination_mailbox).bind(i64::from(destination_uid)).bind(&message_id).bind(&account_id).bind(&source_mailbox).bind(&pending_mailbox).execute(&mut *tx).await?;
+                if moved.rows_affected() != 1 {
+                    tx.rollback().await?;
+                    return Err(anyhow!(
+                        "mailbox action source row changed before reconciliation"
+                    ));
+                }
+            }
+        } else {
+            let deleted = sqlx::query(
+                "DELETE FROM messages WHERE id = ? AND account_id = ? AND mailbox IN (?, ?)",
+            )
+            .bind(&message_id)
+            .bind(&account_id)
+            .bind(&source_mailbox)
+            .bind(&pending_mailbox)
+            .execute(&mut *tx)
+            .await?;
+            if deleted.rows_affected() != 1 {
+                tx.rollback().await?;
+                return Err(anyhow!(
+                    "mailbox action source row changed before reconciliation"
+                ));
+            }
+        }
+        let completed = sqlx::query("UPDATE operation_journal SET state = 'completed', outcome = 'remote_reconciled', error = NULL, next_retry_at = NULL, claim_owner = NULL, claimed_at = NULL, claimed_from_state = NULL, updated_at = ? WHERE operation_id = ? AND state = 'submitting' AND claim_owner = ?")
+            .bind(Utc::now()).bind(operation_id).bind(claim_owner).execute(&mut *tx).await?;
+        if completed.rows_affected() != 1 {
+            tx.rollback().await?;
+            return Err(anyhow!("operation claim is stale or missing"));
+        }
+        sqlx::query("DELETE FROM mailbox_mutation_fences WHERE operation_id = ?")
+            .bind(operation_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM operation_message_backups WHERE operation_id = ?")
+            .bind(operation_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Startup recovery converts an interrupted transport attempt into an
+    /// explicit reconciliation state. It never puts it back in the send queue.
+    pub async fn mark_interrupted_operations_uncertain(
+        &self,
+        account_id: AccountId,
+    ) -> Result<u64> {
+        let now = Utc::now();
+        Ok(sqlx::query("UPDATE operation_journal SET state = CASE WHEN kind IN ('message_read', 'message_star') THEN 'retry' WHEN claimed_from_state = 'accepted' AND outcome = 'provider_sent_reconciliation' THEN 'accepted' WHEN claimed_from_state = 'retry' AND outcome = 'sent_copy_retry_scheduled' THEN 'retry' ELSE 'uncertain' END, outcome = CASE WHEN kind IN ('message_read', 'message_star') THEN 'idempotent_retry_after_interruption' WHEN claimed_from_state = 'accepted' AND outcome = 'provider_sent_reconciliation' THEN 'provider_sent_reconciliation' WHEN claimed_from_state = 'retry' AND outcome = 'sent_copy_retry_scheduled' THEN 'sent_copy_retry_scheduled' WHEN claimed_from_state = 'sent_copy_pending' THEN 'smtp_accepted_sent_copy_uncertain' ELSE COALESCE(outcome, 'interrupted_before_outcome') END, error = CASE WHEN kind IN ('message_read', 'message_star') THEN COALESCE(error, 'idempotent flag update interrupted before durable outcome') WHEN claimed_from_state = 'accepted' AND outcome = 'provider_sent_reconciliation' THEN COALESCE(error, 'SMTP accepted; provider Sent reconciliation was interrupted') WHEN claimed_from_state IN ('sent_copy_pending', 'retry') THEN COALESCE(error, 'SMTP accepted; Sent-copy operation was interrupted') ELSE COALESCE(error, 'operation interrupted before provider outcome') END, next_retry_at = CASE WHEN kind IN ('message_read', 'message_star') THEN ? ELSE next_retry_at END, claim_owner = NULL, claimed_at = NULL, claimed_from_state = NULL, updated_at = ? WHERE account_id = ? AND state = 'submitting' AND (claimed_at IS NULL OR claimed_at <= ?)")
+            .bind(now + chrono::Duration::seconds(1)).bind(now).bind(account_id.to_string()).bind(now - chrono::Duration::seconds(OPERATION_CLAIM_LEASE_SECONDS)).execute(&self.pool).await?.rows_affected())
+    }
+
     pub async fn starred_body(&self, message_id: &str) -> Result<Option<(String, Option<String>)>> {
         Ok(sqlx::query_as(
             "SELECT body_text, body_html FROM starred_message_bodies WHERE message_id = ? AND attachment_presentation_version = ?",
@@ -2517,6 +6261,17 @@ impl Store {
         Ok(updated == 1)
     }
 
+    pub async fn update_message_attachment_state_if_current(
+        &self,
+        identity: &MessageRemoteIdentity,
+        has_attachments: bool,
+    ) -> Result<bool> {
+        let updated = sqlx::query("UPDATE messages SET has_attachments = ? WHERE id = ? AND account_id = ? AND mailbox = ? AND uid = ? AND EXISTS (SELECT 1 FROM accounts AS account WHERE account.id = messages.account_id AND account.config_generation = ? AND account.config_fingerprint = ?) AND EXISTS (SELECT 1 FROM mailbox_catalog_state AS catalogue WHERE catalogue.account_id = messages.account_id AND catalogue.mailbox = messages.mailbox AND catalogue.remote_name = ? AND catalogue.uid_validity = ? AND catalogue.provider_config_generation = ? AND catalogue.provider_config_fingerprint = ?) AND NOT EXISTS (SELECT 1 FROM mailbox_snapshot_generations AS replacement WHERE replacement.account_id = messages.account_id AND replacement.mailbox = messages.mailbox AND replacement.uid_validity != ?)")
+            .bind(has_attachments).bind(&identity.message_id).bind(&identity.account_id).bind(&identity.mailbox).bind(identity.uid).bind(identity.account_config_generation).bind(&identity.account_config_fingerprint).bind(&identity.remote_name).bind(identity.uid_validity).bind(identity.account_config_generation).bind(&identity.account_config_fingerprint).bind(identity.uid_validity)
+            .execute(&self.pool).await?.rows_affected();
+        Ok(updated == 1)
+    }
+
     /// Promotes freshly fetched content into the durable starred cache only
     /// while the same local message remains starred. It intentionally does
     /// not update message flags or any provider identity fields.
@@ -2525,16 +6280,46 @@ impl Store {
         message_id: &str,
         content: CachedMessageContent,
     ) -> Result<bool> {
+        self.cache_starred_message_content_inner(message_id, content, None)
+            .await
+    }
+
+    pub async fn cache_starred_message_content_if_current(
+        &self,
+        identity: &MessageRemoteIdentity,
+        content: CachedMessageContent,
+    ) -> Result<bool> {
+        self.cache_starred_message_content_inner(&identity.message_id, content, Some(identity))
+            .await
+    }
+
+    async fn cache_starred_message_content_inner(
+        &self,
+        message_id: &str,
+        content: CachedMessageContent,
+        identity: Option<&MessageRemoteIdentity>,
+    ) -> Result<bool> {
         let mut attachments = content.attachments;
         for attachment in &mut attachments {
             attachment.message_id = message_id.to_owned();
         }
         attachments.retain(|attachment| attachment.presentation.is_downloadable());
 
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if !Self::cached_content_receipt_is_current(&mut tx, identity).await? {
+            tx.rollback().await?;
+            return Ok(false);
+        }
         let still_flagged: Option<bool> =
-            sqlx::query_scalar("SELECT is_flagged FROM messages WHERE id = ?")
+            sqlx::query_scalar("SELECT is_flagged FROM messages WHERE id = ? AND (? IS NULL OR (account_id = ? AND mailbox = ? AND uid = ? AND EXISTS (SELECT 1 FROM mailbox_catalog_state AS catalogue WHERE catalogue.account_id = messages.account_id AND catalogue.mailbox = messages.mailbox AND catalogue.remote_name = ? AND catalogue.uid_validity = ?) AND NOT EXISTS (SELECT 1 FROM mailbox_snapshot_generations AS replacement WHERE replacement.account_id = messages.account_id AND replacement.mailbox = messages.mailbox AND replacement.uid_validity != ?)))")
                 .bind(message_id)
+                .bind(identity.map(|_| 1_i64))
+                .bind(identity.map(|identity| identity.account_id.as_str()))
+                .bind(identity.map(|identity| identity.mailbox.as_str()))
+                .bind(identity.map(|identity| identity.uid))
+                .bind(identity.map(|identity| identity.remote_name.as_str()))
+                .bind(identity.map(|identity| identity.uid_validity))
+                .bind(identity.map(|identity| identity.uid_validity))
                 .fetch_optional(&mut *tx)
                 .await?;
         if still_flagged != Some(true) {
@@ -2648,6 +6433,24 @@ impl Store {
             is_flagged,
             content,
             MESSAGE_CONTENT_CACHE_MAX_BYTES,
+            None,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    pub async fn cache_message_content_if_current(
+        &self,
+        identity: &MessageRemoteIdentity,
+        is_flagged: bool,
+        content: CachedMessageContent,
+    ) -> Result<bool> {
+        self.cache_message_content_with_budget(
+            &identity.message_id,
+            is_flagged,
+            content,
+            MESSAGE_CONTENT_CACHE_MAX_BYTES,
+            Some(identity),
         )
         .await
     }
@@ -2658,7 +6461,8 @@ impl Store {
         is_flagged: bool,
         content: CachedMessageContent,
         max_bytes: i64,
-    ) -> Result<()> {
+        identity: Option<&MessageRemoteIdentity>,
+    ) -> Result<bool> {
         let mut attachments = content.attachments;
         // The cache key is the current provider locator. Never retain parsed
         // metadata that refers to a different local message id.
@@ -2673,17 +6477,30 @@ impl Store {
             content.unsubscribe_kind.as_deref(),
             &attachments_json,
         )?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if !Self::cached_content_receipt_is_current(&mut tx, identity).await? {
+            tx.rollback().await?;
+            return Ok(false);
+        }
         if byte_size > max_bytes {
-            sqlx::query("DELETE FROM message_content_cache WHERE message_id = ?")
+            sqlx::query("DELETE FROM message_content_cache WHERE message_id = ? AND (? IS NULL OR EXISTS (SELECT 1 FROM messages AS message JOIN mailbox_catalog_state AS catalogue ON catalogue.account_id = message.account_id AND catalogue.mailbox = message.mailbox WHERE message.id = ? AND message.account_id = ? AND message.mailbox = ? AND message.uid = ? AND catalogue.remote_name = ? AND catalogue.uid_validity = ? AND NOT EXISTS (SELECT 1 FROM mailbox_snapshot_generations AS replacement WHERE replacement.account_id = message.account_id AND replacement.mailbox = message.mailbox AND replacement.uid_validity != ?)))")
                 .bind(message_id)
-                .execute(&self.pool)
+                .bind(identity.map(|_| 1_i64))
+                .bind(message_id)
+                .bind(identity.map(|identity| identity.account_id.as_str()))
+                .bind(identity.map(|identity| identity.mailbox.as_str()))
+                .bind(identity.map(|identity| identity.uid))
+                .bind(identity.map(|identity| identity.remote_name.as_str()))
+                .bind(identity.map(|identity| identity.uid_validity))
+                .bind(identity.map(|identity| identity.uid_validity))
+                .execute(&mut *tx)
                 .await?;
-            return Ok(());
+            tx.commit().await?;
+            return Ok(identity.is_none());
         }
 
-        let mut tx = self.pool.begin().await?;
         let stored = sqlx::query(
-            "INSERT INTO message_content_cache(message_id, content_state, body_text, body_html, unsubscribe_kind, attachments_json, byte_size, last_accessed) SELECT ?, 'complete', ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(last_accessed), 0) + 1 FROM message_content_cache) WHERE ? = 0 AND EXISTS (SELECT 1 FROM messages WHERE id = ? AND is_flagged = 0) ON CONFLICT(message_id) DO UPDATE SET content_state = excluded.content_state, body_text = excluded.body_text, body_html = excluded.body_html, unsubscribe_kind = excluded.unsubscribe_kind, attachments_json = excluded.attachments_json, byte_size = excluded.byte_size, last_accessed = excluded.last_accessed",
+            "INSERT INTO message_content_cache(message_id, content_state, body_text, body_html, unsubscribe_kind, attachments_json, byte_size, last_accessed) SELECT ?, 'complete', ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(last_accessed), 0) + 1 FROM message_content_cache) WHERE ? = 0 AND EXISTS (SELECT 1 FROM messages WHERE id = ? AND is_flagged = 0) AND (? IS NULL OR EXISTS (SELECT 1 FROM messages AS message JOIN mailbox_catalog_state AS catalogue ON catalogue.account_id = message.account_id AND catalogue.mailbox = message.mailbox WHERE message.id = ? AND message.account_id = ? AND message.mailbox = ? AND message.uid = ? AND catalogue.remote_name = ? AND catalogue.uid_validity = ? AND NOT EXISTS (SELECT 1 FROM mailbox_snapshot_generations AS replacement WHERE replacement.account_id = message.account_id AND replacement.mailbox = message.mailbox AND replacement.uid_validity != ?))) ON CONFLICT(message_id) DO UPDATE SET content_state = excluded.content_state, body_text = excluded.body_text, body_html = excluded.body_html, unsubscribe_kind = excluded.unsubscribe_kind, attachments_json = excluded.attachments_json, byte_size = excluded.byte_size, last_accessed = excluded.last_accessed",
         )
         .bind(message_id)
         .bind(&content.body_text)
@@ -2691,8 +6508,16 @@ impl Store {
         .bind(&content.unsubscribe_kind)
         .bind(&attachments_json)
         .bind(byte_size)
-        .bind(is_flagged)
+        .bind(is_flagged && identity.is_none())
         .bind(message_id)
+        .bind(identity.map(|_| 1_i64))
+        .bind(message_id)
+        .bind(identity.map(|identity| identity.account_id.as_str()))
+        .bind(identity.map(|identity| identity.mailbox.as_str()))
+        .bind(identity.map(|identity| identity.uid))
+        .bind(identity.map(|identity| identity.remote_name.as_str()))
+        .bind(identity.map(|identity| identity.uid_validity))
+        .bind(identity.map(|identity| identity.uid_validity))
         .execute(&mut *tx)
         .await?
         .rows_affected();
@@ -2704,7 +6529,7 @@ impl Store {
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
-            return Ok(());
+            return Ok(false);
         }
 
         let recent_cutoff =
@@ -2729,13 +6554,28 @@ impl Store {
             }
         }
         tx.commit().await?;
-        Ok(())
+        Ok(true)
+    }
+
+    // Called only under BEGIN IMMEDIATE. In particular, stale oversized or
+    // unstarred fetches must not delete a newer cache entry while rejecting
+    // their own content. The guard covers every write in the transaction.
+    async fn cached_content_receipt_is_current(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        identity: Option<&MessageRemoteIdentity>,
+    ) -> Result<bool> {
+        let Some(identity) = identity else {
+            return Ok(true);
+        };
+        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages AS message JOIN mailbox_catalog_state AS catalogue ON catalogue.account_id = message.account_id AND catalogue.mailbox = message.mailbox JOIN accounts AS account ON account.id = message.account_id WHERE message.id = ? AND message.account_id = ? AND account.config_generation = ? AND account.config_fingerprint = ? AND catalogue.provider_config_generation = account.config_generation AND catalogue.provider_config_fingerprint = account.config_fingerprint AND message.mailbox = ? AND message.uid = ? AND catalogue.remote_name = ? AND catalogue.uid_validity = ? AND NOT EXISTS (SELECT 1 FROM mailbox_snapshot_generations AS replacement WHERE replacement.account_id = message.account_id AND replacement.mailbox = message.mailbox AND replacement.uid_validity != catalogue.uid_validity))")
+            .bind(&identity.message_id).bind(&identity.account_id).bind(identity.account_config_generation).bind(&identity.account_config_fingerprint).bind(&identity.mailbox).bind(identity.uid).bind(&identity.remote_name).bind(identity.uid_validity)
+            .fetch_one(&mut **tx).await?)
     }
 
     /// Returns recent primary-folder messages that still need their body in
-    /// the cache appropriate to their current flag state. Exact, non-empty
-    /// stored Message-IDs are deduplicated in SQL; malformed or variant IDs
-    /// deliberately remain distinct for the coordinator to deduplicate.
+    /// the cache appropriate to their current flag state. Local message
+    /// identity is the cache key: generic RFC Message-IDs can legitimately
+    /// occur on unrelated provider messages and must not hide either one.
     pub async fn recent_body_cache_candidates(
         &self,
         account_id: AccountId,
@@ -2746,9 +6586,7 @@ impl Store {
             .await
     }
 
-    /// Returns a deterministic page of recent body-cache candidates. The
-    /// duplicate ranking runs before pagination so pages neither overlap nor
-    /// resurrect a lower-ranked copy of an already-selected Message-ID.
+    /// Returns a deterministic page of recent body-cache candidates.
     pub async fn recent_body_cache_candidates_page(
         &self,
         account_id: AccountId,
@@ -2756,7 +6594,7 @@ impl Store {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<MailSummary>> {
-        const SQL: &str = "WITH uncached AS (SELECT m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, m.body_text, m.body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, m.classification_signals, ROW_NUMBER() OVER (PARTITION BY CASE WHEN m.message_id IS NULL OR trim(m.message_id) = '' THEN m.id ELSE m.message_id END ORDER BY m.received_at DESC, m.id DESC) AS duplicate_rank FROM messages m LEFT JOIN message_content_cache c ON c.message_id = m.id LEFT JOIN starred_message_bodies b ON b.message_id = m.id AND b.attachment_presentation_version = ? WHERE m.account_id = ? AND m.mailbox IN ('INBOX', 'Sent', 'Archive') AND m.received_at >= ? AND ((m.is_flagged = 0 AND c.message_id IS NULL) OR (m.is_flagged = 1 AND b.message_id IS NULL))) SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM uncached WHERE duplicate_rank = 1 ORDER BY received_at DESC, id DESC LIMIT ? OFFSET ?";
+        const SQL: &str = "WITH uncached AS (SELECT m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, m.body_text, m.body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, m.classification_signals, ROW_NUMBER() OVER (PARTITION BY m.id ORDER BY m.received_at DESC, m.id DESC) AS duplicate_rank FROM messages m LEFT JOIN message_content_cache c ON c.message_id = m.id LEFT JOIN starred_message_bodies b ON b.message_id = m.id AND b.attachment_presentation_version = ? WHERE m.account_id = ? AND m.mailbox IN ('INBOX', 'Sent', 'Archive') AND m.received_at >= ? AND ((m.is_flagged = 0 AND c.message_id IS NULL) OR (m.is_flagged = 1 AND b.message_id IS NULL))) SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM uncached WHERE duplicate_rank = 1 ORDER BY received_at DESC, id DESC LIMIT ? OFFSET ?";
         Ok(sqlx::query_as::<_, MailSummary>(SQL)
             .bind(ATTACHMENT_PRESENTATION_VERSION)
             .bind(account_id.to_string())
@@ -2782,7 +6620,7 @@ impl Store {
         owner: &str,
     ) -> Result<bool> {
         Ok(sqlx::query(
-            "INSERT INTO message_content_fetches(message_id, claimed_at, claim_owner) SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM messages WHERE id = ?) ON CONFLICT(message_id) DO UPDATE SET claimed_at = excluded.claimed_at, claim_owner = excluded.claim_owner WHERE message_content_fetches.claimed_at <= ?",
+            "INSERT INTO message_content_fetches(message_id, claimed_at, claim_owner) SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM messages WHERE id = ?) ON CONFLICT(message_id) DO UPDATE SET claimed_at = excluded.claimed_at, claim_owner = excluded.claim_owner WHERE message_content_fetches.claimed_at <= ? OR (excluded.claim_owner NOT LIKE 'background:%' AND message_content_fetches.claim_owner LIKE 'background:%')",
         )
         .bind(message_id)
         .bind(Utc::now())
@@ -2799,7 +6637,28 @@ impl Store {
         &self,
         message_id: &str,
     ) -> Result<Option<MessageContentFetchClaim>> {
-        let owner = uuid::Uuid::new_v4().to_string();
+        self.acquire_message_content_fetch_with_owner(message_id, uuid::Uuid::new_v4().to_string())
+            .await
+    }
+
+    /// A reader can immediately take over low-priority automatic warming.
+    /// A late warmer cannot release the replacement reader's unique lease.
+    pub async fn acquire_background_message_content_fetch(
+        &self,
+        message_id: &str,
+    ) -> Result<Option<MessageContentFetchClaim>> {
+        self.acquire_message_content_fetch_with_owner(
+            message_id,
+            format!("background:{}", uuid::Uuid::new_v4()),
+        )
+        .await
+    }
+
+    async fn acquire_message_content_fetch_with_owner(
+        &self,
+        message_id: &str,
+        owner: String,
+    ) -> Result<Option<MessageContentFetchClaim>> {
         if !self
             .claim_message_content_fetch_for_owner(message_id, &owner)
             .await?
@@ -3177,8 +7036,29 @@ impl Store {
             .bind(source_uid)
             .execute(&mut *tx)
             .await?;
+        let destination_uid_validity: Option<i64> = sqlx::query_scalar(
+            "SELECT uid_validity FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ?",
+        )
+        .bind(&account_key)
+        .bind(destination_mailbox)
+        .fetch_optional(&mut *tx)
+        .await?
+        .flatten();
+        let destination_id = match destination_uid_validity {
+            Some(uid_validity) => uidvalidity_message_id(
+                account_id,
+                destination_mailbox,
+                destination_uid,
+                u32::try_from(uid_validity)?,
+            ),
+            None => format!(
+                "{}:pending:{}",
+                stable_message_id(account_id, destination_mailbox, destination_uid),
+                uuid::Uuid::new_v4()
+            ),
+        };
         sqlx::query("UPDATE messages SET id = ?, mailbox = ?, uid = ? WHERE account_id = ? AND mailbox = ? AND uid = ?")
-            .bind(stable_message_id(account_id, destination_mailbox, destination_uid))
+            .bind(destination_id)
             .bind(destination_mailbox)
             .bind(destination_uid)
             .bind(&account_key)
@@ -3294,8 +7174,29 @@ impl Store {
                 .await?;
             }
         }
+        let destination_uid_validity: Option<i64> = sqlx::query_scalar(
+            "SELECT uid_validity FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ?",
+        )
+        .bind(&account_key)
+        .bind(destination_mailbox)
+        .fetch_optional(&mut *tx)
+        .await?
+        .flatten();
+        let destination_id = match destination_uid_validity {
+            Some(uid_validity) => uidvalidity_message_id(
+                account_id,
+                destination_mailbox,
+                destination_uid,
+                u32::try_from(uid_validity)?,
+            ),
+            None => format!(
+                "{}:pending:{}",
+                stable_message_id(account_id, destination_mailbox, destination_uid),
+                uuid::Uuid::new_v4()
+            ),
+        };
         sqlx::query("UPDATE messages SET id = ?, mailbox = ?, uid = ? WHERE account_id = ? AND mailbox = ? AND uid = ?")
-            .bind(stable_message_id(account_id, destination_mailbox, destination_uid))
+            .bind(destination_id)
             .bind(destination_mailbox)
             .bind(destination_uid)
             .bind(&account_key)
@@ -3305,6 +7206,39 @@ impl Store {
             .await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Applies a provider-confirmed move only when COPYUID supplied the exact
+    /// destination namespace. If the destination catalogue is not yet known,
+    /// source tombstones are still recorded but no synthetic destination row
+    /// is created; a later authenticated sync publishes that locator.
+    pub async fn move_messages_to_destination_with_namespace(
+        &self,
+        account_id: AccountId,
+        sources: &[(String, u32)],
+        destination_mailbox: &str,
+        destination: Option<MoveDestinationLocator>,
+    ) -> Result<()> {
+        let Some(destination) = destination else {
+            return self
+                .move_messages_to_destination(account_id, sources, destination_mailbox, None)
+                .await;
+        };
+        let namespace_current: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ? AND uid_validity = ?)",
+        )
+        .bind(account_id.to_string())
+        .bind(destination_mailbox)
+        .bind(i64::from(destination.uid_validity))
+        .fetch_one(&self.pool)
+        .await?;
+        self.move_messages_to_destination(
+            account_id,
+            sources,
+            destination_mailbox,
+            namespace_current.then_some(destination.uid),
+        )
+        .await
     }
 
     pub async fn search(&self, query: &SearchQuery) -> Result<Vec<MailSummary>> {
@@ -3648,8 +7582,9 @@ impl Store {
     /// pagination continues through `search_conversation_page` so cursors keep
     /// the same public meaning after the initial page.
     pub async fn search_smart_inbox(&self, query: &SmartInboxQuery) -> Result<SmartInboxPage> {
-        const SECTION_IDS: [&str; 7] = [
+        const SECTION_IDS: [&str; 8] = [
             "starred",
+            "unsorted",
             "people",
             "transactions",
             "notifications",
@@ -3674,7 +7609,7 @@ impl Store {
         let account_placeholders = vec!["?"; query.account_ids.len()].join(",");
         let sql = format!(
             r#"WITH scoped AS (
-                SELECT m.id, m.account_id, m.thread_id, m.received_at, m.category,
+                SELECT m.id, m.account_id, m.thread_id, m.received_at, m.category, m.is_read,
                     ROW_NUMBER() OVER (PARTITION BY m.account_id, m.thread_id ORDER BY m.received_at DESC, m.id DESC) AS thread_rank,
                     MAX(CASE WHEN m.is_read = 0 THEN 1 ELSE 0 END) OVER (PARTITION BY m.account_id, m.thread_id) AS any_unread
                 FROM messages m
@@ -3685,13 +7620,16 @@ impl Store {
                 WHERE account_id IN ({account_placeholders}) AND is_flagged = 1
                 GROUP BY account_id, thread_id
             ), representatives AS (
-                SELECT scoped.id, scoped.account_id, scoped.thread_id, scoped.received_at, scoped.category, scoped.any_unread,
+                SELECT scoped.id, scoped.account_id, scoped.thread_id, scoped.received_at, scoped.category, scoped.is_read, scoped.any_unread,
                     COALESCE(thread_flags.any_flagged, 0) AS any_flagged
                 FROM scoped
                 LEFT JOIN thread_flags USING (account_id, thread_id)
                 WHERE scoped.thread_rank = 1
             ), sectioned AS (
                 SELECT 'starred' AS section_id, id, account_id, thread_id, received_at FROM representatives WHERE any_flagged = 1
+                UNION ALL
+                SELECT 'unsorted' AS section_id, id, account_id, thread_id, received_at FROM representatives
+                    WHERE any_flagged = 0 AND is_read = 0 AND category IS NULL
                 UNION ALL
                 SELECT category AS section_id, id, account_id, thread_id, received_at FROM representatives
                     WHERE any_flagged = 0 AND any_unread = 1 AND category IN ('people', 'transactions', 'notifications', 'newsletters', 'other')
@@ -4043,6 +7981,22 @@ impl Store {
         Ok(query.fetch_all(&self.pool).await?.into_iter().collect())
     }
 
+    /// Returns current physical messages from one exact sender for a durable
+    /// bulk mailbox action. Pending action memberships are omitted so a retry
+    /// cannot enqueue a second mutation for a row already hidden locally.
+    pub async fn messages_from_sender(
+        &self,
+        account_id: AccountId,
+        sender_address: &str,
+    ) -> Result<Vec<MailSummary>> {
+        const SQL: &str = "SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE account_id = ? AND from_address = ? COLLATE NOCASE AND mailbox NOT LIKE '__pending_action__:%' ORDER BY received_at DESC, id DESC";
+        Ok(sqlx::query_as::<_, MailSummary>(SQL)
+            .bind(account_id.to_string())
+            .bind(sender_address.trim())
+            .fetch_all(&self.pool)
+            .await?)
+    }
+
     /// Messages eligible for an explicitly requested model reclassification.
     /// User-selected categories are deliberately excluded.
     pub async fn messages_for_model_reclassification(&self) -> Result<Vec<MailSummary>> {
@@ -4082,6 +8036,104 @@ impl Store {
         }
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Applies Gmail/provider-derived classification evidence only while the
+    /// Account used for that fetch is still the persisted provider identity.
+    /// A false result discards old-server labels after an account update.
+    pub async fn update_classification_signals_if_account_current(
+        &self,
+        receipt: &AccountProviderReceipt,
+        updates: &[(String, String)],
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if ensure_account_provider_receipt_current_in_transaction(&mut tx, receipt)
+            .await
+            .is_err()
+        {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        for (id, signals) in updates {
+            sqlx::query("UPDATE messages SET classification_source = CASE WHEN classification_source = 'model' AND classification_signals != ? THEN NULL ELSE classification_source END, classification_confidence = CASE WHEN classification_source = 'model' AND classification_signals != ? THEN NULL ELSE classification_confidence END, classification_signals = ? WHERE id = ? AND account_id = ?")
+                .bind(signals).bind(signals).bind(signals).bind(id).bind(receipt.account_id.to_string())
+                .execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Applies provider-derived classification evidence using the same
+    /// namespace and local-mutation receipt that fenced the FETCH command.
+    ///
+    /// Category labels are metadata, but they still originate from a remote
+    /// mailbox.  Updating by a local message id after a UIDVALIDITY rollover
+    /// could otherwise attach evidence from an old server or old locator to a
+    /// recycled row.  Each update is keyed by UID and only applies while that
+    /// UID's version remains the one captured before the provider request.
+    /// A `false` result means the account or mailbox identity changed, so the
+    /// entire response must be discarded.  A newer local mutation for one UID
+    /// merely leaves that individual row untouched.
+    pub async fn update_classification_signals_with_provider_receipt(
+        &self,
+        receipt: &ProviderWriteReceipt,
+        updates: &[(u32, String)],
+    ) -> Result<bool> {
+        let account_id = receipt.account_id.to_string();
+        let captured_uids: HashSet<i64> = receipt
+            .expected_flags
+            .iter()
+            .map(|expected| expected.uid)
+            .collect();
+        if updates
+            .iter()
+            .any(|(uid, _)| *uid == 0 || !captured_uids.contains(&i64::from(*uid)))
+        {
+            return Err(anyhow!(
+                "classification update is not covered by its provider write receipt"
+            ));
+        }
+        let expected_versions: HashMap<i64, i64> = receipt
+            .local_mutation_versions
+            .iter()
+            .map(|version| (version.uid, version.version))
+            .collect();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let current: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM mailbox_catalog_state AS catalogue WHERE catalogue.account_id = ? AND catalogue.mailbox = ? AND catalogue.remote_name = ? AND catalogue.uid_validity = ? AND catalogue.provider_config_generation = ? AND catalogue.provider_config_fingerprint = ? AND EXISTS (SELECT 1 FROM accounts AS account WHERE account.id = catalogue.account_id AND account.config_generation = ? AND account.config_fingerprint = ?) AND NOT EXISTS (SELECT 1 FROM mailbox_snapshot_generations AS replacement WHERE replacement.account_id = catalogue.account_id AND replacement.mailbox = catalogue.mailbox AND replacement.uid_validity != catalogue.uid_validity))")
+            .bind(&account_id)
+            .bind(&receipt.mailbox)
+            .bind(&receipt.remote_name)
+            .bind(i64::from(receipt.uid_validity))
+            .bind(receipt.account_config_generation)
+            .bind(&receipt.account_config_fingerprint)
+            .bind(receipt.account_config_generation)
+            .bind(&receipt.account_config_fingerprint)
+            .fetch_one(&mut *tx)
+            .await?;
+        if !current {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        for (uid, signals) in updates {
+            let expected_version = expected_versions
+                .get(&i64::from(*uid))
+                .copied()
+                .unwrap_or(0);
+            sqlx::query("UPDATE messages SET classification_source = CASE WHEN classification_source = 'model' AND classification_signals != ? THEN NULL ELSE classification_source END, classification_confidence = CASE WHEN classification_source = 'model' AND classification_signals != ? THEN NULL ELSE classification_confidence END, classification_signals = ? WHERE account_id = ? AND mailbox = ? AND uid = ? AND NOT EXISTS (SELECT 1 FROM mailbox_mutation_fences AS fence WHERE fence.account_id = messages.account_id AND fence.mailbox = messages.mailbox AND fence.uid = messages.uid AND (fence.uid_validity IS NULL OR fence.uid_validity = ?)) AND COALESCE((SELECT version.version FROM mailbox_mutation_versions AS version WHERE version.account_id = messages.account_id AND version.mailbox = messages.mailbox AND version.uid = messages.uid AND version.uid_validity = ?), 0) = ?")
+                .bind(signals)
+                .bind(signals)
+                .bind(signals)
+                .bind(&account_id)
+                .bind(&receipt.mailbox)
+                .bind(i64::from(*uid))
+                .bind(i64::from(receipt.uid_validity))
+                .bind(i64::from(receipt.uid_validity))
+                .bind(expected_version)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(true)
     }
 
     pub async fn apply_model_classifications(
@@ -4447,6 +8499,7 @@ fn participants_overlap(left: &ThreadRow, right: &ThreadRow) -> bool {
 enum FlagUpdatePolicy {
     ProviderAuthoritative,
     CompareAndSwap(Option<(bool, bool)>),
+    PreserveLocal,
 }
 
 async fn persist_message(
@@ -4540,6 +8593,7 @@ async fn persist_staged_uidvalidity_replacement_messages_in_transaction(
     account_id: &str,
     mailbox: &str,
     generation: &str,
+    uid_validity: i64,
 ) -> Result<()> {
     let mut after_uid: Option<i64> = None;
     loop {
@@ -4568,7 +8622,7 @@ async fn persist_staged_uidvalidity_replacement_messages_in_transaction(
             return Ok(());
         }
         for (uid, message_json) in &rows {
-            let message: MailSummary = serde_json::from_str(message_json)
+            let mut message: MailSummary = serde_json::from_str(message_json)
                 .context("decode staged snapshot replacement message")?;
             if message.account_id != account_id || message.mailbox != mailbox || message.uid != *uid
             {
@@ -4589,6 +8643,10 @@ async fn persist_staged_uidvalidity_replacement_messages_in_transaction(
                 return Err(anyhow!(
                     "staged replacement message UID is absent from the finalized snapshot"
                 ));
+            }
+            message.id = replacement_message_id(account_id, mailbox, *uid, uid_validity)?;
+            for attachment in &mut message.attachments {
+                attachment.attachment.message_id = message.id.clone();
             }
             persist_message(tx, &message).await?;
         }
@@ -4612,10 +8670,23 @@ async fn persist_message_with_flag_policy(
     if suppressed {
         return Ok(());
     }
-    let (provider_authoritative, expected_flags) = match flag_policy {
-        FlagUpdatePolicy::ProviderAuthoritative => (true, None),
-        FlagUpdatePolicy::CompareAndSwap(expected_flags) => (false, expected_flags),
+    let local_mutation_pending: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM mailbox_mutation_fences AS fence JOIN mailbox_catalog_state AS catalogue ON catalogue.account_id = fence.account_id AND catalogue.mailbox = fence.mailbox WHERE fence.account_id = ? AND fence.mailbox = ? AND fence.uid = ? AND (fence.uid_validity IS NULL OR fence.uid_validity = catalogue.uid_validity))",
+    )
+    .bind(&message.account_id)
+    .bind(&message.mailbox)
+    .bind(message.uid)
+    .fetch_one(&mut **tx)
+    .await?;
+    let (requested_provider_authority, expected_flags, compare_allowed) = match flag_policy {
+        FlagUpdatePolicy::ProviderAuthoritative => (true, None, true),
+        FlagUpdatePolicy::CompareAndSwap(expected_flags) => (false, expected_flags, true),
+        FlagUpdatePolicy::PreserveLocal => (false, None, false),
     };
+    // Historical, realtime, and delayed catalogue writers all share this
+    // path. A pending optimistic operation keeps its local flags until its
+    // journal outcome is reconciled, regardless of which writer arrives.
+    let provider_authoritative = requested_provider_authority && !local_mutation_pending;
     let (expected_read, expected_flagged) = expected_flags.unwrap_or_default();
     sqlx::query("INSERT INTO messages(id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, threading_scanned, recipient_headers_scanned, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, unsubscribe_scanned, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(account_id, mailbox, uid) DO UPDATE SET message_id=excluded.message_id, in_reply_to=excluded.in_reply_to, reference_ids=excluded.reference_ids, threading_scanned=1, recipient_headers_scanned=1, subject=excluded.subject, from_name=excluded.from_name, from_address=excluded.from_address, to_addresses=excluded.to_addresses, cc_addresses=excluded.cc_addresses, bcc_addresses=excluded.bcc_addresses, reply_to_addresses=excluded.reply_to_addresses, received_at=excluded.received_at, snippet=CASE WHEN excluded.content_state = 'complete' THEN excluded.snippet ELSE messages.snippet END, body_text=CASE WHEN excluded.content_state = 'complete' THEN excluded.body_text ELSE messages.body_text END, body_html=CASE WHEN excluded.content_state = 'complete' THEN excluded.body_html ELSE messages.body_html END, content_state=CASE WHEN messages.content_state = 'complete' THEN messages.content_state ELSE excluded.content_state END, unsubscribe_kind=CASE WHEN excluded.content_state = 'complete' THEN excluded.unsubscribe_kind ELSE messages.unsubscribe_kind END, unsubscribe_url=CASE WHEN excluded.content_state = 'complete' THEN excluded.unsubscribe_url ELSE messages.unsubscribe_url END, unsubscribe_scanned=CASE WHEN excluded.content_state = 'complete' THEN 1 ELSE messages.unsubscribe_scanned END, is_read=CASE WHEN ? OR (? AND messages.is_read = ? AND messages.is_flagged = ?) THEN excluded.is_read ELSE messages.is_read END, is_flagged=CASE WHEN ? OR (? AND messages.is_read = ? AND messages.is_flagged = ?) THEN excluded.is_flagged ELSE messages.is_flagged END, has_attachments=CASE WHEN excluded.content_state = 'complete' THEN excluded.has_attachments ELSE messages.has_attachments END, classification_confidence=CASE WHEN messages.classification_source = 'model' AND (messages.from_name IS NOT excluded.from_name OR messages.from_address != excluded.from_address OR messages.subject != excluded.subject OR messages.classification_signals != excluded.classification_signals OR (excluded.content_state = 'complete' AND (messages.snippet != excluded.snippet OR messages.body_text != excluded.body_text))) THEN NULL ELSE messages.classification_confidence END, classification_source=CASE WHEN messages.classification_source = 'model' AND (messages.from_name IS NOT excluded.from_name OR messages.from_address != excluded.from_address OR messages.subject != excluded.subject OR messages.classification_signals != excluded.classification_signals OR (excluded.content_state = 'complete' AND (messages.snippet != excluded.snippet OR messages.body_text != excluded.body_text))) THEN NULL ELSE messages.classification_source END, classification_signals=excluded.classification_signals")
         .bind(&message.id).bind(&message.account_id).bind(&message.mailbox).bind(message.uid)
@@ -4634,11 +8705,11 @@ async fn persist_message_with_flag_policy(
         .bind(&message.category).bind(message.classification_confidence)
         .bind(&message.classification_source).bind(&message.classification_signals)
         .bind(provider_authoritative)
-        .bind(expected_flags.is_some())
+        .bind(compare_allowed && expected_flags.is_some())
         .bind(expected_read)
         .bind(expected_flagged)
         .bind(provider_authoritative)
-        .bind(expected_flags.is_some())
+        .bind(compare_allowed && expected_flags.is_some())
         .bind(expected_read)
         .bind(expected_flagged)
         .execute(&mut **tx).await?;
@@ -4673,7 +8744,7 @@ async fn persist_message_with_flag_policy(
                 .await?;
         }
     }
-    let effective_is_flagged = if matches!(flag_policy, FlagUpdatePolicy::CompareAndSwap(_)) {
+    let effective_is_flagged = if !provider_authoritative {
         sqlx::query_scalar(
             "SELECT is_flagged FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?",
         )
@@ -5161,14 +9232,192 @@ async fn save_account_in_transaction(
     if deleted {
         return Err(anyhow!("account was removed"));
     }
-    sqlx::query("INSERT INTO accounts(id, email, data, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET email=excluded.email, data=excluded.data")
+    let fingerprint = account_provider_config_fingerprint(account)?;
+    let prior: Option<(i64, String)> =
+        sqlx::query_as("SELECT config_generation, config_fingerprint FROM accounts WHERE id = ?")
+            .bind(account.id.to_string())
+            .fetch_optional(&mut **tx)
+            .await?;
+    let configuration_changed = prior
+        .as_ref()
+        .is_some_and(|(_, prior_fingerprint)| prior_fingerprint != &fingerprint);
+    let generation = match prior.as_ref() {
+        Some((generation, _)) if configuration_changed => generation + 1,
+        Some((generation, _)) => *generation,
+        None => 1,
+    };
+    sqlx::query("INSERT INTO accounts(id, email, data, config_generation, config_fingerprint, created_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET email=excluded.email, data=excluded.data, config_generation=excluded.config_generation, config_fingerprint=excluded.config_fingerprint")
         .bind(account.id.to_string())
         .bind(&account.email)
         .bind(serde_json::to_string(account)?)
+        .bind(generation)
+        .bind(fingerprint)
         .bind(account.created_at)
         .execute(&mut **tx)
         .await?;
+    if configuration_changed {
+        // Keep retained catalogue rows and their cached bodies readable, but
+        // make their remote locators unusable until a fetch from the new
+        // account configuration republishes the mailbox identity.
+        sqlx::query("UPDATE mailbox_catalog_state SET provider_config_generation = NULL, provider_config_fingerprint = NULL, updated_at = ? WHERE account_id = ?")
+            .bind(Utc::now())
+            .bind(account.id.to_string())
+            .execute(&mut **tx)
+            .await?;
+        invalidate_remote_operations_for_account_configuration_change(tx, account.id).await?;
+    }
     Ok(())
+}
+
+/// A provider configuration update changes the meaning of every IMAP
+/// locator, even if a replacement server reuses the same UIDVALIDITY.  Mark
+/// remote operations as unresolved inside the account-update transaction so
+/// an old worker cannot claim or complete them after the new settings become
+/// visible.  Mailbox actions are first restored from their durable backup:
+/// leaving their source hidden in a synthetic pending mailbox would make an
+/// unresolved intent disappear from the user's catalogue.
+async fn invalidate_remote_operations_for_account_configuration_change(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    account_id: AccountId,
+) -> Result<()> {
+    let account_id_text = account_id.to_string();
+    let backups: Vec<(String, String, String, i64, String)> = sqlx::query_as(
+        "SELECT backup.operation_id, backup.message_id, backup.original_mailbox, backup.original_uid, backup.message_json FROM operation_message_backups AS backup JOIN operation_journal AS operation ON operation.operation_id = backup.operation_id WHERE operation.account_id = ? AND operation.kind = 'mailbox_action' AND operation.state NOT IN ('accepted', 'completed', 'rejected', 'permanent_failed', 'uncertain')",
+    )
+    .bind(&account_id_text)
+    .fetch_all(&mut **tx)
+    .await?;
+    for (operation_id, message_id, mailbox, uid, message_json) in backups {
+        let pending_mailbox = format!("__pending_action__:{operation_id}");
+        let restored = sqlx::query(
+            "UPDATE messages SET mailbox = ?, uid = ? WHERE id = ? AND account_id = ? AND mailbox = ?",
+        )
+        .bind(&mailbox)
+        .bind(uid)
+        .bind(&message_id)
+        .bind(&account_id_text)
+        .bind(&pending_mailbox)
+        .execute(&mut **tx)
+        .await?
+        .rows_affected();
+        if restored == 0 {
+            let message: MailSummary = serde_json::from_str(&message_json)
+                .context("decode mailbox-action backup during account update")?;
+            persist_message(tx, &message).await?;
+        }
+        sqlx::query(
+            "DELETE FROM mailbox_action_tombstones WHERE account_id = ? AND mailbox = ? AND uid = ?",
+        )
+        .bind(&account_id_text)
+        .bind(&mailbox)
+        .bind(uid)
+        .execute(&mut **tx)
+        .await?;
+    }
+    // Sent-copy reconciliation also issues IMAP commands.  Do not let a
+    // previously SMTP-accepted row append or search in a newly configured
+    // account; retain its independent marker so recovery can tell delivery
+    // uncertainty from the Sent-copy uncertainty.
+    sqlx::query("UPDATE operation_journal SET state = 'uncertain', outcome = CASE WHEN smtp_accepted_at IS NOT NULL THEN 'smtp_accepted_account_configuration_changed' ELSE 'account_configuration_changed' END, error = 'account provider configuration changed before remote outcome', next_retry_at = NULL, claim_owner = NULL, claimed_at = NULL, claimed_from_state = NULL, updated_at = ? WHERE account_id = ? AND (state NOT IN ('accepted', 'completed', 'rejected', 'permanent_failed', 'uncertain') OR (kind = 'smtp_submission' AND state = 'accepted'))")
+        .bind(Utc::now())
+        .bind(&account_id_text)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM mailbox_mutation_fences WHERE operation_id IN (SELECT operation_id FROM operation_journal WHERE account_id = ? AND state = 'uncertain' AND outcome IN ('account_configuration_changed', 'smtp_accepted_account_configuration_changed'))")
+        .bind(&account_id_text)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Canonical provider connection settings. Deliberately excludes mutable
+/// OAuth expiry and UI-only fields, but includes every value that can select a
+/// different IMAP namespace or authenticate as a different mailbox owner.
+fn account_provider_config_fingerprint(account: &Account) -> Result<String> {
+    let auth = match &account.auth {
+        AccountAuth::Password { username } => serde_json::json!({
+            "type": "password",
+            "username": username.trim(),
+        }),
+        AccountAuth::OAuth2 {
+            username, provider, ..
+        } => serde_json::json!({
+            "type": "oauth2",
+            "username": username.trim(),
+            "provider": provider.trim().to_lowercase(),
+        }),
+    };
+    serde_json::to_string(&serde_json::json!({
+        "account_id": account.id,
+        "provider_id": account.provider_id.trim().to_lowercase(),
+        "auth": auth,
+        "imap_host": account.imap_host.trim().to_lowercase(),
+        "imap_port": account.imap_port,
+        "imap_security": account.imap_security,
+        "archive_mailbox": account.archive_mailbox.trim(),
+        "spam_mailbox": account.spam_mailbox.trim(),
+    }))
+    .context("could not serialize account provider configuration")
+}
+
+fn folder_sync_state_matches_provider_receipt(
+    state: &FolderSyncState,
+    receipt: &AccountProviderReceipt,
+) -> bool {
+    state.account_id == receipt.account_id.to_string()
+        && state.account_config_generation == Some(receipt.config_generation)
+        && state.account_config_fingerprint.as_deref() == Some(receipt.config_fingerprint.as_str())
+}
+
+async fn ensure_account_provider_receipt_current_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    receipt: &AccountProviderReceipt,
+) -> Result<()> {
+    let account_id = receipt.account_id.to_string();
+    let current: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM accounts WHERE id = ? AND config_generation = ? AND config_fingerprint = ? AND NOT EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = ?))")
+        .bind(&account_id)
+        .bind(receipt.config_generation)
+        .bind(&receipt.config_fingerprint)
+        .bind(&account_id)
+        .fetch_one(&mut **tx)
+        .await?;
+    if current {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "account provider configuration changed during sync"
+        ))
+    }
+}
+
+async fn ensure_stored_provider_receipt_current_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    account_id: &str,
+    config_generation: Option<i64>,
+    config_fingerprint: Option<&str>,
+) -> Result<()> {
+    match (config_generation, config_fingerprint) {
+        (None, None) => Ok(()),
+        (Some(generation), Some(fingerprint)) => {
+            let current: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM accounts WHERE id = ? AND config_generation = ? AND config_fingerprint = ? AND NOT EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = ?))")
+                .bind(account_id)
+                .bind(generation)
+                .bind(fingerprint)
+                .bind(account_id)
+                .fetch_one(&mut **tx)
+                .await?;
+            if current {
+                Ok(())
+            } else {
+                Err(anyhow!(
+                    "account provider configuration changed during sync"
+                ))
+            }
+        }
+        _ => Err(anyhow!(
+            "folder or mailbox snapshot has an invalid provider receipt"
+        )),
+    }
 }
 
 async fn save_mail_rebuild_job_in_transaction(
@@ -5192,6 +9441,36 @@ async fn save_mail_rebuild_job_in_transaction(
 pub fn stable_message_id(account_id: AccountId, mailbox: &str, uid: u32) -> String {
     // UUID v4 is used for accounts; deriving a stable ID avoids duplicates during resync.
     format!("{}:{}:{}", account_id, mailbox.replace(':', "_"), uid)
+}
+
+/// A UID is only unique inside one UIDVALIDITY namespace. Normal incremental
+/// writes retain the long-standing ID; a replacement namespace gets this
+/// canonical ID so a stale UI/content fetch receipt cannot resolve a recycled
+/// UID to an unrelated message.
+pub fn uidvalidity_message_id(
+    account_id: AccountId,
+    mailbox: &str,
+    uid: u32,
+    uid_validity: u32,
+) -> String {
+    format!(
+        "{}:uv:{uid_validity}",
+        stable_message_id(account_id, mailbox, uid)
+    )
+}
+
+fn replacement_message_id(
+    account_id: &str,
+    mailbox: &str,
+    uid: i64,
+    uid_validity: i64,
+) -> Result<String> {
+    Ok(uidvalidity_message_id(
+        AccountId::parse_str(account_id)?,
+        mailbox,
+        u32::try_from(uid).context("replacement UID is invalid")?,
+        u32::try_from(uid_validity).context("replacement UIDVALIDITY is invalid")?,
+    ))
 }
 
 #[cfg(test)]
@@ -5228,6 +9507,145 @@ mod tests {
             access_token_expires_at: None,
         };
         account
+    }
+
+    #[tokio::test]
+    async fn owned_account_update_rolls_back_credentials_and_rebuild_on_failure_or_lost_ownership()
+    {
+        let store = Store::in_memory().await.unwrap();
+        let original = legacy_oauth_account(uuid::Uuid::new_v4());
+        let secret_name = format!(
+            "dev.dakia.mail:{}:{}",
+            original.id,
+            original.auth.username()
+        );
+        store
+            .save_account_with_secret(&original, &secret_name, "original-secret")
+            .await
+            .unwrap();
+        let gate = store
+            .acquire_account_removal_gate(original.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut changed = original.clone();
+        changed.display_name = "Updated account".into();
+        let rebuild = MailRebuildJob {
+            account_id: original.id,
+            phase: "downloading".into(),
+            completed: 0,
+            total: None,
+            reset_before_sync: true,
+        };
+        sqlx::query("CREATE TRIGGER reject_rebuild BEFORE INSERT ON mail_rebuild_jobs BEGIN SELECT RAISE(ABORT, 'forced rebuild failure'); END")
+            .execute(&store.pool).await.unwrap();
+        assert!(gate
+            .save_account_with_secret_and_rebuild(
+                &changed,
+                &secret_name,
+                Some("replacement-secret"),
+                Some(&rebuild),
+                None
+            )
+            .await
+            .is_err());
+        assert_eq!(
+            store
+                .account(original.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .display_name,
+            original.display_name
+        );
+        assert_eq!(
+            store.secret(&secret_name).await.unwrap().as_deref(),
+            Some("original-secret")
+        );
+        assert!(store.mail_rebuild_jobs().await.unwrap().is_empty());
+        sqlx::query("DROP TRIGGER reject_rebuild")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE account_removal_gates SET owner = 'replacement-owner' WHERE account_id = ?",
+        )
+        .bind(original.id.to_string())
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        assert!(gate
+            .save_account_with_secret_and_rebuild(
+                &changed,
+                &secret_name,
+                Some("replacement-secret"),
+                Some(&rebuild),
+                None
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("ownership expired"));
+        assert_eq!(
+            store.secret(&secret_name).await.unwrap().as_deref(),
+            Some("original-secret")
+        );
+        assert!(store.mail_rebuild_jobs().await.unwrap().is_empty());
+        assert!(gate.delete_account_and_secret(&secret_name).await.is_err());
+        assert!(store.account(original.id).await.unwrap().is_some());
+        assert_eq!(
+            store.secret(&secret_name).await.unwrap().as_deref(),
+            Some("original-secret")
+        );
+    }
+
+    #[tokio::test]
+    async fn new_account_credentials_and_initial_sync_commit_together_and_survive_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("account.db");
+        let store = Store::open(&path).await.unwrap();
+        let account = account_with_id(uuid::Uuid::new_v4(), "new@example.test");
+        let name = format!("dev.dakia.mail:{}:{}", account.id, account.auth.username());
+        sqlx::query("CREATE TRIGGER reject_initial_job BEFORE INSERT ON sync_runs BEGIN SELECT RAISE(ABORT, 'forced initial job failure'); END").execute(&store.pool).await.unwrap();
+        assert!(store
+            .create_account_with_secret_and_initial_sync(&account, &name, "fictional-secret")
+            .await
+            .is_err());
+        assert!(store.account(account.id).await.unwrap().is_none());
+        assert!(store.secret(&name).await.unwrap().is_none());
+        assert!(store.sync_runs().await.unwrap().is_empty());
+        sqlx::query("DROP TRIGGER reject_initial_job")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let run = store
+            .create_account_with_secret_and_initial_sync(&account, &name, "fictional-secret")
+            .await
+            .unwrap();
+        let mut duplicate = account.clone();
+        duplicate.id = uuid::Uuid::new_v4();
+        duplicate.email = " NEW@example.test ".into();
+        assert!(store
+            .create_account_with_secret_and_initial_sync(
+                &duplicate,
+                "duplicate-secret",
+                "never-persisted"
+            )
+            .await
+            .is_err());
+        assert!(store.secret("duplicate-secret").await.unwrap().is_none());
+        drop(store);
+        let reopened = Store::open(&path).await.unwrap();
+        assert!(reopened.account(account.id).await.unwrap().is_some());
+        assert_eq!(
+            reopened.secret(&name).await.unwrap().as_deref(),
+            Some("fictional-secret")
+        );
+        let restored = reopened.sync_run(account.id).await.unwrap().unwrap();
+        assert_eq!(restored.run_id, run.run_id);
+        assert_eq!(restored.stage, "initial_inbox");
+        assert_eq!(restored.outcome, "running");
+        assert!(!restored.inbox_ready);
     }
 
     #[tokio::test]
@@ -6505,8 +10923,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recent_body_cache_candidates_respect_cache_folder_cutoff_and_exact_message_id_dedupe()
-    {
+    async fn recent_body_cache_candidates_preserve_distinct_local_messages_with_the_same_rfc_id() {
         let store = Store::in_memory().await.unwrap();
         let account_id = uuid::Uuid::new_v4();
         let cutoff = Utc::now();
@@ -6582,7 +10999,7 @@ mod tests {
         store
             .upsert_messages(&[
                 duplicate_new.clone(),
-                duplicate_old,
+                duplicate_old.clone(),
                 flagged_missing.clone(),
                 sent.clone(),
                 archive.clone(),
@@ -6614,6 +11031,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 duplicate_new.id.as_str(),
+                duplicate_old.id.as_str(),
                 flagged_missing.id.as_str(),
                 sent.id.as_str(),
                 archive.id.as_str(),
@@ -6623,10 +11041,10 @@ mod tests {
         for (offset, expected) in [
             (
                 0,
-                vec![duplicate_new.id.as_str(), flagged_missing.id.as_str()],
+                vec![duplicate_new.id.as_str(), duplicate_old.id.as_str()],
             ),
-            (2, vec![sent.id.as_str(), archive.id.as_str()]),
-            (4, vec![boundary.id.as_str()]),
+            (2, vec![flagged_missing.id.as_str(), sent.id.as_str()]),
+            (4, vec![archive.id.as_str(), boundary.id.as_str()]),
         ] {
             let page = store
                 .recent_body_cache_candidates_page(account_id, cutoff, 2, offset)
@@ -6718,6 +11136,52 @@ mod tests {
                 .await
                 .unwrap();
         assert!(used <= MESSAGE_CONTENT_CACHE_MAX_BYTES);
+    }
+
+    #[tokio::test]
+    async fn foreground_reader_takes_over_background_content_without_waiting_for_its_lease() {
+        let store = Store::in_memory().await.unwrap();
+        let message = message("Read while warming", "preview");
+        let id = message.id.clone();
+        store.upsert_messages(&[message]).await.unwrap();
+        let background = store
+            .acquire_background_message_content_fetch(&id)
+            .await
+            .unwrap()
+            .unwrap();
+        let reader = match store
+            .acquire_message_content_fetch_outcome(&id)
+            .await
+            .unwrap()
+        {
+            MessageContentFetchAcquire::Claimed(reader) => reader,
+            _ => panic!("opening mail must not wait for low-priority warming"),
+        };
+        background.release().await.unwrap();
+        assert!(
+            store
+                .acquire_background_message_content_fetch(&id)
+                .await
+                .unwrap()
+                .is_none(),
+            "the late warmer must not release the reader's replacement lease"
+        );
+        assert!(matches!(
+            store
+                .acquire_message_content_fetch_outcome(&id)
+                .await
+                .unwrap(),
+            MessageContentFetchAcquire::Busy
+        ));
+        reader.release().await.unwrap();
+        store
+            .acquire_background_message_content_fetch(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .release()
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -6833,7 +11297,12 @@ mod tests {
             .await
             .unwrap();
 
-        let destination_id = stable_message_id(account_id, "Archive", 3);
+        let destination_id = store
+            .message_by_locator(account_id, "Archive", 3)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
         let destination_claim = match store
             .acquire_message_content_fetch_outcome(&destination_id)
             .await
@@ -6903,7 +11372,12 @@ mod tests {
             .move_message(account_id, "INBOX", 1, "Archive", Some(3))
             .await
             .unwrap();
-        let destination_id = stable_message_id(account_id, "Archive", 3);
+        let destination_id = store
+            .message_by_locator(account_id, "Archive", 3)
+            .await
+            .unwrap()
+            .expect("move must retain the message under a fresh local identity")
+            .id;
         assert!(store.starred_body(&destination_id).await.unwrap().is_none());
         assert!(store
             .starred_attachment_metadata(&destination_id)
@@ -7071,6 +11545,234 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_content_status_tracks_live_claims_after_header_completion_and_expiry() {
+        let store = Store::in_memory().await.unwrap();
+        let account = account_with_id(uuid::Uuid::new_v4(), "loading@example.test");
+        let other = account_with_id(uuid::Uuid::new_v4(), "other@example.test");
+        store.save_account(&account).await.unwrap();
+        store.save_account(&other).await.unwrap();
+        let run = store.create_sync_run(account.id).await.unwrap();
+        store.create_sync_run(other.id).await.unwrap();
+        store
+            .update_sync_run(
+                &run.run_id,
+                &SyncRunUpdate {
+                    outcome: Some("completed"),
+                    ..SyncRunUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+        let mut row = message("Loading content", "preview");
+        row.account_id = account.id.to_string();
+        store.upsert_messages(&[row.clone()]).await.unwrap();
+        assert!(
+            !store
+                .sync_run(account.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .content_loading
+        );
+        let claim = store
+            .acquire_background_message_content_fetch(&row.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let loaded = store.sync_run(account.id).await.unwrap().unwrap();
+        assert_eq!(loaded.outcome, "completed");
+        assert!(loaded.content_loading);
+        let statuses = store.sync_runs().await.unwrap();
+        assert!(
+            statuses
+                .iter()
+                .find(|status| status.account_id == account.id)
+                .unwrap()
+                .content_loading
+        );
+        assert!(
+            !statuses
+                .iter()
+                .find(|status| status.account_id == other.id)
+                .unwrap()
+                .content_loading
+        );
+        claim.release().await.unwrap();
+        assert!(
+            !store
+                .sync_run(account.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .content_loading
+        );
+        let stale = store
+            .acquire_background_message_content_fetch(&row.id)
+            .await
+            .unwrap()
+            .unwrap();
+        sqlx::query("UPDATE message_content_fetches SET claimed_at = ? WHERE message_id = ?")
+            .bind(Utc::now() - chrono::Duration::seconds(MESSAGE_CONTENT_FETCH_LEASE_SECONDS + 1))
+            .bind(&row.id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        assert!(
+            !store
+                .sync_run(account.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .content_loading
+        );
+        assert!(!store
+            .sync_runs()
+            .await
+            .unwrap()
+            .iter()
+            .any(|status| status.content_loading));
+        stale.release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn old_account_content_cannot_replace_or_evict_newer_cached_body() {
+        let store = Store::in_memory().await.unwrap();
+        let account = account_with_id(uuid::Uuid::new_v4(), "reader@example.test");
+        store.save_account(&account).await.unwrap();
+        let mut row = message("Cached content", "preview");
+        row.account_id = account.id.to_string();
+        store.upsert_messages(&[row.clone()]).await.unwrap();
+        store
+            .save_mailbox_catalog_state(account.id, "INBOX", "INBOX", 77, 1, true)
+            .await
+            .unwrap();
+        let old_identity = store
+            .capture_message_remote_identity(&row.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut changed = account.clone();
+        changed.imap_host = "replacement.example.test".into();
+        store.save_account(&changed).await.unwrap();
+        let current_receipt = store
+            .capture_account_provider_receipt(&changed)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut forged_current_config = old_identity.clone();
+        forged_current_config.account_config_generation = current_receipt.config_generation;
+        forged_current_config.account_config_fingerprint = current_receipt.config_fingerprint;
+        assert!(store
+            .capture_message_remote_identity(&row.id)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(!store
+            .cache_message_content_if_current(
+                &forged_current_config,
+                false,
+                cached_content("forged new-account receipt over old locator")
+            )
+            .await
+            .unwrap());
+        assert!(!store
+            .set_message_content_state_if_current(&forged_current_config, "complete")
+            .await
+            .unwrap());
+        assert!(!store
+            .update_message_attachment_state_if_current(&forged_current_config, true)
+            .await
+            .unwrap());
+        let state = store
+            .begin_folder_sync_for_account(&changed, "INBOX", "INBOX", 77, Some(1))
+            .await
+            .unwrap();
+        let revision = store
+            .stage_folder_discovery_page(
+                changed.id,
+                "INBOX",
+                &state.generation,
+                state.revision as u64,
+                &[u32::try_from(row.uid).unwrap()],
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+        store
+            .commit_folder_header_batch_for_account(
+                &changed,
+                "INBOX",
+                &state.generation,
+                revision,
+                &[row.clone()],
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+        let current_identity = store
+            .capture_message_remote_identity(&row.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(store
+            .cache_message_content_if_current(
+                &current_identity,
+                false,
+                cached_content("new server body")
+            )
+            .await
+            .unwrap());
+        assert!(!store
+            .cache_message_content_if_current(
+                &old_identity,
+                false,
+                cached_content("stale old server body")
+            )
+            .await
+            .unwrap());
+        assert!(!store
+            .cache_message_content_with_budget(
+                &row.id,
+                false,
+                cached_content(&"x".repeat(100)),
+                20,
+                Some(&old_identity)
+            )
+            .await
+            .unwrap());
+        assert_eq!(
+            store
+                .cached_message_content(&row.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .body_text,
+            "new server body"
+        );
+        store.set_message_flagged(&row.id, true).await.unwrap();
+        assert!(store
+            .cache_starred_message_content_if_current(
+                &current_identity,
+                cached_content("new starred body")
+            )
+            .await
+            .unwrap());
+        assert!(!store
+            .cache_starred_message_content_if_current(
+                &old_identity,
+                cached_content("old starred body")
+            )
+            .await
+            .unwrap());
+        assert_eq!(
+            store.starred_body(&row.id).await.unwrap().unwrap().0,
+            "new starred body"
+        );
+    }
+
+    #[tokio::test]
     async fn body_cache_oversized_replacement_bypasses_without_stale_content() {
         let store = Store::in_memory().await.unwrap();
         let message = message("Oversized", "preview");
@@ -7082,7 +11784,7 @@ mod tests {
             .unwrap();
         let oversized = "x".repeat(21);
         store
-            .cache_message_content_with_budget(&id, false, cached_content(&oversized), 20)
+            .cache_message_content_with_budget(&id, false, cached_content(&oversized), 20, None)
             .await
             .unwrap();
         assert!(store.cached_message_content(&id).await.unwrap().is_none());
@@ -7234,7 +11936,7 @@ mod tests {
             .cached_message_content(&regenerated_id)
             .await
             .unwrap()
-            .is_none());
+            .is_some());
         assert!(store
             .cached_message_content(&other_mailbox_id)
             .await
@@ -7656,6 +12358,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 "starred",
+                "unsorted",
                 "people",
                 "transactions",
                 "notifications",
@@ -8205,6 +12908,218 @@ mod tests {
             .messages
             .iter()
             .any(|message| message.mailbox == "Sent"));
+    }
+
+    #[tokio::test]
+    async fn optimistic_mailbox_action_reconciles_the_operation_owned_pending_membership() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        assert!(store
+            .ensure_mailbox_catalog_identity(account_id, "INBOX", "INBOX", 11)
+            .await
+            .unwrap());
+        assert!(store
+            .ensure_mailbox_catalog_identity(account_id, "Archive", "Archive", 12)
+            .await
+            .unwrap());
+        let mut source =
+            cache_candidate_message(account_id, "action-source", 41, "INBOX", Utc::now());
+        source.id = uidvalidity_message_id(account_id, "INBOX", 41, 11);
+        store
+            .upsert_messages(std::slice::from_ref(&source))
+            .await
+            .unwrap();
+        store
+            .cache_message_content(&source.id, false, cached_content("source cache"))
+            .await
+            .unwrap();
+        store
+            .observe_gmail_message(
+                account_id,
+                &source.id,
+                "gmail-action-source",
+                &["\\Inbox".into()],
+            )
+            .await
+            .unwrap();
+        store
+            .observe_message_dates(account_id, &source.id, Utc::now(), None)
+            .await
+            .unwrap();
+        let identity = store
+            .capture_message_remote_identity(&source.id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let operation = store
+            .enqueue_and_apply_mailbox_action_for_identity(
+                &identity,
+                crate::mail::MailboxAction::Archive,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(store
+            .message_by_locator(account_id, "INBOX", 41)
+            .await
+            .unwrap()
+            .is_none());
+        let pending_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE id = ? AND mailbox = ?")
+                .bind(&source.id)
+                .bind(format!("__pending_action__:{}", operation.operation_id))
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(pending_count, 1);
+
+        store
+            .claim_operation_by_id(&operation.operation_id, "action-worker")
+            .await
+            .unwrap()
+            .expect("queued action must be claimed");
+        assert!(store
+            .reconcile_and_complete_claimed_mailbox_action(
+                &operation.operation_id,
+                "action-worker",
+                "Archive",
+                Some(7),
+            )
+            .await
+            .unwrap());
+
+        let destination = store
+            .message_by_locator(account_id, "Archive", 7)
+            .await
+            .unwrap()
+            .expect("remote-confirmed move must become visible");
+        assert_eq!(
+            destination.id,
+            uidvalidity_message_id(account_id, "Archive", 7, 12)
+        );
+        assert_eq!(
+            store
+                .gmail_message_labels(account_id, &destination.id)
+                .await
+                .unwrap(),
+            Some(vec!["\\Inbox".into()])
+        );
+        let temporal_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_temporal_observations WHERE account_id = ? AND message_id = ?",
+        )
+        .bind(account_id.to_string())
+        .bind(&destination.id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(temporal_rows, 1);
+        assert!(store
+            .cached_message_content(&source.id)
+            .await
+            .unwrap()
+            .is_none());
+        let pending_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages WHERE mailbox LIKE '__pending_action__:%'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        let backup_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM operation_message_backups WHERE operation_id = ?",
+        )
+        .bind(&operation.operation_id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(pending_rows, 0);
+        assert_eq!(backup_rows, 0);
+        assert_eq!(
+            store
+                .operation_journal_entry(&operation.operation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "completed"
+        );
+    }
+
+    #[tokio::test]
+    async fn optimistic_mailbox_action_rollback_restores_the_exact_source_membership() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        assert!(store
+            .ensure_mailbox_catalog_identity(account_id, "INBOX", "INBOX", 21)
+            .await
+            .unwrap());
+        let mut source =
+            cache_candidate_message(account_id, "rollback-source", 42, "INBOX", Utc::now());
+        source.id = uidvalidity_message_id(account_id, "INBOX", 42, 21);
+        store
+            .upsert_messages(std::slice::from_ref(&source))
+            .await
+            .unwrap();
+        let identity = store
+            .capture_message_remote_identity(&source.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let operation = store
+            .enqueue_and_apply_mailbox_action_for_identity(
+                &identity,
+                crate::mail::MailboxAction::Delete,
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .claim_operation_by_id(&operation.operation_id, "action-worker")
+            .await
+            .unwrap()
+            .expect("queued action must be claimed");
+        assert!(store
+            .rollback_and_complete_claimed_mailbox_action(
+                &operation.operation_id,
+                "action-worker",
+                "remote delete rejected",
+            )
+            .await
+            .unwrap());
+
+        let restored = store
+            .message_by_locator(account_id, "INBOX", 42)
+            .await
+            .unwrap()
+            .expect("rollback must restore the visible source row");
+        assert_eq!(restored.id, source.id);
+        let tombstones: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM mailbox_action_tombstones WHERE account_id = ? AND mailbox = 'INBOX' AND uid = 42",
+        )
+        .bind(account_id.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        let backup_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM operation_message_backups WHERE operation_id = ?",
+        )
+        .bind(&operation.operation_id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(tombstones, 0);
+        assert_eq!(backup_rows, 0);
+        assert_eq!(
+            store
+                .operation_journal_entry(&operation.operation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "permanent_failed"
+        );
     }
 
     #[tokio::test]
@@ -10123,6 +15038,319 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gmail_membership_epoch_ignores_flags_but_tracks_mailbox_transitions() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let inbox =
+            cache_candidate_message(account_id, "gmail-epoch-inbox", 1, "INBOX", Utc::now());
+        store.upsert_messages(&[inbox.clone()]).await.unwrap();
+        let before = store
+            .capture_gmail_inbox_membership_epoch(account_id)
+            .await
+            .unwrap();
+        store.set_message_read(&inbox.id, true).await.unwrap();
+        assert_eq!(
+            store
+                .capture_gmail_inbox_membership_epoch(account_id)
+                .await
+                .unwrap()
+                .epoch,
+            before.epoch
+        );
+        sqlx::query("UPDATE messages SET mailbox = '__pending_action__:epoch-test' WHERE id = ?")
+            .bind(&inbox.id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .capture_gmail_inbox_membership_epoch(account_id)
+                .await
+                .unwrap()
+                .epoch
+                > before.epoch
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_receipt_rejects_old_endpoint_after_account_update() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let mut old_account = account_with_id(account_id, "source-fence@example.test");
+        old_account.imap_host = "old.imap.example.test".into();
+        store.save_account(&old_account).await.unwrap();
+        assert!(store
+            .ensure_mailbox_catalog_identity(account_id, "INBOX", "INBOX", 1)
+            .await
+            .unwrap());
+        let receipt = store
+            .capture_provider_write_receipt_for_account(&old_account, "INBOX", "INBOX", 1, &[7])
+            .await
+            .unwrap()
+            .unwrap();
+
+        let mut updated_account = old_account.clone();
+        updated_account.imap_host = "new.imap.example.test".into();
+        store.save_account(&updated_account).await.unwrap();
+        let mut stale =
+            cache_candidate_message(account_id, "old-host-message", 7, "INBOX", Utc::now());
+        stale.id = "old-host-message".into();
+        assert!(!store
+            .commit_provider_messages_with_receipt(&receipt, &[stale])
+            .await
+            .unwrap());
+        assert!(store
+            .message_by_locator(account_id, "INBOX", 7)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn smtp_submissions_queue_by_account_without_reusing_another_draft() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+
+        let first = store
+            .enqueue_smtp_submission_and_claim(account_id, r#"{"draft":"first"}"#, "cli-first")
+            .await
+            .unwrap();
+        assert_eq!(first.state, "submitting");
+        assert_eq!(first.payload_json, r#"{"draft":"first"}"#);
+
+        let second = store
+            .enqueue_smtp_submission_and_claim(account_id, r#"{"draft":"second"}"#, "cli-second")
+            .await
+            .unwrap();
+        assert_ne!(second.operation_id, first.operation_id);
+        assert_eq!(second.state, "queued");
+        assert_eq!(second.payload_json, r#"{"draft":"second"}"#);
+        assert!(store
+            .claim_operation_by_id(&second.operation_id, "cli-second")
+            .await
+            .unwrap()
+            .is_none());
+
+        store
+            .complete_claimed_operation(
+                &first.operation_id,
+                "cli-first",
+                "accepted",
+                Some("provider_sent_reconciliation"),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let accepted = store
+            .operation_journal_entry(&first.operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(accepted.smtp_accepted_at.is_some());
+
+        let second_claim = store
+            .claim_operation_by_id(&second.operation_id, "cli-second")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second_claim.operation_id, second.operation_id);
+        assert_eq!(second_claim.payload_json, r#"{"draft":"second"}"#);
+
+        let sent_claim = store
+            .claim_provider_sent_operation(&first.operation_id, "sent-copy")
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .complete_claimed_operation(
+                &sent_claim.operation_id,
+                "sent-copy",
+                "retry",
+                Some("sent_copy_retry_scheduled"),
+                Some("temporary append failure"),
+                Some(Utc::now() + chrono::Duration::minutes(1)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .operation_journal_entry(&first.operation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .smtp_accepted_at,
+            accepted.smtp_accepted_at
+        );
+    }
+
+    #[tokio::test]
+    async fn gmail_epoch_batch_applies_together_and_rejects_a_stale_fetch() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let first =
+            cache_candidate_message(account_id, "gmail-batch-one", 1, "Archive", Utc::now());
+        let second =
+            cache_candidate_message(account_id, "gmail-batch-two", 2, "Archive", Utc::now());
+        store
+            .upsert_messages(&[first.clone(), second.clone()])
+            .await
+            .unwrap();
+
+        let receipt = store
+            .capture_gmail_inbox_membership_epoch(account_id)
+            .await
+            .unwrap();
+        assert!(store
+            .observe_gmail_messages_with_epoch(
+                &receipt,
+                &[
+                    GmailMessageObservation {
+                        local_message_id: first.id.clone(),
+                        gmail_message_id: "1001".into(),
+                        labels: vec!["\\Inbox".into()],
+                    },
+                    GmailMessageObservation {
+                        local_message_id: second.id.clone(),
+                        gmail_message_id: "1002".into(),
+                        labels: vec!["\\Inbox".into()],
+                    },
+                ],
+            )
+            .await
+            .unwrap());
+        assert_eq!(
+            store
+                .gmail_message_labels(account_id, &second.id)
+                .await
+                .unwrap(),
+            Some(vec!["\\Inbox".into()])
+        );
+
+        let stale = store
+            .capture_gmail_inbox_membership_epoch(account_id)
+            .await
+            .unwrap();
+        let inbox = cache_candidate_message(account_id, "gmail-new-inbox", 3, "INBOX", Utc::now());
+        store.upsert_messages(&[inbox]).await.unwrap();
+        assert!(!store
+            .observe_gmail_messages_with_epoch(
+                &stale,
+                &[GmailMessageObservation {
+                    local_message_id: first.id.clone(),
+                    gmail_message_id: "1001".into(),
+                    labels: vec!["\\All".into()],
+                }],
+            )
+            .await
+            .unwrap());
+        assert_eq!(
+            store
+                .gmail_message_labels(account_id, &first.id)
+                .await
+                .unwrap(),
+            Some(vec!["\\Inbox".into()])
+        );
+    }
+
+    #[tokio::test]
+    async fn account_removal_gate_blocks_cross_process_claims_until_cancel_or_expiry() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let operation = store
+            .enqueue_operation(
+                account_id,
+                "smtp_submission",
+                OperationTarget {
+                    mailbox: None,
+                    uid: None,
+                    uid_validity: None,
+                    message_id: None,
+                },
+                "{}",
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(store.begin_account_removal(account_id).await.unwrap());
+        assert!(store
+            .claim_operation_by_id(&operation.operation_id, "separate-cli")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store.cancel_account_removal(account_id).await.unwrap());
+        assert!(store
+            .claim_operation_by_id(&operation.operation_id, "separate-cli")
+            .await
+            .unwrap()
+            .is_some());
+        assert!(store
+            .renew_operation_claim(&operation.operation_id, "separate-cli")
+            .await
+            .unwrap());
+        assert_eq!(
+            store
+                .mark_interrupted_operations_uncertain(account_id)
+                .await
+                .unwrap(),
+            0
+        );
+        sqlx::query("UPDATE operation_journal SET claimed_at = ? WHERE operation_id = ?")
+            .bind(Utc::now() - chrono::Duration::seconds(OPERATION_CLAIM_LEASE_SECONDS + 1))
+            .bind(&operation.operation_id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .mark_interrupted_operations_uncertain(account_id)
+                .await
+                .unwrap(),
+            1
+        );
+
+        assert!(store.begin_account_removal(account_id).await.unwrap());
+        sqlx::query("UPDATE account_removal_gates SET expires_at = ? WHERE account_id = ?")
+            .bind(Utc::now() - chrono::Duration::seconds(1))
+            .bind(account_id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .recover_orphan_account_operation_gates()
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_account_and_secret_commits_both_local_resources_together() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        store
+            .set_secret("mail:remove-with-account", "token")
+            .await
+            .unwrap();
+        store
+            .delete_account_and_secret(account_id, "mail:remove-with-account")
+            .await
+            .unwrap();
+        assert!(store.account(account_id).await.unwrap().is_none());
+        assert!(store
+            .secret("mail:remove-with-account")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn deleting_an_account_also_deletes_its_local_messages() {
         let store = Store::in_memory().await.unwrap();
         let account = AccountDraft {
@@ -11308,7 +16536,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replacement_snapshot_finalization_rolls_back_replacements_when_publish_fails() {
+    async fn replacement_snapshot_finalization_uses_generation_scoped_ids() {
         let store = Store::in_memory().await.unwrap();
         let account_id = uuid::Uuid::new_v4();
         save_test_account(&store, account_id).await;
@@ -11346,7 +16574,7 @@ mod tests {
         replacement.account_id = account_id.to_string();
         replacement.uid = 7;
 
-        assert!(store
+        store
             .finalize_mailbox_snapshot_with_replacements(
                 account_id,
                 "INBOX",
@@ -11354,7 +16582,7 @@ mod tests {
                 &[replacement],
             )
             .await
-            .is_err());
+            .unwrap();
         assert_eq!(
             store
                 .message_by_locator(account_id, "INBOX", 7)
@@ -11362,23 +16590,16 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .subject,
-            "Old namespace"
+            "Replacement namespace"
         );
         assert_eq!(
             store
-                .staged_mailbox_snapshot_uids(account_id, "INBOX", &generation)
-                .await
-                .unwrap(),
-            vec![7]
-        );
-        assert_eq!(
-            store
-                .mailbox_catalog_state(account_id, "INBOX")
+                .message("replacement-id-collision")
                 .await
                 .unwrap()
                 .unwrap()
-                .uid_validity,
-            10
+                .subject,
+            "Unrelated row"
         );
     }
 
@@ -11769,7 +16990,7 @@ mod tests {
             .begin_mailbox_snapshot(
                 account_id,
                 "INBOX",
-                MailboxSnapshotIdentity::new("INBOX", 99, 0, Some(1), None),
+                MailboxSnapshotIdentity::new("INBOX", 99, 0, Some(3), None),
             )
             .await
             .unwrap();
@@ -11792,6 +17013,80 @@ mod tests {
             .unwrap();
         assert_eq!(state.remote_total, 0);
         assert!(state.historical_complete);
+    }
+
+    #[tokio::test]
+    async fn header_failure_summary_separates_delayed_retries_from_user_action_and_content() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let due = Utc::now() + chrono::Duration::minutes(1);
+        store
+            .record_mailbox_sync_failure_with_retry(
+                account_id,
+                "INBOX",
+                1,
+                "headers",
+                "network",
+                "temporary",
+                Some(due),
+                false,
+            )
+            .await
+            .unwrap();
+        store
+            .record_mailbox_sync_failure_with_retry(
+                account_id,
+                "INBOX",
+                2,
+                "headers",
+                "malformed",
+                "malformed header",
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+        store
+            .record_mailbox_sync_failure_with_retry(
+                account_id,
+                "INBOX",
+                3,
+                "preview",
+                "network",
+                "body unavailable",
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        let summary = store
+            .mailbox_header_failure_summary(account_id, "INBOX")
+            .await
+            .unwrap();
+        assert_eq!(summary.outstanding, 2);
+        assert_eq!(summary.retryable, 1);
+        assert_eq!(summary.user_action_required, 1);
+        assert_eq!(summary.next_retry_at, Some(due));
+        assert_eq!(
+            store
+                .mailbox_header_failure_summary(account_id, "Drafts")
+                .await
+                .unwrap()
+                .outstanding,
+            0
+        );
+        store
+            .clear_mailbox_sync_failure(account_id, "INBOX", 1)
+            .await
+            .unwrap();
+        let summary = store
+            .mailbox_header_failure_summary(account_id, "INBOX")
+            .await
+            .unwrap();
+        assert_eq!(summary.outstanding, 1);
+        assert_eq!(summary.retryable, 0);
+        assert!(summary.next_retry_at.is_none());
     }
 
     #[tokio::test]
@@ -12473,6 +17768,714 @@ mod tests {
             Some("old-secret")
         );
     }
+
+    #[tokio::test]
+    async fn folder_generation_retries_reused_uids_and_rejects_stale_pages() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let mut old = message("old namespace", "old");
+        old.account_id = account_id.to_string();
+        old.uid = 7;
+        store.upsert_catalog_messages(&[old]).await.unwrap();
+
+        let first = store
+            .begin_folder_sync(account_id, "INBOX", "INBOX", 10, Some(8))
+            .await
+            .unwrap();
+        let revision = store
+            .stage_folder_discovery_page(
+                account_id,
+                "INBOX",
+                &first.generation,
+                first.revision as u64,
+                &[7],
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .folder_discovered_uids_needing_headers(account_id, "INBOX", 50)
+                .await
+                .unwrap(),
+            vec![7],
+            "an old UIDVALIDITY row cannot make a reused UID look fetched"
+        );
+        let mut replacement = message("replacement namespace", "new");
+        replacement.account_id = account_id.to_string();
+        replacement.uid = 7;
+        store
+            .commit_folder_header_batch(
+                account_id,
+                "INBOX",
+                &first.generation,
+                revision,
+                &[replacement],
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .message_by_locator(account_id, "INBOX", 7)
+                .await
+                .unwrap()
+                .unwrap()
+                .subject,
+            "replacement namespace"
+        );
+
+        let replacement = store
+            .begin_folder_sync(account_id, "INBOX", "INBOX", 11, Some(8))
+            .await
+            .unwrap();
+        assert_ne!(replacement.generation, first.generation);
+        let replacement_revision = store
+            .stage_folder_discovery_page(
+                account_id,
+                "INBOX",
+                &replacement.generation,
+                replacement.revision as u64,
+                &[7],
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+        let mut recycled = message("must remain staged", "new UID namespace");
+        recycled.account_id = account_id.to_string();
+        recycled.uid = 7;
+        assert!(store
+            .commit_folder_header_batch(
+                account_id,
+                "INBOX",
+                &replacement.generation,
+                replacement_revision,
+                &[recycled],
+                None,
+                true,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("UIDVALIDITY"));
+        assert_eq!(
+            store
+                .message_by_locator(account_id, "INBOX", 7)
+                .await
+                .unwrap()
+                .unwrap()
+                .subject,
+            "replacement namespace",
+            "recycled UIDs remain in staged replacement until atomic finalization"
+        );
+        assert!(store
+            .stage_folder_discovery_page(
+                account_id,
+                "INBOX",
+                &first.generation,
+                first.revision as u64,
+                &[7],
+                None,
+                true,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("not active"));
+    }
+
+    #[tokio::test]
+    async fn snapshot_boundary_and_local_mutation_fence_preserve_newer_local_rows() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let mut old = message("old", "old");
+        old.account_id = account_id.to_string();
+        old.uid = 200;
+        let mut realtime = message("realtime", "new");
+        realtime.account_id = account_id.to_string();
+        realtime.uid = 201;
+        store
+            .upsert_catalog_messages(&[old, realtime])
+            .await
+            .unwrap();
+        let generation = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 1, 0, Some(201), None),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .finalize_mailbox_snapshot(account_id, "INBOX", &generation)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(store
+            .message_by_locator(account_id, "INBOX", 201)
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn sync_runs_keep_account_revisions_monotonic_across_terminal_runs() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+
+        let first = store.create_sync_run(account_id).await.unwrap();
+        assert_eq!(first.revision, 0);
+        let completed = store
+            .update_sync_run(
+                &first.run_id,
+                &SyncRunUpdate {
+                    outcome: Some("completed"),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let next = store.create_sync_run(account_id).await.unwrap();
+        assert!(next.revision > completed.revision);
+        assert_ne!(next.run_id, first.run_id);
+        let visible = store.sync_runs().await.unwrap();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].run_id, next.run_id);
+        assert!(store
+            .update_sync_run(&first.run_id, &SyncRunUpdate::default())
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn provider_receipt_keeps_toggle_away_and_back_newer_than_fetch() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let mut local = message("original", "receipt");
+        local.account_id = account_id.to_string();
+        local.uid = 7;
+        local.is_read = false;
+        store
+            .upsert_catalog_messages(&[local.clone()])
+            .await
+            .unwrap();
+        store
+            .ensure_mailbox_catalog_identity(account_id, "INBOX", "INBOX", 9)
+            .await
+            .unwrap();
+        let receipt = store
+            .capture_provider_write_receipt(account_id, "INBOX", "INBOX", 9, &[7])
+            .await
+            .unwrap()
+            .unwrap();
+        let identity = store
+            .capture_message_remote_identity(&local.id)
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .enqueue_and_apply_flag_mutation_for_identity(
+                &identity,
+                "message_read",
+                Some(true),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let identity = store
+            .capture_message_remote_identity(&local.id)
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .enqueue_and_apply_flag_mutation_for_identity(
+                &identity,
+                "message_read",
+                Some(false),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let mut stale_provider = local;
+        stale_provider.is_read = true;
+        assert!(store
+            .commit_provider_messages_with_receipt(&receipt, &[stale_provider])
+            .await
+            .unwrap());
+        assert!(
+            !store
+                .message(&identity.message_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_read
+        );
+    }
+
+    #[tokio::test]
+    async fn account_config_change_invalidates_old_mailbox_claims_and_restores_projection() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let account = account_with_id(account_id, "operation-fence@example.test");
+        store.save_account(&account).await.unwrap();
+        let mut local = message("pending archive", "body");
+        local.account_id = account_id.to_string();
+        local.uid = 7;
+        store
+            .upsert_catalog_messages(&[local.clone()])
+            .await
+            .unwrap();
+        store
+            .ensure_mailbox_catalog_identity(account_id, "INBOX", "INBOX", 9)
+            .await
+            .unwrap();
+        let identity = store
+            .capture_message_remote_identity(&local.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let operation = store
+            .enqueue_and_apply_mailbox_action_and_claim_for_identity(
+                &identity,
+                crate::mail::MailboxAction::Archive,
+                None,
+                "old-provider-worker",
+            )
+            .await
+            .unwrap();
+        assert!(store
+            .message_by_locator(account_id, "INBOX", 7)
+            .await
+            .unwrap()
+            .is_none());
+        let active = store.claimed_account_operations(account_id).await.unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].operation_id, operation.operation_id);
+        assert_eq!(
+            active[0].claim_owner.as_deref(),
+            Some("old-provider-worker")
+        );
+        assert!(active[0].claimed_at.is_some());
+
+        let mut changed = account.clone();
+        changed.imap_host = "different-imap.example.test".into();
+        store.save_account(&changed).await.unwrap();
+
+        let invalidated = store
+            .operation_journal_entry(&operation.operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(invalidated.state, "uncertain");
+        assert_eq!(
+            invalidated.outcome.as_deref(),
+            Some("account_configuration_changed")
+        );
+        assert!(store
+            .claimed_account_operations(account_id)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .message_by_locator(account_id, "INBOX", 7)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(
+            store
+                .capture_message_remote_identity(&local.id)
+                .await
+                .unwrap()
+                .is_none(),
+            "retained cached mail is not a new-host remote locator"
+        );
+        assert!(store
+            .enqueue_and_apply_flag_mutation_for_identity(
+                &identity,
+                "message_read",
+                Some(true),
+                None,
+                None,
+            )
+            .await
+            .is_err());
+        assert!(!store
+            .reconcile_and_complete_claimed_mailbox_action::<MoveDestinationLocator>(
+                &operation.operation_id,
+                "old-provider-worker",
+                "Archive",
+                None,
+            )
+            .await
+            .unwrap());
+        assert!(store
+            .claim_operation_by_id(&operation.operation_id, "old-provider-worker")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn invalidated_catalogue_locator_stays_blocked_after_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("catalogue-config-barrier.sqlite");
+        let account_id = uuid::Uuid::new_v4();
+        let account = account_with_id(account_id, "reopen-config-fence@example.test");
+        let mut row = message("retained cached row", "cached body remains readable");
+        row.account_id = account_id.to_string();
+        row.uid = 7;
+        {
+            let store = Store::open(&database).await.unwrap();
+            store.save_account(&account).await.unwrap();
+            store.upsert_catalog_messages(&[row.clone()]).await.unwrap();
+            store
+                .save_mailbox_catalog_state(account_id, "INBOX", "INBOX", 9, 1, true)
+                .await
+                .unwrap();
+            assert!(store
+                .capture_message_remote_identity(&row.id)
+                .await
+                .unwrap()
+                .is_some());
+            let mut changed = account.clone();
+            changed.imap_host = "replacement.example.test".into();
+            store.save_account(&changed).await.unwrap();
+        }
+        let reopened = Store::open(&database).await.unwrap();
+        assert_eq!(
+            reopened.message(&row.id).await.unwrap().unwrap().subject,
+            "retained cached row"
+        );
+        assert!(
+            reopened
+                .capture_message_remote_identity(&row.id)
+                .await
+                .unwrap()
+                .is_none(),
+            "reopen must not re-stamp an invalidated locator"
+        );
+    }
+
+    #[tokio::test]
+    async fn account_config_change_keeps_smtp_acceptance_distinct_from_sent_copy_uncertainty() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let account = account_with_id(account_id, "smtp-config-fence@example.test");
+        store.save_account(&account).await.unwrap();
+        let operation = store
+            .enqueue_smtp_submission_and_claim(account_id, r#"{"draft":"one"}"#, "smtp-worker")
+            .await
+            .unwrap();
+        store
+            .complete_claimed_operation(
+                &operation.operation_id,
+                "smtp-worker",
+                "accepted",
+                Some("provider_sent_reconciliation"),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let mut changed = account.clone();
+        changed.imap_host = "different-imap.example.test".into();
+        store.save_account(&changed).await.unwrap();
+
+        let invalidated = store
+            .operation_journal_entry(&operation.operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(invalidated.state, "uncertain");
+        assert_eq!(
+            invalidated.outcome.as_deref(),
+            Some("smtp_accepted_account_configuration_changed")
+        );
+        assert!(invalidated.smtp_accepted_at.is_some());
+        assert!(store
+            .claim_provider_sent_operation(&operation.operation_id, "new-worker")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn classification_signals_use_the_provider_receipt_namespace_and_version() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let mut local = message("category evidence", "receipt");
+        local.account_id = account_id.to_string();
+        local.uid = 7;
+        local.classification_signals = "old evidence".into();
+        store
+            .upsert_catalog_messages(&[local.clone()])
+            .await
+            .unwrap();
+        store
+            .ensure_mailbox_catalog_identity(account_id, "INBOX", "INBOX", 9)
+            .await
+            .unwrap();
+
+        let receipt = store
+            .capture_provider_write_receipt(account_id, "INBOX", "INBOX", 9, &[7])
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(store
+            .update_classification_signals_with_provider_receipt(
+                &receipt,
+                &[(7, "fresh provider evidence".into())],
+            )
+            .await
+            .unwrap());
+        assert_eq!(
+            store
+                .message(&local.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .classification_signals,
+            "fresh provider evidence"
+        );
+
+        let receipt = store
+            .capture_provider_write_receipt(account_id, "INBOX", "INBOX", 9, &[7])
+            .await
+            .unwrap()
+            .unwrap();
+        let identity = store
+            .capture_message_remote_identity(&local.id)
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .enqueue_and_apply_flag_mutation_for_identity(
+                &identity,
+                "message_read",
+                Some(true),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(store
+            .update_classification_signals_with_provider_receipt(
+                &receipt,
+                &[(7, "stale provider evidence".into())],
+            )
+            .await
+            .unwrap());
+        assert_eq!(
+            store
+                .message(&local.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .classification_signals,
+            "fresh provider evidence",
+            "a local mutation after FETCH fences a delayed provider label"
+        );
+    }
+
+    #[tokio::test]
+    async fn account_aware_folder_and_snapshot_generations_reject_changed_imap_endpoint() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let account = account_with_id(account_id, "config-fence@example.test");
+        store.save_account(&account).await.unwrap();
+
+        let folder = store
+            .begin_folder_sync_for_account(&account, "INBOX", "INBOX", 7, Some(2))
+            .await
+            .unwrap();
+        let snapshot = store
+            .begin_mailbox_snapshot_for_account(
+                &account,
+                "Archive",
+                MailboxSnapshotIdentity::new("Archive", 9, 1, Some(2), None),
+            )
+            .await
+            .unwrap();
+
+        let mut changed_account = account.clone();
+        changed_account.imap_host = "new-endpoint.example.test".into();
+        store.save_account(&changed_account).await.unwrap();
+
+        assert!(store
+            .stage_folder_discovery_page(
+                account_id,
+                "INBOX",
+                &folder.generation,
+                folder.revision as u64,
+                &[1],
+                None,
+                true,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("provider configuration changed"));
+        assert!(store
+            .stage_mailbox_snapshot_page(account_id, "Archive", &snapshot, &[(1, false, false)])
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("provider configuration changed"));
+        assert!(store
+            .finalize_mailbox_snapshot(account_id, "Archive", &snapshot)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("provider configuration changed"));
+        assert!(store
+            .mailbox_catalog_state(account_id, "Archive")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn gmail_folder_header_batch_publishes_headers_and_labels_under_one_epoch_fence() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let account = account_with_id(account_id, "gmail-folder-batch@example.test");
+        store.save_account(&account).await.unwrap();
+        let account_receipt = store
+            .capture_account_provider_receipt(&account)
+            .await
+            .unwrap()
+            .unwrap();
+        let folder = store
+            .begin_folder_sync_with_provider_receipt(&account_receipt, "INBOX", "INBOX", 7, Some(1))
+            .await
+            .unwrap();
+        let revision = store
+            .stage_folder_discovery_page(
+                account_id,
+                "INBOX",
+                &folder.generation,
+                folder.revision as u64,
+                &[1],
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+        let epoch = store
+            .capture_gmail_inbox_membership_epoch(account_id)
+            .await
+            .unwrap();
+        let mut header = message("Gmail header", "initial");
+        header.account_id = account_id.to_string();
+        header.uid = 1;
+        header.mailbox = "INBOX".into();
+        let labels = vec!["\\Inbox".to_owned(), "\\Important".to_owned()];
+
+        assert_eq!(
+            store
+                .commit_folder_header_batch_with_gmail_observations(
+                    &account_receipt,
+                    &epoch,
+                    "INBOX",
+                    &folder.generation,
+                    revision,
+                    &[header.clone()],
+                    &[GmailProviderObservation {
+                        uid: 1,
+                        gmail_message_id: "9001".into(),
+                        labels: labels.clone(),
+                    }],
+                    None,
+                    true,
+                )
+                .await
+                .unwrap(),
+            revision + 1
+        );
+        assert!(store
+            .message_by_locator(account_id, "INBOX", 1)
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            store
+                .gmail_message_labels(account_id, &header.id)
+                .await
+                .unwrap(),
+            Some(labels)
+        );
+
+        let stale = store
+            .begin_folder_sync_with_provider_receipt(
+                &account_receipt,
+                "Archive",
+                "Archive",
+                8,
+                Some(1),
+            )
+            .await
+            .unwrap();
+        let stale_revision = store
+            .stage_folder_discovery_page(
+                account_id,
+                "Archive",
+                &stale.generation,
+                stale.revision as u64,
+                &[1],
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+        let stale_epoch = store
+            .capture_gmail_inbox_membership_epoch(account_id)
+            .await
+            .unwrap();
+        let late_inbox = cache_candidate_message(account_id, "late-inbox", 2, "INBOX", Utc::now());
+        store.upsert_messages(&[late_inbox]).await.unwrap();
+        let mut stale_header = message("stale Gmail header", "must not publish");
+        stale_header.account_id = account_id.to_string();
+        stale_header.uid = 1;
+        stale_header.mailbox = "Archive".into();
+        assert!(store
+            .commit_folder_header_batch_with_gmail_observations(
+                &account_receipt,
+                &stale_epoch,
+                "Archive",
+                &stale.generation,
+                stale_revision,
+                &[stale_header],
+                &[GmailProviderObservation {
+                    uid: 1,
+                    gmail_message_id: "9002".into(),
+                    labels: vec!["\\Inbox".into()],
+                }],
+                None,
+                true,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("Gmail Inbox membership changed"));
+        assert!(store
+            .message_by_locator(account_id, "Archive", 1)
+            .await
+            .unwrap()
+            .is_none());
+    }
 }
 impl Store {
     /// Starts or resumes an incomplete mailbox inventory. Matching mailbox
@@ -12484,6 +18487,46 @@ impl Store {
         mailbox: &str,
         identity: MailboxSnapshotIdentity<'_>,
     ) -> Result<String> {
+        self.begin_mailbox_snapshot_inner(account_id, mailbox, identity, None)
+            .await
+    }
+
+    /// Captures the exact account configuration before a full mailbox
+    /// snapshot starts. The resulting generation refuses to stage or publish
+    /// after that account's provider endpoint or principal changes.
+    pub async fn begin_mailbox_snapshot_for_account(
+        &self,
+        account: &Account,
+        mailbox: &str,
+        identity: MailboxSnapshotIdentity<'_>,
+    ) -> Result<String> {
+        let receipt = self
+            .capture_account_provider_receipt(account)
+            .await?
+            .ok_or_else(|| anyhow!("account provider configuration is no longer current"))?;
+        self.begin_mailbox_snapshot_with_provider_receipt(&receipt, mailbox, identity)
+            .await
+    }
+
+    /// Starts a snapshot with a receipt retained by the protocol before its
+    /// first IMAP command.
+    pub async fn begin_mailbox_snapshot_with_provider_receipt(
+        &self,
+        receipt: &AccountProviderReceipt,
+        mailbox: &str,
+        identity: MailboxSnapshotIdentity<'_>,
+    ) -> Result<String> {
+        self.begin_mailbox_snapshot_inner(receipt.account_id, mailbox, identity, Some(receipt))
+            .await
+    }
+
+    async fn begin_mailbox_snapshot_inner(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        identity: MailboxSnapshotIdentity<'_>,
+        receipt: Option<&AccountProviderReceipt>,
+    ) -> Result<String> {
         let MailboxSnapshotIdentity {
             remote_name,
             uid_validity,
@@ -12493,9 +18536,12 @@ impl Store {
         } = identity;
         let account_id = account_id.to_string();
         let generation = uuid::Uuid::new_v4().to_string();
-        let uid_next = uid_next.map(i64::from);
+        let mut uid_next = uid_next.map(i64::from);
         let highest_modseq = highest_modseq.map(|value| value.to_string());
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if let Some(receipt) = receipt {
+            ensure_account_provider_receipt_current_in_transaction(&mut tx, receipt).await?;
+        }
         let account_removed: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM deleted_account_tombstones WHERE account_id = ?)",
         )
@@ -12515,8 +18561,22 @@ impl Store {
                 "account does not exist"
             }));
         }
-        let existing: Option<(String, String, i64, i64, Option<i64>)> = sqlx::query_as(
-            "SELECT generation, remote_name, uid_validity, initial_exists, uid_next FROM mailbox_snapshot_generations WHERE account_id = ? AND mailbox = ?",
+        // Some servers omit UIDNEXT. The initial response still gives us a
+        // fixed safe boundary for already committed UIDs: IMAP UIDs only grow,
+        // so a complete inventory can reconcile every UID below the largest
+        // locator known when this generation began. Never extend this bound
+        // with rows that may arrive while the inventory is running.
+        if uid_next.is_none() {
+            uid_next = sqlx::query_scalar::<_, Option<i64>>(
+                "SELECT MAX(uid) + 1 FROM messages WHERE account_id = ? AND mailbox = ?",
+            )
+            .bind(&account_id)
+            .bind(mailbox)
+            .fetch_one(&mut *tx)
+            .await?;
+        }
+        let existing: Option<(String, String, i64, i64, Option<i64>, Option<i64>, Option<String>)> = sqlx::query_as(
+            "SELECT generation, remote_name, uid_validity, initial_exists, uid_next, account_config_generation, account_config_fingerprint FROM mailbox_snapshot_generations WHERE account_id = ? AND mailbox = ?",
         )
         .bind(&account_id)
         .bind(mailbox)
@@ -12528,12 +18588,19 @@ impl Store {
             existing_uid_validity,
             existing_exists,
             existing_uid_next,
+            existing_config_generation,
+            existing_config_fingerprint,
         )) = existing
         {
             if existing_remote_name == remote_name
                 && existing_uid_validity == i64::from(uid_validity)
                 && existing_exists == i64::from(initial_exists)
                 && existing_uid_next == uid_next
+                && receipt.is_none_or(|receipt| {
+                    existing_config_generation == Some(receipt.config_generation)
+                        && existing_config_fingerprint.as_deref()
+                            == Some(receipt.config_fingerprint.as_str())
+                })
             {
                 sqlx::query("UPDATE mailbox_snapshot_generations SET highest_modseq = ?, updated_at = ? WHERE account_id = ? AND mailbox = ? AND generation = ?")
                     .bind(highest_modseq)
@@ -12564,7 +18631,7 @@ impl Store {
         .execute(&mut *tx)
         .await?;
         let now = Utc::now();
-        sqlx::query("INSERT INTO mailbox_snapshot_generations(account_id, mailbox, generation, remote_name, uid_validity, initial_exists, uid_next, highest_modseq, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        sqlx::query("INSERT INTO mailbox_snapshot_generations(account_id, mailbox, generation, remote_name, uid_validity, initial_exists, uid_next, highest_modseq, account_config_generation, account_config_fingerprint, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
             .bind(&account_id)
             .bind(mailbox)
             .bind(&generation)
@@ -12575,6 +18642,8 @@ impl Store {
             // SQLite integers are signed, while IMAP mod-sequences are
             // unsigned 64-bit values. Text preserves every valid value.
             .bind(highest_modseq)
+            .bind(receipt.map(|receipt| receipt.config_generation))
+            .bind(receipt.map(|receipt| receipt.config_fingerprint.as_str()))
             .bind(now)
             .bind(now)
             .execute(&mut *tx)
@@ -12597,27 +18666,38 @@ impl Store {
         }
         let account_id = account_id.to_string();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let active: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM mailbox_snapshot_generations WHERE account_id = ? AND mailbox = ? AND generation = ?)",
+        let publication_timer = PublicationTransactionTimer::start();
+        let active: Option<(i64, Option<i64>, Option<String>)> = sqlx::query_as(
+            "SELECT uid_validity, account_config_generation, account_config_fingerprint FROM mailbox_snapshot_generations WHERE account_id = ? AND mailbox = ? AND generation = ?",
         )
         .bind(&account_id)
         .bind(mailbox)
         .bind(generation)
-        .fetch_one(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
-        if !active {
+        let Some((snapshot_uid_validity, config_generation, config_fingerprint)) = active else {
             tx.rollback().await?;
             return Err(anyhow!("mailbox snapshot generation is not active"));
-        }
+        };
+        ensure_stored_provider_receipt_current_in_transaction(
+            &mut tx,
+            &account_id,
+            config_generation,
+            config_fingerprint.as_deref(),
+        )
+        .await?;
         let now = Utc::now();
         for (uid, is_read, is_flagged) in flags {
-            sqlx::query("INSERT INTO mailbox_snapshot_items(account_id, mailbox, generation, uid, is_read, is_flagged, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(account_id, mailbox, generation, uid) DO UPDATE SET is_read=excluded.is_read, is_flagged=excluded.is_flagged, updated_at=excluded.updated_at")
+            let local_mutation_version: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM mailbox_mutation_versions WHERE account_id = ? AND mailbox = ? AND uid = ? AND uid_validity = ?")
+                .bind(&account_id).bind(mailbox).bind(i64::from(*uid)).bind(snapshot_uid_validity).fetch_one(&mut *tx).await?;
+            sqlx::query("INSERT INTO mailbox_snapshot_items(account_id, mailbox, generation, uid, is_read, is_flagged, local_mutation_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(account_id, mailbox, generation, uid) DO UPDATE SET is_read=excluded.is_read, is_flagged=excluded.is_flagged, local_mutation_version=excluded.local_mutation_version, updated_at=excluded.updated_at")
                 .bind(&account_id)
                 .bind(mailbox)
                 .bind(generation)
                 .bind(i64::from(*uid))
                 .bind(*is_read)
                 .bind(*is_flagged)
+                .bind(local_mutation_version)
                 .bind(now)
                 .bind(now)
                 .execute(&mut *tx)
@@ -12631,6 +18711,7 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
+        publication_timer.committed();
         Ok(())
     }
 
@@ -12654,18 +18735,26 @@ impl Store {
             ));
         }
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let active: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM mailbox_snapshot_generations WHERE account_id = ? AND mailbox = ? AND generation = ?)",
+        let publication_timer = PublicationTransactionTimer::start();
+        let active: Option<(Option<i64>, Option<String>)> = sqlx::query_as(
+            "SELECT account_config_generation, account_config_fingerprint FROM mailbox_snapshot_generations WHERE account_id = ? AND mailbox = ? AND generation = ?",
         )
         .bind(&account_id)
         .bind(mailbox)
         .bind(generation)
-        .fetch_one(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
-        if !active {
+        let Some((config_generation, config_fingerprint)) = active else {
             tx.rollback().await?;
             return Err(anyhow!("mailbox snapshot generation is not active"));
-        }
+        };
+        ensure_stored_provider_receipt_current_in_transaction(
+            &mut tx,
+            &account_id,
+            config_generation,
+            config_fingerprint.as_deref(),
+        )
+        .await?;
         let now = Utc::now();
         for message in messages {
             let staged: bool = sqlx::query_scalar(
@@ -12710,6 +18799,7 @@ impl Store {
                 .await?;
         }
         tx.commit().await?;
+        publication_timer.committed();
         Ok(())
     }
 
@@ -12791,6 +18881,26 @@ impl Store {
         }
         let account_id = account_id.to_string();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let publication_timer = PublicationTransactionTimer::start();
+        let receipt: Option<(Option<i64>, Option<String>)> = sqlx::query_as(
+            "SELECT account_config_generation, account_config_fingerprint FROM mailbox_snapshot_generations WHERE account_id = ? AND mailbox = ? AND generation = ?",
+        )
+        .bind(&account_id)
+        .bind(mailbox)
+        .bind(generation)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((config_generation, config_fingerprint)) = receipt else {
+            tx.rollback().await?;
+            return Err(anyhow!("mailbox snapshot generation is not active"));
+        };
+        ensure_stored_provider_receipt_current_in_transaction(
+            &mut tx,
+            &account_id,
+            config_generation,
+            config_fingerprint.as_deref(),
+        )
+        .await?;
         for uid in uids {
             let staged: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM mailbox_snapshot_items WHERE account_id = ? AND mailbox = ? AND generation = ? AND uid = ?)",
@@ -12832,6 +18942,7 @@ impl Store {
                 .await?;
         }
         tx.commit().await?;
+        publication_timer.committed();
         Ok(())
     }
 
@@ -12882,8 +18993,44 @@ impl Store {
             generation,
             SnapshotReplacementPublication::None,
             SnapshotFinalizeWatermark::StagedMaximum,
+            None,
         )
         .await
+    }
+
+    /// Publishes a snapshot only when the account receipt captured before its
+    /// IMAP work still matches the generation and the persisted account.
+    pub async fn finalize_mailbox_snapshot_with_provider_receipt(
+        &self,
+        receipt: &AccountProviderReceipt,
+        mailbox: &str,
+        generation: &str,
+    ) -> Result<u64> {
+        self.finalize_mailbox_snapshot_inner(
+            receipt.account_id,
+            mailbox,
+            generation,
+            SnapshotReplacementPublication::None,
+            SnapshotFinalizeWatermark::StagedMaximum,
+            Some(receipt),
+        )
+        .await
+    }
+
+    /// Convenience form for code retaining the exact Account that issued the
+    /// snapshot's provider requests.
+    pub async fn finalize_mailbox_snapshot_for_account(
+        &self,
+        account: &Account,
+        mailbox: &str,
+        generation: &str,
+    ) -> Result<u64> {
+        let receipt = self
+            .capture_account_provider_receipt(account)
+            .await?
+            .ok_or_else(|| anyhow!("account provider configuration is no longer current"))?;
+        self.finalize_mailbox_snapshot_with_provider_receipt(&receipt, mailbox, generation)
+            .await
     }
 
     /// Atomically publishes a completed snapshot and any metadata decoded in
@@ -12902,6 +19049,7 @@ impl Store {
             generation,
             SnapshotReplacementPublication::InMemory(replacements),
             SnapshotFinalizeWatermark::StagedMaximum,
+            None,
         )
         .await
     }
@@ -12923,6 +19071,7 @@ impl Store {
             generation,
             SnapshotReplacementPublication::InMemory(replacements),
             SnapshotFinalizeWatermark::Explicit(watermark),
+            None,
         )
         .await
     }
@@ -12941,6 +19090,7 @@ impl Store {
             generation,
             SnapshotReplacementPublication::Staged,
             SnapshotFinalizeWatermark::StagedMaximum,
+            None,
         )
         .await
     }
@@ -12960,6 +19110,7 @@ impl Store {
             generation,
             SnapshotReplacementPublication::Staged,
             SnapshotFinalizeWatermark::Explicit(watermark),
+            None,
         )
         .await
     }
@@ -12979,6 +19130,7 @@ impl Store {
             generation,
             SnapshotReplacementPublication::None,
             SnapshotFinalizeWatermark::Explicit(watermark),
+            None,
         )
         .await
     }
@@ -12990,6 +19142,7 @@ impl Store {
         generation: &str,
         replacement_publication: SnapshotReplacementPublication<'_>,
         watermark: SnapshotFinalizeWatermark,
+        receipt: Option<&AccountProviderReceipt>,
     ) -> Result<u64> {
         let account_id = account_id.to_string();
         if let SnapshotReplacementPublication::InMemory(replacements) = replacement_publication {
@@ -13003,6 +19156,7 @@ impl Store {
             }
         }
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let publication_timer = PublicationTransactionTimer::start();
         let account_removed: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM deleted_account_tombstones WHERE account_id = ?)",
         )
@@ -13014,21 +19168,47 @@ impl Store {
             return Err(anyhow!("account was removed"));
         }
         let generation_state: Option<MailboxSnapshotGenerationState> = sqlx::query_as(
-            "SELECT remote_name, uid_validity, initial_exists, uid_next, highest_modseq FROM mailbox_snapshot_generations WHERE account_id = ? AND mailbox = ? AND generation = ?",
+            "SELECT remote_name, uid_validity, initial_exists, uid_next, highest_modseq, account_config_generation, account_config_fingerprint FROM mailbox_snapshot_generations WHERE account_id = ? AND mailbox = ? AND generation = ?",
         )
         .bind(&account_id)
         .bind(mailbox)
         .bind(generation)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some((remote_name, uid_validity, initial_exists, uid_next, highest_modseq)) =
-            generation_state
+        let Some((
+            remote_name,
+            uid_validity,
+            initial_exists,
+            uid_next,
+            highest_modseq,
+            config_generation,
+            config_fingerprint,
+        )) = generation_state
         else {
             tx.rollback().await?;
             return Err(anyhow!("mailbox snapshot generation is not active"));
         };
+        ensure_stored_provider_receipt_current_in_transaction(
+            &mut tx,
+            &account_id,
+            config_generation,
+            config_fingerprint.as_deref(),
+        )
+        .await?;
+        if let Some(receipt) = receipt {
+            ensure_account_provider_receipt_current_in_transaction(&mut tx, receipt).await?;
+            if receipt.account_id.to_string() != account_id
+                || config_generation != Some(receipt.config_generation)
+                || config_fingerprint.as_deref() != Some(receipt.config_fingerprint.as_str())
+            {
+                tx.rollback().await?;
+                return Err(anyhow!(
+                    "mailbox snapshot generation belongs to another provider configuration"
+                ));
+            }
+        }
         let prior_uid_validities: Vec<i64> = sqlx::query_scalar(
-            "SELECT uid_validity FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ? UNION SELECT uid_validity FROM mailbox_sync_state WHERE account_id = ? AND mailbox = ? AND uid_validity IS NOT NULL",
+            "SELECT uid_validity FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ? AND historical_complete = 1 UNION SELECT uid_validity FROM mailbox_sync_state WHERE account_id = ? AND mailbox = ? AND uid_validity IS NOT NULL",
         )
         .bind(&account_id)
         .bind(mailbox)
@@ -13036,6 +19216,14 @@ impl Store {
         .bind(mailbox)
         .fetch_all(&mut *tx)
         .await?;
+        let prior_catalog_uid_next: Option<i64> = sqlx::query_scalar(
+            "SELECT uid_next FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ?",
+        )
+        .bind(&account_id)
+        .bind(mailbox)
+        .fetch_optional(&mut *tx)
+        .await?
+        .flatten();
         let replacement_namespace = !matches!(
             replacement_publication,
             SnapshotReplacementPublication::None
@@ -13089,12 +19277,28 @@ impl Store {
         if replacement_namespace {
             clear_uidvalidity_replacement_namespace_in_transaction(&mut tx, &account_id, mailbox)
                 .await?;
+            // A pending operation belongs to the old UID namespace. It must
+            // never fence a recycled UID after this atomic publication.
+            sqlx::query("UPDATE operation_journal SET state = 'uncertain', outcome = COALESCE(outcome, 'uidvalidity_changed'), error = COALESCE(error, 'mailbox UIDVALIDITY changed before operation completed'), updated_at = ? WHERE account_id = ? AND mailbox = ? AND uid_validity IS NOT NULL AND uid_validity != ? AND state NOT IN ('completed', 'rejected', 'permanent_failed', 'uncertain')")
+                .bind(Utc::now()).bind(&account_id).bind(mailbox).bind(uid_validity).execute(&mut *tx).await?;
+            sqlx::query("DELETE FROM mailbox_mutation_fences WHERE account_id = ? AND mailbox = ? AND (uid_validity IS NULL OR uid_validity != ?)")
+                .bind(&account_id).bind(mailbox).bind(uid_validity).execute(&mut *tx).await?;
         }
         match replacement_publication {
             SnapshotReplacementPublication::None => {}
             SnapshotReplacementPublication::InMemory(replacements) => {
                 for replacement in replacements {
-                    persist_message(&mut tx, replacement).await?;
+                    let mut replacement = replacement.clone();
+                    replacement.id = replacement_message_id(
+                        &account_id,
+                        mailbox,
+                        replacement.uid,
+                        uid_validity,
+                    )?;
+                    for attachment in &mut replacement.attachments {
+                        attachment.attachment.message_id = replacement.id.clone();
+                    }
+                    persist_message(&mut tx, &replacement).await?;
                 }
             }
             SnapshotReplacementPublication::Staged => {
@@ -13103,18 +19307,29 @@ impl Store {
                     &account_id,
                     mailbox,
                     generation,
+                    uid_validity,
                 )
                 .await?;
             }
         }
-        sqlx::query("DELETE FROM message_content_cache WHERE message_id IN (SELECT message.id FROM messages AS message JOIN mailbox_snapshot_items AS staged ON staged.account_id = message.account_id AND staged.mailbox = message.mailbox AND staged.uid = message.uid WHERE staged.account_id = ? AND staged.mailbox = ? AND staged.generation = ? AND staged.is_flagged = 1)")
+        sqlx::query("UPDATE messages SET is_read = (SELECT staged.is_read FROM mailbox_snapshot_items AS staged WHERE staged.account_id = messages.account_id AND staged.mailbox = messages.mailbox AND staged.uid = messages.uid AND staged.generation = ?), is_flagged = (SELECT staged.is_flagged FROM mailbox_snapshot_items AS staged WHERE staged.account_id = messages.account_id AND staged.mailbox = messages.mailbox AND staged.uid = messages.uid AND staged.generation = ?) WHERE account_id = ? AND mailbox = ? AND EXISTS (SELECT 1 FROM mailbox_snapshot_items AS staged WHERE staged.account_id = messages.account_id AND staged.mailbox = messages.mailbox AND staged.uid = messages.uid AND staged.generation = ?) AND NOT EXISTS (SELECT 1 FROM mailbox_mutation_fences AS fence WHERE fence.account_id = messages.account_id AND fence.mailbox = messages.mailbox AND fence.uid = messages.uid AND (fence.uid_validity IS NULL OR fence.uid_validity = ?)) AND NOT EXISTS (SELECT 1 FROM mailbox_mutation_versions AS version WHERE version.account_id = messages.account_id AND version.mailbox = messages.mailbox AND version.uid = messages.uid AND version.uid_validity = ? AND version.version > (SELECT staged.local_mutation_version FROM mailbox_snapshot_items AS staged WHERE staged.account_id = messages.account_id AND staged.mailbox = messages.mailbox AND staged.uid = messages.uid AND staged.generation = ?))")
+            .bind(generation)
+            .bind(generation)
             .bind(&account_id)
             .bind(mailbox)
             .bind(generation)
+            .bind(uid_validity)
+            .bind(uid_validity)
+            .bind(generation)
             .execute(&mut *tx)
             .await?;
+        // Cache ownership follows the effective flags after the guarded
+        // publication. A staged older flag must never evict cache content
+        // preserved by a newer local mutation version.
+        sqlx::query("DELETE FROM message_content_cache WHERE message_id IN (SELECT message.id FROM messages AS message JOIN mailbox_snapshot_items AS staged ON staged.account_id = message.account_id AND staged.mailbox = message.mailbox AND staged.uid = message.uid WHERE staged.account_id = ? AND staged.mailbox = ? AND staged.generation = ? AND message.is_flagged = 1)")
+            .bind(&account_id).bind(mailbox).bind(generation).execute(&mut *tx).await?;
         for table in ["starred_message_bodies", "starred_attachment_metadata"] {
-            let statement = format!("DELETE FROM {table} WHERE message_id IN (SELECT message.id FROM messages AS message JOIN mailbox_snapshot_items AS staged ON staged.account_id = message.account_id AND staged.mailbox = message.mailbox AND staged.uid = message.uid WHERE staged.account_id = ? AND staged.mailbox = ? AND staged.generation = ? AND staged.is_flagged = 0)");
+            let statement = format!("DELETE FROM {table} WHERE message_id IN (SELECT message.id FROM messages AS message JOIN mailbox_snapshot_items AS staged ON staged.account_id = message.account_id AND staged.mailbox = message.mailbox AND staged.uid = message.uid WHERE staged.account_id = ? AND staged.mailbox = ? AND staged.generation = ? AND message.is_flagged = 0)");
             sqlx::query(&statement)
                 .bind(&account_id)
                 .bind(mailbox)
@@ -13122,31 +19337,47 @@ impl Store {
                 .execute(&mut *tx)
                 .await?;
         }
-        sqlx::query("UPDATE messages SET is_read = (SELECT staged.is_read FROM mailbox_snapshot_items AS staged WHERE staged.account_id = messages.account_id AND staged.mailbox = messages.mailbox AND staged.uid = messages.uid AND staged.generation = ?), is_flagged = (SELECT staged.is_flagged FROM mailbox_snapshot_items AS staged WHERE staged.account_id = messages.account_id AND staged.mailbox = messages.mailbox AND staged.uid = messages.uid AND staged.generation = ?) WHERE account_id = ? AND mailbox = ? AND EXISTS (SELECT 1 FROM mailbox_snapshot_items AS staged WHERE staged.account_id = messages.account_id AND staged.mailbox = messages.mailbox AND staged.uid = messages.uid AND staged.generation = ?)")
-            .bind(generation)
-            .bind(generation)
+        // UIDNEXT captures the inclusive reconciliation boundary. A full
+        // inventory without it can update observed rows but cannot prove an
+        // absence safely, and a realtime row above the boundary is never
+        // eligible for deletion. Pending optimistic mutations are similarly
+        // fenced until their operation journal outcome is reconciled.
+        // An initial empty mailbox reports UIDNEXT=1. Its complete inventory
+        // is authoritative for inherited rows from before catalogue state was
+        // introduced. Every other snapshot remains bounded by UIDNEXT so a
+        // realtime row at or above the captured boundary survives.
+        let reconciliation_uid_next =
+            if prior_uid_validities.is_empty() && initial_exists == 0 && uid_next == Some(1) {
+                Some(i64::MAX)
+            } else {
+                match (uid_next, prior_catalog_uid_next) {
+                    (Some(current), Some(prior)) => Some(current.max(prior)),
+                    (current, None) => current,
+                    (None, prior) => prior,
+                }
+            };
+        let deleted = sqlx::query("DELETE FROM messages WHERE account_id = ? AND mailbox = ? AND ? IS NOT NULL AND uid < ? AND NOT EXISTS (SELECT 1 FROM mailbox_snapshot_items AS staged WHERE staged.account_id = messages.account_id AND staged.mailbox = messages.mailbox AND staged.generation = ? AND staged.uid = messages.uid) AND NOT EXISTS (SELECT 1 FROM mailbox_mutation_fences AS fence WHERE fence.account_id = messages.account_id AND fence.mailbox = messages.mailbox AND fence.uid = messages.uid AND (fence.uid_validity IS NULL OR fence.uid_validity = ?))")
             .bind(&account_id)
             .bind(mailbox)
+            .bind(reconciliation_uid_next)
+            .bind(reconciliation_uid_next)
             .bind(generation)
-            .execute(&mut *tx)
-            .await?;
-        let deleted = sqlx::query("DELETE FROM messages WHERE account_id = ? AND mailbox = ? AND NOT EXISTS (SELECT 1 FROM mailbox_snapshot_items AS staged WHERE staged.account_id = messages.account_id AND staged.mailbox = messages.mailbox AND staged.generation = ? AND staged.uid = messages.uid)")
-            .bind(&account_id)
-            .bind(mailbox)
-            .bind(generation)
+            .bind(uid_validity)
             .execute(&mut *tx)
             .await?
             .rows_affected();
         // A complete authoritative snapshot also proves that failures for
         // UIDs no longer present remotely are obsolete. Failures for staged
         // UIDs remain until their metadata fetch succeeds explicitly.
-        sqlx::query("DELETE FROM mailbox_sync_failures WHERE account_id = ? AND mailbox = ? AND NOT EXISTS (SELECT 1 FROM mailbox_snapshot_items AS staged WHERE staged.account_id = mailbox_sync_failures.account_id AND staged.mailbox = mailbox_sync_failures.mailbox AND staged.generation = ? AND staged.uid = mailbox_sync_failures.uid)")
+        sqlx::query("DELETE FROM mailbox_sync_failures WHERE account_id = ? AND mailbox = ? AND ? IS NOT NULL AND uid < ? AND NOT EXISTS (SELECT 1 FROM mailbox_snapshot_items AS staged WHERE staged.account_id = mailbox_sync_failures.account_id AND staged.mailbox = mailbox_sync_failures.mailbox AND staged.generation = ? AND staged.uid = mailbox_sync_failures.uid)")
             .bind(&account_id)
             .bind(mailbox)
+            .bind(uid_next)
+            .bind(uid_next)
             .bind(generation)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("INSERT INTO mailbox_catalog_state(account_id, mailbox, remote_name, uid_validity, remote_total, historical_complete, uid_next, highest_modseq, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?) ON CONFLICT(account_id, mailbox) DO UPDATE SET remote_name=excluded.remote_name, uid_validity=excluded.uid_validity, remote_total=excluded.remote_total, historical_complete=excluded.historical_complete, uid_next=excluded.uid_next, highest_modseq=excluded.highest_modseq, updated_at=excluded.updated_at")
+        sqlx::query("INSERT INTO mailbox_catalog_state(account_id, mailbox, remote_name, uid_validity, remote_total, historical_complete, uid_next, highest_modseq, provider_config_generation, provider_config_fingerprint, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?) ON CONFLICT(account_id, mailbox) DO UPDATE SET remote_name=excluded.remote_name, uid_validity=excluded.uid_validity, remote_total=excluded.remote_total, historical_complete=excluded.historical_complete, uid_next=excluded.uid_next, highest_modseq=excluded.highest_modseq, provider_config_generation=excluded.provider_config_generation, provider_config_fingerprint=excluded.provider_config_fingerprint, updated_at=excluded.updated_at")
             .bind(&account_id)
             .bind(mailbox)
             .bind(remote_name)
@@ -13154,6 +19385,8 @@ impl Store {
             .bind(initial_exists)
             .bind(uid_next)
             .bind(highest_modseq)
+            .bind(config_generation)
+            .bind(&config_fingerprint)
             .bind(Utc::now())
             .execute(&mut *tx)
             .await?;
@@ -13197,6 +19430,7 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
+        publication_timer.committed();
         if deleted > 0 || replacement_namespace {
             self.rebuild_threads_for_account(&account_id).await?;
         }
@@ -13244,6 +19478,60 @@ impl Store {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    /// Records a sparse retry item without making a failed UID look absent.
+    /// The scheduler can pause authentication failures while continuing other
+    /// folders and can isolate malformed messages by their durable class.
+    pub async fn record_mailbox_sync_failure_with_retry(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        uid: u32,
+        stage: &str,
+        error_class: &str,
+        error: &str,
+        next_retry_at: Option<DateTime<Utc>>,
+        user_action_required: bool,
+    ) -> Result<()> {
+        if uid == 0 || error_class.trim().is_empty() {
+            return Err(anyhow!(
+                "mailbox retry record has invalid UID or error class"
+            ));
+        }
+        sqlx::query("INSERT INTO mailbox_sync_failures(account_id, mailbox, uid, stage, error, error_class, attempt_count, next_retry_at, user_action_required, updated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?) ON CONFLICT(account_id, mailbox, uid) DO UPDATE SET stage=excluded.stage, error=excluded.error, error_class=excluded.error_class, attempt_count=mailbox_sync_failures.attempt_count+1, next_retry_at=excluded.next_retry_at, user_action_required=excluded.user_action_required, updated_at=excluded.updated_at")
+            .bind(account_id.to_string()).bind(mailbox).bind(i64::from(uid)).bind(stage).bind(error).bind(error_class).bind(next_retry_at).bind(user_action_required).bind(Utc::now())
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    /// Header coverage cannot be complete while these failures remain. A
+    /// folder with no due work can yield to other stages, then wake at the
+    /// earliest retry. Content/preview failures do not block header coverage.
+    pub async fn mailbox_header_failure_summary(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+    ) -> Result<MailboxFailureSummary> {
+        let (outstanding, retryable, user_action_required, next_retry_at): (i64, i64, i64, Option<DateTime<Utc>>) = sqlx::query_as("SELECT COUNT(*), COALESCE(SUM(CASE WHEN user_action_required = 0 THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN user_action_required = 1 THEN 1 ELSE 0 END), 0), MIN(CASE WHEN user_action_required = 0 THEN COALESCE(next_retry_at, ?) ELSE NULL END) FROM mailbox_sync_failures WHERE account_id = ? AND mailbox = ? AND stage IN ('headers', 'metadata')")
+            .bind(Utc::now()).bind(account_id.to_string()).bind(mailbox).fetch_one(&self.pool).await?;
+        Ok(MailboxFailureSummary {
+            outstanding: outstanding.try_into()?,
+            retryable: retryable.try_into()?,
+            user_action_required: user_action_required.try_into()?,
+            next_retry_at,
+        })
+    }
+
+    pub async fn due_mailbox_sync_failures(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        limit: usize,
+    ) -> Result<Vec<MailboxSyncFailure>> {
+        Ok(sqlx::query_as("SELECT account_id, mailbox, uid, stage, error, error_class, attempt_count, next_retry_at, user_action_required, updated_at FROM mailbox_sync_failures WHERE account_id = ? AND mailbox = ? AND user_action_required = 0 AND (next_retry_at IS NULL OR next_retry_at <= ?) ORDER BY next_retry_at, updated_at, uid LIMIT ?")
+            .bind(account_id.to_string()).bind(mailbox).bind(Utc::now()).bind(i64::try_from(limit.clamp(1, 500))?)
+            .fetch_all(&self.pool).await?)
     }
 
     /// Returns outstanding failures oldest first. Retrying a permanent
@@ -13319,6 +19607,44 @@ impl Store {
         mailbox: &str,
         changed_since: MailboxChangedSinceFlags<'_>,
     ) -> Result<()> {
+        self.apply_complete_mailbox_changed_since_flags_inner(
+            account_id,
+            mailbox,
+            changed_since,
+            None,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Publishes a CONDSTORE delta using the receipt captured before the
+    /// network command. `false` means the selected namespace changed.
+    pub async fn apply_complete_mailbox_changed_since_flags_with_receipt(
+        &self,
+        receipt: &ChangedSinceWriteReceipt,
+        changed_since: MailboxChangedSinceFlags<'_>,
+    ) -> Result<bool> {
+        if changed_since.identity.remote_name != receipt.remote_name
+            || changed_since.identity.uid_validity != receipt.uid_validity
+        {
+            return Ok(false);
+        }
+        self.apply_complete_mailbox_changed_since_flags_inner(
+            receipt.account_id,
+            &receipt.mailbox,
+            changed_since,
+            Some(receipt),
+        )
+        .await
+    }
+
+    async fn apply_complete_mailbox_changed_since_flags_inner(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        changed_since: MailboxChangedSinceFlags<'_>,
+        receipt: Option<&ChangedSinceWriteReceipt>,
+    ) -> Result<bool> {
         let MailboxChangedSinceFlags {
             identity:
                 MailboxSnapshotIdentity {
@@ -13345,21 +19671,69 @@ impl Store {
         .bind(mailbox)
         .fetch_optional(&mut *tx)
         .await?;
+        if let Some(receipt) = receipt {
+            let catalogue_stamp_current: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ? AND remote_name = ? AND uid_validity = ? AND provider_config_generation = ? AND provider_config_fingerprint = ?)")
+                .bind(&account_id)
+                .bind(mailbox)
+                .bind(&receipt.remote_name)
+                .bind(i64::from(receipt.uid_validity))
+                .bind(receipt.account_config_generation)
+                .bind(&receipt.account_config_fingerprint)
+                .fetch_one(&mut *tx)
+                .await?;
+            if !catalogue_stamp_current {
+                tx.rollback().await?;
+                return Ok(false);
+            }
+        }
         if current.as_ref() != Some(&(remote_name.to_owned(), i64::from(uid_validity), true)) {
             tx.rollback().await?;
+            if receipt.is_some() {
+                return Ok(false);
+            }
             return Err(anyhow!(
                 "cannot apply CHANGEDSINCE delta without a stable mailbox catalogue"
             ));
         }
+        if let Some(receipt) = receipt {
+            let account_current: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM accounts WHERE id = ? AND config_generation = ? AND config_fingerprint = ? AND NOT EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = ?))",
+            )
+            .bind(&account_id)
+            .bind(receipt.account_config_generation)
+            .bind(&receipt.account_config_fingerprint)
+            .bind(&account_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if !account_current {
+                tx.rollback().await?;
+                return Ok(false);
+            }
+        }
+        let expected_versions: HashMap<i64, i64> = receipt
+            .map(|receipt| {
+                receipt
+                    .local_mutation_versions
+                    .iter()
+                    .map(|version| (version.uid, version.version))
+                    .collect()
+            })
+            .unwrap_or_default();
         for (uid, is_read, is_flagged) in flags {
-            sqlx::query("UPDATE messages SET is_read = ?, is_flagged = ? WHERE account_id = ? AND mailbox = ? AND uid = ?")
+            let expected_version = expected_versions.get(&i64::from(*uid)).copied();
+            let applied = sqlx::query("UPDATE messages SET is_read = ?, is_flagged = ? WHERE account_id = ? AND mailbox = ? AND uid = ? AND NOT EXISTS (SELECT 1 FROM mailbox_mutation_fences AS fence WHERE fence.account_id = messages.account_id AND fence.mailbox = messages.mailbox AND fence.uid = messages.uid AND (fence.uid_validity IS NULL OR fence.uid_validity = ?)) AND NOT EXISTS (SELECT 1 FROM mailbox_mutation_versions AS version WHERE version.account_id = messages.account_id AND version.mailbox = messages.mailbox AND version.uid = messages.uid AND version.uid_validity = ? AND version.version != ?)")
                 .bind(is_read)
                 .bind(is_flagged)
                 .bind(&account_id)
                 .bind(mailbox)
                 .bind(i64::from(*uid))
-                .execute(&mut *tx)
-                .await?;
+                .bind(i64::from(uid_validity))
+                .bind(i64::from(uid_validity))
+                .bind(expected_version.unwrap_or(0))
+                .execute(&mut *tx).await?.rows_affected();
+            if applied != 1 {
+                continue;
+            }
             if *is_flagged {
                 sqlx::query("DELETE FROM message_content_cache WHERE message_id IN (SELECT id FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?)")
                     .bind(&account_id)
@@ -13397,6 +19771,6 @@ impl Store {
             ));
         }
         tx.commit().await?;
-        Ok(())
+        Ok(true)
     }
 }

@@ -10,6 +10,8 @@ import type {
   AiSettings,
   MailArrival,
   MailHydrated,
+  MailCatalogueUpdated,
+  MailOperationUpdated,
   MailRebuildProgress,
   MailRebuildFinished,
   NotificationSettings,
@@ -194,6 +196,35 @@ export function onMailChanged(
   if (!isTauri()) return Promise.resolve(() => undefined);
   return listen<{ accountId: string }>("mail-changed", (event) =>
     handler(event.payload.accountId),
+  );
+}
+
+/** Wakes sync coverage after a background content claim starts or finishes. */
+export function onMailContentActivity(
+  handler: (accountId: string) => void,
+): Promise<UnlistenFn> {
+  if (!isTauri()) return Promise.resolve(() => undefined);
+  return listen<{ accountId: string }>("mail-content-activity", (event) =>
+    handler(event.payload.accountId),
+  );
+}
+
+/** Events are only a wake-up signal. The catalogue query remains authoritative. */
+export function onMailCatalogueUpdated(
+  handler: (update: MailCatalogueUpdated) => void,
+): Promise<UnlistenFn> {
+  if (!isTauri()) return Promise.resolve(() => undefined);
+  return listen<MailCatalogueUpdated>("mail-catalogue-updated", (event) =>
+    handler(event.payload),
+  );
+}
+
+export function onMailOperationUpdated(
+  handler: (update: MailOperationUpdated) => void,
+): Promise<UnlistenFn> {
+  if (!isTauri()) return Promise.resolve(() => undefined);
+  return listen<MailOperationUpdated>("mail-operation-updated", (event) =>
+    handler(event.payload),
   );
 }
 

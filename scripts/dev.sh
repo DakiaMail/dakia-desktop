@@ -18,4 +18,4 @@ export CARGO_TARGET_X86_64_APPLE_DARWIN_RUNNER=../../../scripts/codesign-dev-run
 
 cd "$repo_root"
 "$repo_root/scripts/setup-worktree.sh" --dev-prerequisites-only
-exec tauri dev --config apps/desktop/src-tauri/tauri.conf.json
+exec tauri dev --config apps/desktop/src-tauri/tauri.conf.json "$@"

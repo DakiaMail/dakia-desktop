@@ -290,14 +290,7 @@ export function ReaderWindowApp() {
     setActionBusy(true);
     try {
       const results = await Promise.allSettled(
-        actionTargets.map((message) =>
-          readerApi.action(
-            message.account_id,
-            message.mailbox,
-            message.uid,
-            mutation,
-          ),
-        ),
+        actionTargets.map((message) => readerApi.action(message.id, mutation)),
       );
       const succeeded = actionTargets.filter(
         (_message, index) => results[index].status === "fulfilled",
@@ -371,12 +364,7 @@ export function ReaderWindowApp() {
     if (actionBusy || !thread) return;
     setActionBusy(true);
     try {
-      await readerApi.action(
-        message.account_id,
-        message.mailbox,
-        message.uid,
-        "delete",
-      );
+      await readerApi.action(message.id, "delete");
       const remaining = removeConcreteMessage(thread, message);
       setThread(remaining);
       await notifyMutation("delete", [message.id]);

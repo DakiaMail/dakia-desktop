@@ -28,10 +28,20 @@ const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 const MAX_ATTACHMENT_TOTAL_BYTES = 50 * 1024 * 1024;
 const MAX_ATTACHMENTS = 50;
 
+type SendState =
+  | "idle"
+  | "sending"
+  | "sent"
+  | "queued"
+  | "sent_copy_pending"
+  | "sent_persistence_pending"
+  | "uncertain"
+  | "sent_copy_uncertain";
+
 type Props = {
   accounts: Account[];
   seed?: ComposeSeed;
-  sendState: "idle" | "sending" | "sent";
+  sendState: SendState;
   aiConnected: boolean;
   onSend: (draft: Record<string, unknown>) => void;
   onAiDraft: (instruction: string) => Promise<string>;
@@ -448,7 +458,7 @@ export function Composer({
           disabled={!canSend}
           data-send-state={sendState}
         >
-          {sendState === "sent" ? (
+          {sendState === "sent" || sendState === "sent_copy_pending" ? (
             <IconCheck size={16} stroke={2.2} />
           ) : (
             <IconSend className="compose-send-icon" size={16} stroke={1.9} />
@@ -456,9 +466,19 @@ export function Composer({
           <span>
             {sendState === "sent"
               ? t("composer.sent")
-              : sendState === "sending"
-                ? t("composer.sending")
-                : t("actions.send")}
+              : sendState === "queued"
+                ? t("composer.queued")
+                : sendState === "sent_copy_pending"
+                  ? t("composer.sentCopyPending")
+                  : sendState === "sent_persistence_pending"
+                    ? t("composer.sentPersistencePending")
+                    : sendState === "sent_copy_uncertain"
+                      ? t("composer.sentCopyUncertain")
+                      : sendState === "uncertain"
+                        ? t("composer.deliveryUncertain")
+                        : sendState === "sending"
+                          ? t("composer.sending")
+                          : t("actions.send")}
           </span>
           <kbd>⌘↵</kbd>
         </button>
