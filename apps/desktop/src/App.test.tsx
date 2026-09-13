@@ -16,9 +16,14 @@ import type {
   AccountConnection,
   MailRebuildFinished,
   MailRebuildProgress,
+  MailCatalogueUpdated,
+  MailOperationUpdated,
+  MailSyncStatus,
   MailSummary,
+  SendSubmission,
   SmartInboxPage,
   MailThreadPage,
+  UnresolvedMailOperation,
 } from "./types";
 
 const smartInboxPage = (
@@ -34,6 +39,12 @@ const mocks = vi.hoisted(() => {
     [];
   const hydratedHandlers: Array<() => void> = [];
   const mailChangedHandlers: Array<() => void> = [];
+  const contentActivityHandlers: Array<(accountId: string) => void> = [];
+  const catalogueUpdatedHandlers: Array<(event: MailCatalogueUpdated) => void> =
+    [];
+  const composeSentHandlers: Array<(outcome?: SendSubmission) => void> = [];
+  const operationUpdatedHandlers: Array<(event: MailOperationUpdated) => void> =
+    [];
   const nativeMenuHandlers: Array<(action: string) => void> = [];
   const notificationActionHandlers: Array<
     (extra: Record<string, unknown>) => void | Promise<void>
@@ -102,6 +113,22 @@ const mocks = vi.hoisted(() => {
         }),
       ),
       mailRebuildStatus: vi.fn(async () => []),
+      mailSyncStatus: vi.fn(async (): Promise<MailSyncStatus[]> => []),
+      mailUnresolvedOperations: vi.fn(
+        async (): Promise<UnresolvedMailOperation[]> => [],
+      ),
+      outgoingOperationDraft: vi.fn(async () => ({
+        accountId: "account-1",
+        to: ["recipient@example.com"],
+        cc: [],
+        bcc: [],
+        subject: "Recovered draft",
+        bodyText: "Saved body",
+        bodyHtml: null,
+        inReplyTo: null,
+        references: null,
+        attachments: [],
+      })),
       recordNotificationDelivered: vi.fn(async () => undefined),
       search: vi.fn(async () => ({
         conversations: groupMessages([message]),
@@ -155,6 +182,12 @@ const mocks = vi.hoisted(() => {
       body: `Language: ${locale}`,
     })),
     openReaderWindow: vi.fn(async () => undefined),
+    mailPublicationMetrics: {
+      beginCatalogue: vi.fn(),
+      beginAccountConnection: vi.fn(),
+      armVisibleRows: vi.fn(),
+      publishCommittedRows: vi.fn(),
+    },
     noopListener: vi.fn(async () => unlisten),
     onNativeMenuAction: vi.fn(async (handler: (action: string) => void) => {
       nativeMenuHandlers.push(handler);
@@ -183,6 +216,10 @@ const mocks = vi.hoisted(() => {
     rebuildFinishedHandlers,
     hydratedHandlers,
     mailChangedHandlers,
+    contentActivityHandlers,
+    catalogueUpdatedHandlers,
+    composeSentHandlers,
+    operationUpdatedHandlers,
     nativeMenuHandlers,
     notificationActionHandlers,
     desktopNotificationActionHandlers,
@@ -236,6 +273,30 @@ const mocks = vi.hoisted(() => {
       mailChangedHandlers.push(handler);
       return unlisten;
     }),
+    onMailContentActivity: vi.fn(
+      async (handler: (accountId: string) => void) => {
+        contentActivityHandlers.push(handler);
+        return unlisten;
+      },
+    ),
+    onMailCatalogueUpdated: vi.fn(
+      async (handler: (event: MailCatalogueUpdated) => void) => {
+        catalogueUpdatedHandlers.push(handler);
+        return unlisten;
+      },
+    ),
+    onComposeSent: vi.fn(
+      async (handler: (outcome?: SendSubmission) => void) => {
+        composeSentHandlers.push(handler);
+        return unlisten;
+      },
+    ),
+    onMailOperationUpdated: vi.fn(
+      async (handler: (event: MailOperationUpdated) => void) => {
+        operationUpdatedHandlers.push(handler);
+        return unlisten;
+      },
+    ),
   };
 });
 
@@ -250,7 +311,7 @@ vi.mock("./api", () => ({
 }));
 
 vi.mock("./composeWindow", () => ({
-  onComposeSent: mocks.noopListener,
+  onComposeSent: mocks.onComposeSent,
   onOutboxChanged: mocks.noopListener,
   openComposeWindow: mocks.openComposeWindow,
 }));
@@ -286,7 +347,10 @@ vi.mock("./nativeWindows", () => ({
   onAccountRemoved: mocks.onAccountRemoved,
   onAccountUpdated: mocks.onAccountUpdated,
   onMailArrived: mocks.noopListener,
+  onMailCatalogueUpdated: mocks.onMailCatalogueUpdated,
+  onMailOperationUpdated: mocks.onMailOperationUpdated,
   onMailChanged: mocks.onMailChanged,
+  onMailContentActivity: mocks.onMailContentActivity,
   onMailHydrated: mocks.onMailHydrated,
   onMailIndexRebuilt: mocks.noopListener,
   onMailRebuildProgress: mocks.onMailRebuildProgress,
@@ -307,6 +371,10 @@ vi.mock("./updater", () => ({
   installUpdateAndRelaunch: mocks.installUpdateAndRelaunch,
 }));
 
+vi.mock("./mailPublicationMetrics", () => ({
+  mailPublicationMetrics: mocks.mailPublicationMetrics,
+}));
+
 function encodeNativeMenuAddress(address: string) {
   const bytes = new TextEncoder().encode(address);
   return btoa(String.fromCharCode(...bytes))
@@ -322,12 +390,19 @@ describe("App read state", () => {
     mocks.rebuildFinishedHandlers.length = 0;
     mocks.hydratedHandlers.length = 0;
     mocks.mailChangedHandlers.length = 0;
+    mocks.contentActivityHandlers.length = 0;
+    mocks.catalogueUpdatedHandlers.length = 0;
+    mocks.composeSentHandlers.length = 0;
+    mocks.operationUpdatedHandlers.length = 0;
     mocks.nativeMenuHandlers.length = 0;
     mocks.notificationActionHandlers.length = 0;
     mocks.desktopNotificationActionHandlers.length = 0;
     mocks.readerMutationHandlers.length = 0;
     mocks.readerFailureHandlers.length = 0;
     mocks.openReaderWindow.mockClear();
+    Object.values(mocks.mailPublicationMetrics).forEach((mock) =>
+      mock.mockClear(),
+    );
     mocks.accountRemovedHandlers.length = 0;
     mocks.accountUpdatedHandlers.length = 0;
     mocks.accountConnectedHandlers.length = 0;
@@ -342,6 +417,7 @@ describe("App read state", () => {
     });
     mocks.api.smartInbox.mockResolvedValue(smartInboxPage([]));
     mocks.api.starredCount.mockResolvedValue(0);
+    mocks.api.mailUnresolvedOperations.mockResolvedValue([]);
     mocks.api.content.mockResolvedValue({
       body_text: "Message body",
       attachments: [],
@@ -372,6 +448,117 @@ describe("App read state", () => {
     expect(mocks.api.sync).not.toHaveBeenCalled();
   });
 
+  it("keeps a recovered uncertain submission viewable but never resendable", async () => {
+    mocks.api.mailUnresolvedOperations.mockResolvedValue([
+      {
+        operationId: "smtp-uncertain-1",
+        accountId: "account-1",
+        kind: "smtp_submission",
+        status: "uncertain",
+        outcome: "smtp_delivery_uncertain",
+        deliveryAccepted: false,
+        createdAt: "2026-09-12T10:00:00Z",
+      },
+    ] satisfies UnresolvedMailOperation[]);
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    await screen.findByText("Delivery status uncertain. Do not send again.");
+    fireEvent.click(screen.getByRole("button", { name: "View saved message" }));
+
+    await waitFor(() =>
+      expect(mocks.api.outgoingOperationDraft).toHaveBeenCalledWith(
+        "smtp-uncertain-1",
+      ),
+    );
+    expect(mocks.openComposeWindow).toHaveBeenCalledWith({
+      accountId: "account-1",
+      to: "recipient@example.com",
+      cc: "",
+      bcc: "",
+      subject: "Recovered draft",
+      body: "Saved body",
+      bodyHtml: undefined,
+      inReplyTo: undefined,
+      references: undefined,
+      attachments: [],
+      recoveryOutcome: "smtp_delivery_uncertain",
+    });
+  });
+
+  it.each([
+    "smtp_accepted_sent_copy_uncertain",
+    "provider_sent_reconciliation_uncertain",
+    "sent_copy_reconciliation_uncertain",
+    "sent_copy_authentication_required",
+  ])(
+    "keeps an accepted SMTP %s recovery in the Sent-copy state",
+    async (outcome) => {
+      mocks.api.mailUnresolvedOperations.mockResolvedValue([
+        {
+          operationId: `accepted-${outcome}`,
+          accountId: "account-1",
+          kind: "smtp_submission",
+          status: "uncertain",
+          outcome,
+          deliveryAccepted: true,
+          createdAt: "2026-09-12T10:00:00Z",
+        },
+      ] satisfies UnresolvedMailOperation[]);
+      render(
+        <MantineProvider>
+          <App />
+        </MantineProvider>,
+      );
+
+      await screen.findByText(
+        "Message was sent. Its Sent copy is still being checked.",
+      );
+      fireEvent.click(
+        screen.getByRole("button", { name: "View saved message" }),
+      );
+      await waitFor(() =>
+        expect(mocks.openComposeWindow).toHaveBeenCalledWith(
+          expect.objectContaining({
+            recoveryOutcome: "smtp_accepted_sent_copy_uncertain",
+          }),
+        ),
+      );
+    },
+  );
+
+  it("surfaces a recovered UID mutation as uncertain without opening a draft", async () => {
+    mocks.api.mailUnresolvedOperations.mockResolvedValue([
+      {
+        operationId: "old-uid-1",
+        accountId: "account-1",
+        messageId: "retired-message-1",
+        kind: "mailbox_action",
+        status: "uncertain",
+        deliveryAccepted: false,
+        createdAt: "2026-09-12T10:00:00Z",
+      },
+    ] satisfies UnresolvedMailOperation[]);
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    expect(
+      await screen.findByText(
+        "This change may not have reached your email provider. Dakia refreshed the mailbox state.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "View saved message" }),
+    ).not.toBeInTheDocument();
+    expect(mocks.api.outgoingOperationDraft).not.toHaveBeenCalled();
+  });
+
   it("does not depend on the account-connected listener to start a fresh rebuild", async () => {
     render(
       <MantineProvider>
@@ -394,6 +581,35 @@ describe("App read state", () => {
       expect(screen.getByText("Unread thread")).toBeVisible(),
     );
     expect(mocks.api.sync).not.toHaveBeenCalled();
+  });
+
+  it("reports Sent-copy and uncertain submission outcomes without treating them alike", async () => {
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+    await waitFor(() =>
+      expect(mocks.composeSentHandlers.length).toBeGreaterThan(0),
+    );
+
+    act(() => {
+      mocks.composeSentHandlers.at(-1)!({
+        operationId: "operation-pending",
+        status: "sent_copy_pending",
+      });
+    });
+    expect(await screen.findByText("Sent, saving copy…")).toBeVisible();
+
+    act(() => {
+      mocks.composeSentHandlers.at(-1)!({
+        operationId: "operation-uncertain",
+        status: "uncertain",
+      });
+    });
+    expect(
+      await screen.findByText("Delivery status uncertain. Do not send again."),
+    ).toBeVisible();
   });
 
   it("does not probe an AI provider while AI features are hidden", async () => {
@@ -609,6 +825,49 @@ describe("App read state", () => {
     act(() => finishRead?.());
   });
 
+  it("restores a queued read from the authoritative mailbox after a permanent worker failure", async () => {
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const row = (await screen.findByText("Unread thread")).closest("button")!;
+    fireEvent.click(row);
+    await waitFor(() => expect(row).toHaveAttribute("data-unread", "false"));
+    await waitFor(() =>
+      expect(mocks.operationUpdatedHandlers.length).toBeGreaterThan(0),
+    );
+    mocks.api.search.mockResolvedValue({
+      conversations: groupMessages([mocks.message]),
+      nextCursor: null,
+    });
+
+    act(() => {
+      mocks.operationUpdatedHandlers.at(-1)!({
+        operationId: "read-operation",
+        accountId: "account-1",
+        messageId: "message-1",
+        kind: "message_read",
+        status: "permanent_failed",
+        error: "provider rejected the update",
+      });
+    });
+
+    expect(
+      await screen.findByText(
+        "Could not complete this change. Dakia restored the mailbox state.",
+      ),
+    ).toBeVisible();
+    await waitFor(() =>
+      expect(
+        document
+          .querySelector(".mail-list-panel .mail-subject")
+          ?.closest("button"),
+      ).toHaveAttribute("data-unread", "true"),
+    );
+  });
+
   it("archives consecutive conversations immediately without waiting for the network", async () => {
     const messages = [1, 2, 3].map((uid) => ({
       ...mocks.message,
@@ -662,8 +921,8 @@ describe("App read state", () => {
       expect(mocks.api.action).toHaveBeenCalledTimes(3);
     });
     expect(
-      (mocks.api.action.mock.calls as unknown[][]).map((call) => call[2]),
-    ).toEqual([1, 2, 3]);
+      (mocks.api.action.mock.calls as unknown[][]).map((call) => call[0]),
+    ).toEqual(["message-1", "message-2", "message-3"]);
     expect(finishActions).toHaveLength(3);
 
     mocks.api.search.mockResolvedValue({ conversations: [], nextCursor: null });
@@ -1237,6 +1496,306 @@ describe("App read state", () => {
     expect(mocks.api.search).not.toHaveBeenCalled();
   });
 
+  it("keeps an unread uncategorized header visible in Unsorted before classification", async () => {
+    const unsorted = {
+      ...mocks.message,
+      id: "header-only-message",
+      thread_id: "header-only-thread",
+      subject: "Freshly indexed header",
+      category: null,
+      content_state: "headers_only" as const,
+    };
+    localStorage.setItem("dakia.mail-list-view", "smart");
+    mocks.api.classifyPending.mockImplementationOnce(
+      () => new Promise(() => undefined),
+    );
+    mocks.api.smartInbox.mockResolvedValue(
+      smartInboxPage([
+        {
+          id: "unsorted",
+          conversations: groupMessages([unsorted]),
+          nextCursor: null,
+        },
+      ]),
+    );
+
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const section = await screen.findByRole("region", { name: "Unsorted" });
+    expect(section).toHaveTextContent("Freshly indexed header");
+    expect(mocks.api.classifyPending).toHaveBeenCalled();
+  });
+
+  it("moves an opened Unsorted conversation to Seen without rendering a duplicate", async () => {
+    const unsorted = {
+      ...mocks.message,
+      id: "unsorted-6000",
+      thread_id: "unsorted-thread",
+      subject: "Unsorted 6000",
+      category: null,
+    };
+    localStorage.setItem("dakia.mail-list-view", "smart");
+    mocks.api.classifyPending.mockImplementationOnce(
+      () => new Promise(() => undefined),
+    );
+    let smartLoads = 0;
+    mocks.api.smartInbox.mockImplementation(async () => {
+      smartLoads += 1;
+      return smartInboxPage([
+        {
+          id: smartLoads === 1 ? "unsorted" : "seen",
+          conversations: groupMessages([
+            { ...unsorted, is_read: smartLoads > 1 },
+          ]),
+          nextCursor: null,
+        },
+      ]);
+    });
+
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const unsortedSection = await screen.findByRole("region", {
+      name: "Unsorted",
+    });
+    const row = within(unsortedSection)
+      .getByText("Unsorted 6000")
+      .closest("button")!;
+    fireEvent.click(within(row).getByLabelText("Select"));
+    fireEvent.click(row);
+
+    await waitFor(() =>
+      expect(mocks.api.setRead).toHaveBeenCalledWith("unsorted-6000", true),
+    );
+    const seenSection = await screen.findByRole("region", { name: "Seen" });
+    const seenRow = within(seenSection)
+      .getByText("Unsorted 6000")
+      .closest("button")!;
+    const currentUnsortedSection = screen.queryByRole("region", {
+      name: "Unsorted",
+    });
+    expect(
+      currentUnsortedSection
+        ? within(currentUnsortedSection).queryByText("Unsorted 6000")
+        : null,
+    ).toBeNull();
+    expect(
+      document.querySelectorAll(".mail-list-panel .mail-item"),
+    ).toHaveLength(1);
+    expect(within(seenRow).getByLabelText("Select")).toBeChecked();
+    expect(
+      screen.getByRole("heading", { name: "Unsorted 6000" }),
+    ).toBeVisible();
+  });
+
+  it("coalesces committed catalogue reloads and ignores a stale revision", async () => {
+    mocks.api.classifyPending.mockImplementationOnce(
+      () => new Promise(() => undefined),
+    );
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+    await screen.findByText("Unread thread");
+    await waitFor(() =>
+      expect(mocks.catalogueUpdatedHandlers.length).toBeGreaterThan(0),
+    );
+    mocks.api.search.mockClear();
+
+    act(() => {
+      mocks.catalogueUpdatedHandlers.at(-1)!({
+        accountId: "account-1",
+        mailbox: "INBOX",
+        revision: 8,
+      });
+      mocks.catalogueUpdatedHandlers.at(-1)!({
+        accountId: "account-1",
+        mailbox: "INBOX",
+        revision: 9,
+      });
+    });
+    await waitFor(() => expect(mocks.api.search).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      mocks.catalogueUpdatedHandlers.at(-1)!({
+        accountId: "account-1",
+        mailbox: "INBOX",
+        revision: 8,
+      });
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 60));
+    expect(mocks.api.search).toHaveBeenCalledTimes(1);
+  });
+
+  it("publishes catalogue timing only after the matching account row commits", async () => {
+    mocks.api.classifyPending.mockImplementationOnce(
+      () => new Promise(() => undefined),
+    );
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+    await screen.findByText("Unread thread");
+    await waitFor(() =>
+      expect(mocks.catalogueUpdatedHandlers.length).toBeGreaterThan(0),
+    );
+    mocks.mailPublicationMetrics.armVisibleRows.mockClear();
+    mocks.mailPublicationMetrics.publishCommittedRows.mockClear();
+
+    act(() => {
+      mocks.catalogueUpdatedHandlers.at(-1)!({
+        accountId: "account-1",
+        mailbox: "INBOX",
+        revision: 15,
+      });
+    });
+
+    await waitFor(() =>
+      expect(mocks.mailPublicationMetrics.armVisibleRows).toHaveBeenCalledWith(
+        ["account-1"],
+        ["account-1"],
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        mocks.mailPublicationMetrics.publishCommittedRows,
+      ).toHaveBeenCalled(),
+    );
+    const committedAccountIds =
+      mocks.mailPublicationMetrics.publishCommittedRows.mock.calls.at(-1)?.[0];
+    expect([...committedAccountIds]).toEqual(["account-1"]);
+  });
+
+  it("states that search coverage is incomplete while primary history is indexing", async () => {
+    mocks.api.mailSyncStatus.mockResolvedValue([
+      {
+        runId: "run-1",
+        accountId: "account-1",
+        stage: "primary_history",
+        inboxReady: true,
+        primaryComplete: false,
+        secondaryComplete: false,
+        deferredComplete: false,
+        contentLoading: false,
+        retryCount: 2,
+        outcome: "running",
+        revision: 4,
+        nextRetryAt: null,
+        error: null,
+      },
+    ]);
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const search = await screen.findByRole("textbox", { name: "Search mail" });
+    fireEvent.change(search, { target: { value: "release" } });
+    expect(
+      await screen.findByText(
+        "Search covers downloaded mail while indexing continues.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText("Inbox is ready. Downloading older mail…"),
+    ).toBeVisible();
+    expect(screen.getByText("2 messages still need to load")).toBeVisible();
+  });
+
+  it("coalesces content activity into an authoritative true-to-false coverage refresh", async () => {
+    let contentLoading = true;
+    mocks.api.mailSyncStatus.mockImplementation(async () => [
+      {
+        runId: "run-content",
+        accountId: "account-1",
+        stage: "complete",
+        inboxReady: true,
+        primaryComplete: true,
+        secondaryComplete: true,
+        deferredComplete: true,
+        contentLoading,
+        retryCount: 0,
+        outcome: "running",
+        revision: 7,
+        nextRetryAt: null,
+        error: null,
+      },
+    ]);
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    await screen.findByText("Loading message content…");
+    await waitFor(() =>
+      expect(mocks.contentActivityHandlers.length).toBeGreaterThan(0),
+    );
+    const callsBefore = mocks.api.mailSyncStatus.mock.calls.length;
+    contentLoading = false;
+    act(() => {
+      mocks.contentActivityHandlers.at(-1)!("account-1");
+      mocks.contentActivityHandlers.at(-1)!("account-1");
+    });
+
+    await waitFor(() =>
+      expect(mocks.api.mailSyncStatus).toHaveBeenCalledTimes(callsBefore + 1),
+    );
+    expect(
+      screen.queryByText("Loading message content…"),
+    ).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["paused", "Background loading is paused."],
+    ["failed", "Background loading could not continue."],
+  ] as const)(
+    "shows %s background status without claiming active history loading",
+    async (outcome, message) => {
+      mocks.api.mailSyncStatus.mockResolvedValue([
+        {
+          runId: `run-${outcome}`,
+          accountId: "account-1",
+          stage: "primary_history",
+          inboxReady: true,
+          primaryComplete: false,
+          secondaryComplete: false,
+          deferredComplete: false,
+          contentLoading: false,
+          retryCount: 3,
+          outcome,
+          revision: 8,
+          nextRetryAt: null,
+          error: "provider-specific detail must not reach the UI",
+        },
+      ]);
+      render(
+        <MantineProvider>
+          <App />
+        </MantineProvider>,
+      );
+
+      expect(await screen.findByText(message)).toBeVisible();
+      expect(
+        screen.queryByText("Inbox is ready. Downloading older mail…"),
+      ).not.toBeInTheDocument();
+      expect(screen.getByText("3 messages still need to load")).toBeVisible();
+      expect(
+        screen.queryByText("provider-specific detail must not reach the UI"),
+      ).not.toBeInTheDocument();
+    },
+  );
+
   it("ignores an older all-account starred count after selecting one account", async () => {
     const secondAccount = {
       ...mocks.account,
@@ -1652,12 +2211,7 @@ describe("App read state", () => {
     await waitFor(() =>
       expect(within(list).queryByText("Unread thread")).not.toBeInTheDocument(),
     );
-    expect(mocks.api.action).toHaveBeenCalledWith(
-      "account-1",
-      "INBOX",
-      1,
-      "trash",
-    );
+    expect(mocks.api.action).toHaveBeenCalledWith("message-1", "trash");
 
     await act(async () =>
       resolveStaleSmartInbox!(
@@ -1720,18 +2274,11 @@ describe("App read state", () => {
     );
 
     await waitFor(() =>
-      expect(mocks.api.action).toHaveBeenCalledWith(
-        "account-1",
-        "INBOX",
-        41,
-        "delete",
-      ),
+      expect(mocks.api.action).toHaveBeenCalledWith("message-latest", "delete"),
     );
     expect(await screen.findByText("Earlier body")).toBeVisible();
     expect(screen.queryByText("Latest body")).not.toBeInTheDocument();
-    expect(
-      screen.getByText("Message deletion request completed"),
-    ).toBeVisible();
+    expect(screen.getByText("Change queued")).toBeVisible();
   });
 
   it("routes Shift+Delete through confirmation to the exact mailbox locator", async () => {
@@ -1752,12 +2299,7 @@ describe("App read state", () => {
     });
 
     await waitFor(() =>
-      expect(mocks.api.action).toHaveBeenCalledWith(
-        "account-1",
-        "INBOX",
-        1,
-        "delete",
-      ),
+      expect(mocks.api.action).toHaveBeenCalledWith("message-1", "delete"),
     );
     expect(mocks.confirmNativeAction).toHaveBeenCalledOnce();
   });
@@ -1971,6 +2513,126 @@ describe("App read state", () => {
     );
     await Promise.resolve();
     expect(screen.queryByText("Old people")).not.toBeInTheDocument();
+  });
+
+  it("keeps the opened message selected when later history merges its thread", async () => {
+    const opened = {
+      ...mocks.message,
+      id: "opened-message",
+      thread_id: "provisional-thread",
+      subject: "Conversation that gains history",
+    };
+    const older = {
+      ...mocks.message,
+      id: "older-history",
+      thread_id: "merged-thread",
+      uid: 2,
+      subject: "Conversation that gains history",
+      received_at: "2026-07-19T09:00:00Z",
+    };
+    const merged = { ...opened, thread_id: "merged-thread" };
+    mocks.api.classifyPending.mockImplementationOnce(
+      () => new Promise(() => undefined),
+    );
+    mocks.api.search.mockResolvedValue({
+      conversations: groupMessages([opened]),
+      nextCursor: null,
+    });
+    mocks.api.content.mockImplementation(async (messageId: string) => ({
+      body_text:
+        messageId === opened.id ? "Opened message stays here" : "Older history",
+      attachments: [],
+    }));
+
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Select" }));
+    fireEvent.click(
+      (await screen.findByText("Conversation that gains history")).closest(
+        "button",
+      )!,
+    );
+    expect(await screen.findByText("Opened message stays here")).toBeVisible();
+
+    mocks.api.search.mockResolvedValue({
+      conversations: groupMessages([older, merged]),
+      nextCursor: null,
+    });
+    const searchCallsBeforeMerge = mocks.api.search.mock.calls.length;
+    act(() => {
+      mocks.catalogueUpdatedHandlers.at(-1)!({
+        accountId: "account-1",
+        mailbox: "INBOX",
+        revision: 21,
+      });
+    });
+
+    await waitFor(() =>
+      expect(mocks.api.search.mock.calls.length).toBeGreaterThan(
+        searchCallsBeforeMerge,
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByText("Opened message stays here")).toBeVisible(),
+    );
+    expect(
+      screen.getByRole("heading", { name: "Conversation that gains history" }),
+    ).toBeVisible();
+    expect(screen.getByRole("checkbox", { name: "Select" })).toBeChecked();
+  });
+
+  it("clears a selected stale local ID instead of selecting a replacement with the same UID", async () => {
+    const stale = {
+      ...mocks.message,
+      id: "old-generation-message",
+      uid: 77,
+      thread_id: "old-generation-thread",
+      subject: "Old generation",
+    };
+    const replacement = {
+      ...mocks.message,
+      id: "replacement-generation-message",
+      uid: 77,
+      thread_id: "replacement-generation-thread",
+      subject: "Replacement generation",
+    };
+    mocks.api.classifyPending.mockImplementationOnce(
+      () => new Promise(() => undefined),
+    );
+    mocks.api.search.mockResolvedValue({
+      conversations: groupMessages([stale]),
+      nextCursor: null,
+    });
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Select" }));
+    expect(screen.getByText("1 selected")).toBeVisible();
+    mocks.api.search.mockResolvedValue({
+      conversations: groupMessages([replacement]),
+      nextCursor: null,
+    });
+    act(() => {
+      mocks.catalogueUpdatedHandlers.at(-1)!({
+        accountId: "account-1",
+        mailbox: "INBOX",
+        revision: 31,
+      });
+    });
+
+    expect(await screen.findByText("Replacement generation")).toBeVisible();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("checkbox", { name: "Select" }),
+      ).not.toBeChecked(),
+    );
+    expect(screen.queryByText("1 selected")).not.toBeInTheDocument();
   });
 
   it("does not rewrite IMAP state when the opened conversation is already read", async () => {

@@ -43,6 +43,7 @@ import type {
   SmartSection,
   SmartSectionId,
   MailThread,
+  MailSyncStatus,
   SyncStatus,
 } from "../types";
 import { concreteThreadMessages } from "../threads";
@@ -57,7 +58,9 @@ type Props = {
   loadingMore: boolean;
   hasMore: boolean;
   remoteSearchUnavailable: boolean;
+  searchCoverageIncomplete?: boolean;
   syncStatus?: SyncStatus;
+  syncCoverage?: MailSyncStatus[];
   classifying: boolean;
   lastSyncAt?: string;
   aiConnected: boolean;
@@ -102,7 +105,9 @@ export function MailList({
   loadingMore,
   hasMore,
   remoteSearchUnavailable,
+  searchCoverageIncomplete = false,
   syncStatus,
+  syncCoverage = [],
   classifying,
   lastSyncAt,
   aiConnected,
@@ -228,6 +233,14 @@ export function MailList({
           <div className="search-scope-notice" role="status">
             {t("search.localOnly")}
           </div>
+        ) : null}
+        {query.trim() && searchCoverageIncomplete ? (
+          <div className="search-scope-notice" role="status">
+            {t("search.indexing")}
+          </div>
+        ) : null}
+        {syncCoverage.length ? (
+          <SyncCoverageNotice status={syncCoverage} />
         ) : null}
         {syncStatus ? <SyncIndicator status={syncStatus} compact /> : null}
         {classifying ? (
@@ -382,6 +395,7 @@ function SmartThreadSections(
   const { t } = useTranslation();
   const labels: Record<SmartSectionId, string> = {
     starred: "inbox.starred",
+    unsorted: "inbox.unsorted",
     people: "inbox.categoryPeople",
     transactions: "inbox.categoryTransactions",
     notifications: "inbox.categoryNotifications",
@@ -409,6 +423,55 @@ function SmartThreadSections(
       </section>
     );
   });
+}
+
+function SyncCoverageNotice({ status }: { status: MailSyncStatus[] }) {
+  const { t } = useTranslation();
+  const waitingForInbox = status.some((item) => !item.inboxReady);
+  const primaryPending = status.some(
+    (item) => item.inboxReady && !item.primaryComplete,
+  );
+  const secondaryPending = status.some(
+    (item) => item.primaryComplete && !item.secondaryComplete,
+  );
+  const deferredPending = status.some(
+    (item) => item.secondaryComplete && !item.deferredComplete,
+  );
+  const outstanding = status.reduce((sum, item) => sum + item.retryCount, 0);
+  const contentLoading = status.some((item) => item.contentLoading);
+  const paused = status.some((item) => item.outcome === "paused");
+  const failed = status.some((item) => item.outcome === "failed");
+  const stageMessage =
+    paused || failed
+      ? undefined
+      : waitingForInbox
+        ? t("inbox.syncInboxStarting")
+        : primaryPending
+          ? t("inbox.syncPrimaryHistory")
+          : secondaryPending
+            ? t("inbox.syncSecondary")
+            : deferredPending
+              ? t("inbox.syncDeferred")
+              : undefined;
+  const messages = [
+    failed
+      ? t("inbox.syncBackgroundFailed")
+      : paused
+        ? t("inbox.syncBackgroundPaused")
+        : undefined,
+    stageMessage,
+    contentLoading ? t("inbox.syncContentLoading") : undefined,
+    outstanding
+      ? t("inbox.syncOutstanding", { count: outstanding })
+      : undefined,
+  ].filter((message): message is string => Boolean(message));
+  return messages.length ? (
+    <div className="classification-indicator" role="status">
+      {messages.map((message) => (
+        <span key={message}>{message}</span>
+      ))}
+    </div>
+  ) : null;
 }
 
 function ThreadRows({
@@ -581,6 +644,7 @@ function ThreadRows({
           <button
             key={thread.id}
             className="mail-item"
+            data-account-id={thread.latest.account_id}
             data-active={activeThreadId === thread.id}
             data-unread={thread.unread}
             data-smart-exiting={exitingThreadIds.has(thread.id)}

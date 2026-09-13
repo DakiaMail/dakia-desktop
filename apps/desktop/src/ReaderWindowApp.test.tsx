@@ -603,12 +603,7 @@ describe("ReaderWindowApp", () => {
     await waitFor(() =>
       expect(screen.getByTestId("conversation-count")).toHaveTextContent("1"),
     );
-    expect(mocks.api.action).toHaveBeenCalledWith(
-      "account-1",
-      "INBOX",
-      1,
-      "delete",
-    );
+    expect(mocks.api.action).toHaveBeenCalledWith("message-1", "delete");
     expect(mocks.notifyReaderWindowMutated).toHaveBeenCalledWith({
       accountId: "account-1",
       threadId: "thread-1",

@@ -8,6 +8,8 @@ import type {
   AiSettings,
   ComposeAttachment,
   MailRebuildProgress,
+  MailSyncStatus,
+  OutgoingOperationDraft,
   MailCursor,
   MailSummary,
   ConversationTarget,
@@ -21,6 +23,8 @@ import type {
   SyncProgress,
   SyncResult,
   RealtimeSyncStatus,
+  SendSubmission,
+  UnresolvedMailOperation,
   TranslationDownloadProgress,
   TranslationLanguageDetection,
   TranslationModelFiles,
@@ -201,6 +205,17 @@ const desktopApi = {
     });
   },
   mailRebuildStatus: () => invoke<MailRebuildProgress[]>("mail_rebuild_status"),
+  mailSyncStatus: () => invoke<MailSyncStatus[]>("mail_sync_status"),
+  mailUnresolvedOperations: (accountIds?: string[]) =>
+    accountIds
+      ? invoke<UnresolvedMailOperation[]>("mail_unresolved_operations", {
+          accountIds,
+        })
+      : invoke<UnresolvedMailOperation[]>("mail_unresolved_operations"),
+  outgoingOperationDraft: (operationId: string) =>
+    invoke<OutgoingOperationDraft>("outgoing_operation_draft", {
+      operationId,
+    }),
   content: async (messageId: string) => {
     try {
       return await invoke<MessageContent>("message_content", { messageId });
@@ -222,13 +237,12 @@ const desktopApi = {
     invoke<ComposeAttachment[]>("read_dropped_files", { receipt }),
   send: (draft: Record<string, unknown>) =>
     invoke<string>("send_message", { draft }),
+  sendOutcome: (draft: Record<string, unknown>) =>
+    invoke<SendSubmission>("send_message_outcome", { draft }),
   action: (
-    accountId: string,
-    mailbox: string,
-    uid: number,
+    messageId: string,
     action: "archive" | "spam" | "not_spam" | "trash" | "delete",
-  ) =>
-    invoke<void>("apply_mailbox_action", { accountId, mailbox, uid, action }),
+  ) => invoke<void>("apply_mailbox_action", { messageId, action }),
   openExternal: (url: string) => invoke<void>("open_external_url", { url }),
   unsubscribe: (messageId: string) =>
     invoke<UnsubscribeResult>("unsubscribe_message", { messageId }),
@@ -434,6 +448,7 @@ const demoAttachments = (messageId: string): Attachment[] =>
 
 const demoSmartSectionIds: SmartSectionId[] = [
   "starred",
+  "unsorted",
   "people",
   "transactions",
   "notifications",
@@ -569,6 +584,13 @@ const demoApi: typeof desktopApi = {
             if (id === "seen") {
               return messages.every((message) => message.is_read);
             }
+            if (id === "unsorted") {
+              return (
+                messages.some((message) => !message.is_read) &&
+                !messages.some((message) => message.is_flagged) &&
+                thread.latest.category == null
+              );
+            }
             return (
               thread.latest.category === id &&
               messages.some((message) => !message.is_read) &&
@@ -655,6 +677,27 @@ const demoApi: typeof desktopApi = {
   reconcileRealtimeSync: async () => undefined,
   realtimeSyncStatus: async () => [],
   mailRebuildStatus: async () => [],
+  mailSyncStatus: async () => [
+    {
+      runId: "demo-sync-run",
+      accountId: demoAccount.id,
+      stage: "complete",
+      inboxReady: true,
+      primaryComplete: true,
+      secondaryComplete: true,
+      deferredComplete: true,
+      contentLoading: false,
+      retryCount: 0,
+      outcome: "completed",
+      revision: 1,
+      nextRetryAt: null,
+      error: null,
+    },
+  ],
+  mailUnresolvedOperations: async () => [],
+  outgoingOperationDraft: async () => {
+    throw new Error("No saved outgoing operation is available in the web demo");
+  },
   recordNotificationDelivered: async () => undefined,
   hydrateMessage: async (messageId) => {
     const message = demoMessages.find((item) => item.id === messageId);
@@ -703,6 +746,11 @@ const demoApi: typeof desktopApi = {
     throw new Error("Native file drop support is unavailable in the web demo");
   },
   send: async () => "queued",
+  sendOutcome: async () => ({
+    operationId: "demo-submission",
+    status: "accepted" as const,
+    response: "queued",
+  }),
   action: async () => undefined,
   openExternal: async (url) => {
     window.open(url, "_blank", "noopener,noreferrer");
