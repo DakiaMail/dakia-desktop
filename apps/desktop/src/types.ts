@@ -147,6 +147,129 @@ export type ComposeAttachment = {
   content_base64: string;
   size_bytes: number;
 };
+/** A locally learned recipient that can be suggested while composing. */
+export type ContactedPersonSuggestion = {
+  address: string;
+  display_name?: string | null;
+  formatted_address?: string | null;
+  account_id?: string | null;
+  account_send_count?: number;
+  account_last_contacted_at?: string | null;
+  last_contacted_at?: string | null;
+  hidden?: boolean;
+};
+
+export type ContactedPeopleSettings = {
+  enabled: boolean;
+};
+
+export type ContactedPeopleChanged = ContactedPeopleSettings & {
+  cleared: boolean;
+};
+
+/** A provider-discovered mailbox that can be used as an exact search scope. */
+export type SearchMailbox = {
+  /** Stable local catalogue path, never a provider command path. */
+  localPath: string;
+  selectable: boolean;
+};
+
+/** Input and response for the Rust send-parser validation boundary. */
+export type ComposeRecipientsInput = {
+  to: string[];
+  cc: string[];
+  bcc: string[];
+};
+
+export type ComposeRecipientFieldValidation = {
+  valid: boolean;
+  /** Original entries rejected by the exact Rust send parser. */
+  invalid: string[];
+};
+
+export type ComposeRecipientValidation = {
+  to: ComposeRecipientFieldValidation;
+  cc: ComposeRecipientFieldValidation;
+  bcc: ComposeRecipientFieldValidation;
+};
+
+/** The explicit execution mode for the versioned search contract. */
+export type SearchExecutionMode = "local" | "hybrid";
+
+export type SearchScopeV2 = {
+  mailbox?: string | null;
+  include_spam_trash?: boolean;
+};
+
+/** A raw query is deliberately kept opaque to the desktop client. */
+export type SearchRequestV2 = {
+  /** Client-reserved identity, allowing cancellation before start resolves. */
+  client_request_id?: string;
+  raw_query: string;
+  account_ids: string[];
+  scope: SearchScopeV2;
+  execution_mode: SearchExecutionMode;
+  page_size: number;
+  continuation?: string | null;
+};
+
+export type SearchCoverageState =
+  | "local_catalogue"
+  | "local_body_index"
+  | "provider_searched"
+  | "provider_partial"
+  | "offline"
+  | "authentication_failed"
+  | "unsupported"
+  | "cancelled"
+  | "mailbox_changed";
+
+export type SearchCoverage = {
+  account_id: string;
+  mailbox?: string | null;
+  state: SearchCoverageState;
+  detail?: string | null;
+};
+
+/** Incremental coverage published by a submitted native search session. */
+export type SearchProgressUpdate = {
+  sessionId: string;
+  revision: number;
+  coverage: SearchCoverage[];
+};
+
+export type SearchMatchEvidence = {
+  primary_message_id?: string | null;
+  matched_message_ids: string[];
+  match_count: number;
+  excerpt?: string | null;
+};
+
+export type SearchPageV2 = {
+  conversations: MailThread[];
+  match_evidence?: Record<string, SearchMatchEvidence>;
+  coverage: SearchCoverage[];
+  continuation?: string | null;
+  session_id: string;
+  revision: number;
+};
+
+export type SearchErrorV2 = {
+  position?: number | null;
+  category: "parse" | "unsupported" | "provider" | "transient";
+  unsupported_operator?: string | null;
+  message: string;
+};
+
+/** Desktop-local shortcut to a raw query and the accounts it was saved for. */
+export type SavedSearch = {
+  id: string;
+  name: string;
+  raw_query: string;
+  account_ids: string[];
+  local_only: boolean;
+  created_at: string;
+};
 export type MailCategory =
   "people" | "transactions" | "notifications" | "newsletters" | "other";
 export type ClassificationSource = "model" | "override" | "user";

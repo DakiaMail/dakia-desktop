@@ -117,4 +117,75 @@ describe("MailboxNav accounts", () => {
 
     expect(screen.getByRole("button", { name: "Feedback" })).toBeDisabled();
   });
+
+  it("keeps saved searches disabled when their account was removed", () => {
+    render(
+      <MailboxNav
+        accounts={[account]}
+        mailbox="INBOX"
+        onSelectAccount={vi.fn()}
+        onAccountContextMenu={vi.fn()}
+        onAddAccount={vi.fn()}
+        onMailbox={vi.fn()}
+        onFeedback={vi.fn()}
+        savedSearches={[
+          {
+            id: "saved-1",
+            name: "Receipts",
+            raw_query: "has:attachment",
+            account_ids: ["removed-account"],
+            local_only: false,
+            created_at: "2026-09-06T00:00:00Z",
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Receipts" })).toBeDisabled();
+    expect(screen.getByTitle(/enabled account.*not available/i)).toBeVisible();
+  });
+
+  it("keeps a multi-account saved search available when one account is disabled", () => {
+    render(
+      <MailboxNav
+        accounts={[account, { ...account, id: "disabled", enabled: false }]}
+        mailbox="INBOX"
+        onSelectAccount={vi.fn()}
+        onAccountContextMenu={vi.fn()}
+        onAddAccount={vi.fn()}
+        onMailbox={vi.fn()}
+        onFeedback={vi.fn()}
+        savedSearches={[
+          {
+            id: "saved-1",
+            name: "Receipts",
+            raw_query: "has:attachment",
+            account_ids: ["account-1", "disabled"],
+            local_only: false,
+            created_at: "2026-09-06T00:00:00Z",
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Receipts" })).toBeEnabled();
+  });
+
+  it("marks disabled accounts unavailable before selection", () => {
+    render(
+      <MailboxNav
+        accounts={[{ ...account, enabled: false }]}
+        mailbox="INBOX"
+        onSelectAccount={vi.fn()}
+        onAccountContextMenu={vi.fn()}
+        onAddAccount={vi.fn()}
+        onMailbox={vi.fn()}
+        onFeedback={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Personal mail" }),
+    ).toBeDisabled();
+  });
 });

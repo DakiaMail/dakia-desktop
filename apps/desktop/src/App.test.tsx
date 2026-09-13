@@ -7,7 +7,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import "./i18n";
 import App from "./App";
 import { groupMessages } from "./threads";
@@ -17,6 +17,7 @@ import type {
   MailRebuildFinished,
   MailRebuildProgress,
   MailSummary,
+  SearchProgressUpdate,
   SmartInboxPage,
   MailThreadPage,
 } from "./types";
@@ -40,6 +41,12 @@ const mocks = vi.hoisted(() => {
   > = [];
   const desktopNotificationActionHandlers: Array<
     (extra: Record<string, unknown>) => void | Promise<void>
+  > = [];
+  const contactedPeopleHandlers: Array<
+    (change: import("./types").ContactedPeopleChanged) => void
+  > = [];
+  const searchProgressHandlers: Array<
+    (progress: SearchProgressUpdate) => void
   > = [];
   const readerMutationHandlers: Array<() => void> = [];
   const readerFailureHandlers: Array<
@@ -91,6 +98,9 @@ const mocks = vi.hoisted(() => {
       action: vi.fn(async () => undefined),
       aiAvailable: vi.fn(async () => false),
       accounts: vi.fn(async (): Promise<Account[]> => [account]),
+      listSearchMailboxes: vi.fn(
+        async (): Promise<import("./types").SearchMailbox[]> => [],
+      ),
       classifyPending: vi.fn(async () => 0),
       configureTray: vi.fn(async () => undefined),
       content: vi.fn(
@@ -103,14 +113,43 @@ const mocks = vi.hoisted(() => {
       ),
       mailRebuildStatus: vi.fn(async () => []),
       recordNotificationDelivered: vi.fn(async () => undefined),
-      search: vi.fn(async () => ({
-        conversations: groupMessages([message]),
-        nextCursor: null as import("./types").MailCursor | null,
-      })),
+      search: vi.fn(
+        async (
+          _text: string,
+          _accountIds: string[],
+          _mailbox: string | undefined,
+          _unreadOnly: boolean,
+          _flaggedOnly: boolean,
+          _limit: number,
+          _cursor: import("./types").MailCursor | null,
+        ) => ({
+          conversations: groupMessages([message]),
+          nextCursor: null as import("./types").MailCursor | null,
+        }),
+      ),
       smartInbox: vi.fn(async (): Promise<SmartInboxPage> => ({
         sections: [],
       })),
       searchRemote: vi.fn(async () => []),
+      startSearchV2: vi.fn(
+        async (
+          _request: import("./types").SearchRequestV2,
+        ): Promise<import("./types").SearchPageV2> => {
+          throw new Error("v2 unavailable");
+        },
+      ),
+      nextSearchPageV2: vi.fn(
+        async (
+          _request: import("./types").SearchRequestV2,
+        ): Promise<import("./types").SearchPageV2> => {
+          throw new Error("v2 unavailable");
+        },
+      ),
+      cancelSearchV2: vi.fn(async () => undefined),
+      contactedPeopleSettings: vi.fn(async () => ({ enabled: true })),
+      suggestContactedPeople: vi.fn(
+        async (): Promise<import("./types").ContactedPersonSuggestion[]> => [],
+      ),
       showEmailAddressContextMenu: vi.fn(async () => undefined),
       setRead: vi.fn(async () => undefined),
       setStarred: vi.fn(async () => undefined),
@@ -188,6 +227,8 @@ const mocks = vi.hoisted(() => {
     desktopNotificationActionHandlers,
     readerMutationHandlers,
     readerFailureHandlers,
+    contactedPeopleHandlers,
+    searchProgressHandlers,
     onReaderWindowMutated: vi.fn(async (handler: () => void) => {
       readerMutationHandlers.push(handler);
       return unlisten;
@@ -213,6 +254,20 @@ const mocks = vi.hoisted(() => {
         handler: (extra: Record<string, unknown>) => void | Promise<void>,
       ) => {
         desktopNotificationActionHandlers.push(handler);
+        return unlisten;
+      },
+    ),
+    onContactedPeopleChanged: vi.fn(
+      async (
+        handler: (change: import("./types").ContactedPeopleChanged) => void,
+      ) => {
+        contactedPeopleHandlers.push(handler);
+        return unlisten;
+      },
+    ),
+    onSearchProgress: vi.fn(
+      async (handler: (progress: SearchProgressUpdate) => void) => {
+        searchProgressHandlers.push(handler);
         return unlisten;
       },
     ),
@@ -294,6 +349,8 @@ vi.mock("./nativeWindows", () => ({
   onMailSyncState: mocks.noopListener,
   onDesktopNotificationAction: mocks.onDesktopNotificationAction,
   onNativeMenuAction: mocks.onNativeMenuAction,
+  onContactedPeopleChanged: mocks.onContactedPeopleChanged,
+  onSearchProgress: mocks.onSearchProgress,
   onNotificationSettingsChanged: mocks.noopListener,
   onSettingsChanged: mocks.noopListener,
   openAccountWindow: mocks.openAccountWindow,
@@ -325,6 +382,8 @@ describe("App read state", () => {
     mocks.nativeMenuHandlers.length = 0;
     mocks.notificationActionHandlers.length = 0;
     mocks.desktopNotificationActionHandlers.length = 0;
+    mocks.contactedPeopleHandlers.length = 0;
+    mocks.searchProgressHandlers.length = 0;
     mocks.readerMutationHandlers.length = 0;
     mocks.readerFailureHandlers.length = 0;
     mocks.openReaderWindow.mockClear();
@@ -333,6 +392,7 @@ describe("App read state", () => {
     mocks.accountConnectedHandlers.length = 0;
     localStorage.clear();
     mocks.api.accounts.mockResolvedValue([mocks.account]);
+    mocks.api.listSearchMailboxes.mockResolvedValue([]);
     mocks.api.action.mockResolvedValue(undefined);
     localStorage.setItem("dakia.mail-list-view", "list");
     mocks.api.classifyPending.mockResolvedValue(0);
@@ -341,6 +401,9 @@ describe("App read state", () => {
       nextCursor: null,
     });
     mocks.api.smartInbox.mockResolvedValue(smartInboxPage([]));
+    mocks.api.startSearchV2.mockRejectedValue(new Error("v2 unavailable"));
+    mocks.api.nextSearchPageV2.mockRejectedValue(new Error("v2 unavailable"));
+    mocks.api.contactedPeopleSettings.mockResolvedValue({ enabled: true });
     mocks.api.starredCount.mockResolvedValue(0);
     mocks.api.content.mockResolvedValue({
       body_text: "Message body",
@@ -405,6 +468,1736 @@ describe("App read state", () => {
 
     await screen.findByText("Unread thread");
     expect(mocks.api.aiAvailable).not.toHaveBeenCalled();
+  });
+
+  it("offers every selectable provider-catalogued folder to search", async () => {
+    mocks.api.listSearchMailboxes.mockResolvedValue([
+      { localPath: "Projects/Client A", selectable: true },
+      { localPath: "Projects/NoSelect", selectable: false },
+    ]);
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    await waitFor(() =>
+      expect(mocks.api.listSearchMailboxes).toHaveBeenCalled(),
+    );
+    const search = await screen.findByRole("combobox", { name: "Search mail" });
+    fireEvent.focus(search);
+    const clientFolder = await screen.findByRole("option", {
+      name: "In Projects/Client A",
+    });
+    expect(
+      screen.queryByRole("option", { name: "In Projects/NoSelect" }),
+    ).toBeNull();
+    fireEvent.click(clientFolder);
+    expect(search).toHaveValue('in:"Projects/Client A"');
+  });
+
+  it("clears an invalid folder draft error after choosing a nested folder", async () => {
+    const orion = {
+      ...mocks.message,
+      id: "orion-folder-message",
+      thread_id: "orion-folder-thread",
+      mailbox: "Projects/Orion",
+      subject: "Orion folder result",
+    };
+    mocks.api.listSearchMailboxes.mockResolvedValue([
+      { localPath: "Projects/Orion", selectable: true },
+    ]);
+    mocks.api.startSearchV2.mockImplementation(async (request) => {
+      if (request.raw_query === "in:") {
+        throw {
+          category: "parse",
+          message: "The search query is invalid.",
+        } satisfies import("./types").SearchErrorV2;
+      }
+      return {
+        conversations:
+          request.raw_query === "in:Projects/Orion"
+            ? groupMessages([orion])
+            : groupMessages([mocks.message]),
+        match_evidence: {},
+        coverage: [],
+        continuation: null,
+        session_id: request.client_request_id!,
+        revision: 1,
+      };
+    });
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const search = await screen.findByRole("combobox", { name: "Search mail" });
+    fireEvent.change(search, { target: { value: "in:" } });
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "The search query is invalid.",
+    );
+
+    fireEvent.focus(search);
+    fireEvent.click(
+      await screen.findByRole("option", { name: "In Projects/Orion" }),
+    );
+
+    expect(await screen.findByText("Orion folder result")).toBeVisible();
+    expect(search).toHaveValue("in:Projects/Orion");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("refreshes provider-catalogued folders after sync without restarting the account", async () => {
+    mocks.api.listSearchMailboxes
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        { localPath: "Projects/New client", selectable: true },
+      ]);
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    await screen.findByText("Unread thread");
+    await waitFor(() =>
+      expect(mocks.api.listSearchMailboxes).toHaveBeenCalledOnce(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Sync" }));
+    await waitFor(() => expect(mocks.api.sync).toHaveBeenCalledOnce());
+    const search = screen.getByRole("combobox", { name: "Search mail" });
+    fireEvent.focus(search);
+    expect(
+      await screen.findByRole("option", {
+        name: "In Projects/New client",
+      }),
+    ).toBeVisible();
+  });
+
+  it("replaces disabled account folders with the active catalogue", async () => {
+    const disabled = { ...mocks.account, enabled: false };
+    mocks.api.listSearchMailboxes
+      .mockResolvedValueOnce([
+        { localPath: "Projects/Disabled account", selectable: true },
+      ])
+      .mockResolvedValueOnce([]);
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const search = await screen.findByRole("combobox", { name: "Search mail" });
+    fireEvent.focus(search);
+    expect(
+      await screen.findByRole("option", {
+        name: "In Projects/Disabled account",
+      }),
+    ).toBeVisible();
+    await waitFor(() =>
+      expect(mocks.accountUpdatedHandlers.length).toBeGreaterThan(0),
+    );
+
+    act(() => mocks.accountUpdatedHandlers.at(-1)!(disabled));
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("option", { name: "In Projects/Disabled account" }),
+      ).toBeNull(),
+    );
+  });
+
+  it("removes deleted account folders while keeping remaining account folders", async () => {
+    const remaining = {
+      ...mocks.account,
+      id: "account-2",
+      email: "remaining@example.com",
+    };
+    mocks.api.accounts.mockResolvedValue([mocks.account, remaining]);
+    mocks.api.listSearchMailboxes
+      .mockResolvedValueOnce([
+        { localPath: "Projects/Deleted account", selectable: true },
+      ])
+      .mockResolvedValueOnce([
+        { localPath: "Projects/Remaining account", selectable: true },
+      ]);
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const search = await screen.findByRole("combobox", { name: "Search mail" });
+    fireEvent.focus(search);
+    expect(
+      await screen.findByRole("option", {
+        name: "In Projects/Deleted account",
+      }),
+    ).toBeVisible();
+    await waitFor(() =>
+      expect(mocks.accountRemovedHandlers.length).toBeGreaterThan(0),
+    );
+
+    act(() => mocks.accountRemovedHandlers.at(-1)!({ accountId: "account-1" }));
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("option", { name: "In Projects/Deleted account" }),
+      ).toBeNull(),
+    );
+    expect(
+      await screen.findByRole("option", {
+        name: "In Projects/Remaining account",
+      }),
+    ).toBeVisible();
+  });
+
+  it("keeps observed mailbox paths available when the catalogue command fails", async () => {
+    const observed = {
+      ...mocks.message,
+      id: "observed-folder-message",
+      thread_id: "observed-folder-thread",
+      mailbox: "Projects/Observed",
+      subject: "Observed folder message",
+    };
+    mocks.api.listSearchMailboxes.mockRejectedValue(
+      new Error("command unavailable"),
+    );
+    mocks.api.search.mockResolvedValue({
+      conversations: groupMessages([observed]),
+      nextCursor: null,
+    });
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    await screen.findByText("Observed folder message");
+    const search = screen.getByRole("combobox", { name: "Search mail" });
+    fireEvent.focus(search);
+    expect(
+      await screen.findByRole("option", { name: "In Projects/Observed" }),
+    ).toBeVisible();
+  });
+
+  it("never exposes an opaque mailbox locator from the observed-message fallback", async () => {
+    const opaque = {
+      ...mocks.message,
+      id: "opaque-folder-message",
+      thread_id: "opaque-folder-thread",
+      mailbox: "Mailbox::@dakia-mailbox-v1:c2VjcmV0:ZGlzcGxheQ",
+      subject: "Opaque folder message",
+    };
+    mocks.api.listSearchMailboxes.mockRejectedValue(
+      new Error("command unavailable"),
+    );
+    mocks.api.search.mockResolvedValue({
+      conversations: groupMessages([opaque]),
+      nextCursor: null,
+    });
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    await screen.findByText("Opaque folder message");
+    const search = screen.getByRole("combobox", { name: "Search mail" });
+    fireEvent.focus(search);
+    expect(
+      screen.queryByRole("option", {
+        name: "In Mailbox::@dakia-mailbox-v1:c2VjcmV0:ZGlzcGxheQ",
+      }),
+    ).toBeNull();
+  });
+
+  it("keeps provider search explicit while local preview follows typing", async () => {
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const search = await screen.findByRole("combobox", { name: "Search mail" });
+    mocks.api.searchRemote.mockClear();
+    fireEvent.change(search, { target: { value: "invoice" } });
+
+    await waitFor(() =>
+      expect(mocks.api.startSearchV2).toHaveBeenCalledWith(
+        expect.objectContaining({
+          raw_query: "invoice",
+          account_ids: ["account-1"],
+          execution_mode: "local",
+        }),
+      ),
+    );
+    expect(mocks.api.searchRemote).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(search, { key: "Enter" });
+    await waitFor(() =>
+      expect(mocks.api.startSearchV2).toHaveBeenCalledWith(
+        expect.objectContaining({ raw_query: "invoice" }),
+      ),
+    );
+    expect(mocks.api.searchRemote).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(mocks.showNativeMessage).toHaveBeenCalledWith(
+        "Something went wrong",
+        "v2 unavailable",
+        "error",
+      ),
+    );
+  });
+
+  it("uses a bounded local V2 preview and exposes its continuation without provider work", async () => {
+    const sparseMatch: MailSummary = {
+      ...mocks.message,
+      id: "sparse-preview-match",
+      thread_id: "sparse-preview-thread",
+      subject: "Sparse preview match",
+    };
+    mocks.api.search.mockResolvedValue({ conversations: [], nextCursor: null });
+    mocks.api.startSearchV2.mockImplementation(async (request) => ({
+      conversations: [],
+      match_evidence: {},
+      coverage: [],
+      continuation: "preview-next",
+      session_id: request.client_request_id!,
+      revision: 1,
+    }));
+    mocks.api.nextSearchPageV2.mockImplementation(async (request) => ({
+      conversations: groupMessages([sparseMatch]),
+      match_evidence: {},
+      coverage: [],
+      continuation: null,
+      session_id: request.client_request_id!,
+      revision: 2,
+    }));
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const search = await screen.findByRole("combobox", { name: "Search mail" });
+    fireEvent.change(search, { target: { value: "sparse" } });
+
+    await waitFor(() =>
+      expect(mocks.api.startSearchV2).toHaveBeenCalledWith(
+        expect.objectContaining({
+          raw_query: "sparse",
+          execution_mode: "local",
+        }),
+      ),
+    );
+    expect(mocks.api.searchRemote).not.toHaveBeenCalled();
+    expect(
+      await screen.findByRole("button", { name: "Show more" }),
+    ).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Show more" }));
+    expect(await screen.findByText("Sparse preview match")).toBeVisible();
+    expect(mocks.api.nextSearchPageV2).toHaveBeenCalledWith(
+      expect.objectContaining({ continuation: "preview-next" }),
+    );
+  });
+
+  it("cancels a stale local V2 preview before it can publish matches", async () => {
+    let resolvePreview:
+      ((page: import("./types").SearchPageV2) => void) | undefined;
+    const staleMatch: MailSummary = {
+      ...mocks.message,
+      id: "stale-preview-match",
+      thread_id: "stale-preview-thread",
+      subject: "Stale preview match",
+    };
+    mocks.api.search.mockResolvedValue({ conversations: [], nextCursor: null });
+    mocks.api.startSearchV2.mockImplementationOnce(
+      () =>
+        new Promise<import("./types").SearchPageV2>((resolve) => {
+          resolvePreview = resolve;
+        }),
+    );
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const search = await screen.findByRole("combobox", { name: "Search mail" });
+    fireEvent.change(search, { target: { value: "first draft" } });
+    await waitFor(() => expect(mocks.api.startSearchV2).toHaveBeenCalled());
+    const request = mocks.api.startSearchV2.mock.calls[0][0];
+    fireEvent.change(search, { target: { value: "second draft" } });
+    await waitFor(() =>
+      expect(mocks.api.cancelSearchV2).toHaveBeenCalledWith(
+        request.client_request_id,
+      ),
+    );
+
+    await act(async () => {
+      resolvePreview?.({
+        conversations: groupMessages([staleMatch]),
+        match_evidence: {},
+        coverage: [],
+        continuation: null,
+        session_id: request.client_request_id!,
+        revision: 1,
+      });
+    });
+    expect(screen.queryByText("Stale preview match")).not.toBeInTheDocument();
+  });
+
+  it("shows structured local search errors inline without opening a native dialog", async () => {
+    mocks.api.startSearchV2.mockImplementation(async (request) => {
+      if (request.raw_query === 'subject:"') {
+        throw {
+          category: "parse",
+          position: 8,
+          message: "Missing closing quote at character 8.",
+        } satisfies import("./types").SearchErrorV2;
+      }
+      return {
+        conversations: groupMessages([mocks.message]),
+        match_evidence: {},
+        coverage: [],
+        continuation: null,
+        session_id: request.client_request_id!,
+        revision: 1,
+      };
+    });
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const search = await screen.findByRole("combobox", { name: "Search mail" });
+    fireEvent.change(search, { target: { value: 'subject:"' } });
+
+    const alert = await screen.findByText(
+      "Missing closing quote at character 8.",
+    );
+    expect(alert).toHaveAttribute("role", "alert");
+    expect(alert).toBeVisible();
+    expect(mocks.showNativeMessage).not.toHaveBeenCalled();
+    expect(screen.queryByText("[object Object]")).not.toBeInTheDocument();
+  });
+
+  it("shows a structured provider search error inline with its safe message", async () => {
+    mocks.api.startSearchV2.mockRejectedValue({
+      category: "unsupported",
+      unsupported_operator: "memo",
+      message: "memo: is not supported.",
+    } satisfies import("./types").SearchErrorV2);
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const search = await screen.findByRole("combobox", { name: "Search mail" });
+    fireEvent.change(search, { target: { value: "memo:project" } });
+    fireEvent.keyDown(search, { key: "Enter" });
+
+    const alert = await screen.findByText("memo: is not supported.");
+    expect(alert).toHaveAttribute("role", "alert");
+    expect(alert).toBeVisible();
+    expect(mocks.showNativeMessage).not.toHaveBeenCalled();
+  });
+
+  it("uses the local contacted-people index for people search suggestions", async () => {
+    mocks.api.suggestContactedPeople.mockResolvedValue([
+      { address: "alex@example.com", display_name: "Alex" },
+    ]);
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const search = await screen.findByRole("combobox", { name: "Search mail" });
+    fireEvent.change(search, { target: { value: "from:al" } });
+    await waitFor(() =>
+      expect(mocks.api.suggestContactedPeople).toHaveBeenCalledWith(
+        "al",
+        undefined,
+      ),
+    );
+    fireEvent.focus(search);
+    expect(await screen.findByText("Alex <alex@example.com>")).toBeVisible();
+  });
+
+  it("requests people suggestions from an open group and unfinished quoted people filter", async () => {
+    mocks.api.suggestContactedPeople.mockResolvedValue([
+      { address: "alice@example.com", display_name: "Alice" },
+    ]);
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const search = await screen.findByRole("combobox", { name: "Search mail" });
+    fireEvent.change(search, {
+      target: { value: "(from:al" },
+    });
+    await waitFor(() =>
+      expect(mocks.api.suggestContactedPeople).toHaveBeenCalledWith(
+        "al",
+        undefined,
+      ),
+    );
+
+    fireEvent.change(search, { target: { value: 'from:"Alice S' } });
+    await waitFor(() =>
+      expect(mocks.api.suggestContactedPeople).toHaveBeenCalledWith(
+        "Alice S",
+        undefined,
+      ),
+    );
+  });
+
+  it("ignores late people suggestions from an earlier search token", async () => {
+    const resolvers = new Map<
+      string,
+      (people: import("./types").ContactedPersonSuggestion[]) => void
+    >();
+    const suggest = mocks.api.suggestContactedPeople as Mock<
+      (prefix: string) => Promise<import("./types").ContactedPersonSuggestion[]>
+    >;
+    suggest.mockImplementation(
+      (prefix: string) =>
+        new Promise<import("./types").ContactedPersonSuggestion[]>(
+          (resolve) => {
+            resolvers.set(prefix, resolve);
+          },
+        ),
+    );
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+    const search = await screen.findByRole("combobox", { name: "Search mail" });
+    fireEvent.change(search, { target: { value: "from:al" } });
+    await waitFor(() =>
+      expect(mocks.api.suggestContactedPeople).toHaveBeenCalledWith(
+        "al",
+        undefined,
+      ),
+    );
+
+    fireEvent.change(search, { target: { value: "to:bo" } });
+    await act(async () => {
+      resolvers.get("al")?.([
+        { address: "alex@example.com", display_name: "Alex" },
+      ]);
+    });
+    fireEvent.focus(search);
+    expect(screen.queryByText("Alex <alex@example.com>")).toBeNull();
+
+    await waitFor(() =>
+      expect(mocks.api.suggestContactedPeople).toHaveBeenCalledWith(
+        "bo",
+        undefined,
+      ),
+    );
+    await act(async () => {
+      resolvers.get("bo")?.([
+        { address: "bob@example.com", display_name: "Bob" },
+      ]);
+    });
+    fireEvent.focus(search);
+    fireEvent.click(await screen.findByText("Bob <bob@example.com>"));
+    expect(search).toHaveValue("to:bob@example.com");
+  });
+
+  it("clears open people suggestions immediately when contacted-people data changes", async () => {
+    const alex = { address: "alex@example.com", display_name: "Alex" };
+    mocks.api.suggestContactedPeople.mockResolvedValue([alex]);
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+    const search = await screen.findByRole("combobox", { name: "Search mail" });
+    fireEvent.change(search, { target: { value: "from:al" } });
+    fireEvent.focus(search);
+    expect(await screen.findByText("Alex <alex@example.com>")).toBeVisible();
+    await waitFor(() => expect(mocks.contactedPeopleHandlers).toHaveLength(1));
+    const callsBeforeClear = mocks.api.suggestContactedPeople.mock.calls.length;
+    mocks.api.suggestContactedPeople.mockResolvedValue([]);
+
+    await act(async () => {
+      mocks.contactedPeopleHandlers[0]({ enabled: true, cleared: true });
+    });
+    expect(
+      screen.queryByText("Alex <alex@example.com>"),
+    ).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(mocks.api.suggestContactedPeople).toHaveBeenCalledTimes(
+        callsBeforeClear + 1,
+      ),
+    );
+
+    await act(async () => {
+      mocks.contactedPeopleHandlers[0]({ enabled: false, cleared: false });
+    });
+    expect(
+      screen.queryByText("Alex <alex@example.com>"),
+    ).not.toBeInTheDocument();
+    expect(mocks.api.suggestContactedPeople).toHaveBeenCalledTimes(
+      callsBeforeClear + 1,
+    );
+  });
+
+  it("shows mixed v2 coverage and continues the submitted v2 session", async () => {
+    const work: Account = {
+      ...mocks.account,
+      id: "account-2",
+      email: "work@example.com",
+      account_name: "Work",
+    };
+    const secondMessage: MailSummary = {
+      ...mocks.message,
+      id: "message-2",
+      thread_id: "thread-2",
+      subject: "Second page",
+    };
+    mocks.api.accounts.mockResolvedValue([mocks.account, work]);
+    mocks.api.startSearchV2.mockImplementation(async (request) => ({
+      conversations: groupMessages([mocks.message]),
+      match_evidence: {
+        "account-1:thread-1": {
+          primary_message_id: "message-1",
+          matched_message_ids: ["message-1"],
+          match_count: 1,
+          excerpt: "Receipt matched in the message body",
+        },
+      },
+      coverage: [
+        {
+          account_id: "account-1",
+          mailbox: "INBOX",
+          state: "provider_searched",
+        },
+        {
+          account_id: "account-2",
+          mailbox: "Archive",
+          state: "offline",
+          detail: "No connection",
+        },
+        {
+          account_id: "account-2",
+          mailbox: "Sent",
+          state: "provider_partial",
+        },
+      ],
+      continuation: "next-page",
+      session_id: request.client_request_id!,
+      revision: 1,
+    }));
+    mocks.api.nextSearchPageV2.mockImplementation(async (request) => ({
+      conversations: groupMessages([secondMessage]),
+      match_evidence: {},
+      coverage: [
+        {
+          account_id: "account-1",
+          mailbox: "INBOX",
+          state: "local_body_index",
+        },
+      ],
+      continuation: null,
+      session_id: request.client_request_id!,
+      revision: 2,
+    }));
+
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+    const search = await screen.findByRole("combobox", { name: "Search mail" });
+    fireEvent.change(search, { target: { value: "receipt" } });
+    fireEvent.keyDown(search, { key: "Enter" });
+
+    const coverage = await screen.findByRole("status", {
+      name: "Search status",
+    });
+    expect(coverage).toHaveTextContent("Work couldn’t be searched. Try again.");
+    expect(coverage).not.toHaveTextContent("Inbox");
+    expect(coverage).not.toHaveTextContent("Provider searched");
+    expect(
+      await screen.findByText("Receipt matched in the message body"),
+    ).toBeVisible();
+    expect(
+      screen.getByText(/Matched message from sender@example.com/),
+    ).toBeVisible();
+
+    const scroller = document.querySelector(".mail-scroll") as HTMLDivElement;
+    Object.defineProperties(scroller, {
+      scrollHeight: { configurable: true, value: 2_000 },
+      scrollTop: { configurable: true, value: 1_300 },
+      clientHeight: { configurable: true, value: 500 },
+    });
+    fireEvent.scroll(scroller);
+    await waitFor(() =>
+      expect(mocks.api.nextSearchPageV2).toHaveBeenCalledWith(
+        expect.objectContaining({ continuation: "next-page" }),
+      ),
+    );
+    expect(await screen.findByText("Second page")).toBeVisible();
+    expect(coverage).toHaveTextContent("Work couldn’t be searched");
+  });
+
+  it("merges live coverage only from the active search session and never regresses its revision", async () => {
+    let resolveSearch: (page: import("./types").SearchPageV2) => void = () =>
+      undefined;
+    mocks.api.startSearchV2.mockImplementation(
+      () =>
+        new Promise<import("./types").SearchPageV2>((resolve) => {
+          resolveSearch = resolve;
+        }),
+    );
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+    const search = await screen.findByRole("combobox", { name: "Search mail" });
+    fireEvent.change(search, { target: { value: "receipt" } });
+    fireEvent.keyDown(search, { key: "Enter" });
+
+    await waitFor(() => expect(mocks.api.startSearchV2).toHaveBeenCalled());
+    await waitFor(() => expect(mocks.searchProgressHandlers).toHaveLength(1));
+    const request = vi.mocked(mocks.api.startSearchV2).mock.calls[0][0];
+    const sessionId = request.client_request_id!;
+
+    await act(async () => {
+      mocks.searchProgressHandlers[0]({
+        sessionId,
+        revision: 4,
+        coverage: [
+          {
+            account_id: "account-1",
+            mailbox: "INBOX",
+            state: "offline",
+          },
+          {
+            account_id: "account-1",
+            mailbox: "INBOX",
+            state: "local_catalogue",
+          },
+          {
+            account_id: "account-1",
+            mailbox: "INBOX",
+            state: "local_body_index",
+          },
+        ],
+      });
+    });
+    const coverage = await screen.findByRole("status", {
+      name: "Search status",
+    });
+    expect(coverage).toHaveTextContent(
+      "Inbox couldn’t be searched. Check your connection and try again.",
+    );
+
+    await act(async () => {
+      mocks.searchProgressHandlers[0]({
+        sessionId,
+        revision: 5,
+        coverage: [
+          {
+            account_id: "account-1",
+            mailbox: "INBOX",
+            state: "provider_searched",
+          },
+        ],
+      });
+    });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("status", { name: "Search status" }),
+      ).not.toBeInTheDocument(),
+    );
+
+    await act(async () => {
+      mocks.searchProgressHandlers[0]({
+        sessionId: "older-session",
+        revision: 99,
+        coverage: [
+          {
+            account_id: "account-1",
+            mailbox: "INBOX",
+            state: "provider_searched",
+          },
+        ],
+      });
+      mocks.searchProgressHandlers[0]({
+        sessionId,
+        revision: 3,
+        coverage: [
+          {
+            account_id: "account-1",
+            mailbox: "Archive",
+            state: "provider_searched",
+          },
+        ],
+      });
+    });
+    expect(
+      screen.queryByRole("status", { name: "Search status" }),
+    ).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveSearch({
+        conversations: groupMessages([mocks.message]),
+        match_evidence: {},
+        coverage: [],
+        continuation: null,
+        session_id: sessionId,
+        revision: 4,
+      });
+    });
+    expect(
+      screen.queryByRole("status", { name: "Search status" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("sends the exact V2 request contract with a reserved client request ID", async () => {
+    mocks.api.startSearchV2.mockImplementation(async (request) => ({
+      conversations: groupMessages([mocks.message]),
+      match_evidence: {},
+      coverage: [],
+      continuation: null,
+      session_id: request.client_request_id!,
+      revision: 1,
+    }));
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const search = await screen.findByRole("combobox", { name: "Search mail" });
+    fireEvent.change(search, { target: { value: "receipt" } });
+    fireEvent.keyDown(search, { key: "Enter" });
+
+    await waitFor(() =>
+      expect(mocks.api.startSearchV2).toHaveBeenCalledTimes(1),
+    );
+    expect(mocks.api.startSearchV2.mock.calls[0]?.[0]).toEqual({
+      client_request_id: expect.any(String),
+      raw_query: "receipt",
+      account_ids: ["account-1"],
+      scope: { mailbox: "INBOX" },
+      execution_mode: "hybrid",
+      page_size: 500,
+    });
+    expect(mocks.api.startSearchV2.mock.calls[0]?.[0]).not.toHaveProperty(
+      "session_id",
+    );
+  });
+
+  it("lets explicit folder predicates replace the selected mailbox in local and V2 search", async () => {
+    mocks.api.startSearchV2.mockImplementation(async (request) => ({
+      conversations: groupMessages([mocks.message]),
+      match_evidence: {},
+      coverage: [],
+      continuation: null,
+      session_id: request.client_request_id!,
+      revision: 1,
+    }));
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+    const search = await screen.findByRole("combobox", { name: "Search mail" });
+
+    const expectExplicitFolderSearch = async (rawQuery: string) => {
+      mocks.api.search.mockClear();
+      mocks.api.startSearchV2.mockClear();
+      fireEvent.change(search, { target: { value: rawQuery } });
+      fireEvent.keyDown(search, { key: "Enter" });
+      await waitFor(() =>
+        expect(mocks.api.search).toHaveBeenLastCalledWith(
+          rawQuery,
+          ["account-1"],
+          undefined,
+          false,
+          false,
+          100,
+          null,
+        ),
+      );
+      await waitFor(() =>
+        expect(mocks.api.startSearchV2).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            raw_query: rawQuery,
+            scope: { mailbox: null },
+          }),
+        ),
+      );
+    };
+
+    await expectExplicitFolderSearch("in:Sent");
+
+    const nav = screen.getByRole("navigation", { name: "Dakia" });
+    fireEvent.click(within(nav).getByRole("button", { name: "Archive" }));
+    await expectExplicitFolderSearch('in:"Projects/Client work"');
+    await expectExplicitFolderSearch("in:*");
+    await expectExplicitFolderSearch("in:Spam OR in:Trash");
+  });
+
+  it("cancels a reserved client request before its V2 start promise resolves", async () => {
+    let resolveStart:
+      ((page: import("./types").SearchPageV2) => void) | undefined;
+    mocks.api.startSearchV2.mockImplementationOnce(
+      () =>
+        new Promise<import("./types").SearchPageV2>((resolve) => {
+          resolveStart = resolve;
+        }),
+    );
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const search = await screen.findByRole("combobox", { name: "Search mail" });
+    fireEvent.change(search, { target: { value: "pending" } });
+    fireEvent.keyDown(search, { key: "Enter" });
+    await waitFor(() =>
+      expect(mocks.api.startSearchV2).toHaveBeenCalledTimes(1),
+    );
+    const request = mocks.api.startSearchV2.mock.calls[0]?.[0]!;
+
+    fireEvent.change(search, { target: { value: "edited" } });
+    await waitFor(() =>
+      expect(mocks.api.cancelSearchV2).toHaveBeenCalledWith(
+        request.client_request_id,
+      ),
+    );
+    fireEvent.change(search, { target: { value: "" } });
+    expect(mocks.api.cancelSearchV2).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveStart?.({
+        conversations: groupMessages([mocks.message]),
+        match_evidence: {},
+        coverage: [],
+        continuation: null,
+        session_id: request.client_request_id!,
+        revision: 1,
+      });
+    });
+    expect(
+      screen.queryByText("Receipt matched in the message body"),
+    ).toBeNull();
+  });
+
+  it("auto-drains a bounded submitted search when its first page has no matches", async () => {
+    const laterMatch: MailSummary = {
+      ...mocks.message,
+      id: "bounded-match",
+      thread_id: "bounded-thread",
+      subject: "Match beyond the first candidate page",
+    };
+    mocks.api.search.mockResolvedValue({ conversations: [], nextCursor: null });
+    mocks.api.startSearchV2.mockImplementation(async (request) => ({
+      conversations: [],
+      match_evidence: {},
+      coverage: [],
+      continuation: "bounded-next",
+      session_id: request.client_request_id!,
+      revision: 1,
+    }));
+    mocks.api.nextSearchPageV2.mockImplementation(async (request) => ({
+      conversations: groupMessages([laterMatch]),
+      match_evidence: {},
+      coverage: [],
+      continuation: null,
+      session_id: request.client_request_id!,
+      revision: 2,
+    }));
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const search = await screen.findByRole("combobox", { name: "Search mail" });
+    fireEvent.change(search, { target: { value: "bounded" } });
+    fireEvent.keyDown(search, { key: "Enter" });
+
+    expect(
+      await screen.findByText("Match beyond the first candidate page"),
+    ).toBeVisible();
+    expect(mocks.api.nextSearchPageV2).toHaveBeenCalledWith(
+      expect.objectContaining({ continuation: "bounded-next" }),
+    );
+  });
+
+  it("uses bounded V2 pages for an explicit local-only search", async () => {
+    localStorage.setItem("dakia.search.local-only", "true");
+    mocks.api.startSearchV2.mockImplementation(async (request) => ({
+      conversations: [],
+      match_evidence: {},
+      coverage: [],
+      continuation: null,
+      session_id: request.client_request_id!,
+      revision: 1,
+    }));
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const search = await screen.findByRole("combobox", { name: "Search mail" });
+    fireEvent.change(search, { target: { value: "local only" } });
+    fireEvent.keyDown(search, { key: "Enter" });
+
+    await waitFor(() =>
+      expect(mocks.api.startSearchV2).toHaveBeenCalledWith(
+        expect.objectContaining({ execution_mode: "local" }),
+      ),
+    );
+    expect(mocks.api.searchRemote).not.toHaveBeenCalled();
+  });
+
+  it("cancels an in-flight automatic continuation when the draft changes", async () => {
+    const staleMatch: MailSummary = {
+      ...mocks.message,
+      id: "stale-bounded-match",
+      thread_id: "stale-bounded-thread",
+      subject: "Stale bounded match",
+    };
+    let resolveNext:
+      ((page: import("./types").SearchPageV2) => void) | undefined;
+    mocks.api.search.mockResolvedValue({ conversations: [], nextCursor: null });
+    mocks.api.startSearchV2.mockImplementation(async (request) => ({
+      conversations: [],
+      match_evidence: {},
+      coverage: [],
+      continuation: "bounded-next",
+      session_id: request.client_request_id!,
+      revision: 1,
+    }));
+    mocks.api.nextSearchPageV2.mockImplementation(
+      () =>
+        new Promise<import("./types").SearchPageV2>((resolve) => {
+          resolveNext = resolve;
+        }),
+    );
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const search = await screen.findByRole("combobox", { name: "Search mail" });
+    fireEvent.change(search, { target: { value: "bounded" } });
+    fireEvent.keyDown(search, { key: "Enter" });
+    await waitFor(() => expect(mocks.api.nextSearchPageV2).toHaveBeenCalled());
+
+    fireEvent.change(search, { target: { value: "new draft" } });
+    await act(async () => {
+      resolveNext?.({
+        conversations: groupMessages([staleMatch]),
+        match_evidence: {},
+        coverage: [],
+        continuation: null,
+        session_id: mocks.api.startSearchV2.mock.calls[0][0].client_request_id!,
+        revision: 2,
+      });
+    });
+
+    expect(screen.queryByText("Stale bounded match")).not.toBeInTheDocument();
+  });
+
+  it("does not revive a cancelled V2 request with the legacy remote search", async () => {
+    let rejectStart: ((error: Error) => void) | undefined;
+    mocks.api.startSearchV2.mockImplementationOnce(
+      () =>
+        new Promise<import("./types").SearchPageV2>((_resolve, reject) => {
+          rejectStart = reject;
+        }),
+    );
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const search = await screen.findByRole("combobox", { name: "Search mail" });
+    fireEvent.change(search, { target: { value: "cancelled" } });
+    fireEvent.keyDown(search, { key: "Enter" });
+    await waitFor(() =>
+      expect(mocks.api.startSearchV2).toHaveBeenCalledWith(
+        expect.objectContaining({ raw_query: "cancelled" }),
+      ),
+    );
+    fireEvent.change(search, { target: { value: "new draft" } });
+    await act(async () => rejectStart?.(new Error("cancelled")));
+
+    expect(mocks.api.searchRemote).not.toHaveBeenCalled();
+    expect(mocks.showNativeMessage).not.toHaveBeenCalled();
+  });
+
+  it("replaces a local conversation with V2 evidence and opens its primary message", async () => {
+    const providerMatch: MailSummary = {
+      ...mocks.message,
+      id: "provider-match",
+      subject: "Provider match",
+      received_at: "2026-07-20T10:00:00Z",
+    };
+    mocks.api.startSearchV2.mockImplementation(async (request) => ({
+      conversations: groupMessages([mocks.message, providerMatch]),
+      match_evidence: {
+        "account-1:thread-1": {
+          primary_message_id: "provider-match",
+          matched_message_ids: ["provider-match"],
+          match_count: 1,
+          excerpt: "Fresh provider match",
+        },
+      },
+      coverage: [],
+      continuation: null,
+      session_id: request.client_request_id!,
+      revision: 1,
+    }));
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const search = await screen.findByRole("combobox", { name: "Search mail" });
+    fireEvent.change(search, { target: { value: "provider" } });
+    fireEvent.keyDown(search, { key: "Enter" });
+
+    const match = await screen.findByText("Fresh provider match");
+    expect(screen.getByText("Provider match")).toBeVisible();
+    fireEvent.click(match.closest("button")!);
+    await waitFor(() =>
+      expect(mocks.api.content).toHaveBeenCalledWith("provider-match"),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "Provider match" }),
+    ).toBeVisible();
+  });
+
+  it("does not record a rejected search in recent history", async () => {
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+    const search = await screen.findByRole("combobox", { name: "Search mail" });
+    mocks.api.search.mockImplementation(async (rawQuery: string) => {
+      if (rawQuery === 'subject:"') throw new Error("Malformed search");
+      return {
+        conversations: groupMessages([mocks.message]),
+        nextCursor: null,
+      };
+    });
+
+    fireEvent.change(search, { target: { value: 'subject:"' } });
+    fireEvent.keyDown(search, { key: "Enter" });
+    await waitFor(() =>
+      expect(mocks.api.search).toHaveBeenCalledWith(
+        'subject:"',
+        ["account-1"],
+        "INBOX",
+        false,
+        false,
+        100,
+        null,
+      ),
+    );
+    fireEvent.focus(search);
+    expect(screen.queryByText('subject:"')).not.toBeInTheDocument();
+  });
+
+  it("restores valid recent and saved search arrays after reload", async () => {
+    localStorage.setItem(
+      "dakia.search.recent",
+      JSON.stringify(["subject:invoice"]),
+    );
+    localStorage.setItem(
+      "dakia.search.saved",
+      JSON.stringify([
+        {
+          id: "saved-invoice",
+          name: "Invoices",
+          raw_query: "subject:invoice",
+          account_ids: ["account-1"],
+          local_only: false,
+          created_at: "2026-09-06T00:00:00Z",
+        },
+      ]),
+    );
+    const view = render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+    const search = await screen.findByRole("combobox", { name: "Search mail" });
+    fireEvent.focus(search);
+    expect(await screen.findByText("subject:invoice")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Invoices" })).toBeVisible();
+
+    view.unmount();
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+    expect(
+      await screen.findByRole("button", { name: "Invoices" }),
+    ).toBeVisible();
+  });
+
+  it("rejects malformed or wrong-shape persisted search arrays", async () => {
+    localStorage.setItem(
+      "dakia.search.recent",
+      JSON.stringify({ 0: "subject:invoice" }),
+    );
+    localStorage.setItem(
+      "dakia.search.saved",
+      JSON.stringify([{ name: "Missing fields" }]),
+    );
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+    const search = await screen.findByRole("combobox", { name: "Search mail" });
+    fireEvent.focus(search);
+    expect(screen.queryByText("subject:invoice")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Missing fields" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps a multi-account saved search active after one account is removed", async () => {
+    const work: Account = {
+      ...mocks.account,
+      id: "account-2",
+      email: "work@example.com",
+      account_name: "Work",
+    };
+    const saved = {
+      id: "saved-both",
+      name: "Both accounts",
+      raw_query: "subject:invoice",
+      account_ids: ["account-1", "account-2"],
+      local_only: true,
+      created_at: "2026-09-06T00:00:00Z",
+    };
+    localStorage.setItem("dakia.search.saved", JSON.stringify([saved]));
+    mocks.api.accounts.mockResolvedValue([mocks.account, work]);
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Both accounts" }),
+    );
+    await waitFor(() =>
+      expect(mocks.api.search).toHaveBeenCalledWith(
+        "subject:invoice",
+        ["account-1", "account-2"],
+        "INBOX",
+        false,
+        false,
+        100,
+        null,
+      ),
+    );
+
+    await act(async () => {
+      mocks.accountRemovedHandlers[0]({ accountId: "account-1" });
+    });
+    await waitFor(() =>
+      expect(mocks.api.search).toHaveBeenCalledWith(
+        "subject:invoice",
+        ["account-2"],
+        "INBOX",
+        false,
+        false,
+        100,
+        null,
+      ),
+    );
+    expect(JSON.parse(localStorage.getItem("dakia.search.saved")!)).toEqual([
+      saved,
+    ]);
+  });
+
+  it("preserves an active saved search's exact account scope when saving it again", async () => {
+    const work: Account = {
+      ...mocks.account,
+      id: "account-2",
+      email: "work@example.com",
+      account_name: "Work",
+    };
+    const third: Account = {
+      ...mocks.account,
+      id: "account-3",
+      email: "third@example.com",
+      account_name: "Third",
+    };
+    const saved = {
+      id: "saved-both",
+      name: "Both accounts",
+      raw_query: "subject:invoice",
+      account_ids: ["account-1", "account-2"],
+      local_only: true,
+      created_at: "2026-09-06T00:00:00Z",
+    };
+    localStorage.setItem("dakia.search.saved", JSON.stringify([saved]));
+    mocks.api.accounts.mockResolvedValue([mocks.account, work, third]);
+    const prompt = vi.spyOn(window, "prompt").mockReturnValue("Resaved");
+    try {
+      render(
+        <MantineProvider>
+          <App />
+        </MantineProvider>,
+      );
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Both accounts" }),
+      );
+      const search = screen.getByRole("combobox", { name: "Search mail" });
+      fireEvent.focus(search);
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Save search" }),
+      );
+
+      await waitFor(() => expect(prompt).toHaveBeenCalledOnce());
+      const searches = JSON.parse(localStorage.getItem("dakia.search.saved")!);
+      expect(searches.at(-1)).toEqual(
+        expect.objectContaining({
+          name: "Resaved",
+          account_ids: ["account-1", "account-2"],
+        }),
+      );
+    } finally {
+      prompt.mockRestore();
+    }
+  });
+
+  it("keeps a single-account saved search unavailable when its account is removed", async () => {
+    const work: Account = {
+      ...mocks.account,
+      id: "account-2",
+      email: "work@example.com",
+      account_name: "Work",
+    };
+    localStorage.setItem(
+      "dakia.search.saved",
+      JSON.stringify([
+        {
+          id: "saved-personal",
+          name: "Personal invoices",
+          raw_query: "subject:invoice",
+          account_ids: ["account-1"],
+          local_only: true,
+          created_at: "2026-09-06T00:00:00Z",
+        },
+      ]),
+    );
+    mocks.api.accounts.mockResolvedValue([mocks.account, work]);
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Personal invoices" }),
+    );
+    await waitFor(() =>
+      expect(mocks.api.search).toHaveBeenCalledWith(
+        "subject:invoice",
+        ["account-1"],
+        "INBOX",
+        false,
+        false,
+        100,
+        null,
+      ),
+    );
+    mocks.api.search.mockClear();
+    await act(async () => {
+      mocks.accountRemovedHandlers[0]({ accountId: "account-1" });
+    });
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          "This saved search needs an enabled account that is not available.",
+        ),
+      ).toBeVisible(),
+    );
+    expect(mocks.api.search).not.toHaveBeenCalled();
+    expect(JSON.parse(localStorage.getItem("dakia.search.saved")!)).toEqual([
+      {
+        id: "saved-personal",
+        name: "Personal invoices",
+        raw_query: "subject:invoice",
+        account_ids: ["account-1"],
+        local_only: true,
+        created_at: "2026-09-06T00:00:00Z",
+      },
+    ]);
+  });
+
+  it("keeps a saved search scoped to active accounts and restores it after re-enabling an account", async () => {
+    const disabled: Account = {
+      ...mocks.account,
+      id: "account-2",
+      email: "work@example.com",
+      account_name: "Work",
+      enabled: false,
+    };
+    const saved = {
+      id: "saved-both",
+      name: "Both accounts",
+      raw_query: "subject:invoice",
+      account_ids: ["account-1", "account-2"],
+      local_only: true,
+      created_at: "2026-09-06T00:00:00Z",
+    };
+    localStorage.setItem("dakia.search.saved", JSON.stringify([saved]));
+    mocks.api.accounts.mockResolvedValue([mocks.account, disabled]);
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Both accounts" }),
+    );
+    await waitFor(() =>
+      expect(mocks.api.search).toHaveBeenCalledWith(
+        "subject:invoice",
+        ["account-1"],
+        "INBOX",
+        false,
+        false,
+        100,
+        null,
+      ),
+    );
+
+    await waitFor(() =>
+      expect(mocks.accountUpdatedHandlers.length).toBeGreaterThan(0),
+    );
+    mocks.api.search.mockClear();
+    await act(async () => {
+      mocks.accountUpdatedHandlers.at(-1)!({ ...disabled, enabled: true });
+    });
+
+    await waitFor(() =>
+      expect(mocks.api.search).toHaveBeenCalledWith(
+        "subject:invoice",
+        ["account-1", "account-2"],
+        "INBOX",
+        false,
+        false,
+        100,
+        null,
+      ),
+    );
+    expect(JSON.parse(localStorage.getItem("dakia.search.saved")!)).toEqual([
+      saved,
+    ]);
+  });
+
+  it("does not widen a saved search when its only account is disabled", async () => {
+    const work: Account = {
+      ...mocks.account,
+      id: "account-2",
+      email: "work@example.com",
+      account_name: "Work",
+    };
+    localStorage.setItem(
+      "dakia.search.saved",
+      JSON.stringify([
+        {
+          id: "saved-personal",
+          name: "Personal invoices",
+          raw_query: "subject:invoice",
+          account_ids: ["account-1"],
+          local_only: true,
+          created_at: "2026-09-06T00:00:00Z",
+        },
+      ]),
+    );
+    mocks.api.accounts.mockResolvedValue([mocks.account, work]);
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    await screen.findByText("Unread thread");
+    mocks.api.search.mockClear();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Personal invoices" }),
+    );
+    await waitFor(() =>
+      expect(mocks.api.search).toHaveBeenCalledWith(
+        "subject:invoice",
+        ["account-1"],
+        "INBOX",
+        false,
+        false,
+        100,
+        null,
+      ),
+    );
+    await waitFor(() =>
+      expect(mocks.accountUpdatedHandlers.length).toBeGreaterThan(0),
+    );
+    mocks.api.search.mockClear();
+    await act(async () => {
+      mocks.accountUpdatedHandlers.at(-1)!({
+        ...mocks.account,
+        enabled: false,
+      });
+    });
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          "This saved search needs an enabled account that is not available.",
+        ),
+      ).toBeVisible(),
+    );
+    expect(mocks.api.search).not.toHaveBeenCalled();
+  });
+
+  it("does not widen a disabled account selection to other accounts", async () => {
+    const disabled: Account = {
+      ...mocks.account,
+      id: "account-2",
+      email: "work@example.com",
+      account_name: "Work",
+      enabled: false,
+    };
+    mocks.api.accounts.mockResolvedValue([mocks.account, disabled]);
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+
+    const disabledAccount = await screen.findByRole("button", {
+      name: "Work",
+    });
+    expect(disabledAccount).toBeDisabled();
+    expect(disabledAccount).toHaveAttribute(
+      "title",
+      "This account is disabled or no longer available. Enable it before searching.",
+    );
+    await screen.findByText("Unread thread");
+    const callsBeforeClick = mocks.api.search.mock.calls.length;
+    fireEvent.click(disabledAccount);
+    await act(async () => undefined);
+    expect(mocks.api.search).toHaveBeenCalledTimes(callsBeforeClick);
+  });
+
+  it("keeps disabled accounts out of preview search and people ranking", async () => {
+    const disabled: Account = {
+      ...mocks.account,
+      id: "account-disabled",
+      email: "disabled@example.com",
+      account_name: "Disabled",
+      enabled: false,
+    };
+    mocks.api.accounts.mockResolvedValue([mocks.account, disabled]);
+    mocks.api.suggestContactedPeople.mockResolvedValue([
+      { address: "alex@example.com", display_name: "Alex" },
+    ]);
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+    const nav = await screen.findByRole("navigation", { name: "Dakia" });
+    expect(
+      await within(nav).findByRole("button", { name: "Disabled" }),
+    ).toBeDisabled();
+    const search = screen.getByRole("combobox", { name: "Search mail" });
+    fireEvent.change(search, { target: { value: "from:al" } });
+    fireEvent.focus(search);
+    await waitFor(() =>
+      expect(mocks.api.startSearchV2).toHaveBeenCalledWith(
+        expect.objectContaining({
+          raw_query: "from:al",
+          account_ids: ["account-1"],
+          execution_mode: "local",
+        }),
+      ),
+    );
+    await waitFor(() =>
+      expect(mocks.api.suggestContactedPeople).toHaveBeenLastCalledWith(
+        "al",
+        undefined,
+      ),
+    );
+  });
+
+  it("does not let a stale persisted saved search send a missing account ID", async () => {
+    localStorage.setItem(
+      "dakia.search.saved",
+      JSON.stringify([
+        {
+          id: "saved-stale",
+          name: "Old account search",
+          raw_query: "subject:invoice",
+          account_ids: ["deleted-account"],
+          local_only: true,
+          created_at: "2026-09-06T00:00:00Z",
+        },
+      ]),
+    );
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+    const staleSearch = await screen.findByRole("button", {
+      name: "Old account search",
+    });
+    expect(staleSearch).toBeDisabled();
+    await waitFor(() =>
+      expect(mocks.api.search).toHaveBeenLastCalledWith(
+        "",
+        ["account-1"],
+        "INBOX",
+        false,
+        false,
+        100,
+        null,
+      ),
+    );
+    expect(
+      mocks.api.search.mock.calls.some(([_, accountIds]) =>
+        accountIds.includes("deleted-account"),
+      ),
+    ).toBe(false);
+  });
+
+  it("cancels an active v2 session when the draft is edited, cleared, or submitted again", async () => {
+    mocks.api.startSearchV2.mockImplementation(async (request) => ({
+      conversations: groupMessages([mocks.message]),
+      match_evidence: {},
+      coverage: [],
+      continuation: null,
+      session_id: request.client_request_id!,
+      revision: 1,
+    }));
+    render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+    const search = await screen.findByRole("combobox", { name: "Search mail" });
+
+    fireEvent.change(search, { target: { value: "first" } });
+    fireEvent.keyDown(search, { key: "Enter" });
+    await waitFor(() =>
+      expect(mocks.api.startSearchV2).toHaveBeenCalledWith(
+        expect.objectContaining({ raw_query: "first" }),
+      ),
+    );
+    const firstRequest = mocks.api.startSearchV2.mock.calls.find(
+      ([request]) =>
+        request.raw_query === "first" && request.execution_mode === "hybrid",
+    )?.[0]!;
+    fireEvent.change(search, { target: { value: "edited" } });
+    await waitFor(() =>
+      expect(mocks.api.cancelSearchV2).toHaveBeenCalledWith(
+        firstRequest.client_request_id,
+      ),
+    );
+
+    fireEvent.keyDown(search, { key: "Enter" });
+    await waitFor(() =>
+      expect(mocks.api.startSearchV2).toHaveBeenCalledWith(
+        expect.objectContaining({ raw_query: "edited" }),
+      ),
+    );
+    const editedRequest = mocks.api.startSearchV2.mock.calls.find(
+      ([request]) =>
+        request.raw_query === "edited" && request.execution_mode === "hybrid",
+    )?.[0]!;
+    fireEvent.change(search, { target: { value: "" } });
+    await waitFor(() =>
+      expect(mocks.api.cancelSearchV2).toHaveBeenCalledTimes(3),
+    );
+    expect(mocks.api.cancelSearchV2).toHaveBeenCalledWith(
+      editedRequest.client_request_id,
+    );
+    fireEvent.change(search, { target: { value: "again" } });
+    fireEvent.keyDown(search, { key: "Enter" });
+    await waitFor(() =>
+      expect(mocks.api.startSearchV2).toHaveBeenCalledWith(
+        expect.objectContaining({ raw_query: "again" }),
+      ),
+    );
+    const againRequest = mocks.api.startSearchV2.mock.calls.find(
+      ([request]) => request.raw_query === "again",
+    )?.[0]!;
+    fireEvent.keyDown(search, { key: "Enter" });
+    await waitFor(() =>
+      expect(mocks.api.cancelSearchV2).toHaveBeenCalledTimes(4),
+    );
+    expect(mocks.api.cancelSearchV2).toHaveBeenCalledWith(
+      againRequest.client_request_id,
+    );
+  });
+
+  it("cancels an active v2 session when the app unmounts", async () => {
+    mocks.api.startSearchV2.mockImplementation(async (request) => ({
+      conversations: groupMessages([mocks.message]),
+      match_evidence: {},
+      coverage: [],
+      continuation: null,
+      session_id: request.client_request_id!,
+      revision: 1,
+    }));
+    const view = render(
+      <MantineProvider>
+        <App />
+      </MantineProvider>,
+    );
+    const search = await screen.findByRole("combobox", { name: "Search mail" });
+    fireEvent.change(search, { target: { value: "unmount" } });
+    fireEvent.keyDown(search, { key: "Enter" });
+    await waitFor(() =>
+      expect(mocks.api.startSearchV2).toHaveBeenCalledWith(
+        expect.objectContaining({ raw_query: "unmount" }),
+      ),
+    );
+    const request = mocks.api.startSearchV2.mock.calls.find(
+      ([item]) => item.raw_query === "unmount",
+    )?.[0]!;
+
+    view.unmount();
+    await waitFor(() =>
+      expect(mocks.api.cancelSearchV2).toHaveBeenCalledWith(
+        request.client_request_id,
+      ),
+    );
   });
 
   it("opens an editable support composer from the sidebar feedback action", async () => {

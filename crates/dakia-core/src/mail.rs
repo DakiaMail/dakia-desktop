@@ -1,22 +1,34 @@
 #[cfg(test)]
-use crate::storage::ThreadingHeaders;
+use crate::storage::{SearchQuery, ThreadingHeaders};
 use crate::{
+    compile_generic_imap, evaluate_search,
     flowed::decode_format_flowed,
     mime_budget::{
         preflight_raw_message, validate_header_bytes, validate_structure, MAX_MIME_HEADER_BYTES,
         MAX_MIME_PARTS, MAX_MULTIPART_NESTING, MAX_RAW_MESSAGE_BYTES,
     },
     oauth::OAuthTokens,
+    parse_search_query,
     provider::Security,
-    storage::{
-        stable_message_id, Attachment, AttachmentData, AttachmentPresentation, MailSummary,
-        MailboxChangedSinceFlags, MailboxSnapshotIdentity,
+    search::{FolderScope, SearchField, SearchNode, SearchTerm},
+    search_eval::{
+        display_imap_mailbox_name, generic_mailbox_storage_identity,
+        is_special_mailbox_storage_identity, normalize_search_text,
+        special_mailbox_storage_identity,
     },
-    Account, AccountAuth, Store,
+    storage::{
+        stable_message_id, Attachment, AttachmentData, AttachmentPresentation,
+        ContactedPersonRecipient, MailSummary, MailboxChangedSinceFlags, MailboxSnapshotIdentity,
+        SelectableMailbox, SelectableMailboxDraft,
+    },
+    Account, AccountAuth, SearchExpression, SearchSession, SearchableAttachment, SearchableMessage,
+    Store,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use chrono::Utc;
+#[cfg(debug_assertions)]
+use lettre::transport::smtp::client::Certificate;
 use lettre::{
     address::Envelope,
     message::{
@@ -44,6 +56,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    future::Future,
     net::IpAddr,
     ops::Range,
     sync::Arc,
@@ -57,6 +70,8 @@ use tokio::{
     sync::watch,
     time::{timeout, timeout_at, Duration, Instant},
 };
+#[cfg(any(test, debug_assertions))]
+use tokio_rustls::rustls::pki_types::CertificateDer;
 use tokio_rustls::{
     client::TlsStream,
     rustls::{pki_types::ServerName, ClientConfig, RootCertStore},
@@ -72,6 +87,13 @@ const SMTP_SEND_TIMEOUT: Duration = Duration::from_secs(60);
 /// send deadline so an opt-in diagnostic cannot hold a manual CI runner for a
 /// full delivery timeout.
 const SMTP_AUTH_PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+/// Debug-only opt-in for the isolated native mail fixture. This must never be
+/// enabled by a release build and is deliberately restricted to an exact,
+/// loopback-only account endpoint.
+#[cfg(debug_assertions)]
+const NATIVE_MAIL_FIXTURE_ENV: &str = "DAKIA_NATIVE_MAIL_FIXTURE";
+#[cfg(debug_assertions)]
+const NATIVE_MAIL_FIXTURE_CA_DER_ENV: &str = "DAKIA_NATIVE_MAIL_FIXTURE_CA_DER_BASE64";
 const DKIM_VERIFY_TIMEOUT: Duration = Duration::from_secs(5);
 const UNSUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
@@ -108,6 +130,10 @@ const MAX_SUPPORTED_MAILBOX_MESSAGES: u32 = 1_000_000;
 /// server response.
 const MAX_IMAP_RESPONSE_LITERAL_BYTES: usize = 100 * 1024 * 1024;
 const MAX_ATTACHMENT_COUNT: usize = 50;
+/// Provider SEARCH can return every message in every selectable mailbox.
+/// Bound the first-pass candidate set independently of the requested UI page.
+const MAX_PROVIDER_SEARCH_CANDIDATES: usize = 2_000;
+const MAX_PROVIDER_CANDIDATES_PER_MAILBOX: usize = 100;
 const MIME_CONTENT_UNDECODABLE: &str = "mime_content_undecodable";
 const INVALID_FILENAME_PARAMETER_MARKER: &str = "x-dakia-invalid-filename";
 const MAX_OUTBOUND_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
@@ -137,6 +163,28 @@ pub struct ComposeMessage {
     pub references: Option<String>,
     #[serde(default)]
     pub attachments: Vec<ComposeAttachment>,
+}
+
+/// Field-level result for the recipient parser shared by compose validation
+/// and the SMTP envelope builder. `invalid` retains the original user text so
+/// the composer can highlight it without rewriting or discarding it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposeRecipientFieldValidation {
+    pub valid: bool,
+    #[serde(default)]
+    pub invalid: Vec<String>,
+}
+
+/// Authoritative, local-only validation for the three compose recipient
+/// fields. It intentionally delegates to the exact parser used by sending;
+/// this command does not construct an SMTP message or learn contacted people.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposeRecipientValidation {
+    pub to: ComposeRecipientFieldValidation,
+    pub cc: ComposeRecipientFieldValidation,
+    pub bcc: ComposeRecipientFieldValidation,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -241,6 +289,38 @@ pub struct SyncProgress {
 pub struct SyncResult {
     pub synced_count: usize,
     pub new_messages: Vec<MailSummary>,
+}
+
+/// Provider work is deliberately reported at mailbox granularity. A failure
+/// in one selected folder must not discard authoritative matches from another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderMailboxSearchCoverage {
+    pub mailbox: String,
+    pub state: ProviderMailboxSearchState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderMailboxSearchState {
+    Searched,
+    /// A current provider candidate could not be canonically evaluated, such
+    /// as after a missing header, malformed BODYSTRUCTURE, or text FETCH
+    /// failure. This is distinct from an otherwise valid hit whose text was
+    /// merely not retained for future local pages.
+    Partial,
+    /// The provider yielded and canonically evaluated a result, but its body
+    /// could not be retained in the bounded search-only cache. The immediate
+    /// provider page is valid; only later local-only pages are incomplete.
+    SearchBodyCacheIncomplete,
+    Offline,
+    MailboxChanged,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderSearchPage {
+    pub messages: Vec<MailSummary>,
+    pub cursor: crate::ProviderSearchCursor,
+    pub exhausted: bool,
+    pub coverage: Vec<ProviderMailboxSearchCoverage>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1068,27 +1148,105 @@ impl MailService {
         let condstore = supports_condstore(&capabilities);
         let requested_families = plans
             .iter()
-            .filter_map(|plan| special_mailbox_family(plan.local))
+            .filter_map(|plan| special_mailbox_family(&plan.local))
+            .map(str::to_owned)
             .collect::<std::collections::HashSet<_>>();
-        let (listing, listing_authoritative) = match client.command("LIST \"\" \"*\"").await {
-            Ok(listing) => match validate_list_response(&listing) {
-                Ok(()) => (listing, true),
-                Err(error) if reset_before_sync => {
-                    return Err(error).context(
+        let catalogue_all_mailboxes =
+            plans.is_empty() || plans.len() > 1 || plans.iter().any(|plan| plan.local != "INBOX");
+        let (listing, listing_is_authoritative) =
+            match client.command_with_literal("LIST \"\" \"*\"").await {
+                Ok(listing) if authoritative_list_response(&listing) => (listing, true),
+                Ok(_) if reset_before_sync => {
+                    return Err(anyhow!("LIST response is malformed")).context(
                         "cannot replace mailbox families without a complete LIST response",
                     );
                 }
-                Err(_) => (listing, false),
-            },
-            Err(error) if reset_before_sync => {
-                return Err(error)
-                    .context("cannot replace mailbox families because LIST discovery failed");
-            }
-            Err(_) => (Vec::new(), false),
+                Ok(listing) => (listing, false),
+                Err(error) if reset_before_sync => {
+                    return Err(error)
+                        .context("cannot replace mailbox families because LIST discovery failed");
+                }
+                Err(_) => (ImapResponse::default(), false),
+            };
+        let discovered_mailboxes = parse_list_mailbox_details_from_response(&listing);
+        let discovered_remote_paths = discovered_mailboxes
+            .iter()
+            .map(|mailbox| mailbox.remote.clone())
+            .collect::<std::collections::HashSet<_>>();
+        let plans = if catalogue_all_mailboxes {
+            sync_mailbox_plans_from_discovered(plans, &discovered_mailboxes)
+        } else {
+            plans
         };
-        let plans = resolve_special_mailboxes(plans, &listing);
-        let mut family_keep = std::collections::HashMap::<&'static str, Vec<String>>::new();
-        let mut incomplete_families = std::collections::HashSet::<&'static str>::new();
+        // Persist every discovered identity before selecting any mailbox. This
+        // keeps ordinary folders restart-safe and prevents a later discovery
+        // from manufacturing a duplicate local label for the same wire path.
+        let mut selectable_mailboxes = self
+            .store
+            .list_selectable_mailboxes(account.id)
+            .await?
+            .into_iter()
+            .map(|mailbox| (mailbox.remote_path.clone(), mailbox))
+            .collect::<BTreeMap<_, _>>();
+        for mailbox in &discovered_mailboxes {
+            let matching_plan = plans.iter().find(|plan| plan.remote == mailbox.remote);
+            let existing_mailbox = selectable_mailboxes.get(&mailbox.remote);
+            let canonical_path =
+                canonical_local_mailbox_path(&mailbox.remote, mailbox.delimiter.as_deref());
+            let local_path = matching_plan
+                .map(|plan| plan.local.clone())
+                .or_else(|| existing_mailbox.map(|stored| stored.local_path.clone()))
+                .unwrap_or_else(|| canonical_path.clone());
+            let parent_path = canonical_path
+                .rsplit_once('/')
+                .map(|(parent, _)| parent.to_owned())
+                .filter(|parent| !parent.is_empty());
+            let selectable_mailbox = self
+                .store
+                .upsert_selectable_mailbox(
+                    account.id,
+                    &SelectableMailboxDraft {
+                        remote_path: mailbox.remote.clone(),
+                        local_path: Some(local_path),
+                        hierarchy_delimiter: mailbox.delimiter.clone(),
+                        parent_id: None,
+                        parent_path,
+                        special_use: mailbox
+                            .flags
+                            .iter()
+                            .find(|flag| {
+                                flag.starts_with('\\') && !flag.eq_ignore_ascii_case("\\Noselect")
+                            })
+                            .cloned(),
+                        selectable: !mailbox
+                            .flags
+                            .iter()
+                            .any(|flag| flag.eq_ignore_ascii_case("\\Noselect")),
+                        // A fresh LIST alone cannot prove that every UID was
+                        // catalogued. Keep the last UID namespace if known,
+                        // but downgrade stale complete coverage until this
+                        // sync successfully SELECTs and finishes the folder.
+                        uid_validity: existing_mailbox.and_then(|stored| stored.uid_validity),
+                        catalogue_coverage: if mailbox
+                            .flags
+                            .iter()
+                            .any(|flag| flag.eq_ignore_ascii_case("\\Noselect"))
+                        {
+                            "unknown".into()
+                        } else if matching_plan.is_none() {
+                            existing_mailbox
+                                .map(|stored| stored.catalogue_coverage.clone())
+                                .unwrap_or_else(|| "unknown".into())
+                        } else {
+                            "partial".into()
+                        },
+                    },
+                )
+                .await?;
+            selectable_mailboxes.insert(mailbox.remote.clone(), selectable_mailbox);
+        }
+        let mut family_keep = std::collections::HashMap::<String, Vec<String>>::new();
+        let mut incomplete_families = std::collections::HashSet::<String>::new();
         on_progress(SyncProgress {
             phase: "finding",
             completed: 0,
@@ -1125,8 +1283,8 @@ impl MailService {
                                     plan.storage
                                 ));
                             }
-                            if let Some(family) = special_mailbox_family(plan.local) {
-                                incomplete_families.insert(family);
+                            if let Some(family) = special_mailbox_family(&plan.local) {
+                                incomplete_families.insert(family.to_owned());
                             }
                             continue;
                         }
@@ -1145,25 +1303,42 @@ impl MailService {
                             plan.storage
                         ));
                     }
-                    if let Some(family) = special_mailbox_family(plan.local) {
-                        incomplete_families.insert(family);
+                    if let Some(family) = special_mailbox_family(&plan.local) {
+                        incomplete_families.insert(family.to_owned());
                     }
                     continue;
                 }
             };
-            if let Some(family) = special_mailbox_family(plan.local) {
+            if let Some(family) = special_mailbox_family(&plan.local) {
                 family_keep
-                    .entry(family)
+                    .entry(family.to_owned())
                     .or_default()
                     .push(plan.storage.clone());
             }
             let mut snapshot_identity = parse_mailbox_identity(&selected)?;
-            let uid_validity = snapshot_identity.uid_validity;
+            let mut uid_validity = snapshot_identity.uid_validity;
+            // SELECT is the authoritative boundary for a mailbox UID
+            // namespace. Publish it before SEARCH or FETCH so an interrupted
+            // sync is visibly partial, never an old complete catalogue with
+            // an invented or erased UIDVALIDITY.
+            let selectable_mailbox = self
+                .store
+                .upsert_selectable_mailbox(
+                    account.id,
+                    &selectable_mailbox_sync_draft(
+                        &plan,
+                        selectable_mailboxes.get(&plan.remote),
+                        uid_validity,
+                        "partial",
+                    ),
+                )
+                .await?;
+            selectable_mailboxes.insert(plan.remote.clone(), selectable_mailbox.clone());
             let mut previous_state = self
                 .store
                 .mailbox_catalog_state(account.id, &plan.storage)
                 .await?;
-            let uid_validity_changed = previous_state
+            let mut uid_validity_changed = previous_state
                 .as_ref()
                 .is_some_and(|state| state.uid_validity != i64::from(uid_validity));
             if uid_validity_changed {
@@ -1242,12 +1417,61 @@ impl MailService {
                                 },
                             )
                             .await?;
+                        if plan.local == "Sent" {
+                            let local_highest = self
+                                .store
+                                .highest_mailbox_uid(account.id, &plan.storage)
+                                .await?;
+                            let highest_uid = final_identity
+                                .uid_next
+                                .map(|uid_next| uid_next.saturating_sub(1))
+                                .into_iter()
+                                .chain(local_highest)
+                                .max()
+                                .unwrap_or(0);
+                            self.store
+                                .capture_contacted_people_sent_provider_cutoff(
+                                    account.id,
+                                    &plan.storage,
+                                    u64::from(final_identity.uid_validity),
+                                    u64::from(highest_uid),
+                                )
+                                .await?;
+                        }
+                        self.store
+                            .bind_catalog_mailbox_memberships(
+                                account.id,
+                                &plan.storage,
+                                &selectable_mailbox.id,
+                            )
+                            .await?;
+                        let selectable_mailbox = self
+                            .store
+                            .upsert_selectable_mailbox(
+                                account.id,
+                                &selectable_mailbox_sync_draft(
+                                    &plan,
+                                    Some(&selectable_mailbox),
+                                    uid_validity,
+                                    "complete",
+                                ),
+                            )
+                            .await?;
+                        selectable_mailboxes.insert(plan.remote.clone(), selectable_mailbox);
                         continue;
                     }
                     // A concurrent flag change or mailbox mutation invalidates
                     // the delta but the final SELECT provides a fresh identity
                     // for the complete bounded snapshot below.
                     snapshot_identity = final_identity;
+                    uid_validity = snapshot_identity.uid_validity;
+                    uid_validity_changed = uid_validity_changed
+                        || previous_state.as_ref().is_some_and(|state| {
+                            state.uid_validity != i64::from(snapshot_identity.uid_validity)
+                        });
+                    if uid_validity_changed {
+                        previous_state = None;
+                    }
                 }
             }
             let snapshot_generation = self
@@ -1286,6 +1510,32 @@ impl MailService {
             remote_uids.sort_unstable();
             if remote_uids.len() != usize::try_from(snapshot_identity.exists)? {
                 bail!("IMAP mailbox snapshot repeated a UID across pages");
+            }
+            if plan.local == "Sent" {
+                // A Clear or collection-setting transition must never cause
+                // an old, newly discovered Sent message to be learned later.
+                // Capture this provider generation boundary before any flags,
+                // catalogue reconciliation, or message import can make a
+                // historical row available to the contacted-people backfill.
+                // UIDNEXT is normally one greater than the largest assigned
+                // UID, but it is provider state and can be stale or lower
+                // than a concurrently observed SEARCH result. Never let a
+                // low UIDNEXT reopen historical UIDs after a privacy clear.
+                let highest_uid = snapshot_identity
+                    .uid_next
+                    .map(|uid_next| uid_next.saturating_sub(1))
+                    .into_iter()
+                    .chain(remote_uids.last().copied())
+                    .max()
+                    .unwrap_or(0);
+                self.store
+                    .capture_contacted_people_sent_provider_cutoff(
+                        account.id,
+                        &plan.storage,
+                        u64::from(snapshot_identity.uid_validity),
+                        u64::from(highest_uid),
+                    )
+                    .await?;
             }
             let remote_set: std::collections::HashSet<u32> = remote_uids.iter().copied().collect();
             let local_uids = if reset_before_sync || uid_validity_changed {
@@ -1348,12 +1598,15 @@ impl MailService {
                     )
                     .await?;
             }
+            selectable_mailboxes.insert(plan.remote.clone(), selectable_mailbox.clone());
             work.push(MailboxSyncWork {
                 plan,
                 snapshot_generation,
                 snapshot_identity,
                 condstore: mailbox_condstore,
                 replace_namespace,
+                selectable_mailbox: Some(selectable_mailbox),
+                uid_validity,
                 initialized: previous_state.is_some() && !reset_before_sync,
                 previous_highest,
                 inventory_uids: remote_uids,
@@ -1583,7 +1836,7 @@ impl MailService {
             }
         }
         if work.iter().any(|item| !item.failed_uids.is_empty()) {
-            for item in &work {
+            for item in &mut work {
                 if !item.replace_namespace {
                     self.store
                         .discard_mailbox_snapshot(
@@ -1666,19 +1919,50 @@ impl MailService {
                     )
                     .await?;
             }
+            if let Some(mailbox) = &item.selectable_mailbox {
+                self.store
+                    .bind_catalog_mailbox_memberships(account.id, &item.plan.storage, &mailbox.id)
+                    .await?;
+                self.store
+                    .upsert_selectable_mailbox(
+                        account.id,
+                        &selectable_mailbox_sync_draft(
+                            &item.plan,
+                            Some(mailbox),
+                            item.uid_validity,
+                            "complete",
+                        ),
+                    )
+                    .await?;
+            }
         }
-        if listing_authoritative {
+        if listing_is_authoritative && catalogue_all_mailboxes {
+            let mut safely_listed_remote_paths = discovered_remote_paths;
             for family in requested_families {
-                if incomplete_families.contains(family) {
+                if incomplete_families.contains(&family) {
+                    safely_listed_remote_paths.extend(
+                        selectable_mailboxes
+                            .values()
+                            .filter(|mailbox| {
+                                special_mailbox_family(&mailbox.local_path) == Some(family.as_str())
+                            })
+                            .map(|mailbox| mailbox.remote_path.clone()),
+                    );
                     continue;
                 }
-                let mut keep = family_keep.remove(family).unwrap_or_default();
+                let mut keep = family_keep.remove(&family).unwrap_or_default();
                 keep.sort();
                 keep.dedup();
                 self.store
-                    .prune_obsolete_mailbox_family_namespaces(account.id, family, &keep)
+                    .prune_obsolete_mailbox_family_namespaces(account.id, &family, &keep)
                     .await?;
             }
+            self.store
+                .retire_selectable_mailboxes_absent_from_authoritative_list(
+                    account.id,
+                    &safely_listed_remote_paths,
+                )
+                .await?;
         }
         if synced > 0 {
             self.store.finish_threading_backfill(account.id).await?;
@@ -1721,9 +2005,14 @@ impl MailService {
         let secret = self.credentials.secret(account).await?;
         let mut client = ImapClient::connect(account).await?;
         client.authenticate(account, &secret).await?;
-        let listing = client.command("LIST \"\" \"*\"").await.unwrap_or_default();
-        let plans =
-            refresh_main_mailbox_plans(resolve_special_mailboxes(mailbox_plans(account), &listing));
+        let listing = client
+            .command_with_literal("LIST \"\" \"*\"")
+            .await
+            .unwrap_or_default();
+        let plans = refresh_main_mailbox_plans(resolve_special_mailboxes_from_response(
+            mailbox_plans(account),
+            &listing,
+        ));
         let since = imap_since_date(cutoff);
         let mut work = Vec::new();
 
@@ -1948,9 +2237,14 @@ impl MailService {
             .into_iter()
             .find(|part| part.attachment_id(&id) == attachment_id)
             .context("attachment is not available for download")?;
-        let header =
-            fetch_section_mime_headers(&mut client, uid, &attachment.part.path, Some(&headers))
-                .await?;
+        let header = fetch_section_mime_headers(
+            &mut client,
+            uid,
+            &attachment.part.path,
+            Some(&headers),
+            None,
+        )
+        .await?;
         let mut response = client
             .command_with_literal_limited(
                 &section_fetch_command(uid, &attachment.part.path),
@@ -2039,102 +2333,1016 @@ impl MailService {
         if text.trim().is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
+        let expression = parse_search_query(text)?;
+        self.search_remote_expression(account, &expression, mailbox, limit)
+            .await
+    }
+
+    /// Searches with a parsed, provider-neutral expression.  Providers only
+    /// receive a conservative generic IMAP candidate criterion, never the
+    /// user-entered Fastmail-style syntax.  Every candidate is evaluated
+    /// locally before it is returned.
+    pub async fn search_remote_expression(
+        &self,
+        account: &Account,
+        expression: &SearchExpression,
+        mailbox: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MailSummary>> {
+        Ok(self
+            .search_remote_expression_page(
+                account,
+                expression,
+                mailbox,
+                &crate::ProviderSearchCursor::default(),
+                limit,
+                false,
+                None,
+            )
+            .await?
+            .messages)
+    }
+
+    /// Compatibility entry point for callers that do not have a foreground
+    /// account generation. Versioned desktop search uses the guarded variant
+    /// below so its provider writes cannot win a configuration/flag race.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "compatibility entry point keeps each search boundary value explicit"
+    )]
+    pub async fn search_remote_expression_page(
+        &self,
+        account: &Account,
+        expression: &SearchExpression,
+        mailbox: Option<&str>,
+        cursor: &crate::ProviderSearchCursor,
+        limit: usize,
+        include_spam_trash: bool,
+        session: Option<&SearchSession>,
+    ) -> Result<ProviderSearchPage> {
+        self.search_remote_expression_page_with_generation(
+            account,
+            expression,
+            mailbox,
+            cursor,
+            limit,
+            include_spam_trash,
+            session,
+            None,
+        )
+        .await
+    }
+
+    /// Fetches one bounded, fair provider page. `cursor` records how many
+    /// candidates have already been consumed in each remote mailbox, so a
+    /// later search page resumes rather than replaying the first mailbox.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "provider paging keeps cancellation and publication guards explicit"
+    )]
+    pub async fn search_remote_expression_page_with_generation(
+        &self,
+        account: &Account,
+        expression: &SearchExpression,
+        mailbox: Option<&str>,
+        cursor: &crate::ProviderSearchCursor,
+        limit: usize,
+        include_spam_trash: bool,
+        session: Option<&SearchSession>,
+        publication_generation: Option<i64>,
+    ) -> Result<ProviderSearchPage> {
+        if limit == 0 {
+            return Ok(ProviderSearchPage {
+                messages: Vec::new(),
+                cursor: cursor.clone(),
+                exhausted: true,
+                coverage: Vec::new(),
+            });
+        }
+        // Callers may still supply a legacy ambient mailbox alongside the
+        // parsed query. Explicit `in:` syntax is user intent, so it replaces
+        // the ambient narrowing before mailbox discovery and SELECT planning.
+        let has_explicit_folder = expression_has_folder_predicate(expression);
+        let mailbox = if has_explicit_folder { None } else { mailbox };
+        let candidate = compile_generic_imap(expression, Utc::now().date_naive())?;
+        ensure_search_not_cancelled(session)?;
         let secret = self.credentials.secret(account).await?;
-        let mut client = ImapClient::connect(account).await?;
-        client.authenticate(account, &secret).await?;
-        let listing = client.command("LIST \"\" \"*\"").await.unwrap_or_default();
-        let plans = resolve_special_mailboxes(mailbox_plans(account), &listing);
-        let mut hits = Vec::new();
+        let mut client = ImapClient::connect_cancellable(account, session).await?;
+        ensure_search_not_cancelled(session)?;
+        client
+            .authenticate_cancellable(account, &secret, session)
+            .await?;
+        ensure_search_not_cancelled(session)?;
+        let listing = match client
+            .command_with_literal_cancellable("LIST \"\" \"*\"", session)
+            .await
+        {
+            Ok(listing) => listing,
+            Err(error) => {
+                tracing::warn!(
+                    account_id = %account.id,
+                    error = %error,
+                    "could not list selectable mailboxes during provider search"
+                );
+                let _ = client.command("LOGOUT").await;
+                return Ok(ProviderSearchPage {
+                    messages: Vec::new(),
+                    cursor: cursor.clone(),
+                    exhausted: true,
+                    coverage: vec![ProviderMailboxSearchCoverage {
+                        mailbox: mailbox.unwrap_or("All mailboxes").to_owned(),
+                        state: ProviderMailboxSearchState::Offline,
+                    }],
+                });
+            }
+        };
+        ensure_search_not_cancelled(session)?;
+        let plans = self
+            .discover_provider_search_mailboxes(account, &listing, session, publication_generation)
+            .await?;
+        let mut candidates = Vec::new();
+        let mut coverage = Vec::new();
+        let mut partial_coverage = Vec::new();
+        let mut next_cursor = cursor.clone();
+        let mut mailbox_has_more = BTreeMap::new();
         for plan in plans {
-            if mailbox.is_some_and(|requested| requested != plan.local) {
+            ensure_search_not_cancelled(session)?;
+            if !provider_search_plan_is_in_scope(
+                &plan,
+                mailbox,
+                include_spam_trash,
+                expression_explicitly_includes_provider_mailbox(expression, &plan),
+            ) {
                 continue;
             }
-            if client
-                .command(&format!("SELECT {}", quote_imap(&plan.remote)))
+            let selected = match client
+                .command_cancellable(&format!("SELECT {}", quote_imap(&plan.remote)), session)
                 .await
-                .is_err()
             {
+                Ok(selected) => selected,
+                Err(error) => {
+                    tracing::warn!(
+                        account_id = %account.id,
+                        mailbox = %plan.remote,
+                        error = %error,
+                        "could not select mailbox during provider search"
+                    );
+                    coverage.push(ProviderMailboxSearchCoverage {
+                        mailbox: plan.local.clone(),
+                        state: ProviderMailboxSearchState::Offline,
+                    });
+                    continue;
+                }
+            };
+            let Some(current_uid_validity) = parse_uid_validity(&selected) else {
+                tracing::warn!(
+                    account_id = %account.id,
+                    mailbox = %plan.remote,
+                    "provider search omitted mailbox UIDVALIDITY"
+                );
+                coverage.push(ProviderMailboxSearchCoverage {
+                    mailbox: plan.local.clone(),
+                    state: ProviderMailboxSearchState::MailboxChanged,
+                });
                 continue;
+            };
+            // A continuation is bound to the IMAP UID namespace that produced
+            // its descending UID anchor. Do this check before SEARCH: after a
+            // UIDVALIDITY rollover the provider may legally reuse the old
+            // numeric UID and an otherwise safe `< last_uid` filter would
+            // resolve the wrong message.
+            if let Some(expected_uid_validity) =
+                cursor.mailbox_uid_validity.get(&plan.remote).copied()
+            {
+                if expected_uid_validity != current_uid_validity {
+                    tracing::warn!(
+                        account_id = %account.id,
+                        mailbox = %plan.remote,
+                        expected_uid_validity,
+                        current_uid_validity,
+                        "stopping provider search after continuation UIDVALIDITY changed"
+                    );
+                    coverage.push(ProviderMailboxSearchCoverage {
+                        mailbox: plan.local.clone(),
+                        state: ProviderMailboxSearchState::MailboxChanged,
+                    });
+                    continue;
+                }
             }
-            let text_criterion = format!("TEXT {}", quote_imap(text.trim()));
-            let response = if account.provider_id == "gmail" {
-                let gmail = format!("X-GM-RAW {}", quote_imap(text.trim()));
-                match client.command(&format!("UID SEARCH {gmail}")).await {
-                    Ok(response) => response,
-                    Err(_) => {
-                        client
-                            .command(&format!("UID SEARCH {text_criterion}"))
-                            .await?
+            ensure_search_not_cancelled(session)?;
+            let selectable_mailbox = SelectableMailboxDraft {
+                remote_path: plan.remote.clone(),
+                local_path: Some(plan.local.clone()),
+                hierarchy_delimiter: plan.hierarchy_delimiter.clone(),
+                parent_id: None,
+                parent_path: plan.parent_path.clone(),
+                special_use: plan.special_use.clone(),
+                selectable: true,
+                uid_validity: Some(i64::from(current_uid_validity)),
+                catalogue_coverage: "partial".into(),
+            };
+            let selectable_published = match publication_generation {
+                Some(generation) => self
+                    .store
+                    .upsert_selectable_mailbox_if_account_generation(
+                        account.id,
+                        generation,
+                        &selectable_mailbox,
+                    )
+                    .await?
+                    .is_some(),
+                None => {
+                    self.store
+                        .upsert_selectable_mailbox(account.id, &selectable_mailbox)
+                        .await?;
+                    true
+                }
+            };
+            if !selectable_published {
+                bail!("provider search publication was superseded");
+            }
+            match self
+                .store
+                .mailbox_catalog_state(account.id, &plan.storage)
+                .await?
+            {
+                Some(state) => {
+                    if verify_mailbox_uid_validity(
+                        current_uid_validity,
+                        state.uid_validity,
+                        "searching",
+                    )
+                    .is_err()
+                    {
+                        // Do not resolve a UID against a recycled catalogue
+                        // identity. A normal sync will reset and rebuild this
+                        // mailbox before a later search can use it.
+                        tracing::warn!(
+                            account_id = %account.id,
+                            mailbox = %plan.remote,
+                            "skipping provider search after UIDVALIDITY changed"
+                        );
+                        coverage.push(ProviderMailboxSearchCoverage {
+                            mailbox: plan.local.clone(),
+                            state: ProviderMailboxSearchState::MailboxChanged,
+                        });
+                        continue;
                     }
                 }
-            } else {
-                client
-                    .command(&format!("UID SEARCH {text_criterion}"))
-                    .await?
+                None => {
+                    // Establish the identity before resolving provider UIDs.
+                    // It is deliberately marked incomplete so ordinary sync
+                    // remains responsible for full catalogue coverage.
+                    ensure_search_not_cancelled(session)?;
+                    let state_published = match publication_generation {
+                        Some(generation) => {
+                            self.store
+                                .save_mailbox_catalog_state_if_account_generation(
+                                    account.id,
+                                    generation,
+                                    &plan.storage,
+                                    &plan.remote,
+                                    current_uid_validity,
+                                    0,
+                                    false,
+                                )
+                                .await?
+                        }
+                        None => {
+                            self.store
+                                .save_mailbox_catalog_state(
+                                    account.id,
+                                    &plan.storage,
+                                    &plan.remote,
+                                    current_uid_validity,
+                                    0,
+                                    false,
+                                )
+                                .await?;
+                            true
+                        }
+                    };
+                    if !state_published {
+                        bail!("provider search publication was superseded");
+                    }
+                }
+            }
+            let response = match client
+                .command_cancellable(&format!("UID SEARCH {}", candidate.criteria), session)
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    tracing::warn!(
+                        account_id = %account.id,
+                        mailbox = %plan.remote,
+                        error = %error,
+                        "provider rejected safe generic IMAP search"
+                    );
+                    coverage.push(ProviderMailboxSearchCoverage {
+                        mailbox: plan.local.clone(),
+                        state: ProviderMailboxSearchState::Offline,
+                    });
+                    continue;
+                }
             };
+            ensure_search_not_cancelled(session)?;
             let mut uids = parse_search_uids(&response)?;
             uids.sort_unstable_by(|left, right| right.cmp(left));
-            for uid in uids {
-                if let Some(message) = self
-                    .store
-                    .message_by_locator(account.id, &plan.storage, uid)
-                    .await?
-                {
-                    hits.push(message);
-                } else {
-                    // Search can outrun a long historical backfill. Publish
-                    // metadata for an online-only hit immediately without
-                    // retaining its body.
-                    let fields = if account.provider_id == "gmail" {
-                        "FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE X-GM-LABELS BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)]"
-                    } else {
-                        "FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)]"
-                    };
-                    let mut response = client
-                        .command_with_literal_limited(
-                            &format!("UID FETCH {uid} ({fields})"),
-                            MAX_MIME_HEADER_BYTES,
-                        )
-                        .await?;
-                    if let Some(headers) = response.take_header_literal_for(uid) {
-                        if plan.skip_gmail_system_labels
-                            && !gmail_all_mail_is_archive(&response.lines)
-                        {
-                            continue;
-                        }
-                        let snippet = client
-                            .command_with_literal(&format!("UID FETCH {uid} (BODY.PEEK[]<0.8192>)"))
-                            .await
-                            .ok()
-                            .and_then(|mut response| response.take_body_literal_for(uid, "TEXT"))
-                            .map(|raw| snippet_from_partial(&raw))
-                            .unwrap_or_default();
-                        let Ok(message) = parse_catalog_message(
-                            account,
-                            &plan.storage,
-                            uid,
-                            &response.lines,
-                            &headers,
-                            snippet,
-                        ) else {
-                            continue;
-                        };
+            let last_uid = cursor.mailbox_last_uid.get(&plan.remote).copied();
+            // Keep a UID anchor, rather than an offset into a new SEARCH
+            // response. A newly delivered message can prepend a UID between
+            // pages but cannot make us replay or skip an older UID.
+            if let Some(last_uid) = last_uid {
+                uids.retain(|uid| *uid < last_uid);
+            }
+            // A remote SEARCH result can be arbitrarily large.  One page only
+            // needs at most `limit` candidates from a mailbox, and retaining
+            // more would both defeat the bound and make later folders wait.
+            let per_mailbox_limit = limit.min(MAX_PROVIDER_CANDIDATES_PER_MAILBOX);
+            mailbox_has_more.insert(plan.remote.clone(), uids.len() > per_mailbox_limit);
+            uids.truncate(per_mailbox_limit);
+            next_cursor
+                .mailbox_last_uid
+                .entry(plan.remote.clone())
+                .or_insert(last_uid.unwrap_or(u32::MAX));
+            next_cursor
+                .mailbox_uid_validity
+                .entry(plan.remote.clone())
+                .or_insert(current_uid_validity);
+            coverage.push(ProviderMailboxSearchCoverage {
+                mailbox: plan.local.clone(),
+                state: ProviderMailboxSearchState::Searched,
+            });
+            candidates.push((plan, uids));
+        }
+        let candidate_lengths = candidates
+            .iter()
+            .map(|(_, uids)| uids.len())
+            .collect::<Vec<_>>();
+        for ((plan, uids), allowed) in candidates.iter_mut().zip(bounded_fair_candidate_lengths(
+            &candidate_lengths,
+            MAX_PROVIDER_SEARCH_CANDIDATES,
+        )) {
+            if allowed < uids.len() {
+                mailbox_has_more.insert(plan.remote.clone(), true);
+            }
+            uids.truncate(allowed);
+        }
+
+        // Consume one newest candidate from each mailbox per round.  A large
+        // Inbox can therefore no longer prevent Sent, Archive, or an
+        // arbitrary selected folder from contributing to the first page.
+        let mut hits = Vec::new();
+        // IMAP labels can expose one RFC Message-ID through several SELECTed
+        // mailboxes. Keep every exact provider candidate until their logical
+        // mailbox paths can be unioned for canonical `in:` evaluation.
+        let mut canonical_candidates = Vec::<(MailSummary, String)>::new();
+        let candidate_lengths = candidates
+            .iter()
+            .map(|(_, uids)| uids.len())
+            .collect::<Vec<_>>();
+        // A page smaller than the number of matching folders must not always
+        // begin with INBOX. Rotate only those constrained pages: larger pages
+        // retain their established round order and candidate cap behavior.
+        let non_empty_mailbox_indexes = candidate_lengths
+            .iter()
+            .enumerate()
+            .filter_map(|(index, count)| (*count > 0).then_some(index))
+            .collect::<Vec<_>>();
+        let rotate_small_page = limit < non_empty_mailbox_indexes.len();
+        let mailbox_round_offset = if rotate_small_page {
+            cursor.mailbox_round_offset % non_empty_mailbox_indexes.len()
+        } else {
+            0
+        };
+        if rotate_small_page {
+            next_cursor.mailbox_round_offset =
+                (mailbox_round_offset + 1) % non_empty_mailbox_indexes.len();
+        } else {
+            next_cursor.mailbox_round_offset = 0;
+        }
+        let candidate_order = if rotate_small_page {
+            fair_candidate_mailbox_order_for_indexes(
+                &candidate_lengths,
+                &non_empty_mailbox_indexes,
+                mailbox_round_offset,
+            )
+        } else {
+            fair_candidate_mailbox_order_from(&candidate_lengths, 0)
+        };
+        for mailbox_index in candidate_order {
+            ensure_search_not_cancelled(session)?;
+            let (plan, uids) = &mut candidates[mailbox_index];
+            let Some(uid) = uids.first().copied() else {
+                continue;
+            };
+            uids.remove(0);
+            next_cursor
+                .mailbox_last_uid
+                .insert(plan.remote.clone(), uid);
+            let selected = match client
+                .command_cancellable(&format!("SELECT {}", quote_imap(&plan.remote)), session)
+                .await
+            {
+                Ok(selected) => selected,
+                Err(error) => {
+                    tracing::warn!(
+                        account_id = %account.id,
+                        mailbox = %plan.remote,
+                        error = %error,
+                        "could not reselect mailbox for provider candidate"
+                    );
+                    mark_provider_mailbox_coverage(
+                        &mut coverage,
+                        &plan.local,
+                        ProviderMailboxSearchState::Offline,
+                    );
+                    continue;
+                }
+            };
+            let Some(current_uid_validity) = parse_uid_validity(&selected) else {
+                mark_provider_mailbox_coverage(
+                    &mut coverage,
+                    &plan.local,
+                    ProviderMailboxSearchState::MailboxChanged,
+                );
+                continue;
+            };
+            // Re-selecting immediately before FETCH closes the race where a
+            // mailbox rolls over after SEARCH but before the candidate is
+            // resolved. Compare with the page's newly pinned namespace too,
+            // not only the catalogue identity from an older sync.
+            let expected_uid_validity = next_cursor
+                .mailbox_uid_validity
+                .get(&plan.remote)
+                .copied()
+                .or_else(|| cursor.mailbox_uid_validity.get(&plan.remote).copied());
+            if expected_uid_validity.is_some_and(|expected| expected != current_uid_validity) {
+                tracing::warn!(
+                    account_id = %account.id,
+                    mailbox = %plan.remote,
+                    expected_uid_validity,
+                    current_uid_validity,
+                    "stopping provider candidate fetch after UIDVALIDITY changed"
+                );
+                mark_provider_mailbox_coverage(
+                    &mut coverage,
+                    &plan.local,
+                    ProviderMailboxSearchState::MailboxChanged,
+                );
+                continue;
+            }
+            let Some(state) = self
+                .store
+                .mailbox_catalog_state(account.id, &plan.storage)
+                .await?
+            else {
+                continue;
+            };
+            if verify_mailbox_uid_validity(current_uid_validity, state.uid_validity, "searching")
+                .is_err()
+            {
+                mark_provider_mailbox_coverage(
+                    &mut coverage,
+                    &plan.local,
+                    ProviderMailboxSearchState::MailboxChanged,
+                );
+                continue;
+            }
+            let mut metadata = match client
+                .command_with_literal_limited_cancellable(
+                    &format!(
+                        "UID FETCH {uid} ({})",
+                        selective_metadata_fetch_fields(account)
+                    ),
+                    MAX_MIME_HEADER_BYTES,
+                    session,
+                )
+                .await
+            {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    tracing::warn!(
+                        account_id = %account.id,
+                        mailbox = %plan.remote,
+                        uid,
+                        error = %error,
+                        "could not fetch provider candidate metadata"
+                    );
+                    mark_provider_mailbox_coverage(
+                        &mut coverage,
+                        &plan.local,
+                        ProviderMailboxSearchState::Offline,
+                    );
+                    continue;
+                }
+            };
+            ensure_search_not_cancelled(session)?;
+            if plan.skip_gmail_system_labels && !gmail_all_mail_is_archive(&metadata.lines) {
+                continue;
+            }
+            let body_required = expression_requires_authoritative_body(expression);
+            let attachment_metadata_required = expression_requires_attachment_metadata(expression);
+            // BODYSTRUCTURE and the requested headers share one FETCH
+            // response. Parse the structure while every declared literal is
+            // still present; consuming the header first leaves its `{size}`
+            // marker behind and makes an otherwise valid provider response
+            // look truncated.
+            let structure = match parse_bodystructure_response(&metadata) {
+                Ok(structure) => Some(structure),
+                Err(error) if body_required || attachment_metadata_required => {
+                    tracing::warn!(
+                        account_id = %account.id,
+                        mailbox = %plan.remote,
+                        uid,
+                        error = %error,
+                        "provider candidate BODYSTRUCTURE is unavailable for a dependent search"
+                    );
+                    mark_provider_mailbox_coverage(
+                        &mut coverage,
+                        &plan.local,
+                        ProviderMailboxSearchState::Partial,
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    // Header-only predicates can still be decided from the
+                    // authoritative header/flag response. Do not discard a
+                    // valid `subject:`, `from:`, or state match just because
+                    // a provider gave malformed optional BODYSTRUCTURE.
+                    tracing::warn!(
+                        account_id = %account.id,
+                        mailbox = %plan.remote,
+                        uid,
+                        error = %error,
+                        "ignoring malformed optional BODYSTRUCTURE for header-only search"
+                    );
+                    None
+                }
+            };
+            let Some(headers) = metadata.take_header_literal_for(uid) else {
+                mark_provider_mailbox_coverage(
+                    &mut coverage,
+                    &plan.local,
+                    ProviderMailboxSearchState::Partial,
+                );
+                continue;
+            };
+            // Header/state/date/folder/attachment predicates are complete in
+            // the selective metadata response. Parse and publish those
+            // candidates without requiring a body fetch that may be offline.
+            // Any expression containing plain text or `body:` remains
+            // body-dependent, including mixed Boolean forms, because a
+            // missing body could otherwise turn an unknown branch into a
+            // false canonical result.
+            let mut message = match parse_catalog_message_with_structure(
+                account,
+                &plan.storage,
+                uid,
+                &metadata.lines,
+                &headers,
+                String::new(),
+                structure.as_ref(),
+            ) {
+                Ok(message) => message,
+                Err(error) => {
+                    // A tagged OK FETCH can still carry unusable headers or
+                    // no trustworthy Date/INTERNALDATE. Never silently keep
+                    // this mailbox marked fully searched when its candidate
+                    // could not be canonically evaluated.
+                    tracing::warn!(
+                        account_id = %account.id,
+                        mailbox = %plan.remote,
+                        uid,
+                        error = %error,
+                        "could not parse provider candidate metadata"
+                    );
+                    mark_provider_mailbox_coverage(
+                        &mut coverage,
+                        &plan.local,
+                        ProviderMailboxSearchState::Partial,
+                    );
+                    continue;
+                }
+            };
+            if !body_required {
+                ensure_search_not_cancelled(session)?;
+                let published = match publication_generation {
+                    Some(generation) => {
+                        self.store
+                            .upsert_catalog_messages_if_account_generation(
+                                account.id,
+                                generation,
+                                std::slice::from_ref(&message),
+                            )
+                            .await?
+                    }
+                    None => {
                         self.store
                             .upsert_catalog_messages(std::slice::from_ref(&message))
                             .await?;
-                        hits.push(message);
+                        true
                     }
+                };
+                if !published {
+                    bail!("provider search publication was superseded");
                 }
+                ensure_search_not_cancelled(session)?;
+                let membership_result = match publication_generation {
+                    Some(generation) => self
+                        .store
+                        .set_message_mailbox_memberships_if_account_generation(
+                            account.id,
+                            generation,
+                            &message.id,
+                            std::slice::from_ref(&plan.id),
+                        )
+                        .await
+                        .and_then(|published| {
+                            published.then_some(()).ok_or_else(|| {
+                                anyhow::anyhow!("provider search publication was superseded")
+                            })
+                        }),
+                    None => {
+                        self.store
+                            .set_message_mailbox_memberships(
+                                account.id,
+                                &message.id,
+                                std::slice::from_ref(&plan.id),
+                            )
+                            .await
+                    }
+                };
+                if let Err(error) = membership_result {
+                    if error.to_string() == "provider search publication was superseded" {
+                        return Err(error);
+                    }
+                    tracing::warn!(
+                        account_id = %account.id,
+                        message_id = %message.id,
+                        error = %error,
+                        "could not record provider mailbox membership during search"
+                    );
+                }
+                canonical_candidates.push((message, plan.local.clone()));
+                if canonical_candidates.len() >= limit {
+                    break;
+                }
+                continue;
+            }
+            let text = match fetch_searchable_text_parts(
+                &mut client,
+                uid,
+                &headers,
+                structure
+                    .as_ref()
+                    .expect("body-dependent search requires BODYSTRUCTURE"),
+                session,
+            )
+            .await
+            {
+                Ok(text) => text,
+                Err(error) => {
+                    tracing::warn!(
+                        account_id = %account.id,
+                        mailbox = %plan.remote,
+                        uid,
+                        error = %error,
+                        "could not fetch complete text for canonical provider search"
+                    );
+                    mark_provider_mailbox_coverage(
+                        &mut coverage,
+                        &plan.local,
+                        ProviderMailboxSearchState::Partial,
+                    );
+                    continue;
+                }
+            };
+            message.snippet = clean_snippet(&text);
+            message.body_text = text;
+            ensure_search_not_cancelled(session)?;
+            let published = match publication_generation {
+                Some(generation) => {
+                    self.store
+                        .upsert_catalog_messages_if_account_generation(
+                            account.id,
+                            generation,
+                            std::slice::from_ref(&message),
+                        )
+                        .await?
+                }
+                None => {
+                    self.store
+                        .upsert_catalog_messages(std::slice::from_ref(&message))
+                        .await?;
+                    true
+                }
+            };
+            if !published {
+                bail!("provider search publication was superseded");
+            }
+            // Search may fetch only the selected text leaves, which is
+            // enough for canonical matching but not a faithful reader
+            // payload: HTML and downloadable attachments are absent.
+            // Keep this header catalogue row incomplete so opening the
+            // message performs the existing full selective hydration.
+            ensure_search_not_cancelled(session)?;
+            let body_cache_result = match publication_generation {
+                Some(generation) => {
+                    self.store
+                        .cache_search_body_text_if_account_generation(
+                            account.id,
+                            generation,
+                            &message.id,
+                            &message.body_text,
+                        )
+                        .await
+                }
+                None => {
+                    self.store
+                        .cache_search_body_text(&message.id, &message.body_text)
+                        .await
+                }
+            };
+            // A generation-bound cache miss means a foreground mutation won
+            // after this page's catalogue transaction. Do not continue to
+            // attach membership or return a UI hit from that stale page.
+            if publication_generation.is_some() && matches!(body_cache_result, Ok(false)) {
+                bail!("provider search publication was superseded");
+            }
+            match body_cache_result {
+                Ok(true) => {}
+                Ok(false) => partial_coverage.push(ProviderMailboxSearchCoverage {
+                    mailbox: plan.local.clone(),
+                    state: ProviderMailboxSearchState::SearchBodyCacheIncomplete,
+                }),
+                Err(error) => {
+                    tracing::warn!(
+                        account_id = %account.id,
+                        message_id = %message.id,
+                        error = %error,
+                        "could not retain provider text for local search"
+                    );
+                    partial_coverage.push(ProviderMailboxSearchCoverage {
+                        mailbox: plan.local.clone(),
+                        state: ProviderMailboxSearchState::SearchBodyCacheIncomplete,
+                    });
+                }
+            }
+            ensure_search_not_cancelled(session)?;
+            let membership_result = match publication_generation {
+                Some(generation) => self
+                    .store
+                    .set_message_mailbox_memberships_if_account_generation(
+                        account.id,
+                        generation,
+                        &message.id,
+                        std::slice::from_ref(&plan.id),
+                    )
+                    .await
+                    .and_then(|published| {
+                        published.then_some(()).ok_or_else(|| {
+                            anyhow::anyhow!("provider search publication was superseded")
+                        })
+                    }),
+                None => {
+                    self.store
+                        .set_message_mailbox_memberships(
+                            account.id,
+                            &message.id,
+                            std::slice::from_ref(&plan.id),
+                        )
+                        .await
+                }
+            };
+            if let Err(error) = membership_result {
+                if error.to_string() == "provider search publication was superseded" {
+                    return Err(error);
+                }
+                tracing::warn!(
+                    account_id = %account.id,
+                    message_id = %message.id,
+                    error = %error,
+                    "could not record provider mailbox membership during search"
+                );
+            }
+            canonical_candidates.push((message, plan.local.clone()));
+            if canonical_candidates.len() >= limit {
+                break;
+            }
+        }
+        let candidate_ids = canonical_candidates
+            .iter()
+            .map(|(message, _)| message.id.clone())
+            .collect::<Vec<_>>();
+        let durable_mailboxes = self
+            .store
+            .logical_mailbox_paths_by_message_ids(&candidate_ids)
+            .await?;
+        let mut evaluated = std::collections::HashSet::new();
+        for (message, _) in &canonical_candidates {
+            // No RFC Message-ID means there is no provider-supported identity
+            // for cross-mailbox aggregation. Keep that candidate isolated.
+            let identity = message
+                .message_id
+                .as_deref()
+                .filter(|message_id| !message_id.trim().is_empty())
+                .map(|message_id| format!("{}:{message_id}", message.account_id))
+                .unwrap_or_else(|| format!("{}:{}", message.account_id, message.id));
+            if !evaluated.insert(identity.clone()) {
+                continue;
+            }
+            let mut mailboxes = durable_mailboxes
+                .get(&message.id)
+                .cloned()
+                .unwrap_or_default();
+            for mailbox in canonical_candidates
+                .iter()
+                .filter(|(candidate, _)| {
+                    candidate.account_id == message.account_id
+                        && candidate
+                            .message_id
+                            .as_deref()
+                            .filter(|message_id| !message_id.trim().is_empty())
+                            .map(|message_id| format!("{}:{message_id}", candidate.account_id))
+                            .as_deref()
+                            == Some(identity.as_str())
+                })
+                .map(|(_, mailbox)| mailbox)
+            {
+                if !mailboxes.iter().any(|known| known == mailbox) {
+                    mailboxes.push(mailbox.clone());
+                }
+            }
+            let mailbox_refs = mailboxes.iter().map(String::as_str).collect::<Vec<_>>();
+            if canonical_remote_search_match_with_mailboxes(expression, message, &mailbox_refs) {
+                hits.push(message.clone());
                 if hits.len() >= limit {
                     break;
                 }
             }
-            if hits.len() >= limit {
-                break;
-            }
         }
+        let exhausted = candidates.iter().all(|(plan, uids)| {
+            uids.is_empty() && !mailbox_has_more.get(&plan.remote).copied().unwrap_or(false)
+        });
         let _ = client.command("LOGOUT").await;
-        Ok(hits)
+        coverage.extend(partial_coverage);
+        Ok(ProviderSearchPage {
+            messages: hits,
+            cursor: next_cursor,
+            exhausted,
+            coverage,
+        })
+    }
+
+    /// Persists every IMAP LIST mailbox before searching it.  System folders
+    /// retain their existing local names, while arbitrary provider paths get
+    /// an opaque selectable-mailbox record and a local path of their own.
+    /// Non-selectable hierarchy nodes are catalogued but never SELECTed.
+    async fn discover_provider_search_mailboxes(
+        &self,
+        account: &Account,
+        listing: &ImapResponse,
+        session: Option<&SearchSession>,
+        publication_generation: Option<i64>,
+    ) -> Result<Vec<SearchMailboxPlan>> {
+        let system = resolve_special_mailboxes_from_response(mailbox_plans(account), listing);
+        let mut system_by_remote = BTreeMap::new();
+        for plan in system {
+            system_by_remote.insert(
+                plan.remote.clone(),
+                (
+                    plan.remote,
+                    plan.local.to_owned(),
+                    plan.storage,
+                    plan.skip_gmail_system_labels,
+                ),
+            );
+        }
+        let mut discovered = parse_list_mailbox_details_from_response(listing);
+        if discovered.is_empty() {
+            // A server may refuse LIST despite allowing a known special-use
+            // mailbox. Keep legacy search working, but do not manufacture any
+            // arbitrary hierarchy paths.
+            discovered = system_by_remote
+                .values()
+                .map(|(remote, _, _, _)| ImapListMailbox {
+                    flags: Vec::new(),
+                    delimiter: None,
+                    remote: remote.clone(),
+                })
+                .collect();
+        }
+        let mut plans = Vec::new();
+        for mailbox in discovered {
+            ensure_search_not_cancelled(session)?;
+            let key = mailbox.remote.clone();
+            let canonical_path =
+                canonical_local_mailbox_path(&mailbox.remote, mailbox.delimiter.as_deref());
+            let (local, storage, skip_gmail_system_labels) = system_by_remote
+                .get(&key)
+                .cloned()
+                .map(|(_, local, storage, skip)| (local, storage, skip))
+                .unwrap_or_else(|| {
+                    (
+                        canonical_path.clone(),
+                        generic_mailbox_storage_identity(&mailbox.remote, &canonical_path),
+                        false,
+                    )
+                });
+            let selectable = !mailbox
+                .flags
+                .iter()
+                .any(|flag| flag.eq_ignore_ascii_case("\\Noselect"));
+            let special_use = mailbox
+                .flags
+                .iter()
+                .find(|flag| flag.starts_with('\\') && !flag.eq_ignore_ascii_case("\\Noselect"))
+                .cloned();
+            let parent_path = canonical_path
+                .rsplit_once('/')
+                .map(|(parent, _)| parent.to_owned())
+                .filter(|parent| !parent.is_empty());
+            let draft = SelectableMailboxDraft {
+                remote_path: mailbox.remote.clone(),
+                local_path: Some(local.clone()),
+                hierarchy_delimiter: mailbox.delimiter.clone(),
+                parent_id: None,
+                parent_path: parent_path.clone(),
+                special_use: special_use.clone(),
+                selectable,
+                uid_validity: None,
+                catalogue_coverage: "unknown".into(),
+            };
+            let stored = match publication_generation {
+                Some(generation) => self
+                    .store
+                    .upsert_selectable_mailbox_if_account_generation(account.id, generation, &draft)
+                    .await?
+                    .ok_or_else(|| anyhow!("provider search publication was superseded"))?,
+                None => {
+                    self.store
+                        .upsert_selectable_mailbox(account.id, &draft)
+                        .await?
+                }
+            };
+            plans.push(SearchMailboxPlan {
+                id: stored.id,
+                remote: mailbox.remote,
+                local,
+                storage,
+                skip_gmail_system_labels,
+                hierarchy_delimiter: mailbox.delimiter,
+                parent_path,
+                special_use,
+                selectable,
+            });
+        }
+        // A system path omitted by a quirky LIST response remains usable for
+        // existing accounts. It is also recorded as a selectable candidate so
+        // the next successful discovery can refine its metadata.
+        for (_, (remote, local, storage, skip_gmail_system_labels)) in system_by_remote {
+            ensure_search_not_cancelled(session)?;
+            if plans.iter().any(|plan| plan.remote == remote) {
+                continue;
+            }
+            let draft = SelectableMailboxDraft {
+                remote_path: remote.clone(),
+                local_path: Some(local.clone()),
+                hierarchy_delimiter: None,
+                parent_id: None,
+                parent_path: None,
+                special_use: None,
+                selectable: true,
+                uid_validity: None,
+                catalogue_coverage: "unknown".into(),
+            };
+            let stored = match publication_generation {
+                Some(generation) => self
+                    .store
+                    .upsert_selectable_mailbox_if_account_generation(account.id, generation, &draft)
+                    .await?
+                    .ok_or_else(|| anyhow!("provider search publication was superseded"))?,
+                None => {
+                    self.store
+                        .upsert_selectable_mailbox(account.id, &draft)
+                        .await?
+                }
+            };
+            plans.push(SearchMailboxPlan {
+                id: stored.id,
+                remote,
+                local,
+                storage,
+                skip_gmail_system_labels,
+                hierarchy_delimiter: None,
+                parent_path: None,
+                special_use: None,
+                selectable: true,
+            });
+        }
+        Ok(plans)
     }
 
     /// Refreshes only Gmail's built-in category metadata for already-synced
@@ -2158,7 +3366,7 @@ impl MailService {
             }
             for row in self
                 .store
-                .mailbox_signal_metadata(account.id, plan.local)
+                .mailbox_signal_metadata(account.id, &plan.local)
                 .await?
             {
                 let lines = client
@@ -2502,7 +3710,7 @@ impl MailService {
         let endpoint = SmtpEndpoint {
             host: account.smtp_host.clone(),
             port: account.smtp_port,
-            tls_parameters: TlsParameters::new(account.smtp_host.clone())?,
+            tls_parameters: smtp_tls_parameters(&account.smtp_host)?,
         };
         self.send_with_smtp_endpoint(account, draft, &secret, endpoint, SMTP_SEND_TIMEOUT)
             .await
@@ -2517,7 +3725,7 @@ impl MailService {
         let endpoint = SmtpEndpoint {
             host: account.smtp_host.clone(),
             port: account.smtp_port,
-            tls_parameters: TlsParameters::new(account.smtp_host.clone())?,
+            tls_parameters: smtp_tls_parameters(&account.smtp_host)?,
         };
         smtp_auth_probe_with_smtp_endpoint(account, &secret, endpoint, SMTP_AUTH_PROBE_TIMEOUT)
             .await
@@ -2533,6 +3741,27 @@ impl MailService {
     ) -> Result<String> {
         let email = build_compose_message(account, draft)?;
         let raw_email = email.formatted();
+        // Lettre adds the generated RFC Message-ID when formatting. Capture
+        // its canonical value from the exact bytes sent to SMTP so a later
+        // Sent catalogue row can be recognised as the same accepted send.
+        let outgoing_message_id = outgoing_rfc_message_id(&raw_email);
+        // Reserve the user's causal position before any SMTP/network await.
+        // The sequence alone does not learn anyone: it is used only after the
+        // relay accepts DATA. This means a Clear or Hide performed after send
+        // starts wins even if the provider's 250 arrives later, while a send
+        // started after that action can restore the address on success.
+        let contacted_people_sequence =
+            match self.store.reserve_contacted_people_action_sequence().await {
+                Ok(sequence) => Some(sequence),
+                Err(error) => {
+                    tracing::warn!(
+                        account_id = %account.id,
+                        error = %error,
+                        "could not reserve contacted-people sequence before SMTP submission"
+                    );
+                    None
+                }
+            };
         let response = send_smtp_raw(
             account,
             email.envelope(),
@@ -2542,6 +3771,20 @@ impl MailService {
             deadline,
         )
         .await?;
+
+        // The relay's final DATA response is the first authoritative signal
+        // that this message was accepted. Learn only the parsed envelope
+        // recipients at that point, before an optional Sent APPEND can fail.
+        // Local autocomplete must never turn an accepted send into a failure.
+        self.record_accepted_outgoing_recipients(
+            account,
+            draft,
+            email.envelope(),
+            outgoing_message_id.as_deref(),
+            contacted_people_sequence,
+        )
+        .await;
+
         if !smtp_saves_sent_copy(account) {
             self.append_sent_copy(account, secret, &raw_email)
                 .await
@@ -2552,6 +3795,68 @@ impl MailService {
         Ok(response)
     }
 
+    async fn record_accepted_outgoing_recipients(
+        &self,
+        account: &Account,
+        draft: &ComposeMessage,
+        envelope: &Envelope,
+        rfc_message_id: Option<&str>,
+        accepted_sequence: Option<i64>,
+    ) {
+        let Some(accepted_sequence) = accepted_sequence else {
+            // SMTP acceptance remains successful. Without a durable causal
+            // token, learning could resurrect data a later privacy action
+            // deliberately removed, so fail closed for autocomplete only.
+            return;
+        };
+        let Some(rfc_message_id) = rfc_message_id else {
+            // The message was accepted, so never surface a local learning
+            // error as send failure. Skipping this unusual message is safer
+            // than risking later Sent backfill double-counting it.
+            tracing::warn!(
+                account_id = %account.id,
+                "SMTP-accepted message had no usable generated Message-ID; skipping contacted-people learning"
+            );
+            return;
+        };
+        let recipients = match compose_envelope_recipients(draft, envelope) {
+            Ok(recipients) => recipients,
+            Err(error) => {
+                // `build_compose_message` has already parsed the same fields,
+                // so this indicates an unexpected local inconsistency. The
+                // SMTP-accepted message still remains successful.
+                tracing::warn!(
+                    account_id = %account.id,
+                    error = %error,
+                    "could not prepare contacted-people recipients after SMTP acceptance"
+                );
+                return;
+            }
+        };
+        // The storage transaction derives configured self addresses itself.
+        // Always call it after SMTP acceptance, including while collection is
+        // disabled, so its Message-ID suppression marker can prevent a later
+        // provider Sent copy from becoming newly learned history.
+        let excluded_addresses = Vec::new();
+        if let Err(error) = self
+            .store
+            .record_successful_outgoing_recipients_with_message_id_at_sequence(
+                account.id,
+                rfc_message_id,
+                &recipients,
+                &excluded_addresses,
+                accepted_sequence,
+            )
+            .await
+        {
+            tracing::warn!(
+                account_id = %account.id,
+                error = %error,
+                "could not record contacted people after SMTP acceptance"
+            );
+        }
+    }
+
     async fn append_sent_copy(
         &self,
         account: &Account,
@@ -2560,12 +3865,82 @@ impl MailService {
     ) -> Result<()> {
         let mut client = ImapClient::connect(account).await?;
         client.authenticate(account, secret).await?;
-        let listing = client.command("LIST \"\" \"*\"").await.unwrap_or_default();
-        let mailbox = sent_mailbox(account, &listing);
+        let listing = client
+            .command_with_literal("LIST \"\" \"*\"")
+            .await
+            .unwrap_or_default();
+        let mailbox = sent_mailbox_from_response(account, &listing);
         client.append(&mailbox, raw_email).await?;
         let _ = client.command("LOGOUT").await;
         Ok(())
     }
+}
+
+/// Build the SMTP TLS roots for an account. In a debug binary only, an
+/// explicitly enabled local fixture may add exactly one supplied CA. The
+/// validation is shared with the IMAP path so neither transport can weaken
+/// the loopback gate independently.
+fn smtp_tls_parameters(host: &str) -> Result<TlsParameters> {
+    #[cfg(debug_assertions)]
+    if let Some(ca_der) = native_mail_fixture_ca_der_from_environment(host)? {
+        let certificate = Certificate::from_der(ca_der)
+            .context("native local mail fixture CA is not a valid DER certificate")?;
+        return TlsParameters::builder(host.to_owned())
+            .add_root_certificate(certificate)
+            .build()
+            .map_err(Into::into);
+    }
+
+    TlsParameters::new(host.to_owned()).map_err(Into::into)
+}
+
+#[cfg(debug_assertions)]
+fn native_mail_fixture_ca_der_from_environment(host: &str) -> Result<Option<Vec<u8>>> {
+    native_mail_fixture_ca_der(
+        host,
+        std::env::var(NATIVE_MAIL_FIXTURE_ENV).ok().as_deref(),
+        std::env::var(NATIVE_MAIL_FIXTURE_CA_DER_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Pure validation for the opt-in, debug-only native verification fixture.
+/// Keeping environment access outside this function makes the security gates
+/// directly testable without process-wide environment mutation.
+#[cfg(debug_assertions)]
+fn native_mail_fixture_ca_der(
+    host: &str,
+    enabled: Option<&str>,
+    ca_der_base64: Option<&str>,
+) -> Result<Option<Vec<u8>>> {
+    if enabled != Some("1") {
+        return Ok(None);
+    }
+    if !is_native_fixture_loopback_host(host) {
+        bail!("native local mail fixture is allowed only for loopback SMTP/IMAP hosts");
+    }
+    let encoded = ca_der_base64
+        .filter(|value| !value.is_empty())
+        .context("native local mail fixture requires DAKIA_NATIVE_MAIL_FIXTURE_CA_DER_BASE64")?;
+    let der = STANDARD
+        .decode(encoded)
+        .context("native local mail fixture CA must be base64-encoded DER")?;
+    if der.is_empty() {
+        bail!("native local mail fixture CA must not be empty");
+    }
+    // Validate before either transport starts a connection. SMTP and IMAP use
+    // different TLS stacks, so accepting syntactically base64 data here and
+    // relying on only one later stack would make this safety boundary uneven.
+    RootCertStore::empty()
+        .add(CertificateDer::from(der.clone()))
+        .context("native local mail fixture CA is not a valid DER certificate")?;
+    Ok(Some(der))
+}
+
+#[cfg(debug_assertions)]
+fn is_native_fixture_loopback_host(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "::1" | "localhost")
 }
 
 async fn smtp_auth_probe_with_smtp_endpoint(
@@ -2796,11 +4171,49 @@ fn parse_mailto_action(url: &Url) -> Result<MailtoAction> {
     })
 }
 
+/// Retains the user-facing presentation of the parsed recipient fields while
+/// limiting learning to the exact envelope supplied to SMTP. This avoids
+/// learning draft-only text, and keeps To/Cc/Bcc duplicate handling aligned
+/// with the actual transmission.
+fn compose_envelope_recipients(
+    draft: &ComposeMessage,
+    envelope: &Envelope,
+) -> Result<Vec<ContactedPersonRecipient>> {
+    let envelope_addresses = envelope
+        .to()
+        .iter()
+        .map(|address| address.to_string().to_lowercase())
+        .collect::<BTreeSet<_>>();
+    let mut recipients = BTreeMap::<String, ContactedPersonRecipient>::new();
+    for value in draft.to.iter().chain(&draft.cc).chain(&draft.bcc) {
+        let mailbox = parse_recipient_mailbox(value)?;
+        let address = mailbox.email.to_string();
+        let canonical_address = address.to_lowercase();
+        if envelope_addresses.contains(&canonical_address) {
+            let formatted_address = mailbox.to_string();
+            recipients.insert(
+                canonical_address,
+                ContactedPersonRecipient {
+                    address,
+                    display_name: mailbox.name,
+                    formatted_address: Some(formatted_address),
+                },
+            );
+        }
+    }
+    Ok(recipients.into_values().collect())
+}
+
 fn build_compose_message(account: &Account, draft: &ComposeMessage) -> Result<Message> {
     let from = Mailbox::new(Some(account.display_name.clone()), account.email.parse()?);
     let envelope_from = from.email.clone();
     let mut envelope_to = Vec::new();
-    let mut builder = Message::builder().from(from).subject(&draft.subject);
+    // Generate a stable RFC Message-ID before formatting so the exact SMTP
+    // bytes and a later provider Sent copy share one durable identity.
+    let mut builder = Message::builder()
+        .from(from)
+        .subject(&draft.subject)
+        .message_id(None);
     for recipient in &draft.to {
         let mailbox = parse_recipient_mailbox(recipient)?;
         envelope_to.push(mailbox.email.clone());
@@ -2870,6 +4283,16 @@ fn build_compose_message(account: &Account, draft: &ComposeMessage) -> Result<Me
     Ok(builder.multipart(body)?)
 }
 
+fn outgoing_rfc_message_id(raw_email: &[u8]) -> Option<String> {
+    let parsed = parse_header_block(raw_email).ok()?;
+    // Message-ID is syntactic, rather than encoded display text. Reading its
+    // raw unfolded header preserves the angle-bracket form Lettre generated;
+    // `HeaderForm::Text` can legitimately omit this structured header.
+    header_values(&parsed, "Message-ID")
+        .into_iter()
+        .find_map(|value| canonical_message_ids(&value))
+}
+
 fn parse_recipient_mailbox(value: &str) -> Result<Mailbox> {
     if let Ok(mailbox) = value.parse() {
         return Ok(mailbox);
@@ -2924,6 +4347,33 @@ fn parse_recipient_mailbox(value: &str) -> Result<Mailbox> {
         None,
         Address::new_dangerous(local, domain.to_ascii_lowercase()),
     ))
+}
+
+fn validate_recipient_field(values: &[String]) -> ComposeRecipientFieldValidation {
+    let invalid = values
+        .iter()
+        .filter(|value| parse_recipient_mailbox(value).is_err())
+        .cloned()
+        .collect::<Vec<_>>();
+    ComposeRecipientFieldValidation {
+        valid: invalid.is_empty(),
+        invalid,
+    }
+}
+
+/// Validates To, Cc, and Bcc with the exact address parser used by
+/// `build_compose_message`. This is deliberately a pure local operation: it
+/// does not contact SMTP and cannot update the contacted-people index.
+pub fn validate_compose_recipients(
+    to: &[String],
+    cc: &[String],
+    bcc: &[String],
+) -> ComposeRecipientValidation {
+    ComposeRecipientValidation {
+        to: validate_recipient_field(to),
+        cc: validate_recipient_field(cc),
+        bcc: validate_recipient_field(bcc),
+    }
 }
 
 async fn post_one_click_unsubscribe(url: &Url) -> Result<()> {
@@ -3224,6 +4674,7 @@ struct ImapClient<S = TlsStream<TcpStream>> {
     reader: BufReader<S>,
     tag: u32,
 }
+#[derive(Default)]
 struct ImapResponse {
     lines: Vec<String>,
     /// Every server literal in transcript order. The associated FETCH item
@@ -3233,6 +4684,10 @@ struct ImapResponse {
 }
 
 struct ImapLiteral {
+    /// Index of the transcript line whose trailing literal marker introduced
+    /// these bytes. LIST literals have no FETCH UID, so this keeps their
+    /// mailbox name attached to the correct untagged response.
+    line_index: usize,
     /// UID from the untagged FETCH that introduced this literal.  IMAP may
     /// interleave unsolicited FETCH replies while a command is outstanding.
     uid: Option<u32>,
@@ -3285,11 +4740,27 @@ enum IdleOutcome {
     Cancelled,
 }
 
+#[derive(Clone)]
 struct MailboxPlan {
     remote: String,
-    local: &'static str,
+    local: String,
     storage: String,
     skip_gmail_system_labels: bool,
+}
+
+/// A provider-search locator is fully owned because IMAP LIST discovery can
+/// expose arbitrary user folders, while the older sync plan has only the
+/// built-in special-use families.
+struct SearchMailboxPlan {
+    id: String,
+    remote: String,
+    local: String,
+    storage: String,
+    skip_gmail_system_labels: bool,
+    hierarchy_delimiter: Option<String>,
+    parent_path: Option<String>,
+    special_use: Option<String>,
+    selectable: bool,
 }
 
 struct MailboxSyncWork {
@@ -3298,6 +4769,8 @@ struct MailboxSyncWork {
     snapshot_identity: MailboxIdentity,
     condstore: bool,
     replace_namespace: bool,
+    selectable_mailbox: Option<SelectableMailbox>,
+    uid_validity: u32,
     initialized: bool,
     previous_highest: Option<u32>,
     inventory_uids: Vec<u32>,
@@ -3337,11 +4810,12 @@ struct RecentRefreshWork {
 }
 
 impl MailboxPlan {
-    fn new(remote: impl Into<String>, local: &'static str) -> Self {
+    fn new(remote: impl Into<String>, local: impl Into<String>) -> Self {
+        let local = local.into();
         Self {
             remote: remote.into(),
+            storage: local.clone(),
             local,
-            storage: local.into(),
             skip_gmail_system_labels: false,
         }
     }
@@ -3349,39 +4823,140 @@ impl MailboxPlan {
     fn gmail_archive(remote: impl Into<String>) -> Self {
         Self {
             remote: remote.into(),
-            local: "Archive",
+            local: "Archive".into(),
             storage: "Archive".into(),
             skip_gmail_system_labels: true,
         }
     }
 
     fn discovered(&self, remote: String) -> Self {
-        let storage = if remote.eq_ignore_ascii_case(&self.remote) {
+        let storage = if remote == self.remote {
             self.local.to_owned()
         } else {
-            format!("{}::{remote}", self.local)
+            special_mailbox_storage_identity(&self.local, &remote)
         };
         Self {
             remote,
-            local: self.local,
+            local: self.local.clone(),
             storage,
             skip_gmail_system_labels: self.skip_gmail_system_labels,
         }
     }
 }
 
-fn special_mailbox_family(local: &'static str) -> Option<&'static str> {
+fn special_mailbox_family(local: &str) -> Option<&str> {
     matches!(local, "Sent" | "Archive" | "Spam" | "Trash").then_some(local)
 }
 
+fn selectable_mailbox_sync_draft(
+    plan: &MailboxPlan,
+    existing: Option<&SelectableMailbox>,
+    uid_validity: u32,
+    catalogue_coverage: &str,
+) -> SelectableMailboxDraft {
+    SelectableMailboxDraft {
+        remote_path: plan.remote.clone(),
+        local_path: Some(plan.local.clone()),
+        hierarchy_delimiter: existing.and_then(|mailbox| mailbox.hierarchy_delimiter.clone()),
+        parent_id: existing.and_then(|mailbox| mailbox.parent_id.clone()),
+        parent_path: existing.and_then(|mailbox| mailbox.parent_path.clone()),
+        special_use: existing.and_then(|mailbox| mailbox.special_use.clone()),
+        selectable: true,
+        uid_validity: Some(i64::from(uid_validity)),
+        catalogue_coverage: catalogue_coverage.to_owned(),
+    }
+}
+
+#[cfg(test)]
 fn resolve_special_mailboxes(plans: Vec<MailboxPlan>, lines: &[String]) -> Vec<MailboxPlan> {
     let discovered = lines
         .iter()
         .filter_map(|line| parse_list_mailbox(line))
         .collect::<Vec<_>>();
+    resolve_special_mailboxes_from_discovered(plans, discovered)
+}
+
+fn resolve_special_mailboxes_from_response(
+    plans: Vec<MailboxPlan>,
+    response: &ImapResponse,
+) -> Vec<MailboxPlan> {
+    resolve_special_mailboxes_from_discovered(plans, parse_list_mailboxes_from_response(response))
+}
+
+/// Normal catalogue sync must use the same complete LIST result as provider
+/// search.  The old special-use resolution kept only six conventional paths,
+/// so user folders were never selected or restarted from their own durable
+/// catalogue state.
+fn sync_mailbox_plans_from_discovered(
+    plans: Vec<MailboxPlan>,
+    discovered: &[ImapListMailbox],
+) -> Vec<MailboxPlan> {
+    let special = resolve_special_mailboxes_from_discovered(
+        plans,
+        discovered
+            .iter()
+            .map(|mailbox| {
+                (
+                    mailbox
+                        .flags
+                        .iter()
+                        .map(|flag| flag.to_ascii_lowercase())
+                        .collect(),
+                    mailbox.remote.clone(),
+                )
+            })
+            .collect(),
+    );
+    let special_by_remote = special
+        .iter()
+        .map(|plan| (plan.remote.clone(), plan))
+        .collect::<BTreeMap<_, _>>();
+    let mut result = Vec::new();
+    let mut remotes = BTreeSet::new();
+    for mailbox in discovered {
+        if mailbox
+            .flags
+            .iter()
+            .any(|flag| flag.eq_ignore_ascii_case("\\Noselect"))
+        {
+            continue;
+        }
+        let plan = match special_by_remote.get(&mailbox.remote) {
+            Some(plan) => (*plan).clone(),
+            None => {
+                let local =
+                    canonical_local_mailbox_path(&mailbox.remote, mailbox.delimiter.as_deref());
+                MailboxPlan {
+                    remote: mailbox.remote.clone(),
+                    storage: generic_mailbox_storage_identity(&mailbox.remote, &local),
+                    local,
+                    skip_gmail_system_labels: false,
+                }
+            }
+        };
+        if remotes.insert(plan.remote.clone()) {
+            result.push(plan);
+        }
+    }
+    // A provider that rejects LIST must retain the legacy special folders so
+    // reconnect can resume their existing catalogue.  With a successful LIST,
+    // keep any omitted special fallback too: later SELECT will report it as
+    // unavailable without erasing previously catalogued mail.
+    for plan in special {
+        if remotes.insert(plan.remote.clone()) {
+            result.push(plan);
+        }
+    }
+    result
+}
+
+fn resolve_special_mailboxes_from_discovered(
+    plans: Vec<MailboxPlan>,
+    discovered: Vec<(Vec<String>, String)>,
+) -> Vec<MailboxPlan> {
     let mut resolved = Vec::new();
     for plan in plans {
-        let flag = match plan.local {
+        let flag = match plan.local.as_str() {
             "Sent" => Some("\\sent"),
             "Drafts" => Some("\\drafts"),
             "Archive" => Some(if plan.skip_gmail_system_labels {
@@ -3407,7 +4982,7 @@ fn resolve_special_mailboxes(plans: Vec<MailboxPlan>, lines: &[String]) -> Vec<M
         } else {
             for remote in matches {
                 if !resolved.iter().any(|existing: &MailboxPlan| {
-                    existing.local == plan.local && existing.remote.eq_ignore_ascii_case(&remote)
+                    existing.local == plan.local && existing.remote == remote
                 }) {
                     resolved.push(plan.discovered(remote));
                 }
@@ -3418,42 +4993,164 @@ fn resolve_special_mailboxes(plans: Vec<MailboxPlan>, lines: &[String]) -> Vec<M
 }
 
 fn parse_list_mailbox(line: &str) -> Option<(Vec<String>, String)> {
-    let line = line.trim_start();
-    let prefix = "* LIST ";
-    if line.len() < prefix.len() || !line[..prefix.len()].eq_ignore_ascii_case(prefix) {
-        return None;
-    }
-    let attributes = &line[prefix.len()..];
-    if !attributes.starts_with('(') {
-        return None;
-    }
+    parse_list_mailbox_with_literals(line, std::iter::empty())
+}
+
+fn parse_list_mailbox_with_literals<'a>(
+    line: &str,
+    literals: impl IntoIterator<Item = &'a ImapLiteral>,
+) -> Option<(Vec<String>, String)> {
+    let list = find_imap_atom_outside_quotes(line, "LIST")? + "LIST".len();
+    let attributes = line[list..].trim_start();
+    let attributes = attributes.strip_prefix('(')?;
     let attributes_end = attributes.find(')')?;
-    let flags = attributes[1..attributes_end]
+    let flags = attributes[..attributes_end]
         .split_whitespace()
         .map(str::to_ascii_lowercase)
         .collect::<Vec<_>>();
+    let mut literals = literals.into_iter();
     let mut remainder = attributes[attributes_end + 1..].trim_start();
-    let (_, rest) = parse_imap_astring(remainder)?;
+    let (_, rest) = parse_imap_astring_or_literal(remainder, &mut literals)?;
     remainder = rest.trim_start();
-    let (mailbox, _) = parse_imap_astring(remainder)?;
+    let (mailbox, _) = parse_imap_astring_or_literal(remainder, &mut literals)?;
     Some((flags, mailbox))
 }
 
-fn validate_list_response(lines: &[String]) -> Result<()> {
-    for line in lines {
-        let trimmed = line.trim_start();
-        let Some(first) = trimmed.split_whitespace().next() else {
-            continue;
-        };
-        if first != "*" {
-            continue;
-        }
-        let response_kind = trimmed.split_whitespace().nth(1).unwrap_or_default();
-        if response_kind.eq_ignore_ascii_case("LIST") && parse_list_mailbox(trimmed).is_none() {
-            bail!("IMAP LIST response is malformed");
-        }
+#[derive(Debug, Clone)]
+struct ImapListMailbox {
+    flags: Vec<String>,
+    delimiter: Option<String>,
+    remote: String,
+}
+
+#[cfg(test)]
+fn parse_list_mailbox_details(line: &str) -> Option<ImapListMailbox> {
+    parse_list_mailbox_details_with_literals(line, std::iter::empty())
+}
+
+fn parse_list_mailbox_details_with_literals<'a>(
+    line: &str,
+    literals: impl IntoIterator<Item = &'a ImapLiteral>,
+) -> Option<ImapListMailbox> {
+    let list = find_imap_atom_outside_quotes(line, "LIST")? + "LIST".len();
+    let attributes = line[list..].trim_start();
+    let attributes = attributes.strip_prefix('(')?;
+    let attributes_end = attributes.find(')')?;
+    let flags = attributes[..attributes_end]
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut literals = literals.into_iter();
+    let mut remainder = attributes[attributes_end + 1..].trim_start();
+    let (delimiter, rest) = parse_imap_astring_or_literal(remainder, &mut literals)?;
+    remainder = rest.trim_start();
+    let (remote, _) = parse_imap_astring_or_literal(remainder, &mut literals)?;
+    Some(ImapListMailbox {
+        flags,
+        delimiter: (!delimiter.eq_ignore_ascii_case("NIL")).then_some(delimiter),
+        remote,
+    })
+}
+
+fn parse_list_mailbox_details_from_response(response: &ImapResponse) -> Vec<ImapListMailbox> {
+    response
+        .lines
+        .iter()
+        .enumerate()
+        .filter_map(|(line_index, line)| {
+            parse_list_mailbox_details_with_literals(
+                line,
+                response
+                    .literals
+                    .iter()
+                    .filter(move |literal| literal.line_index == line_index),
+            )
+        })
+        .collect()
+}
+
+/// A tagged LIST completion is authoritative only if every untagged LIST
+/// record can be parsed. Unknown untagged responses are allowed, but a
+/// malformed mailbox record must retain the prior catalogue instead of
+/// retiring folders based on a partial view.
+fn authoritative_list_response(response: &ImapResponse) -> bool {
+    response.lines.iter().enumerate().all(|(line_index, line)| {
+        !is_untagged_list_response_record(line)
+            || parse_list_mailbox_details_with_literals(
+                line,
+                response
+                    .literals
+                    .iter()
+                    .filter(|literal| literal.line_index == line_index),
+            )
+            .is_some()
+    })
+}
+
+fn is_untagged_list_response_record(line: &str) -> bool {
+    let mut atoms = line.split_ascii_whitespace();
+    atoms.next() == Some("*")
+        && atoms
+            .next()
+            .is_some_and(|atom| atom.eq_ignore_ascii_case("LIST"))
+}
+
+fn parse_list_mailboxes_from_response(response: &ImapResponse) -> Vec<(Vec<String>, String)> {
+    response
+        .lines
+        .iter()
+        .enumerate()
+        .filter_map(|(line_index, line)| {
+            parse_list_mailbox_with_literals(
+                line,
+                response
+                    .literals
+                    .iter()
+                    .filter(move |literal| literal.line_index == line_index),
+            )
+        })
+        .collect()
+}
+
+/// Canonical search paths use `/` as a hierarchy separator while retaining a
+/// one-to-one representation of the provider's path components. A provider
+/// using `.` can legally have a literal slash in a mailbox name, so replacing
+/// delimiters blindly would collide `Projects.Client` with `Projects/Client`.
+/// Escape `%` first and then literal `/` inside each component before joining.
+/// The remote path remains separately catalogued for IMAP SELECT and LIST.
+fn canonical_local_mailbox_path(remote: &str, delimiter: Option<&str>) -> String {
+    let path = delimiter
+        .filter(|delimiter| !delimiter.is_empty())
+        .map(|delimiter| {
+            remote
+                .split(delimiter)
+                .map(|component| {
+                    escape_canonical_mailbox_component(&display_imap_mailbox_name(component))
+                })
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .unwrap_or_else(|| escape_canonical_mailbox_component(&display_imap_mailbox_name(remote)));
+    // A normal provider path is user-controlled. Preserve it as a distinct
+    // literal if it happens to resemble our role-qualified opaque locator.
+    // This prevents an ordinary `Sent::@dakia-special-v1:...` mailbox from
+    // being decoded as a special Sent alias.
+    if is_special_mailbox_storage_identity(&path) {
+        path.replacen(
+            SPECIAL_MAILBOX_STORAGE_ESCAPE_SOURCE,
+            SPECIAL_MAILBOX_STORAGE_ESCAPE_REPLACEMENT,
+            1,
+        )
+    } else {
+        path
     }
-    Ok(())
+}
+
+const SPECIAL_MAILBOX_STORAGE_ESCAPE_SOURCE: &str = "::@dakia-special-v1:";
+const SPECIAL_MAILBOX_STORAGE_ESCAPE_REPLACEMENT: &str = "::%40dakia-special-v1:";
+
+fn escape_canonical_mailbox_component(component: &str) -> String {
+    component.replace('%', "%25").replace('/', "%2F")
 }
 
 fn parse_imap_astring(value: &str) -> Option<(String, &str)> {
@@ -3486,6 +5183,37 @@ fn parse_imap_astring(value: &str) -> Option<(String, &str)> {
     }
 }
 
+/// Parses an IMAP astring whose value may be represented by a response
+/// literal. The literal bytes remain private protocol data: malformed or
+/// non-UTF-8 mailbox names are ignored rather than converted lossily into a
+/// display path or an outgoing SELECT value.
+fn parse_imap_astring_or_literal<'value, 'literal>(
+    value: &'value str,
+    literals: &mut impl Iterator<Item = &'literal ImapLiteral>,
+) -> Option<(String, &'value str)> {
+    let Some((length, rest)) = parse_imap_literal_marker(value) else {
+        return parse_imap_astring(value);
+    };
+    let literal = literals.next()?;
+    (literal.bytes.len() == length)
+        .then(|| String::from_utf8(literal.bytes.clone()).ok())
+        .flatten()
+        .map(|value| (value, rest))
+}
+
+/// Parses the leading `{N}` or `{N+}` marker without accepting a malformed
+/// marker as an ordinary atom. The command reader has already enforced the
+/// literal count and byte budgets before this parser sees the bytes.
+fn parse_imap_literal_marker(value: &str) -> Option<(usize, &str)> {
+    let value = value.strip_prefix('{')?;
+    let end = value.find('}')?;
+    let length = value[..end].strip_suffix('+').unwrap_or(&value[..end]);
+    (!length.is_empty() && length.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| length.parse().ok())
+        .flatten()
+        .map(|length| (length, &value[end + 1..]))
+}
+
 fn mailbox_plans(account: &Account) -> Vec<MailboxPlan> {
     if account.provider_id == "gmail" {
         vec![
@@ -3508,11 +5236,27 @@ fn mailbox_plans(account: &Account) -> Vec<MailboxPlan> {
     }
 }
 
+#[cfg(test)]
 fn sent_mailbox(account: &Account, lines: &[String]) -> String {
     let fallback = remote_mailbox(account, "Sent");
     let discovered = lines
         .iter()
         .filter_map(|line| parse_list_mailbox(line))
+        .filter(|(flags, _)| flags.iter().any(|flag| flag == "\\sent"))
+        .map(|(_, mailbox)| mailbox)
+        .collect::<Vec<_>>();
+    discovered
+        .iter()
+        .find(|mailbox| mailbox.eq_ignore_ascii_case(&fallback))
+        .cloned()
+        .or_else(|| discovered.into_iter().next())
+        .unwrap_or(fallback)
+}
+
+fn sent_mailbox_from_response(account: &Account, response: &ImapResponse) -> String {
+    let fallback = remote_mailbox(account, "Sent");
+    let discovered = parse_list_mailboxes_from_response(response)
+        .into_iter()
         .filter(|(flags, _)| flags.iter().any(|flag| flag == "\\sent"))
         .map(|(_, mailbox)| mailbox)
         .collect::<Vec<_>>();
@@ -3555,7 +5299,7 @@ fn raw_message_fetch_command(uid: u32) -> String {
 fn refresh_main_mailbox_plans(plans: Vec<MailboxPlan>) -> Vec<MailboxPlan> {
     plans
         .into_iter()
-        .filter(|plan| matches!(plan.local, "INBOX" | "Sent" | "Archive"))
+        .filter(|plan| matches!(plan.local.as_str(), "INBOX" | "Sent" | "Archive"))
         .collect()
 }
 
@@ -4413,6 +6157,7 @@ async fn fetch_section_mime_headers<S>(
     uid: u32,
     path: &[usize],
     root_headers: Option<&[u8]>,
+    session: Option<&SearchSession>,
 ) -> Result<Vec<u8>>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -4425,7 +6170,7 @@ where
     let command = nested_section_mime_fetch_command(uid, path)
         .context("IMAP MIME header section is missing")?;
     let mut response = client
-        .command_with_literal_limited(&command, 256 * 1024)
+        .command_with_literal_limited_cancellable(&command, 256 * 1024, session)
         .await?;
     response
         .take_body_literal_for(uid, &format!("{}.MIME", section_name(path)))
@@ -4455,7 +6200,7 @@ where
             continue;
         }
         let header =
-            fetch_section_mime_headers(client, uid, &part.part.path, Some(headers)).await?;
+            fetch_section_mime_headers(client, uid, &part.part.path, Some(headers), None).await?;
         let remaining =
             display_literal_limit(total, part.part.encoded_size, "message display part")?;
         let mut response = client
@@ -4510,7 +6255,8 @@ where
             continue;
         }
         let header =
-            fetch_section_mime_headers(client, uid, &attachment.part.path, Some(headers)).await?;
+            fetch_section_mime_headers(client, uid, &attachment.part.path, Some(headers), None)
+                .await?;
         let part = mime_part_with_headers(&attachment.part, &header)?;
         let references = unique_mime_part_references(&part);
         for reference in &references {
@@ -4614,6 +6360,70 @@ where
     message.has_attachments = !attachments.is_empty();
     message.attachments = attachments;
     Ok(message)
+}
+
+/// Fetches only selected text MIME leaves for canonical provider search. It
+/// deliberately excludes attachment and inline-image sections.
+async fn fetch_searchable_text_parts<S>(
+    client: &mut ImapClient<S>,
+    uid: u32,
+    headers: &[u8],
+    structure: &MimePart,
+    session: Option<&SearchSession>,
+) -> Result<String>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let plan = selective_plan(structure)?;
+    let mut total = 0usize;
+    let mut decoded = Vec::new();
+    let mut successful_alternative_branches = BTreeMap::new();
+    for part in &plan.text_parts {
+        ensure_search_not_cancelled(session)?;
+        if !alternative_branch_is_eligible(part, &successful_alternative_branches) {
+            continue;
+        }
+        let header =
+            fetch_section_mime_headers(client, uid, &part.part.path, Some(headers), session)
+                .await?;
+        let remaining = display_literal_limit(total, part.part.encoded_size, "search text part")?;
+        let mut response = client
+            .command_with_literal_limited_cancellable(
+                &section_fetch_command(uid, &part.part.path),
+                remaining.min(MAX_DISPLAY_PART_BYTES),
+                session,
+            )
+            .await?;
+        ensure_search_not_cancelled(session)?;
+        let bytes = response
+            .take_body_literal_for(uid, &response_body_section(&part.part.path))
+            .context("IMAP server did not return the requested search text part")?;
+        total = total
+            .checked_add(bytes.len())
+            .context("search body size overflow")?;
+        let text = decode_mime_part_body(&header, &bytes)?;
+        record_successful_alternative_branches(part, &mut successful_alternative_branches);
+        decoded.push((part, text));
+    }
+    let mut text = Vec::new();
+    for (part, value) in decoded {
+        if !alternative_branch_is_selected(part, &successful_alternative_branches) {
+            continue;
+        }
+        if part.part.mime_type.eq_ignore_ascii_case("text/html") {
+            text.push(mail_parser::decoders::html::html_to_text(&value));
+        } else {
+            text.push(value);
+        }
+    }
+    Ok(text.join("\n"))
+}
+
+fn ensure_search_not_cancelled(session: Option<&SearchSession>) -> Result<()> {
+    if session.is_some_and(SearchSession::is_cancelled) {
+        bail!("search cancelled");
+    }
+    Ok(())
 }
 
 fn display_literal_limit(total: usize, advertised_size: usize, label: &str) -> Result<usize> {
@@ -4845,59 +6655,115 @@ fn gmail_all_mail_is_archive(lines: &[String]) -> bool {
 
 impl ImapClient<TlsStream<TcpStream>> {
     async fn connect(account: &Account) -> Result<Self> {
+        Self::connect_cancellable(account, None).await
+    }
+
+    async fn connect_cancellable(
+        account: &Account,
+        session: Option<&SearchSession>,
+    ) -> Result<Self> {
+        ensure_search_not_cancelled(session)?;
+        #[cfg(any(test, debug_assertions))]
+        let mut roots = RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        };
+        #[cfg(not(any(test, debug_assertions)))]
         let roots = RootCertStore {
             roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
         };
+        #[cfg(test)]
+        if account.imap_host == "127.0.0.1" {
+            // Public-method protocol tests use a fixed localhost-only CA.
+            // Production builds cannot enter this branch or trust this CA.
+            roots
+                .add(CertificateDer::from(
+                    STANDARD.decode(tests::SMTP_TEST_CA_DER_BASE64).unwrap(),
+                ))
+                .unwrap();
+        }
+        #[cfg(debug_assertions)]
+        if let Some(ca_der) = native_mail_fixture_ca_der_from_environment(&account.imap_host)? {
+            roots
+                .add(CertificateDer::from(ca_der))
+                .context("native local mail fixture CA is not a valid DER certificate")?;
+        }
         let config = ClientConfig::builder()
             .with_root_certificates(roots)
             .with_no_client_auth();
         let connector = TlsConnector::from(Arc::new(config));
-        let mut tcp = timeout(
-            IMAP_CONNECT_TIMEOUT,
-            TcpStream::connect((&*account.imap_host, account.imap_port)),
+        let mut tcp = imap_await(
+            session,
+            timeout(
+                IMAP_CONNECT_TIMEOUT,
+                TcpStream::connect((&*account.imap_host, account.imap_port)),
+            ),
         )
-        .await
+        .await?
         .context("IMAP connection timed out")?
         .context("could not connect to IMAP server")?;
         if account.imap_security == Security::StartTls {
             let mut plain = BufReader::new(tcp);
-            let greeting = timeout(
-                IMAP_COMMAND_TIMEOUT,
-                read_imap_line_limited(&mut plain, MAX_IMAP_RESPONSE_TRANSCRIPT_BYTES),
+            let greeting = imap_await(
+                session,
+                timeout(
+                    IMAP_COMMAND_TIMEOUT,
+                    read_imap_line_limited(&mut plain, MAX_IMAP_RESPONSE_TRANSCRIPT_BYTES),
+                ),
             )
-            .await
+            .await?
             .context("IMAP greeting timed out")??;
-            if !greeting.starts_with("* OK") {
+            if !greeting
+                .trim_start()
+                .to_ascii_uppercase()
+                .starts_with("* OK")
+            {
                 bail!("IMAP server rejected connection: {}", greeting.trim());
             }
             plain.get_mut().write_all(b"D0000 STARTTLS\r\n").await?;
             plain.get_mut().flush().await?;
-            let response = timeout(
-                IMAP_COMMAND_TIMEOUT,
-                read_imap_line_limited(&mut plain, MAX_IMAP_RESPONSE_TRANSCRIPT_BYTES),
+            let response = imap_await(
+                session,
+                timeout(
+                    IMAP_COMMAND_TIMEOUT,
+                    read_imap_line_limited(&mut plain, MAX_IMAP_RESPONSE_TRANSCRIPT_BYTES),
+                ),
             )
-            .await
+            .await?
             .context("IMAP STARTTLS response timed out")??;
-            if !response.starts_with("D0000 OK") {
+            if !response
+                .trim_start()
+                .to_ascii_uppercase()
+                .starts_with("D0000 OK")
+            {
                 bail!("IMAP server rejected STARTTLS: {}", response.trim());
             }
             tcp = plain.into_inner();
         }
         let server_name =
             ServerName::try_from(account.imap_host.clone()).context("invalid IMAP hostname")?;
-        let stream = timeout(IMAP_CONNECT_TIMEOUT, connector.connect(server_name, tcp))
-            .await
-            .context("IMAP TLS handshake timed out")?
-            .context("IMAP TLS handshake failed")?;
+        let stream = imap_await(
+            session,
+            timeout(IMAP_CONNECT_TIMEOUT, connector.connect(server_name, tcp)),
+        )
+        .await?
+        .context("IMAP TLS handshake timed out")?
+        .context("IMAP TLS handshake failed")?;
         let mut reader = BufReader::new(stream);
         if account.imap_security == Security::Tls {
-            let greeting = timeout(
-                IMAP_COMMAND_TIMEOUT,
-                read_imap_line_limited(&mut reader, MAX_IMAP_RESPONSE_TRANSCRIPT_BYTES),
+            let greeting = imap_await(
+                session,
+                timeout(
+                    IMAP_COMMAND_TIMEOUT,
+                    read_imap_line_limited(&mut reader, MAX_IMAP_RESPONSE_TRANSCRIPT_BYTES),
+                ),
             )
-            .await
+            .await?
             .context("IMAP greeting timed out")??;
-            if !greeting.starts_with("* OK") {
+            if !greeting
+                .trim_start()
+                .to_ascii_uppercase()
+                .starts_with("* OK")
+            {
                 bail!("IMAP server rejected connection: {}", greeting.trim());
             }
         }
@@ -4913,19 +6779,27 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     async fn authenticate(&mut self, account: &Account, secret: &str) -> Result<()> {
+        self.authenticate_cancellable(account, secret, None).await
+    }
+
+    async fn authenticate_cancellable(
+        &mut self,
+        account: &Account,
+        secret: &str,
+        session: Option<&SearchSession>,
+    ) -> Result<()> {
         let result = match &account.auth {
             AccountAuth::Password { username } => self
-                .command(&format!(
-                    "LOGIN {} {}",
-                    quote_imap(username),
-                    quote_imap(secret)
-                ))
+                .command_cancellable(
+                    &format!("LOGIN {} {}", quote_imap(username), quote_imap(secret)),
+                    session,
+                )
                 .await
                 .map(|_| ()),
             AccountAuth::OAuth2 { username, .. } => {
                 let auth =
                     STANDARD.encode(format!("user={username}\x01auth=Bearer {secret}\x01\x01"));
-                self.command(&format!("AUTHENTICATE XOAUTH2 {auth}"))
+                self.command_cancellable(&format!("AUTHENTICATE XOAUTH2 {auth}"), session)
                     .await
                     .map(|_| ())
             }
@@ -4973,7 +6847,9 @@ where
                 pending_change = true;
                 continue;
             }
-            if continuation.starts_with(&tag)
+            if continuation
+                .get(..tag.len())
+                .is_some_and(|response_tag| response_tag.eq_ignore_ascii_case(&tag))
                 || continuation.to_ascii_uppercase().starts_with("* BYE")
             {
                 bail!("IMAP server rejected IDLE: {}", continuation.trim());
@@ -5017,7 +6893,10 @@ where
             if line.to_ascii_uppercase().starts_with("* BYE") {
                 bail!("IMAP server closed the connection during IDLE termination");
             }
-            if line.starts_with(&tag) {
+            if line
+                .get(..tag.len())
+                .is_some_and(|response_tag| response_tag.eq_ignore_ascii_case(&tag))
+            {
                 if !tagged_status_is_ok(&line[tag.len()..]) {
                     bail!("IMAP IDLE termination failed: {}", line.trim());
                 }
@@ -5028,7 +6907,17 @@ where
     }
 
     async fn command(&mut self, command: &str) -> Result<Vec<String>> {
-        let response = self.command_with_literal(command).await?;
+        self.command_cancellable(command, None).await
+    }
+
+    async fn command_cancellable(
+        &mut self,
+        command: &str,
+        session: Option<&SearchSession>,
+    ) -> Result<Vec<String>> {
+        let response = self
+            .command_with_literal_cancellable(command, session)
+            .await?;
         Ok(response.lines)
     }
 
@@ -5061,7 +6950,10 @@ where
             if line.starts_with('+') {
                 break;
             }
-            if line.starts_with(&tag) {
+            if line
+                .get(..tag.len())
+                .is_some_and(|response_tag| response_tag.eq_ignore_ascii_case(&tag))
+            {
                 bail!("IMAP APPEND failed: {}", line.trim());
             }
             if line.to_ascii_uppercase().starts_with("* BYE") {
@@ -5076,7 +6968,10 @@ where
             if self.reader.read_line(&mut line).await? == 0 {
                 bail!("IMAP connection closed during APPEND");
             }
-            if line.starts_with(&tag) {
+            if line
+                .get(..tag.len())
+                .is_some_and(|response_tag| response_tag.eq_ignore_ascii_case(&tag))
+            {
                 if !tagged_status_is_ok(&line[tag.len()..]) {
                     bail!("IMAP APPEND failed: {}", line.trim());
                 }
@@ -5090,8 +6985,20 @@ where
     }
 
     async fn command_with_literal(&mut self, command: &str) -> Result<ImapResponse> {
-        self.command_with_literal_limited(command, MAX_IMAP_RESPONSE_LITERAL_BYTES)
-            .await
+        self.command_with_literal_cancellable(command, None).await
+    }
+
+    async fn command_with_literal_cancellable(
+        &mut self,
+        command: &str,
+        session: Option<&SearchSession>,
+    ) -> Result<ImapResponse> {
+        self.command_with_literal_limited_cancellable(
+            command,
+            MAX_IMAP_RESPONSE_LITERAL_BYTES,
+            session,
+        )
+        .await
     }
 
     async fn command_with_literal_limited(
@@ -5099,8 +7006,25 @@ where
         command: &str,
         max_literal_bytes: usize,
     ) -> Result<ImapResponse> {
-        self.command_with_literal_budgets(command, max_literal_bytes, max_literal_bytes)
+        self.command_with_literal_limited_cancellable(command, max_literal_bytes, None)
             .await
+    }
+
+    async fn command_with_literal_limited_cancellable(
+        &mut self,
+        command: &str,
+        max_literal_bytes: usize,
+        session: Option<&SearchSession>,
+    ) -> Result<ImapResponse> {
+        imap_await(
+            session,
+            timeout(
+                IMAP_COMMAND_TIMEOUT,
+                self.command_with_literal_inner(command, max_literal_bytes, max_literal_bytes),
+            ),
+        )
+        .await?
+        .context("IMAP command timed out")?
     }
 
     async fn command_with_literal_budgets(
@@ -5170,6 +7094,7 @@ where
                 current_fetch_uid = Some(uid);
                 backfill_fetch_literal_uids(&mut literals, &mut pending_fetch_literals, uid);
             }
+            let line_index = lines.len();
             lines.push(line.clone());
             if let Some(length) = literal_length(&line) {
                 if length > MAX_RAW_MESSAGE_BYTES {
@@ -5189,6 +7114,7 @@ where
                 literal_bytes += length;
                 let pending = current_fetch_uid.is_none();
                 literals.push(ImapLiteral {
+                    line_index,
                     uid: current_fetch_uid,
                     data_item: literal_data_item(&line),
                     bytes,
@@ -5197,7 +7123,10 @@ where
                     pending_fetch_literals.push(literals.len() - 1);
                 }
             }
-            if line.starts_with(&tag) {
+            if line
+                .get(..tag.len())
+                .is_some_and(|response_tag| response_tag.eq_ignore_ascii_case(&tag))
+            {
                 if !tagged_status_is_ok(&line[tag.len()..]) {
                     bail!("IMAP command failed: {}", line.trim());
                 }
@@ -5375,6 +7304,25 @@ where
     Ok(items)
 }
 
+/// IMAP command and connection deadlines protect against a silent provider,
+/// but submitted search cancellation must win immediately rather than waiting
+/// for those 30/60 second safety limits.
+async fn imap_await<T>(
+    session: Option<&SearchSession>,
+    future: impl Future<Output = T>,
+) -> Result<T> {
+    match session {
+        Some(session) => {
+            ensure_search_not_cancelled(Some(session))?;
+            tokio::select! {
+                _ = session.cancelled() => bail!("search cancelled"),
+                result = future => Ok(result),
+            }
+        }
+        None => Ok(future.await),
+    }
+}
+
 async fn read_imap_line_limited<R>(reader: &mut R, max_bytes: usize) -> Result<String>
 where
     R: AsyncBufRead + Unpin,
@@ -5546,35 +7494,348 @@ fn quote_imap(value: &str) -> String {
 }
 
 fn parse_search_uids(lines: &[String]) -> Result<Vec<u32>> {
-    let mut search_values = lines.iter().filter_map(|line| {
-        let trimmed = line.trim();
-        let prefix = "* SEARCH";
-        (trimmed.len() >= prefix.len()
-            && trimmed[..prefix.len()].eq_ignore_ascii_case(prefix)
-            && trimmed[prefix.len()..]
-                .chars()
+    let mut found = false;
+    let mut uids = Vec::new();
+    for line in lines {
+        let mut atoms = line.split_ascii_whitespace();
+        if atoms.next() != Some("*")
+            || !atoms
                 .next()
-                .is_none_or(char::is_whitespace))
-        .then_some(trimmed[prefix.len()..].trim())
-    });
-    let value = search_values
-        .next()
-        .context("IMAP server omitted SEARCH results")?;
-    if search_values.next().is_some() {
-        bail!("IMAP server returned multiple SEARCH results");
-    }
-    value
-        .split_whitespace()
-        .map(|token| {
-            let uid = token
-                .parse::<u32>()
-                .with_context(|| format!("IMAP SEARCH returned malformed UID {token:?}"))?;
-            if uid == 0 {
-                bail!("IMAP SEARCH returned invalid UID 0");
+                .is_some_and(|atom| atom.eq_ignore_ascii_case("SEARCH"))
+        {
+            continue;
+        }
+        found = true;
+        for token in atoms {
+            if !token.bytes().all(|byte| byte.is_ascii_digit()) {
+                bail!("IMAP SEARCH response contains malformed UID token: {token}");
             }
-            Ok(uid)
+            uids.push(token.parse().context("IMAP SEARCH UID is out of range")?);
+        }
+    }
+    if !found {
+        bail!("IMAP server omitted SEARCH response");
+    }
+    if uids.contains(&0) {
+        bail!("IMAP SEARCH returned invalid UID 0");
+    }
+    Ok(uids)
+}
+
+/// Returns mailbox indexes in rounds, one candidate per selectable mailbox
+/// before returning to the first.  The candidate UID lists remain owned by the
+/// caller so provider work can consume them without copying result data.
+#[cfg(test)]
+fn fair_candidate_mailbox_order(lengths: &[usize]) -> Vec<usize> {
+    fair_candidate_mailbox_order_from(lengths, 0)
+}
+
+fn fair_candidate_mailbox_order_from(lengths: &[usize], start: usize) -> Vec<usize> {
+    fair_candidate_mailbox_order_for_indexes(
+        lengths,
+        &(0..lengths.len()).collect::<Vec<_>>(),
+        start,
+    )
+}
+
+fn fair_candidate_mailbox_order_for_indexes(
+    lengths: &[usize],
+    indexes: &[usize],
+    start: usize,
+) -> Vec<usize> {
+    let mut remaining = lengths.to_vec();
+    let mut order = Vec::with_capacity(remaining.iter().sum());
+    if indexes.is_empty() {
+        return order;
+    }
+    loop {
+        let mut progressed = false;
+        for offset in 0..indexes.len() {
+            let mailbox_index = indexes[(start + offset) % indexes.len()];
+            let count = &mut remaining[mailbox_index];
+            if *count == 0 {
+                continue;
+            }
+            *count -= 1;
+            order.push(mailbox_index);
+            progressed = true;
+        }
+        if !progressed {
+            return order;
+        }
+    }
+}
+
+/// Allocates a global candidate budget in the same round-robin order used by
+/// publication. Every mailbox with a candidate gets one before any mailbox
+/// gets a second, so a wide account cannot turn one Inbox into an unbounded
+/// provider fetch.
+fn bounded_fair_candidate_lengths(lengths: &[usize], max_total: usize) -> Vec<usize> {
+    let mut remaining = lengths.to_vec();
+    let mut allowed = vec![0; lengths.len()];
+    let mut budget = max_total;
+    while budget > 0 {
+        let mut progressed = false;
+        for (index, count) in remaining.iter_mut().enumerate() {
+            if budget == 0 {
+                break;
+            }
+            if *count == 0 {
+                continue;
+            }
+            *count -= 1;
+            allowed[index] += 1;
+            budget -= 1;
+            progressed = true;
+        }
+        if !progressed {
+            break;
+        }
+    }
+    allowed
+}
+
+/// Whether a provider candidate requires complete fetched text before the
+/// canonical evaluator can decide it. Metadata-only predicates use headers,
+/// flags, dates, mailbox identity, and BODYSTRUCTURE attachment metadata, so
+/// they remain publishable if a text-part FETCH fails. Any plain term or
+/// `body:` field can inspect content that metadata does not have; treating a
+/// missing body as empty would produce false positives for NOT/OR expressions.
+fn expression_requires_authoritative_body(expression: &SearchExpression) -> bool {
+    fn node_requires_body(node: &SearchNode) -> bool {
+        match node {
+            SearchNode::MatchAll => false,
+            SearchNode::Term(SearchTerm::Text(_)) => true,
+            SearchNode::Term(SearchTerm::Field {
+                field: SearchField::Body,
+                ..
+            }) => true,
+            SearchNode::Term(_) => false,
+            SearchNode::And(nodes) | SearchNode::Or(nodes) => nodes.iter().any(node_requires_body),
+            SearchNode::Not(node) => node_requires_body(node),
+        }
+    }
+
+    node_requires_body(&expression.root)
+}
+
+fn expression_has_folder_predicate(expression: &SearchExpression) -> bool {
+    fn node_has_folder(node: &SearchNode) -> bool {
+        match node {
+            SearchNode::MatchAll => false,
+            SearchNode::Term(SearchTerm::Folder(_)) => true,
+            SearchNode::Term(_) => false,
+            SearchNode::And(nodes) | SearchNode::Or(nodes) => nodes.iter().any(node_has_folder),
+            SearchNode::Not(node) => node_has_folder(node),
+        }
+    }
+
+    node_has_folder(&expression.root)
+}
+
+/// Returns true only when a positive `in:` branch selects this concrete
+/// provider mailbox. A special-use Junk folder can have a user-visible alias
+/// such as `Bulk`; matching the plan's local, storage, or remote identity
+/// keeps that alias usable without making unrelated Boolean folder terms opt
+/// into Spam/Trash. Negation flips polarity and never grants an opt-in.
+fn expression_explicitly_includes_provider_mailbox(
+    expression: &SearchExpression,
+    plan: &SearchMailboxPlan,
+) -> bool {
+    fn folder_matches_plan(scope: &FolderScope, plan: &SearchMailboxPlan) -> bool {
+        match scope {
+            FolderScope::All => true,
+            FolderScope::Exact(path) | FolderScope::Descendants(path) => {
+                let path = path.trim();
+                let normalized_path = normalize_mailbox_identity(path);
+                let remote_display = display_imap_mailbox_name(&plan.remote);
+                let identities = [&plan.local, &plan.storage, &plan.remote, &remote_display];
+                identities.iter().any(|identity| {
+                    let normalized_identity = normalize_mailbox_identity(identity);
+                    normalized_identity == normalized_path
+                        || matches!(scope, FolderScope::Descendants(_))
+                            && normalized_identity
+                                .strip_prefix(&normalized_path)
+                                .is_some_and(|suffix| suffix.starts_with('/'))
+                })
+            }
+        }
+    }
+    fn visit(node: &SearchNode, positive: bool, plan: &SearchMailboxPlan) -> bool {
+        match node {
+            SearchNode::MatchAll => false,
+            SearchNode::Term(SearchTerm::Folder(scope)) => {
+                positive && folder_matches_plan(scope, plan)
+            }
+            SearchNode::Term(_) => false,
+            SearchNode::And(nodes) | SearchNode::Or(nodes) => {
+                nodes.iter().any(|node| visit(node, positive, plan))
+            }
+            SearchNode::Not(node) => visit(node, !positive, plan),
+        }
+    }
+
+    visit(&expression.root, true, plan)
+}
+
+/// Folder paths use the same Unicode case-folding and diacritic handling as
+/// the canonical search evaluator. Provider discovery must not select a
+/// different mailbox set merely because an alias is written as `Sént` or uses
+/// a non-ASCII case form.
+fn normalize_mailbox_identity(value: &str) -> String {
+    normalize_search_text(value.trim())
+}
+
+fn mailbox_identities_match(left: &str, right: &str) -> bool {
+    normalize_mailbox_identity(left) == normalize_mailbox_identity(right)
+}
+
+/// The normal search scope deliberately leaves Junk/Spam and Trash out. IMAP
+/// providers name these differently, so prefer the resolved local role and
+/// LIST special-use markers over remote-path string matching.
+fn provider_search_mailbox_is_spam_or_trash(plan: &SearchMailboxPlan) -> bool {
+    plan.local.eq_ignore_ascii_case("spam")
+        || plan.local.eq_ignore_ascii_case("trash")
+        || plan.storage.eq_ignore_ascii_case("spam")
+        || plan.storage.eq_ignore_ascii_case("trash")
+        || plan.special_use.as_deref().is_some_and(|special_use| {
+            special_use.eq_ignore_ascii_case("\\Junk")
+                || special_use.eq_ignore_ascii_case("\\Spam")
+                || special_use.eq_ignore_ascii_case("\\Trash")
         })
-        .collect()
+}
+
+fn provider_search_plan_is_in_scope(
+    plan: &SearchMailboxPlan,
+    ambient_mailbox: Option<&str>,
+    include_spam_trash: bool,
+    explicitly_includes_plan: bool,
+) -> bool {
+    if !plan.selectable {
+        return false;
+    }
+    let ambient_selects_plan = ambient_mailbox.is_some_and(|requested| {
+        let remote_display = display_imap_mailbox_name(&plan.remote);
+        mailbox_identities_match(&plan.local, requested)
+            || mailbox_identities_match(&plan.storage, requested)
+            || mailbox_identities_match(&plan.remote, requested)
+            || mailbox_identities_match(&remote_display, requested)
+    });
+    if ambient_mailbox.is_some() && !ambient_selects_plan {
+        return false;
+    }
+    // The legacy/CLI mailbox selector is explicit scope too. In particular,
+    // selecting Spam or Trash in the UI must not be silently defeated by the
+    // default global exclusion when there is no `in:` expression.
+    ambient_selects_plan
+        || explicitly_includes_plan
+        || include_spam_trash
+        || !provider_search_mailbox_is_spam_or_trash(plan)
+}
+
+/// Attachment predicates require a parseable BODYSTRUCTURE response. Without
+/// it, an empty provisional attachment list is unknown rather than evidence
+/// for `has:noattachment`.
+fn expression_requires_attachment_metadata(expression: &SearchExpression) -> bool {
+    fn node_requires_attachment_metadata(node: &SearchNode) -> bool {
+        match node {
+            SearchNode::MatchAll => false,
+            SearchNode::Term(
+                SearchTerm::Attachment(_) | SearchTerm::Filename(_) | SearchTerm::FileType(_),
+            ) => true,
+            SearchNode::Term(_) => false,
+            SearchNode::And(nodes) | SearchNode::Or(nodes) => {
+                nodes.iter().any(node_requires_attachment_metadata)
+            }
+            SearchNode::Not(node) => node_requires_attachment_metadata(node),
+        }
+    }
+
+    node_requires_attachment_metadata(&expression.root)
+}
+
+fn mark_provider_mailbox_coverage(
+    coverage: &mut Vec<ProviderMailboxSearchCoverage>,
+    mailbox: &str,
+    state: ProviderMailboxSearchState,
+) {
+    if let Some(existing) = coverage
+        .iter_mut()
+        .rev()
+        .find(|existing| existing.mailbox == mailbox)
+    {
+        existing.state = state;
+    } else {
+        coverage.push(ProviderMailboxSearchCoverage {
+            mailbox: mailbox.to_owned(),
+            state,
+        });
+    }
+}
+
+/// The provider compiler intentionally emits a broad candidate query.  This
+/// final check is the only authority for publishing a candidate, which keeps
+/// Gmail, Fastmail, Outlook and generic IMAP semantics identical even when a
+/// provider has a different tokenizer or unsupported search key.
+#[cfg(test)]
+fn canonical_remote_search_match(expression: &SearchExpression, message: &MailSummary) -> bool {
+    canonical_remote_search_match_with_mailboxes(expression, message, &[])
+}
+
+fn canonical_remote_search_match_with_mailboxes(
+    expression: &SearchExpression,
+    message: &MailSummary,
+    mailboxes: &[&str],
+) -> bool {
+    let from = message
+        .from_name
+        .as_deref()
+        .map(|name| format!("{name} <{}>", message.from_address))
+        .unwrap_or_else(|| message.from_address.clone());
+    let attachments = message
+        .attachments
+        .iter()
+        .filter(|attachment| attachment.attachment.presentation.is_downloadable())
+        .map(|attachment| SearchableAttachment {
+            filename: Some(attachment.attachment.filename.as_str()),
+            mime_type: Some(attachment.attachment.mime_type.as_str()),
+        })
+        .collect::<Vec<_>>();
+    // A catalogue row that only knows an attachment exists must still obey
+    // has:attachment. Its missing filename/type remains unknown, never
+    // invented merely to make filetype/filename search look complete.
+    let fallback_attachment = SearchableAttachment::default();
+    let attachments =
+        if attachments.is_empty() && message.attachments.is_empty() && message.has_attachments {
+            std::slice::from_ref(&fallback_attachment)
+        } else {
+            attachments.as_slice()
+        };
+    let body = if message.body_text.is_empty() {
+        message.snippet.as_str()
+    } else {
+        message.body_text.as_str()
+    };
+    evaluate_search(
+        expression,
+        &SearchableMessage {
+            from: &from,
+            to: &message.to_addresses,
+            cc: &message.cc_addresses,
+            bcc: &message.bcc_addresses,
+            subject: &message.subject,
+            body,
+            mailboxes,
+            mailbox: &message.mailbox,
+            received_on: message.received_at.date_naive(),
+            attachments,
+            is_read: message.is_read,
+            is_flagged: message.is_flagged,
+            is_replied: message.is_answered,
+            is_draft: message.is_draft,
+        },
+        Utc::now().date_naive(),
+    )
 }
 
 fn parse_uid_validity(lines: &[String]) -> Option<u32> {
@@ -5788,6 +8049,12 @@ fn tagged_status_is_ok(suffix: &str) -> bool {
         .is_some_and(|status| status.eq_ignore_ascii_case("OK"))
 }
 
+fn has_imap_system_flag(flags: &str, flag: &str) -> bool {
+    flags
+        .split(|character: char| character.is_ascii_whitespace() || matches!(character, '(' | ')'))
+        .any(|candidate| candidate.eq_ignore_ascii_case(flag))
+}
+
 fn missing_uids_newest_first(remote: &[u32], local: &std::collections::HashSet<u32>) -> Vec<u32> {
     let mut missing = remote
         .iter()
@@ -5796,6 +8063,23 @@ fn missing_uids_newest_first(remote: &[u32], local: &std::collections::HashSet<u
         .collect::<Vec<_>>();
     missing.sort_unstable_by(|left, right| right.cmp(left));
     missing
+}
+
+#[cfg(test)]
+fn sync_uids(mut uids: Vec<u32>, highest_uid: Option<u32>, max_messages: u32) -> Vec<u32> {
+    uids.sort_unstable();
+    let limit = max_messages as usize;
+    if let Some(highest_uid) = highest_uid {
+        // Drain incremental batches from the oldest unseen UID so advancing
+        // the durable watermark cannot skip messages beyond this batch.
+        uids.retain(|uid| *uid > highest_uid);
+        uids.truncate(limit);
+        uids
+    } else {
+        // Initial sync remains silent and starts with the newest messages.
+        let offset = uids.len().saturating_sub(limit);
+        uids.split_off(offset)
+    }
 }
 
 fn supports_idle(lines: &[String]) -> bool {
@@ -6080,8 +8364,10 @@ async fn parse_message(
         content_state: "complete".into(),
         unsubscribe_kind,
         unsubscribe_url,
-        is_read: flags.contains("\\Seen"),
-        is_flagged: flags.contains("\\Flagged"),
+        is_read: has_imap_system_flag(&flags, "\\Seen"),
+        is_flagged: has_imap_system_flag(&flags, "\\Flagged"),
+        is_answered: has_imap_system_flag(&flags, "\\Answered"),
+        is_draft: has_imap_system_flag(&flags, "\\Draft"),
         has_attachments: !attachments.is_empty(),
         attachments,
         category: None,
@@ -6099,18 +8385,76 @@ fn parse_catalog_message(
     raw_headers: &[u8],
     snippet: String,
 ) -> Result<MailSummary> {
+    let parsed_structure = parse_bodystructure_with_literals(response_lines, &[]).ok();
+    parse_catalog_message_with_structure(
+        account,
+        mailbox,
+        uid,
+        response_lines,
+        raw_headers,
+        snippet,
+        parsed_structure.as_ref(),
+    )
+}
+
+fn parse_catalog_message_with_structure(
+    account: &Account,
+    mailbox: &str,
+    uid: u32,
+    response_lines: &[String],
+    raw_headers: &[u8],
+    snippet: String,
+    parsed_structure: Option<&MimePart>,
+) -> Result<MailSummary> {
     let parsed = parse_header_block(raw_headers)?;
     let header = |name| decoded_header(&parsed, name);
     let received_at = message_received_at(&parsed, response_lines)?;
     let (from_name, from_address) = parse_first_address(&header("From"));
     let id = stable_message_id(account.id, mailbox, uid);
     let flags = response_lines.join(" ");
-    let structure = flags.to_ascii_lowercase();
+    let response_text = flags.to_ascii_lowercase();
     // A header-only BODYSTRUCTURE cannot tell whether a named inline part is
     // a referenced signature asset. Only an explicit attachment disposition
     // is safe to surface provisionally; complete MIME parsing supplies the
     // authoritative user-facing attachment state.
-    let has_attachments = structure.contains("attachment");
+    let attachments = parsed_structure
+        .and_then(|structure| selective_plan(structure).ok())
+        .map(|plan| {
+            plan.attachments
+                .iter()
+                .filter_map(|attachment| {
+                    // BODYSTRUCTURE supplies only metadata. Keep bytes empty
+                    // so a historical catalogue never downloads or retains
+                    // attachment content just to make filename/filetype
+                    // search available.
+                    let mut data =
+                        attachment_data_from_part(attachment, &id, &[], None, false).ok()?;
+                    // Header-only catalogue data cannot prove whether this
+                    // particular named inline part is referenced. Treat that
+                    // one part as embedded until an authoritative display
+                    // fetch observes the selected HTML branch. Do not use a
+                    // message-wide `inline` marker: a signature logo must
+                    // not hide a sibling PDF attachment from search or the
+                    // paperclip state.
+                    if (attachment
+                        .part
+                        .disposition
+                        .as_deref()
+                        .is_some_and(|value| value.eq_ignore_ascii_case("inline"))
+                        || attachment.part.content_id.is_some())
+                        && !attachment.part.is_explicit_attachment()
+                    {
+                        data.attachment.presentation = AttachmentPresentation::Embedded;
+                    }
+                    Some(data)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let has_attachments = attachments
+        .iter()
+        .any(|attachment| attachment.attachment.presentation.is_downloadable())
+        || response_text.contains("\"attachment\"");
     let unsubscribe_url = header_values(&parsed, "List-Unsubscribe")
         .into_iter()
         .flat_map(|value| parse_list_urls(&value))
@@ -6155,10 +8499,12 @@ fn parse_catalog_message(
         content_state: "headers_only".into(),
         unsubscribe_kind,
         unsubscribe_url: unsubscribe_url.map(|url| url.to_string()),
-        is_read: flags.contains("\\Seen"),
-        is_flagged: flags.contains("\\Flagged"),
+        is_read: has_imap_system_flag(&flags, "\\Seen"),
+        is_flagged: has_imap_system_flag(&flags, "\\Flagged"),
+        is_answered: has_imap_system_flag(&flags, "\\Answered"),
+        is_draft: has_imap_system_flag(&flags, "\\Draft"),
         has_attachments,
-        attachments: Vec::new(),
+        attachments,
         category: None,
         classification_confidence: None,
         classification_source: None,
@@ -6284,8 +8630,10 @@ fn parse_header_message(
         content_state: "headers_only".into(),
         unsubscribe_kind: None,
         unsubscribe_url: None,
-        is_read: flags.contains("\\Seen"),
-        is_flagged: flags.contains("\\Flagged"),
+        is_read: has_imap_system_flag(&flags, "\\Seen"),
+        is_flagged: has_imap_system_flag(&flags, "\\Flagged"),
+        is_answered: has_imap_system_flag(&flags, "\\Answered"),
+        is_draft: has_imap_system_flag(&flags, "\\Draft"),
         has_attachments: false,
         attachments: Vec::new(),
         category: None,
@@ -7940,7 +10288,10 @@ pub fn is_potentially_unsafe(filename: &str, mime_type: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{provider, AccountDraft};
+    use crate::{
+        provider, AccountDraft, SearchExecutionMode, SearchRequestV2, SearchScopeV2,
+        SearchSessionRegistry,
+    };
     use lettre::transport::smtp::client::Certificate;
     use tokio::{
         io::{duplex, split, AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream},
@@ -8384,12 +10735,19 @@ mod tests {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the scripted server models the complete mailbox response fixture"
+    )]
     async fn scripted_inbox_sync_server(
         server: TcpStream,
         uid_validity: u32,
         remote_uids: &[u32],
         fetched_uid: u32,
         subject: &str,
+        mailbox: &str,
+        recipient: &str,
+        uid_next: Option<u32>,
     ) -> Vec<String> {
         let (read, mut write) = server.into_split();
         let mut read = BufReader::new(read);
@@ -8410,14 +10768,33 @@ mod tests {
             .unwrap();
 
         let tag = scripted_expect_command(&mut read, &mut transcript, "LIST \"\" \"*\"").await;
-        let response = format!("* LIST (\\\\HasNoChildren) \"/\" \"INBOX\"\r\n{tag} OK listed\r\n");
+        let response = if mailbox == "INBOX" {
+            format!("* LIST (\\\\HasNoChildren) \"/\" \"{mailbox}\"\r\n{tag} OK listed\r\n")
+        } else {
+            // A complete LIST is authoritative for the whole account. Keep
+            // the previously synchronized Inbox in this custom-folder
+            // transcript, while marking it non-selectable so this fixture
+            // still exercises only the custom-folder sync plan.
+            format!(
+                "* LIST (\\Noselect) \"/\" \"INBOX\"\r\n* LIST (\\HasNoChildren) \"/\" \"{mailbox}\"\r\n{tag} OK listed\r\n"
+            )
+        };
         write.write_all(response.as_bytes()).await.unwrap();
 
-        let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+        let uid_next = uid_next.unwrap_or_else(|| {
+            remote_uids
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1)
+        });
+        let selected_mailbox = format!("SELECT \"{mailbox}\"");
+        let tag = scripted_expect_command(&mut read, &mut transcript, &selected_mailbox).await;
         let response = format!(
-            "* {} EXISTS\r\n* OK [UIDVALIDITY {uid_validity}] UIDs valid\r\n* OK [UIDNEXT {}] next\r\n{tag} OK selected\r\n",
+            "* {} EXISTS\r\n* OK [UIDVALIDITY {uid_validity}] UIDs valid\r\n* OK [UIDNEXT {}] Predicted next UID\r\n{tag} OK selected\r\n",
             remote_uids.len(),
-            remote_uids.iter().copied().max().unwrap_or(0) + 1
+            uid_next,
         );
         write.write_all(response.as_bytes()).await.unwrap();
 
@@ -8435,11 +10812,11 @@ mod tests {
         let response = format!("{flags}{tag} OK flags\r\n");
         write.write_all(response.as_bytes()).await.unwrap();
 
-        let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+        let tag = scripted_expect_command(&mut read, &mut transcript, &selected_mailbox).await;
         let response = format!(
-            "* {} EXISTS\r\n* OK [UIDVALIDITY {uid_validity}] UIDs valid\r\n* OK [UIDNEXT {}] next\r\n{tag} OK selected\r\n",
+            "* {} EXISTS\r\n* OK [UIDVALIDITY {uid_validity}] UIDs valid\r\n* OK [UIDNEXT {}] Predicted next UID\r\n{tag} OK selected\r\n",
             remote_uids.len(),
-            remote_uids.iter().copied().max().unwrap_or(0) + 1
+            uid_next,
         );
         write.write_all(response.as_bytes()).await.unwrap();
 
@@ -8451,7 +10828,7 @@ mod tests {
         )
         .await;
         let headers = format!(
-            "Date: Wed, 30 Jul 2026 10:00:00 +0000\r\nFrom: Sender <sender@example.test>\r\nTo: Reader <reader@example.test>\r\nSubject: {subject}\r\nMessage-ID: <{fetched_uid}@example.test>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"
+            "Date: Wed, 30 Jul 2026 10:00:00 +0000\r\nFrom: Sender <sender@example.test>\r\nTo: Recipient <{recipient}>\r\nSubject: {subject}\r\nMessage-ID: <{fetched_uid}@example.test>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"
         );
         let response = format!(
             "* 1 FETCH (UID {fetched_uid} FLAGS () INTERNALDATE \"30-Jul-2026 10:00:00 +0000\" RFC822.SIZE 5 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"UTF-8\") NIL NIL \"7BIT\" 5 1) BODY[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)] {{{}}}\r\n",
@@ -8473,11 +10850,11 @@ mod tests {
         );
         write.write_all(response.as_bytes()).await.unwrap();
 
-        let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+        let tag = scripted_expect_command(&mut read, &mut transcript, &selected_mailbox).await;
         let response = format!(
             "* {} EXISTS\r\n* OK [UIDVALIDITY {uid_validity}] UIDs valid\r\n* OK [UIDNEXT {}] next\r\n{tag} OK selected\r\n",
             remote_uids.len(),
-            remote_uids.iter().copied().max().unwrap_or(0) + 1
+            uid_next
         );
         write.write_all(response.as_bytes()).await.unwrap();
 
@@ -8675,6 +11052,9 @@ mod tests {
             &[42],
             42,
             "Initial transcript message",
+            "INBOX",
+            "reader@example.test",
+            None,
         ));
         let first = service
             .sync_mailboxes_with_progress_on_client(
@@ -8707,6 +11087,15 @@ mod tests {
                 "LOGOUT",
             ]
         );
+        let inbox = store
+            .list_selectable_mailboxes(account.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|mailbox| mailbox.remote_path == "INBOX")
+            .expect("normal sync must retain the selected mailbox identity");
+        assert_eq!(inbox.uid_validity, Some(77));
+        assert_eq!(inbox.catalogue_coverage, "complete");
 
         let (mut second_client, second_server) = plain_imap_client_and_server().await;
         let second_server = tokio::spawn(scripted_inbox_sync_server(
@@ -8715,6 +11104,9 @@ mod tests {
             &[42, 43],
             43,
             "Incremental transcript message",
+            "INBOX",
+            "reader@example.test",
+            None,
         ));
         let second = service
             .sync_mailboxes_with_progress_on_client(
@@ -8784,6 +11176,75 @@ mod tests {
                 "SELECT \"INBOX\"",
                 "LOGOUT",
             ]
+        );
+
+        // An ordinary full sync, not provider-search hydration, must retain
+        // the visible custom path and attach the persisted message to that
+        // selectable mailbox for local `in:` evaluation after restart.
+        let (mut custom_client, custom_server) = plain_imap_client_and_server().await;
+        let custom_server = tokio::spawn(scripted_inbox_sync_server(
+            custom_server,
+            78,
+            &[77],
+            77,
+            "Custom folder transcript message",
+            "Projects/2026",
+            "reader@example.test",
+            None,
+        ));
+        service
+            .sync_mailboxes_with_progress_on_client(
+                &mut custom_client,
+                &account,
+                50,
+                Vec::new(),
+                false,
+                |_| {},
+            )
+            .await
+            .unwrap();
+        custom_server.await.unwrap();
+        let custom_mailbox = store
+            .list_selectable_mailboxes(account.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|mailbox| mailbox.remote_path == "Projects/2026")
+            .expect("custom mailbox discovery");
+        assert_eq!(custom_mailbox.local_path, "Projects/2026");
+        let custom_message = store
+            .message_by_locator(
+                account.id,
+                &generic_mailbox_storage_identity("Projects/2026", "Projects/2026"),
+                77,
+            )
+            .await
+            .unwrap()
+            .expect("custom folder message");
+        assert_eq!(
+            store
+                .list_message_mailbox_memberships(account.id, &custom_message.id)
+                .await
+                .unwrap()
+                .iter()
+                .map(|membership| membership.mailbox_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![custom_mailbox.id.as_str()]
+        );
+        assert_eq!(
+            store
+                .search_conversation_page(&SearchQuery {
+                    text: "in:Projects/2026".into(),
+                    account_ids: vec![account.id],
+                    ..SearchQuery::default()
+                })
+                .await
+                .unwrap()
+                .conversations
+                .iter()
+                .map(|conversation| conversation.latest.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![custom_message.id.as_str()]
         );
 
         drop(service);
@@ -9087,11 +11548,13 @@ mod tests {
 
     #[tokio::test]
     async fn scripted_thirty_thousand_message_snapshot_uses_sixty_bounded_pages() {
+        let _large_dataset = crate::large_dataset_test_guard().await;
         assert_large_message_snapshot_is_bounded(30_000).await;
     }
 
     #[tokio::test]
     async fn scripted_one_hundred_thousand_message_snapshot_uses_bounded_pages() {
+        let _large_dataset = crate::large_dataset_test_guard().await;
         assert_large_message_snapshot_is_bounded(100_000).await;
     }
 
@@ -9393,6 +11856,155 @@ mod tests {
             .unwrap();
         assert_eq!(state.uid_next, Some(4));
         assert_eq!(state.highest_modseq.as_deref(), Some("201"));
+    }
+
+    #[tokio::test]
+    async fn scripted_condstore_uidvalidity_drift_replaces_a_recycled_uid_namespace() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        seed_condstore_catalog(&store, &account).await;
+        service
+            .credentials()
+            .set_password(&account, "sync secret")
+            .await
+            .unwrap();
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            for (expected, untagged) in [
+                ("LOGIN \"reader@example.test\" \"sync secret\"", ""),
+                ("CAPABILITY", "* CAPABILITY IMAP4rev1 CONDSTORE\r\n"),
+                (
+                    "LIST \"\" \"*\"",
+                    "* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n",
+                ),
+            ] {
+                let tag = scripted_expect_command(&mut read, &mut transcript, expected).await;
+                write
+                    .write_all(format!("{untagged}{tag} OK done\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            let old_identity = "* 2 EXISTS\r\n* OK [UIDVALIDITY 77] valid\r\n* OK [UIDNEXT 3] next\r\n* OK [HIGHESTMODSEQ 200] modseq\r\n";
+            let new_identity = "* 1 EXISTS\r\n* OK [UIDVALIDITY 78] valid\r\n* OK [UIDNEXT 2] next\r\n* OK [HIGHESTMODSEQ 201] modseq\r\n";
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\" (CONDSTORE)")
+                    .await;
+            write
+                .write_all(format!("{old_identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(
+                &mut read,
+                &mut transcript,
+                "FETCH 1:2 (UID FLAGS MODSEQ) (CHANGEDSINCE 100)",
+            )
+            .await;
+            write
+                .write_all(format!("{tag} OK delta\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\" (CONDSTORE)")
+                    .await;
+            write
+                .write_all(format!("{new_identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "FETCH 1:1 (UID FLAGS)").await;
+            write
+                .write_all(
+                    format!("* 1 FETCH (UID 1 FLAGS ())\r\n{tag} OK snapshot\r\n").as_bytes(),
+                )
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+            write
+                .write_all(format!("{new_identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            let (tag, command) = scripted_command(&mut read).await;
+            transcript.push(command.clone());
+            assert!(command.starts_with("UID FETCH 1 (FLAGS INTERNALDATE "));
+            let headers = "Date: Wed, 30 Jul 2026 10:00:00 +0000\r\nFrom: New <new@example.test>\r\nTo: Reader <reader@example.test>\r\nSubject: New namespace\r\nMessage-ID: <new-namespace@example.test>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n";
+            write.write_all(format!("* 1 FETCH (UID 1 FLAGS () INTERNALDATE \"30-Jul-2026 10:00:00 +0000\" RFC822.SIZE 5 BODY[HEADER] {{{}}}\r\n", headers.len()).as_bytes()).await.unwrap();
+            write.write_all(headers.as_bytes()).await.unwrap();
+            write
+                .write_all(format!(")\r\n{tag} OK metadata\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(
+                &mut read,
+                &mut transcript,
+                "UID FETCH 1 (BODY.PEEK[]<0.8192>)",
+            )
+            .await;
+            write
+                .write_all(
+                    format!("* 1 FETCH (UID 1 BODY[]<0> {{5}}\r\nhello)\r\n{tag} OK snippet\r\n")
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\" (CONDSTORE)")
+                    .await;
+            write
+                .write_all(format!("{new_identity}{tag} OK selected\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "LOGOUT").await;
+            write
+                .write_all(format!("{tag} OK logout\r\n").as_bytes())
+                .await
+                .unwrap();
+            transcript
+        });
+
+        service
+            .sync_mailboxes_with_progress_on_client(
+                &mut client,
+                &account,
+                50,
+                vec![MailboxPlan::new("INBOX", "INBOX")],
+                false,
+                |_| {},
+            )
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(
+            store.mailbox_uids(account.id, "INBOX").await.unwrap(),
+            [1].into()
+        );
+        assert_eq!(
+            store
+                .message_by_locator(account.id, "INBOX", 1)
+                .await
+                .unwrap()
+                .unwrap()
+                .subject,
+            "New namespace"
+        );
+        let state = store
+            .mailbox_catalog_state(account.id, "INBOX")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.uid_validity, 78);
+        let inbox = store
+            .list_selectable_mailboxes(account.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|mailbox| mailbox.remote_path == "INBOX")
+            .unwrap();
+        assert_eq!(inbox.uid_validity, Some(78));
+        assert_eq!(inbox.catalogue_coverage, "complete");
     }
 
     #[tokio::test]
@@ -11351,12 +13963,18 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(store
-            .mailbox_catalog_state(account.id, "Sent::Sent Items")
+            .mailbox_catalog_state(
+                account.id,
+                &special_mailbox_storage_identity("Sent", "Sent Items"),
+            )
             .await
             .unwrap()
             .is_some());
         assert!(store
-            .mailbox_catalog_state(account.id, "Sent::Sent Messages")
+            .mailbox_catalog_state(
+                account.id,
+                &special_mailbox_storage_identity("Sent", "Sent Messages"),
+            )
             .await
             .unwrap()
             .is_some());
@@ -11438,12 +14056,18 @@ mod tests {
             .unwrap();
         server.await.unwrap();
         assert!(store
-            .mailbox_catalog_state(account.id, "Sent::Sent Items")
+            .mailbox_catalog_state(
+                account.id,
+                &special_mailbox_storage_identity("Sent", "Sent Items"),
+            )
             .await
             .unwrap()
             .is_some());
         assert!(store
-            .mailbox_catalog_state(account.id, "Sent::Sent Messages")
+            .mailbox_catalog_state(
+                account.id,
+                &special_mailbox_storage_identity("Sent", "Sent Messages"),
+            )
             .await
             .unwrap()
             .is_none());
@@ -11512,7 +14136,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scripted_reset_list_literal_mailbox_cannot_select_or_prune_a_family() {
+    async fn scripted_reset_list_literal_mailbox_can_select_and_prune_a_family() {
         let store = Store::in_memory().await.unwrap();
         let service = MailService::new(store.clone());
         let account = test_account();
@@ -11552,9 +14176,24 @@ mod tests {
                 .write_all(format!("{tag} OK done\r\n").as_bytes())
                 .await
                 .unwrap();
+            let identity = "* 0 EXISTS\r\n* OK [UIDVALIDITY 77] valid\r\n* OK [UIDNEXT 1] next\r\n";
+            for _ in 0..2 {
+                let tag =
+                    scripted_expect_command(&mut read, &mut transcript, "SELECT \"Sent Items\"")
+                        .await;
+                write
+                    .write_all(format!("{identity}{tag} OK selected\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            let tag = scripted_expect_command(&mut read, &mut transcript, "LOGOUT").await;
+            write
+                .write_all(format!("{tag} OK logout\r\n").as_bytes())
+                .await
+                .unwrap();
             transcript
         });
-        let error = service
+        service
             .sync_mailboxes_with_progress_on_client(
                 &mut client,
                 &account,
@@ -11564,19 +14203,24 @@ mod tests {
                 |_| {},
             )
             .await
-            .unwrap_err();
+            .unwrap();
         let transcript = server.await.unwrap();
-        assert!(format!("{error:#}").contains("LIST response is malformed"));
-        assert!(!transcript
+        assert!(transcript
             .iter()
-            .any(|command| command.starts_with("SELECT ")));
-        assert_eq!(
-            store
-                .mailbox_uids(account.id, "Sent::Legacy")
-                .await
-                .unwrap(),
-            [9].into()
-        );
+            .any(|command| command == "SELECT \"Sent Items\""));
+        assert!(store
+            .mailbox_uids(account.id, "Sent::Legacy")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .mailbox_catalog_state(
+                account.id,
+                &special_mailbox_storage_identity("Sent", "Sent Items"),
+            )
+            .await
+            .unwrap()
+            .is_some());
     }
 
     #[tokio::test]
@@ -11801,6 +14445,322 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn normal_sync_marks_a_select_failed_mailbox_partial_without_erasing_its_uidvalidity() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        service
+            .credentials()
+            .set_password(&account, "sync secret")
+            .await
+            .unwrap();
+        store
+            .upsert_selectable_mailbox(
+                account.id,
+                &SelectableMailboxDraft {
+                    remote_path: "INBOX".into(),
+                    local_path: Some("INBOX".into()),
+                    hierarchy_delimiter: Some("/".into()),
+                    parent_id: None,
+                    parent_path: None,
+                    special_use: Some("\\Inbox".into()),
+                    selectable: true,
+                    uid_validity: Some(77),
+                    catalogue_coverage: "complete".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let (mut client, server) = plain_imap_client_and_server().await;
+        let server = tokio::spawn(async move {
+            let (read, mut write) = server.into_split();
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            let tag = scripted_expect_command(
+                &mut read,
+                &mut transcript,
+                "LOGIN \"reader@example.test\" \"sync secret\"",
+            )
+            .await;
+            write
+                .write_all(format!("{tag} OK authenticated\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "CAPABILITY").await;
+            write
+                .write_all(format!("* CAPABILITY IMAP4rev1\r\n{tag} OK capability\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "LIST \"\" \"*\"").await;
+            write
+                .write_all(
+                    format!(
+                        "* LIST (\\HasNoChildren \\Inbox) \"/\" \"INBOX\"\r\n{tag} OK LIST completed\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+            write
+                .write_all(format!("{tag} NO mailbox unavailable\r\n").as_bytes())
+                .await
+                .unwrap();
+        });
+        assert!(service
+            .sync_mailboxes_with_progress_on_client(
+                &mut client,
+                &account,
+                50,
+                vec![MailboxPlan::new("INBOX", "INBOX")],
+                false,
+                |_| {},
+            )
+            .await
+            .is_err());
+        server.await.unwrap();
+        let inbox = store
+            .list_selectable_mailboxes(account.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|mailbox| mailbox.remote_path == "INBOX")
+            .unwrap();
+        assert_eq!(inbox.uid_validity, Some(77));
+        assert_eq!(inbox.catalogue_coverage, "partial");
+    }
+
+    #[tokio::test]
+    async fn normal_sync_authoritative_list_retires_omitted_mailbox_cache_before_restart() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        service
+            .credentials()
+            .set_password(&account, "sync secret")
+            .await
+            .unwrap();
+        let stale = store
+            .upsert_selectable_mailbox(
+                account.id,
+                &SelectableMailboxDraft {
+                    remote_path: "Projects/Old".into(),
+                    local_path: Some("Projects/Old".into()),
+                    hierarchy_delimiter: Some("/".into()),
+                    parent_id: None,
+                    parent_path: Some("Projects".into()),
+                    special_use: None,
+                    selectable: true,
+                    uid_validity: Some(9),
+                    catalogue_coverage: "complete".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let stale_storage = generic_mailbox_storage_identity("Projects/Old", "Projects/Old");
+        let mut stale_message = message("Old project", "must not survive restart");
+        stale_message.id = "stale-project-message".into();
+        stale_message.account_id = account.id.to_string();
+        stale_message.mailbox = stale_storage.clone();
+        store
+            .upsert_catalog_messages(std::slice::from_ref(&stale_message))
+            .await
+            .unwrap();
+        store
+            .set_message_mailbox_memberships(
+                account.id,
+                &stale_message.id,
+                std::slice::from_ref(&stale.id),
+            )
+            .await
+            .unwrap();
+        store
+            .save_mailbox_catalog_state(account.id, &stale_storage, "Projects/Old", 9, 1, true)
+            .await
+            .unwrap();
+
+        let (mut client, server) = plain_imap_client_and_server().await;
+        let server = tokio::spawn(async move {
+            let (read, mut write) = server.into_split();
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            let tag = scripted_expect_command(
+                &mut read,
+                &mut transcript,
+                "LOGIN \"reader@example.test\" \"sync secret\"",
+            )
+            .await;
+            write
+                .write_all(format!("{tag} OK authenticated\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "CAPABILITY").await;
+            write
+                .write_all(format!("* CAPABILITY IMAP4rev1\r\n{tag} OK capability\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "LIST \"\" \"*\"").await;
+            write
+                .write_all(
+                    format!(
+                        "* LIST (\\HasNoChildren \\Inbox) \"/\" \"INBOX\"\r\n{tag} OK LIST completed\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+            write
+                .write_all(
+                    format!("* 0 EXISTS\r\n* OK [UIDVALIDITY 77] valid\r\n{tag} OK selected\r\n")
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+            write
+                .write_all(
+                    format!("* 0 EXISTS\r\n* OK [UIDVALIDITY 77] valid\r\n{tag} OK selected\r\n")
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "LOGOUT").await;
+            write
+                .write_all(format!("* BYE done\r\n{tag} OK logout\r\n").as_bytes())
+                .await
+                .unwrap();
+            transcript
+        });
+        service
+            .sync_mailboxes_with_progress_on_client(
+                &mut client,
+                &account,
+                50,
+                Vec::new(),
+                false,
+                |_| {},
+            )
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert!(store.message(&stale_message.id).await.unwrap().is_none());
+        assert!(store
+            .list_selectable_mailboxes(account.id)
+            .await
+            .unwrap()
+            .iter()
+            .all(|mailbox| mailbox.remote_path != "Projects/Old"));
+        assert!(store
+            .mailbox_catalog_state(account.id, &stale_storage)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn sent_sync_captures_provider_cutoff_before_cataloguing_after_clear() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        service
+            .credentials()
+            .set_password(&account, "sync secret")
+            .await
+            .unwrap();
+        // A clear advances the privacy generation. The next Sent SELECT must
+        // establish its provider boundary before this historical UID can be
+        // imported and later considered by contacted-people backfill.
+        store.clear_contacted_people().await.unwrap();
+
+        let (mut client, server) = plain_imap_client_and_server().await;
+        let server = tokio::spawn(scripted_inbox_sync_server(
+            server,
+            77,
+            &[42],
+            42,
+            "Historical Sent message",
+            "Sent",
+            "recipient@example.test",
+            // Deliberately stale: SEARCH exposes historical UID 42.
+            Some(10),
+        ));
+        let sync = service
+            .sync_mailboxes_with_progress_on_client(
+                &mut client,
+                &account,
+                50,
+                vec![MailboxPlan::new("Sent", "Sent")],
+                false,
+                |_| {},
+            )
+            .await
+            .unwrap();
+        assert_eq!(sync.synced_count, 1);
+        server.await.unwrap();
+
+        store
+            .backfill_contacted_people_from_sent(
+                account.id,
+                std::slice::from_ref(&account.email),
+                10,
+            )
+            .await
+            .unwrap();
+        assert!(store
+            .suggest_contacted_people("recipient", Some(account.id))
+            .await
+            .unwrap()
+            .is_empty());
+
+        // The same UIDVALIDITY retains the original cutoff. A recipient in a
+        // newly assigned UID is post-boundary and may be learned normally.
+        let (mut next_client, next_server) = plain_imap_client_and_server().await;
+        let next_server = tokio::spawn(scripted_inbox_sync_server(
+            next_server,
+            77,
+            &[42, 43],
+            43,
+            "New Sent message",
+            "Sent",
+            "recipient@example.test",
+            Some(10),
+        ));
+        service
+            .sync_mailboxes_with_progress_on_client(
+                &mut next_client,
+                &account,
+                50,
+                vec![MailboxPlan::new("Sent", "Sent")],
+                false,
+                |_| {},
+            )
+            .await
+            .unwrap();
+        next_server.await.unwrap();
+        store
+            .backfill_contacted_people_from_sent(
+                account.id,
+                std::slice::from_ref(&account.email),
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .suggest_contacted_people("recipient", Some(account.id))
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "only UIDs assigned after the trusted Sent cutoff may be learned"
+        );
+    }
+
+    #[tokio::test]
     async fn scripted_mail_service_imap_auth_probe_uses_read_only_constant_size_commands() {
         let store = Store::in_memory().await.unwrap();
         let service = MailService::new(store);
@@ -11971,9 +14931,77 @@ mod tests {
     // Test-only CA plus leaf certificate for 127.0.0.1/localhost. The
     // private key is intentionally public: it exists solely to make the
     // loopback TLS transcripts deterministic while still verifying a test CA.
-    const SMTP_TEST_CA_DER_BASE64: &str = "MIIBoDCCAUWgAwIBAgIUQltW8tjmRLr4QjHNjnIXOGd4oqcwCgYIKoZIzj0EAwIwHTEbMBkGA1UEAwwSRGFraWEgU01UUCB0ZXN0IENBMB4XDTI2MDczMDE2MDE1NFoXDTM2MDcyNzE2MDE1NFowHTEbMBkGA1UEAwwSRGFraWEgU01UUCB0ZXN0IENBMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEowlFdKeMeRMDaJroLiqhOMAQ1dKYMuoX/SXdgSSY0fIcL7K4mv7z8Xqg5iLrw84NQxGZt36GLxNaGfSLmCR6nqNjMGEwHQYDVR0OBBYEFKzJ36GY9x0+2bor86BZVX+U3mOLMB8GA1UdIwQYMBaAFKzJ36GY9x0+2bor86BZVX+U3mOLMA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgKEMAoGCCqGSM49BAMCA0kAMEYCIQD5sjoNPPW9m+gCspyKyj9AOdgwZiavQhgDeIvu5hzVgQIhALJpuju+3/idyBTJ1qGomBG4aRuIO9cHhLwuMtAVtMvt";
+    pub(super) const SMTP_TEST_CA_DER_BASE64: &str = "MIIBoDCCAUWgAwIBAgIUQltW8tjmRLr4QjHNjnIXOGd4oqcwCgYIKoZIzj0EAwIwHTEbMBkGA1UEAwwSRGFraWEgU01UUCB0ZXN0IENBMB4XDTI2MDczMDE2MDE1NFoXDTM2MDcyNzE2MDE1NFowHTEbMBkGA1UEAwwSRGFraWEgU01UUCB0ZXN0IENBMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEowlFdKeMeRMDaJroLiqhOMAQ1dKYMuoX/SXdgSSY0fIcL7K4mv7z8Xqg5iLrw84NQxGZt36GLxNaGfSLmCR6nqNjMGEwHQYDVR0OBBYEFKzJ36GY9x0+2bor86BZVX+U3mOLMB8GA1UdIwQYMBaAFKzJ36GY9x0+2bor86BZVX+U3mOLMA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgKEMAoGCCqGSM49BAMCA0kAMEYCIQD5sjoNPPW9m+gCspyKyj9AOdgwZiavQhgDeIvu5hzVgQIhALJpuju+3/idyBTJ1qGomBG4aRuIO9cHhLwuMtAVtMvt";
     const SMTP_TEST_CERT_DER_BASE64: &str = "MIIBxjCCAWygAwIBAgIUM95kwE13FWtKVQEkqO3f8DeMFAgwCgYIKoZIzj0EAwIwHTEbMBkGA1UEAwwSRGFraWEgU01UUCB0ZXN0IENBMB4XDTI2MDczMDE2MDE1NFoXDTM2MDcyNzE2MDE1NFowFDESMBAGA1UEAwwJbG9jYWxob3N0MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAElFRQ2c4qt7037iUsrzdKiDrS/euRkQ3z5uCpfrYsFVhe3g4ffc5IBLZDWSEUP0EJvyEOOg5KL1by1ZGYC/d+S6OBkjCBjzAMBgNVHRMBAf8EAjAAMA4GA1UdDwEB/wQEAwIHgDATBgNVHSUEDDAKBggrBgEFBQcDATAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEwHQYDVR0OBBYEFM3UTgErLg6p5+pv13yFNths9Lb9MB8GA1UdIwQYMBaAFKzJ36GY9x0+2bor86BZVX+U3mOLMAoGCCqGSM49BAMCA0gAMEUCIEmgwMiWttP7OvYXRkvPm/5c64vpxLLtT+Jg6E4g+OnYAiEAp742aGep2AEwIRP9YXI8RLjhaseLGUQT7R4AWFwnYZE=";
     const SMTP_TEST_KEY_DER_BASE64: &str = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg8ZClgJ8kAl4AVnA0D9d0PXx2siCJiOmjud/vD1NKSqehRANCAASUVFDZziq3vTfuJSyvN0qIOtL965GRDfPm4Kl+tiwVWF7eDh99zkgEtkNZIRQ/QQm/IQ46DkovVvLVkZgL935L";
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn native_fixture_ca_gate_is_exact_loopback_only_and_fail_closed() {
+        let ca = SMTP_TEST_CA_DER_BASE64.to_owned();
+        for host in ["127.0.0.1", "::1", "localhost"] {
+            assert_eq!(
+                native_mail_fixture_ca_der(host, Some("1"), Some(&ca))
+                    .unwrap()
+                    .unwrap(),
+                STANDARD.decode(&ca).unwrap()
+            );
+        }
+
+        for enabled in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("true"),
+            Some("01"),
+            Some("1 "),
+        ] {
+            assert!(native_mail_fixture_ca_der("127.0.0.1", enabled, Some(&ca))
+                .unwrap()
+                .is_none());
+        }
+        let non_loopback = native_mail_fixture_ca_der("smtp.example.test", Some("1"), Some(&ca))
+            .unwrap_err()
+            .to_string();
+        assert!(non_loopback.contains("only for loopback"));
+        assert!(native_mail_fixture_ca_der("127.0.0.1", Some("1"), None)
+            .unwrap_err()
+            .to_string()
+            .contains(NATIVE_MAIL_FIXTURE_CA_DER_ENV));
+        assert!(
+            native_mail_fixture_ca_der("127.0.0.1", Some("1"), Some("not-base64"))
+                .unwrap_err()
+                .to_string()
+                .contains("base64")
+        );
+        assert!(native_mail_fixture_ca_der(
+            "127.0.0.1",
+            Some("1"),
+            Some(&STANDARD.encode([1_u8, 2, 3]))
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("valid DER"));
+        assert!(native_mail_fixture_ca_der("127.0.0.1", Some("1"), Some(""))
+            .unwrap_err()
+            .to_string()
+            .contains("requires"));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn native_fixture_loopback_host_does_not_allow_lookalikes() {
+        for host in [
+            "localhost.",
+            "LOCALHOST",
+            "127.0.0.01",
+            "127.0.0.1.example.test",
+            "[::1]",
+            "::1.example.test",
+        ] {
+            assert!(!is_native_fixture_loopback_host(host), "{host}");
+        }
+    }
 
     fn smtp_test_acceptor() -> TlsAcceptor {
         let certificate = CertificateDer::from(STANDARD.decode(SMTP_TEST_CERT_DER_BASE64).unwrap());
@@ -11985,6 +15013,253 @@ mod tests {
             .with_single_cert(vec![certificate], key)
             .unwrap();
         TlsAcceptor::from(Arc::new(config))
+    }
+
+    fn provider_search_test_account(provider_id: &str, port: u16) -> Account {
+        let preset = provider::by_id(if provider_id == "imap" {
+            "fastmail"
+        } else {
+            provider_id
+        })
+        .unwrap();
+        let mut account = AccountDraft {
+            email: "reader@example.test".into(),
+            display_name: "Reader".into(),
+            provider_id: Some(preset.id.into()),
+            username: Some("reader@example.test".into()),
+            imap_host: Some("127.0.0.1".into()),
+            imap_port: Some(port),
+            imap_security: Some(Security::Tls),
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: Some("Archive".into()),
+            spam_mailbox: Some("Spam".into()),
+        }
+        .into_account(preset);
+        account.provider_id = provider_id.into();
+        account
+    }
+
+    #[derive(Clone)]
+    struct ProviderSearchMailboxFixture {
+        remote: &'static str,
+        flags: &'static str,
+        uid_validity: u32,
+        messages: Vec<(u32, &'static str)>,
+        fail_initial_select: bool,
+    }
+
+    async fn provider_search_select<S>(
+        connection: &mut BufReader<S>,
+        mailbox: &ProviderSearchMailboxFixture,
+    ) where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let (tag, command) = scripted_command(connection).await;
+        assert_eq!(command, format!("SELECT {}", quote_imap(mailbox.remote)));
+        if mailbox.fail_initial_select {
+            smtp_reply(connection, &format!("{tag} NO temporarily unavailable\r\n")).await;
+            return;
+        }
+        smtp_reply(
+            connection,
+            &format!(
+                "* {} EXISTS\r\n* OK [UIDVALIDITY {}] stable\r\n{tag} OK selected\r\n",
+                mailbox.messages.len(),
+                mailbox.uid_validity
+            ),
+        )
+        .await;
+    }
+
+    async fn provider_search_metadata<S>(
+        connection: &mut BufReader<S>,
+        account: &Account,
+        mailbox: &ProviderSearchMailboxFixture,
+        uid: u32,
+        subject: &str,
+    ) where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let (tag, command) = scripted_command(connection).await;
+        assert_eq!(command, format!("SELECT {}", quote_imap(mailbox.remote)));
+        smtp_reply(
+            connection,
+            &format!(
+                "* {} EXISTS\r\n* OK [UIDVALIDITY {}] stable\r\n{tag} OK selected\r\n",
+                mailbox.messages.len(),
+                mailbox.uid_validity
+            ),
+        )
+        .await;
+
+        let (tag, command) = scripted_command(connection).await;
+        assert_eq!(
+            command,
+            format!(
+                "UID FETCH {uid} ({})",
+                selective_metadata_fetch_fields(account)
+            )
+        );
+        let headers = format!(
+            "Date: Sun, 06 Sep 2026 10:00:00 +0000\r\nFrom: Sender <sender@example.test>\r\nTo: reader@example.test\r\nSubject: {subject}\r\nMessage-ID: <{uid}.{}@example.test>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n",
+            mailbox.remote.replace('/', ".")
+        );
+        let gmail_labels = if account.provider_id == "gmail" {
+            " X-GM-LABELS ()"
+        } else {
+            ""
+        };
+        smtp_reply(
+            connection,
+            &format!(
+                "* 1 FETCH (UID {uid} FLAGS () INTERNALDATE \"06-Sep-2026 10:00:00 +0000\"{gmail_labels} BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"UTF-8\") NIL NIL \"7BIT\" 5 1) BODY[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES CONTENT-TYPE CONTENT-TRANSFER-ENCODING LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)] {{{}}}\r\n",
+                headers.len()
+            ),
+        )
+        .await;
+        connection
+            .get_mut()
+            .write_all(headers.as_bytes())
+            .await
+            .unwrap();
+        smtp_reply(connection, &format!(")\r\n{tag} OK metadata\r\n")).await;
+    }
+
+    async fn scripted_provider_search_server(
+        listener: TcpListener,
+        account: Account,
+        criteria: String,
+        mailboxes: Vec<ProviderSearchMailboxFixture>,
+        cursor: crate::ProviderSearchCursor,
+        page_limit: usize,
+    ) -> Vec<String> {
+        let (stream, _) = listener.accept().await.unwrap();
+        let stream = smtp_test_acceptor().accept(stream).await.unwrap();
+        let mut connection = BufReader::new(stream);
+        let mut transcript = Vec::new();
+        smtp_reply(&mut connection, "* OK scripted provider ready\r\n").await;
+
+        let (tag, command) = scripted_command(&mut connection).await;
+        transcript.push(command.clone());
+        assert_eq!(command, "LOGIN \"reader@example.test\" \"search secret\"");
+        smtp_reply(&mut connection, &format!("{tag} OK authenticated\r\n")).await;
+
+        let (tag, command) = scripted_command(&mut connection).await;
+        transcript.push(command.clone());
+        assert_eq!(command, "LIST \"\" \"*\"");
+        for mailbox in &mailboxes {
+            smtp_reply(
+                &mut connection,
+                &format!(
+                    "* LIST ({}) \"/\" {}\r\n",
+                    mailbox.flags,
+                    quote_imap(mailbox.remote)
+                ),
+            )
+            .await;
+        }
+        smtp_reply(&mut connection, &format!("{tag} OK listed\r\n")).await;
+
+        let selectable_mailboxes = mailboxes
+            .iter()
+            .filter(|mailbox| !mailbox.flags.contains("\\Noselect"))
+            .collect::<Vec<_>>();
+        for mailbox in &selectable_mailboxes {
+            provider_search_select(&mut connection, mailbox).await;
+            transcript.push(format!("SELECT {}", quote_imap(mailbox.remote)));
+            if mailbox.fail_initial_select {
+                continue;
+            }
+            let (tag, command) = scripted_command(&mut connection).await;
+            transcript.push(command.clone());
+            assert_eq!(command, format!("UID SEARCH {criteria}"));
+            let uids = mailbox
+                .messages
+                .iter()
+                .map(|(uid, _)| uid.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+            smtp_reply(
+                &mut connection,
+                &format!("* SEARCH {uids}\r\n{tag} OK searched\r\n"),
+            )
+            .await;
+        }
+
+        let eligible = selectable_mailboxes
+            .iter()
+            .filter(|mailbox| !mailbox.fail_initial_select)
+            .map(|mailbox| {
+                let anchor = cursor.mailbox_last_uid.get(mailbox.remote).copied();
+                mailbox
+                    .messages
+                    .iter()
+                    .filter(|(uid, _)| anchor.is_none_or(|anchor| *uid < anchor))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let eligible_lengths = eligible.iter().map(Vec::len).collect::<Vec<_>>();
+        let non_empty_indexes = eligible_lengths
+            .iter()
+            .enumerate()
+            .filter_map(|(index, count)| (*count > 0).then_some(index))
+            .collect::<Vec<_>>();
+        let start = if page_limit < non_empty_indexes.len() {
+            cursor.mailbox_round_offset % non_empty_indexes.len()
+        } else {
+            0
+        };
+        let order = if page_limit < non_empty_indexes.len() {
+            fair_candidate_mailbox_order_for_indexes(&eligible_lengths, &non_empty_indexes, start)
+        } else {
+            fair_candidate_mailbox_order_from(&eligible_lengths, 0)
+        };
+        let mut emitted = 0;
+        let mut offsets = vec![0usize; eligible.len()];
+        for mailbox_index in order {
+            if emitted >= page_limit {
+                break;
+            }
+            let offset = offsets[mailbox_index];
+            let Some((uid, subject)) = eligible[mailbox_index].get(offset) else {
+                continue;
+            };
+            offsets[mailbox_index] += 1;
+            provider_search_metadata(
+                &mut connection,
+                &account,
+                selectable_mailboxes
+                    .iter()
+                    .filter(|mailbox| !mailbox.fail_initial_select)
+                    .nth(mailbox_index)
+                    .unwrap(),
+                *uid,
+                subject,
+            )
+            .await;
+            let mailbox = selectable_mailboxes
+                .iter()
+                .filter(|mailbox| !mailbox.fail_initial_select)
+                .nth(mailbox_index)
+                .unwrap();
+            transcript.push(format!("FETCH {}:{}", mailbox.remote, uid));
+            if subject.contains("Needle") {
+                emitted += 1;
+            }
+        }
+
+        let (tag, command) = scripted_command(&mut connection).await;
+        transcript.push(command.clone());
+        assert_eq!(command, "LOGOUT");
+        smtp_reply(
+            &mut connection,
+            &format!("* BYE done\r\n{tag} OK logout\r\n"),
+        )
+        .await;
+        transcript
     }
 
     fn smtp_test_account(security: Security, port: u16) -> Account {
@@ -12304,17 +15579,20 @@ mod tests {
             assert!(message.contains("plain body"));
             assert!(message.contains("HTML body"));
             smtp_reply(&mut connection, "250 2.0.0 queued as fixture-42\r\n").await;
+            message
         });
 
-        let service = MailService::new(Store::in_memory().await.unwrap());
+        let store = Store::in_memory().await.unwrap();
         let endpoint = smtp_test_endpoint(&transport_account);
         let mut gmail = transport_account;
         // The exact production Gmail submission host is the provider contract
         // that prevents a second IMAP APPEND after SMTP accepts the message.
         gmail.smtp_host = "smtp.gmail.com".into();
+        store.save_account(&gmail).await.unwrap();
+        let service = MailService::new(store.clone());
         let draft = ComposeMessage {
             account_id: gmail.id,
-            to: vec!["recipient@example.test".into()],
+            to: vec!["Recipient Name <recipient@example.test>".into()],
             cc: Vec::new(),
             bcc: Vec::new(),
             subject: "MailService transcript".into(),
@@ -12328,8 +15606,347 @@ mod tests {
             .send_with_smtp_endpoint(&gmail, &draft, "secret", endpoint, Duration::from_secs(1))
             .await
             .unwrap();
-        server.await.unwrap();
+        let accepted_raw = server.await.unwrap();
         assert!(response.contains("queued as fixture-42"));
+        let people = store
+            .suggest_contacted_people("recipient", Some(gmail.id))
+            .await
+            .unwrap();
+        assert_eq!(people.len(), 1);
+        assert_eq!(people[0].address, "recipient@example.test");
+        assert_eq!(people[0].display_name.as_deref(), Some("Recipient Name"));
+
+        // The server's future Sent catalogue row has the Message-ID from the
+        // exact accepted bytes. It must mark the source as seen, but must not
+        // increase the SMTP-learned count a second time.
+        let sent_copy = parse_catalog_message(
+            &gmail,
+            "Sent",
+            42,
+            &[],
+            accepted_raw.as_bytes(),
+            String::new(),
+        )
+        .expect("the exact SMTP-accepted bytes must catalogue as Sent mail");
+        assert_eq!(
+            sent_copy.message_id.as_deref(),
+            outgoing_rfc_message_id(accepted_raw.as_bytes()).as_deref(),
+            "the Sent catalogue row must retain the exact accepted Message-ID"
+        );
+        store.upsert_messages(&[sent_copy]).await.unwrap();
+        store
+            .backfill_contacted_people_from_sent(gmail.id, &[gmail.email.clone()], 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .suggest_contacted_people("recipient", Some(gmail.id))
+                .await
+                .unwrap()[0]
+                .send_count,
+            1,
+            "the later Sent copy must not double-count an SMTP-accepted recipient"
+        );
+    }
+
+    #[tokio::test]
+    async fn smtp_accepted_message_records_people_even_when_sent_append_fails() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let transport_account =
+            smtp_test_account(Security::Tls, listener.local_addr().unwrap().port());
+        let acceptor = smtp_test_acceptor();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let stream = acceptor.accept(stream).await.unwrap();
+            let mut connection = BufReader::new(stream);
+            smtp_reply(&mut connection, "220 localhost ready\r\n").await;
+            smtp_expect_ehlo_and_auth(&mut connection, false).await;
+            smtp_expect_envelope_until_data(&mut connection).await;
+            let _ = smtp_read_message(&mut connection).await;
+            smtp_reply(&mut connection, "250 2.0.0 queued as fixture-accepted\r\n").await;
+        });
+
+        // Reserve then release a loopback port so the optional IMAP Sent
+        // append fails immediately after the SMTP relay accepts the message.
+        let unavailable_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unavailable_imap_port = unavailable_listener.local_addr().unwrap().port();
+        drop(unavailable_listener);
+
+        let mut account = transport_account.clone();
+        account.imap_host = "127.0.0.1".into();
+        account.imap_port = unavailable_imap_port;
+        let store = Store::in_memory().await.unwrap();
+        store.save_account(&account).await.unwrap();
+        let draft = ComposeMessage {
+            account_id: account.id,
+            to: vec!["Recipient Name <recipient@example.test>".into()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "Sent append failure".into(),
+            body_text: "plain body".into(),
+            body_html: None,
+            in_reply_to: None,
+            references: None,
+            attachments: Vec::new(),
+        };
+
+        let error = MailService::new(store.clone())
+            .send_with_smtp_endpoint(
+                &account,
+                &draft,
+                "secret",
+                smtp_test_endpoint(&transport_account),
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        assert!(
+            error.to_string().contains("could not be saved"),
+            "{error:#}"
+        );
+        assert_eq!(
+            store
+                .suggest_contacted_people("recipient", Some(account.id))
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "SMTP acceptance must be recorded before an optional Sent APPEND"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_smtp_message_does_not_record_people() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let transport_account =
+            smtp_test_account(Security::Tls, listener.local_addr().unwrap().port());
+        let acceptor = smtp_test_acceptor();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let stream = acceptor.accept(stream).await.unwrap();
+            let mut connection = BufReader::new(stream);
+            smtp_reply(&mut connection, "220 localhost ready\r\n").await;
+            smtp_expect_ehlo_and_auth(&mut connection, false).await;
+            assert_eq!(
+                smtp_command(&mut connection).await,
+                "MAIL FROM:<sender@example.test>\r\n"
+            );
+            smtp_reply(&mut connection, "250 2.1.0 sender accepted\r\n").await;
+            assert_eq!(
+                smtp_command(&mut connection).await,
+                "RCPT TO:<recipient@example.test>\r\n"
+            );
+            smtp_reply(&mut connection, "550 5.1.1 no such recipient\r\n").await;
+        });
+
+        let mut account = transport_account.clone();
+        // Avoid a Sent APPEND if a future fixture accidentally accepts the
+        // message. The local endpoint remains authoritative for this test.
+        account.smtp_host = "smtp.gmail.com".into();
+        let store = Store::in_memory().await.unwrap();
+        store.save_account(&account).await.unwrap();
+        let draft = ComposeMessage {
+            account_id: account.id,
+            to: vec!["Recipient Name <recipient@example.test>".into()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "Rejected recipient".into(),
+            body_text: "plain body".into(),
+            body_html: None,
+            in_reply_to: None,
+            references: None,
+            attachments: Vec::new(),
+        };
+
+        let error = MailService::new(store.clone())
+            .send_with_smtp_endpoint(
+                &account,
+                &draft,
+                "secret",
+                smtp_test_endpoint(&transport_account),
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        assert!(error.to_string().contains("550"), "{error:#}");
+        assert!(
+            store
+                .suggest_contacted_people("recipient", Some(account.id))
+                .await
+                .unwrap()
+                .is_empty(),
+            "a rejected SMTP transaction must not become autocomplete history"
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_autocomplete_does_not_record_accepted_recipients() {
+        let store = Store::in_memory().await.unwrap();
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        store
+            .set_autocomplete_suggestions_enabled(false)
+            .await
+            .unwrap();
+        let draft = ComposeMessage {
+            account_id: account.id,
+            to: vec!["Recipient Name <recipient@example.test>".into()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "Disabled autocomplete".into(),
+            body_text: "plain body".into(),
+            body_html: None,
+            in_reply_to: None,
+            references: None,
+            attachments: Vec::new(),
+        };
+        let email = build_compose_message(&account, &draft).unwrap();
+        let raw = email.formatted();
+        let accepted_sequence = store
+            .reserve_contacted_people_action_sequence()
+            .await
+            .unwrap();
+        MailService::new(store.clone())
+            .record_accepted_outgoing_recipients(
+                &account,
+                &draft,
+                email.envelope(),
+                outgoing_rfc_message_id(&raw).as_deref(),
+                Some(accepted_sequence),
+            )
+            .await;
+
+        assert!(store
+            .suggest_contacted_people("recipient", Some(account.id))
+            .await
+            .unwrap()
+            .is_empty());
+
+        // The provider copy arrives after collection is re-enabled and after
+        // the trusted Sent cutoff. It must still be suppressed because SMTP
+        // accepted this Message-ID while collection was disabled.
+        store
+            .set_autocomplete_suggestions_enabled(true)
+            .await
+            .unwrap();
+        store
+            .capture_contacted_people_sent_provider_cutoff(account.id, "Sent", 77, 0)
+            .await
+            .unwrap();
+        store
+            .save_mailbox_catalog_state(account.id, "Sent", "Sent", 77, 1, true)
+            .await
+            .unwrap();
+        let mut provider_copy = message("Provider Sent copy", "preview");
+        provider_copy.account_id = account.id.to_string();
+        provider_copy.id = stable_message_id(account.id, "Sent", 1);
+        provider_copy.thread_id = provider_copy.id.clone();
+        provider_copy.mailbox = "Sent".into();
+        provider_copy.uid = 1;
+        provider_copy.message_id = outgoing_rfc_message_id(&raw);
+        provider_copy.to_addresses = "Recipient Name <recipient@example.test>".into();
+        provider_copy.cc_addresses.clear();
+        provider_copy.bcc_addresses.clear();
+        store.upsert_messages(&[provider_copy]).await.unwrap();
+        assert_eq!(
+            store
+                .backfill_contacted_people_from_sent(account.id, &[], 10)
+                .await
+                .unwrap()
+                .changed_people,
+            0
+        );
+        assert!(store
+            .suggest_contacted_people("recipient", Some(account.id))
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn clear_after_send_initiation_wins_when_smtp_acceptance_arrives_later() {
+        let store = Store::in_memory().await.unwrap();
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        let draft = ComposeMessage {
+            account_id: account.id,
+            to: vec!["Recipient Name <recipient@example.test>".into()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "Causal autocomplete".into(),
+            body_text: "plain body".into(),
+            body_html: None,
+            in_reply_to: None,
+            references: None,
+            attachments: Vec::new(),
+        };
+        let email = build_compose_message(&account, &draft).unwrap();
+        let raw = email.formatted();
+        // Sending begins by reserving a causal position before SMTP. The user
+        // clears history while the relay is still processing DATA, then its
+        // later 250 response starts local learning.
+        let send_initiated_sequence = store
+            .reserve_contacted_people_action_sequence()
+            .await
+            .unwrap();
+        store.clear_contacted_people().await.unwrap();
+
+        MailService::new(store.clone())
+            .record_accepted_outgoing_recipients(
+                &account,
+                &draft,
+                email.envelope(),
+                outgoing_rfc_message_id(&raw).as_deref(),
+                Some(send_initiated_sequence),
+            )
+            .await;
+
+        assert!(
+            store
+                .suggest_contacted_people("recipient", Some(account.id))
+                .await
+                .unwrap()
+                .is_empty(),
+            "a later clear must not be resurrected by deferred accepted-send learning"
+        );
+
+        // The Sent SELECT's cutoff can be captured before the provider copy
+        // is catalogued. The copy is newer than that cutoff, but it still
+        // represents the SMTP-accepted message that Clear deliberately hid.
+        store
+            .capture_contacted_people_sent_provider_cutoff(account.id, "Sent", 88, 0)
+            .await
+            .unwrap();
+        store
+            .save_mailbox_catalog_state(account.id, "Sent", "Sent", 88, 1, true)
+            .await
+            .unwrap();
+        let mut provider_copy = message("Provider Sent copy after Clear", "preview");
+        provider_copy.account_id = account.id.to_string();
+        provider_copy.id = stable_message_id(account.id, "Sent", 1);
+        provider_copy.thread_id = provider_copy.id.clone();
+        provider_copy.mailbox = "Sent".into();
+        provider_copy.uid = 1;
+        provider_copy.message_id = outgoing_rfc_message_id(&raw);
+        provider_copy.to_addresses = "Recipient Name <recipient@example.test>".into();
+        provider_copy.cc_addresses.clear();
+        provider_copy.bcc_addresses.clear();
+        store.upsert_messages(&[provider_copy]).await.unwrap();
+        assert_eq!(
+            store
+                .backfill_contacted_people_from_sent(account.id, &[], 10)
+                .await
+                .unwrap()
+                .changed_people,
+            0
+        );
+        assert!(store
+            .suggest_contacted_people("recipient", Some(account.id))
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     fn test_account() -> Account {
@@ -12389,6 +16006,21 @@ mod tests {
             error.to_string().contains("OAuth authentication failed"),
             "{error:#}"
         );
+    }
+
+    fn message(subject: &str, body: &str) -> MailSummary {
+        let headers = format!(
+            "Date: Wed, 30 Jul 2026 10:00:00 +0000\r\nFrom: Sender <sender@example.test>\r\nTo: reader@example.test\r\nSubject: {subject}\r\nMessage-ID: <fixture@example.test>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"
+        );
+        parse_catalog_message(
+            &test_account(),
+            "INBOX",
+            1,
+            &["* 1 FETCH (UID 1 FLAGS ())".into()],
+            headers.as_bytes(),
+            body.into(),
+        )
+        .expect("test message")
     }
 
     fn mime_corpus(name: &str) -> &'static [u8] {
@@ -12915,6 +16547,243 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_search_fetches_text_past_the_catalogue_snippet_before_post_filtering() {
+        let account = test_account();
+        let body = format!("{}needle café phrase", "ordinary text ".repeat(900));
+        assert!(
+            body.len() > 8 * 1024,
+            "fixture must exceed the old snippet bound"
+        );
+        let raw = format!(
+            "Date: Tue, 08 Sep 2026 09:00:00 +0000\r\nFrom: Sender <sender@example.test>\r\nTo: reader@example.test\r\nSubject: Long body\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{body}"
+        );
+        let fixture = fixture_imap_message(raw.as_bytes()).unwrap();
+        let structure = parse_bodystructure(&[format!(
+            "* 1 FETCH (UID 91 BODYSTRUCTURE {})",
+            fixture.bodystructure
+        )])
+        .unwrap();
+        let (client_transport, server_transport) = duplex(MAX_RAW_MESSAGE_BYTES.min(1024 * 1024));
+        let server = tokio::spawn(serve_fixture_selective_sections(
+            server_transport,
+            91,
+            fixture.sections,
+        ));
+        let mut client = ImapClient {
+            reader: BufReader::new(client_transport),
+            tag: 0,
+        };
+        let fetched =
+            fetch_searchable_text_parts(&mut client, 91, &fixture.root_headers, &structure, None)
+                .await
+                .unwrap();
+        drop(client);
+        let served = server.await.unwrap().unwrap();
+        assert!(
+            served.contains("TEXT"),
+            "provider transcript must fetch text"
+        );
+        assert!(fetched.ends_with("needle café phrase"));
+
+        let mut message = parse_catalog_message(
+            &account,
+            "INBOX",
+            91,
+            &["* 1 FETCH (UID 91 FLAGS ())".into()],
+            &fixture.root_headers,
+            clean_snippet(&fetched),
+        )
+        .unwrap();
+        assert!(
+            !message.snippet.contains("needle café phrase"),
+            "the regression must put the matching phrase outside the snippet"
+        );
+        message.body_text = fetched;
+        assert!(canonical_remote_search_match(
+            &parse_search_query("\"needle café phrase\"").unwrap(),
+            &message
+        ));
+    }
+
+    #[test]
+    fn provider_search_only_requires_text_fetch_for_body_dependent_expressions() {
+        for query in [
+            "from:sender@example.test is:unread after:2026-01-01",
+            "subject:invoice filename:report.pdf filetype:pdf",
+            "in:Projects/* has:attachment",
+        ] {
+            assert!(
+                !expression_requires_authoritative_body(&parse_search_query(query).unwrap()),
+                "{query} must remain publishable from authoritative metadata when text FETCH fails"
+            );
+        }
+        for query in [
+            "body:invoice",
+            "invoice",
+            "subject:invoice OR body:receipt",
+            "NOT body:spam",
+        ] {
+            assert!(
+                expression_requires_authoritative_body(&parse_search_query(query).unwrap()),
+                "{query} is ambiguous without complete body text and must report partial coverage"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_folder_predicates_override_legacy_provider_mailbox_narrowing() {
+        for query in [
+            "in:Sent",
+            "in:*",
+            "in:Projects/*",
+            "(from:person@example.test OR in:Spam)",
+        ] {
+            assert!(
+                expression_has_folder_predicate(&parse_search_query(query).unwrap()),
+                "{query} must search the expression-selected folders rather than an ambient Inbox"
+            );
+        }
+        assert!(!expression_has_folder_predicate(
+            &parse_search_query("from:person@example.test").unwrap()
+        ));
+    }
+
+    #[test]
+    fn header_only_provider_candidate_survives_missing_bodystructure_but_attachment_search_is_partial(
+    ) {
+        let account = test_account();
+        let message = parse_catalog_message(
+            &account,
+            "INBOX",
+            88,
+            &["* 1 FETCH (UID 88 FLAGS (\\Seen) BODYSTRUCTURE malformed)".into()],
+            b"Date: Tue, 08 Sep 2026 09:00:00 +0000\r\nFrom: Sender <sender@example.test>\r\nSubject: Invoice statement\r\n\r\n",
+            String::new(),
+        )
+        .unwrap();
+        let subject = parse_search_query("subject:invoice is:read").unwrap();
+        assert!(!expression_requires_authoritative_body(&subject));
+        assert!(!expression_requires_attachment_metadata(&subject));
+        assert!(canonical_remote_search_match(&subject, &message));
+
+        let attachment = parse_search_query("has:attachment").unwrap();
+        assert!(expression_requires_attachment_metadata(&attachment));
+        let mut coverage = vec![ProviderMailboxSearchCoverage {
+            mailbox: "INBOX".into(),
+            state: ProviderMailboxSearchState::Searched,
+        }];
+        mark_provider_mailbox_coverage(&mut coverage, "INBOX", ProviderMailboxSearchState::Partial);
+        assert_eq!(coverage.len(), 1);
+        assert_eq!(coverage[0].state, ProviderMailboxSearchState::Partial);
+    }
+
+    #[test]
+    fn candidate_stage_failures_replace_searched_coverage_instead_of_hiding_them() {
+        let mut coverage = vec![ProviderMailboxSearchCoverage {
+            mailbox: "Projects/2026".into(),
+            state: ProviderMailboxSearchState::Searched,
+        }];
+        for state in [
+            ProviderMailboxSearchState::Offline,
+            ProviderMailboxSearchState::MailboxChanged,
+            ProviderMailboxSearchState::Partial,
+        ] {
+            mark_provider_mailbox_coverage(&mut coverage, "Projects/2026", state);
+            assert_eq!(coverage.len(), 1);
+            assert_eq!(coverage[0].state, state);
+        }
+    }
+
+    #[test]
+    fn tagged_ok_candidate_with_unusable_headers_or_date_is_partial_not_searched() {
+        let account = test_account();
+        let parse = parse_catalog_message(
+            &account,
+            "INBOX",
+            89,
+            &[
+                "* 1 FETCH (UID 89 FLAGS ())".into(),
+                "A14 OK FETCH completed".into(),
+            ],
+            b"From: Sender <sender@example.test>\r\nSubject: Missing Date\r\n\r\n",
+            String::new(),
+        );
+        assert!(
+            parse.is_err(),
+            "the transcript lacks both Date and INTERNALDATE"
+        );
+        let mut coverage = vec![ProviderMailboxSearchCoverage {
+            mailbox: "INBOX".into(),
+            state: ProviderMailboxSearchState::Searched,
+        }];
+        mark_provider_mailbox_coverage(&mut coverage, "INBOX", ProviderMailboxSearchState::Partial);
+        assert_eq!(coverage[0].state, ProviderMailboxSearchState::Partial);
+    }
+
+    #[tokio::test]
+    async fn provider_search_text_hydration_never_becomes_a_complete_reader_cache() {
+        let account = test_account();
+        let store = Store::in_memory().await.unwrap();
+        let mut message = parse_catalog_message(
+            &account,
+            "INBOX",
+            92,
+            &["* 1 FETCH (UID 92 FLAGS () BODYSTRUCTURE ((\"TEXT\" \"HTML\" (\"CHARSET\" \"UTF-8\") NIL NIL \"7BIT\" 24 1 NIL NIL) (\"APPLICATION\" \"PDF\" (\"NAME\" \"invoice.pdf\") NIL NIL \"BASE64\" 12 NIL (\"ATTACHMENT\" (\"FILENAME\" \"invoice.pdf\"))) \"MIXED\" NIL NIL NIL))".into()],
+            b"Date: Tue, 08 Sep 2026 09:00:00 +0000\r\nFrom: Sender <sender@example.test>\r\nTo: reader@example.test\r\nSubject: Rich message\r\n\r\n",
+            "plain search projection".into(),
+        )
+        .unwrap();
+        assert!(message.attachments.iter().any(|attachment| {
+            attachment.attachment.filename == "invoice.pdf"
+                && attachment.attachment.presentation.is_downloadable()
+        }));
+        message.body_text = "text fetched only for canonical search".into();
+        store
+            .upsert_catalog_messages(&[message.clone()])
+            .await
+            .unwrap();
+        assert!(
+            store.cached_message_content(&message.id).await.unwrap().is_none(),
+            "a search-only text projection must not make opening this HTML/attachment message use a downgraded reader cache"
+        );
+        assert_ne!(
+            store
+                .message(&message.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .content_state,
+            "complete"
+        );
+        assert!(
+            store
+                .cache_search_body_text(&message.id, &message.body_text)
+                .await
+                .unwrap(),
+            "the provider's canonical text must be available to a later local page"
+        );
+        assert_eq!(
+            store
+                .search(&SearchQuery {
+                    text: "body:canonical".into(),
+                    account_ids: vec![account.id],
+                    limit: Some(10),
+                    ..SearchQuery::default()
+                })
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "a remote body-only hit must join subsequent local pagination"
+        );
+        assert!(store
+            .cached_message_content(&message.id)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn every_mime_corpus_fixture_uses_all_publication_parse_paths() {
         let account = test_account();
         let cases = [
@@ -13178,6 +17047,208 @@ mod tests {
             metadata[0].size_bytes,
             message.attachments[0].attachment.size_bytes
         );
+    }
+
+    #[test]
+    fn provider_scope_excludes_spam_trash_by_default_and_explicit_folder_syntax_overrides() {
+        let spam = SearchMailboxPlan {
+            id: "spam-id".into(),
+            remote: "Spam".into(),
+            local: "Spam".into(),
+            storage: "Spam".into(),
+            skip_gmail_system_labels: false,
+            hierarchy_delimiter: Some("/".into()),
+            parent_path: None,
+            special_use: Some("\\Junk".into()),
+            selectable: true,
+        };
+        let plain = parse_search_query("from:person@example.test").unwrap();
+        assert!(
+            !provider_search_plan_is_in_scope(
+                &spam,
+                None,
+                false,
+                expression_explicitly_includes_provider_mailbox(&plain, &spam),
+            ),
+            "default hybrid scope must not SELECT Spam"
+        );
+        assert!(provider_search_plan_is_in_scope(
+            &spam,
+            None,
+            true,
+            expression_explicitly_includes_provider_mailbox(&plain, &spam),
+        ));
+        for (ambient, expected) in [
+            (Some("Inbox"), false),
+            (Some("Archive"), false),
+            (Some("Spam"), true),
+            (Some("spam"), true),
+            (Some("Trash"), false),
+            (None, false),
+        ] {
+            assert_eq!(
+                provider_search_plan_is_in_scope(&spam, ambient, false, false),
+                expected,
+                "ambient {ambient:?} must {}select this Spam plan",
+                if expected { "" } else { "not " },
+            );
+        }
+        let trash = SearchMailboxPlan {
+            id: "trash-id".into(),
+            remote: "Trash".into(),
+            local: "Trash".into(),
+            storage: "Trash".into(),
+            skip_gmail_system_labels: false,
+            hierarchy_delimiter: Some("/".into()),
+            parent_path: None,
+            special_use: Some("\\Trash".into()),
+            selectable: true,
+        };
+        assert!(provider_search_plan_is_in_scope(
+            &trash,
+            Some("Trash"),
+            false,
+            false,
+        ));
+        for query in ["in:Spam", "in:spam", "in:*"] {
+            let expression = parse_search_query(query).unwrap();
+            assert!(
+                provider_search_plan_is_in_scope(
+                    &spam,
+                    None,
+                    false,
+                    expression_explicitly_includes_provider_mailbox(&expression, &spam),
+                ),
+                "{query} must override default and ambient folder exclusion"
+            );
+        }
+        for query in ["in:Trash", "in:TRASH", "in:*"] {
+            let expression = parse_search_query(query).unwrap();
+            assert!(
+                provider_search_plan_is_in_scope(
+                    &trash,
+                    None,
+                    false,
+                    expression_explicitly_includes_provider_mailbox(&expression, &trash),
+                ),
+                "{query} must override default Trash exclusion"
+            );
+        }
+        for query in ["NOT in:Sent", "(in:Inbox OR subject:invoice)"] {
+            let expression = parse_search_query(query).unwrap();
+            assert!(expression_has_folder_predicate(&expression), "{query}");
+            assert!(
+                !expression_explicitly_includes_provider_mailbox(&expression, &spam),
+                "{query} has no positive selection for this Spam plan"
+            );
+            assert!(
+                !provider_search_plan_is_in_scope(
+                    &spam,
+                    None,
+                    false,
+                    expression_explicitly_includes_provider_mailbox(&expression, &spam),
+                ),
+                "{query} must retain default Spam exclusion"
+            );
+        }
+
+        let bulk_alias = SearchMailboxPlan {
+            id: "bulk-id".into(),
+            remote: "Spam::Bulk".into(),
+            local: "Bulk".into(),
+            storage: "Spam::Bulk".into(),
+            skip_gmail_system_labels: false,
+            hierarchy_delimiter: Some("::".into()),
+            parent_path: Some("Spam".into()),
+            special_use: Some("\\Junk".into()),
+            selectable: true,
+        };
+        for query in ["in:\"Bulk\"", "in:\"Spam::Bulk\"", "in:*"] {
+            let expression = parse_search_query(query).unwrap();
+            assert!(
+                expression_explicitly_includes_provider_mailbox(&expression, &bulk_alias),
+                "{query} must opt into the resolved Junk/Bulk mailbox"
+            );
+            assert!(provider_search_plan_is_in_scope(
+                &bulk_alias,
+                None,
+                false,
+                expression_explicitly_includes_provider_mailbox(&expression, &bulk_alias),
+            ));
+        }
+        for query in ["NOT in:\"Bulk\"", "(in:Inbox OR subject:invoice)"] {
+            let expression = parse_search_query(query).unwrap();
+            assert!(
+                !expression_explicitly_includes_provider_mailbox(&expression, &bulk_alias),
+                "{query} must not opt into a Junk/Bulk mailbox"
+            );
+        }
+        assert!(provider_search_plan_is_in_scope(
+            &bulk_alias,
+            Some("Bulk"),
+            false,
+            false,
+        ));
+        assert!(provider_search_plan_is_in_scope(
+            &bulk_alias,
+            Some("Spam::Bulk"),
+            false,
+            false,
+        ));
+
+        // This is the form produced by special-use resolution: the provider
+        // calls the folder `Bulk`, while the local catalogue keeps the opaque
+        // role-qualified identity `Spam::Bulk`. The visible alias must still
+        // opt into this Junk mailbox.
+        let resolved_bulk_alias = SearchMailboxPlan {
+            id: "resolved-bulk-id".into(),
+            remote: "Bulk".into(),
+            local: "Spam".into(),
+            storage: "Spam::Bulk".into(),
+            skip_gmail_system_labels: false,
+            hierarchy_delimiter: Some("/".into()),
+            parent_path: None,
+            special_use: Some("\\Junk".into()),
+            selectable: true,
+        };
+        let expression = parse_search_query("in:\"Bulk\"").unwrap();
+        assert!(expression_explicitly_includes_provider_mailbox(
+            &expression,
+            &resolved_bulk_alias,
+        ));
+        assert!(provider_search_plan_is_in_scope(
+            &resolved_bulk_alias,
+            None,
+            false,
+            expression_explicitly_includes_provider_mailbox(&expression, &resolved_bulk_alias),
+        ));
+
+        // The canonical evaluator folds Unicode case and common Latin
+        // diacritics for visible mailbox aliases. Provider planning must make
+        // the same selection, otherwise an explicit search can be correct in
+        // the local catalogue but silently skip the remote mailbox.
+        let unicode_sent_alias = SearchMailboxPlan {
+            id: "unicode-sent-id".into(),
+            remote: "Sént Items".into(),
+            local: "Sent".into(),
+            storage: "Sent::Sént Items".into(),
+            skip_gmail_system_labels: false,
+            hierarchy_delimiter: Some("/".into()),
+            parent_path: None,
+            special_use: Some("\\Sent".into()),
+            selectable: true,
+        };
+        let expression = parse_search_query("in:\"sent items\"").unwrap();
+        assert!(expression_explicitly_includes_provider_mailbox(
+            &expression,
+            &unicode_sent_alias,
+        ));
+        assert!(provider_search_plan_is_in_scope(
+            &unicode_sent_alias,
+            Some("SENT ITEMS"),
+            false,
+            false,
+        ));
     }
 
     #[tokio::test]
@@ -13716,6 +17787,41 @@ mod tests {
     }
 
     #[test]
+    fn catalogue_classifies_inline_and_downloadable_siblings_per_part() {
+        let raw = b"Date: Tue, 21 Jul 2026 10:00:00 +0000\r\nSubject: Mixed attachments\r\n\r\n";
+        let message = parse_catalog_message(
+            &test_account(),
+            "INBOX",
+            3,
+            &["* 3 FETCH (BODYSTRUCTURE ((\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 4 1) (\"IMAGE\" \"PNG\" NIL \"logo.png\" NIL \"BASE64\" 4 NIL (\"INLINE\" (\"FILENAME\" \"logo.png\"))) (\"APPLICATION\" \"PDF\" NIL \"claim.pdf\" NIL \"BASE64\" 3 NIL (\"ATTACHMENT\" (\"FILENAME\" \"claim.pdf\"))) \"MIXED\"))".into()],
+            raw,
+            String::new(),
+        )
+        .unwrap();
+
+        assert!(message.has_attachments);
+        assert_eq!(message.attachments.len(), 2);
+        let logo = message
+            .attachments
+            .iter()
+            .find(|attachment| attachment.attachment.filename == "logo.png")
+            .unwrap();
+        assert_eq!(
+            logo.attachment.presentation,
+            AttachmentPresentation::Embedded
+        );
+        let pdf = message
+            .attachments
+            .iter()
+            .find(|attachment| attachment.attachment.filename == "claim.pdf")
+            .unwrap();
+        assert_eq!(
+            pdf.attachment.presentation,
+            AttachmentPresentation::Downloadable
+        );
+    }
+
+    #[test]
     fn missing_recipient_headers_remain_empty_without_fallbacks() {
         let account = test_account();
         let message = parse_header_message(
@@ -13902,7 +18008,10 @@ mod tests {
         gmail.archive_mailbox = "[Gmail]/All Mail".into();
         let plans = refresh_main_mailbox_plans(mailbox_plans(&gmail));
         assert_eq!(
-            plans.iter().map(|plan| plan.local).collect::<Vec<_>>(),
+            plans
+                .iter()
+                .map(|plan| plan.local.as_str())
+                .collect::<Vec<_>>(),
             vec!["INBOX", "Sent", "Archive"]
         );
         assert_eq!(plans[1].remote, "[Gmail]/Sent Mail");
@@ -14580,21 +18689,25 @@ mod tests {
             ],
             literals: vec![
                 ImapLiteral {
+                    line_index: 0,
                     uid: Some(1),
                     data_item: ImapLiteralItem::BodyStructure,
                     bytes: b"claim-documents.pdf".to_vec(),
                 },
                 ImapLiteral {
+                    line_index: 1,
                     uid: Some(1),
                     data_item: ImapLiteralItem::BodyStructure,
                     bytes: b"claim-documents.pdf".to_vec(),
                 },
                 ImapLiteral {
+                    line_index: 2,
                     uid: Some(1),
                     data_item: ImapLiteralItem::Body("BODY[HEADER.FIELDS (SUBJECT)]".into()),
                     bytes: b"Subject: Test\r\n\r\n".to_vec(),
                 },
                 ImapLiteral {
+                    line_index: 3,
                     uid: Some(1),
                     data_item: ImapLiteralItem::Body("BODY[1]".into()),
                     bytes: b"body".to_vec(),
@@ -14627,11 +18740,13 @@ mod tests {
             ],
             literals: vec![
                 ImapLiteral {
+                    line_index: 0,
                     uid: Some(1),
                     data_item: ImapLiteralItem::Body("BODY[HEADER.FIELDS (SUBJECT)]".into()),
                     bytes: b"Subject: Test\r\n\r\n".to_vec(),
                 },
                 ImapLiteral {
+                    line_index: 1,
                     uid: Some(1),
                     data_item: ImapLiteralItem::BodyStructure,
                     bytes: b"claim-documents.pdf".to_vec(),
@@ -14655,6 +18770,7 @@ mod tests {
                 " BODYSTRUCTURE (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 4 1))\r\n".into(),
             ],
             literals: vec![ImapLiteral {
+                line_index: 0,
                 uid: Some(42),
                 data_item: ImapLiteralItem::Body("BODY[HEADER.FIELDS (SUBJECT)]".into()),
                 bytes: b"Subject: BODYSTRUCTURE\r\n\r\n".to_vec(),
@@ -14684,16 +18800,19 @@ mod tests {
             lines: vec![],
             literals: vec![
                 ImapLiteral {
+                    line_index: 0,
                     uid: Some(7),
                     data_item: ImapLiteralItem::Body("BODY[1]".into()),
                     bytes: b"unsolicited-other-message".to_vec(),
                 },
                 ImapLiteral {
+                    line_index: 0,
                     uid: Some(42),
                     data_item: ImapLiteralItem::Body("BODY[2]".into()),
                     bytes: b"unsolicited-other-section".to_vec(),
                 },
                 ImapLiteral {
+                    line_index: 0,
                     uid: Some(42),
                     data_item: ImapLiteralItem::Body("BODY[1]".into()),
                     bytes: b"requested".to_vec(),
@@ -14708,6 +18827,92 @@ mod tests {
         assert_eq!(
             fetch_uid_from_line("* 3 FETCH (UID 42 BODY[1] {9}\r\n"),
             Some(42)
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_list_preserves_literal_mailbox_identity_and_display_paths() {
+        let (mut client, server) = plain_imap_client_and_server().await;
+        let server = tokio::spawn(async move {
+            let (read, mut write) = server.into_split();
+            let mut read = BufReader::new(read);
+            let (tag, command) = scripted_command(&mut read).await;
+            assert_eq!(command, "LIST \"\" \"*\"");
+
+            let sync_name = b"&ZeVnLIqe-";
+            let unicode_name = "Földer".as_bytes();
+            let invalid_name = [0xff, 0xfe];
+            let sync_marker = format!(
+                "* LIST (\\HasNoChildren \\Sent) \"/\" {{{}}}\r\n",
+                sync_name.len()
+            );
+            let non_sync_marker = format!(
+                "* LIST (\\HasNoChildren) \".\" {{{}+}}\r\n",
+                unicode_name.len()
+            );
+            let invalid_marker = format!(
+                "* LIST (\\HasNoChildren) \"/\" {{{}+}}\r\n",
+                invalid_name.len()
+            );
+            let completed = format!("{tag} OK LIST complete\r\n");
+            write_transcript_fragments(
+                &mut write,
+                &[
+                    b"* LIST (\\HasNoChildren) \"/\" \"Projects/&ZeVnLIqe-\"\r\n",
+                    b"* LIST (\\HasNoChildren) \".\" Archive\r\n",
+                    sync_marker.as_bytes(),
+                    sync_name,
+                    b"\r\n",
+                    non_sync_marker.as_bytes(),
+                    unicode_name,
+                    b"\r\n",
+                    invalid_marker.as_bytes(),
+                    &invalid_name,
+                    b"\r\n",
+                    completed.as_bytes(),
+                ],
+            )
+            .await;
+        });
+
+        let response = client
+            .command_with_literal("LIST \"\" \"*\"")
+            .await
+            .unwrap();
+        server.await.unwrap();
+        let mailboxes = parse_list_mailbox_details_from_response(&response);
+
+        assert_eq!(
+            mailboxes.len(),
+            4,
+            "invalid literal bytes must stay private"
+        );
+        assert_eq!(mailboxes[0].remote, "Projects/&ZeVnLIqe-");
+        assert_eq!(mailboxes[0].delimiter.as_deref(), Some("/"));
+        assert_eq!(
+            canonical_local_mailbox_path(&mailboxes[0].remote, mailboxes[0].delimiter.as_deref()),
+            "Projects/日本語"
+        );
+        assert_eq!(mailboxes[1].remote, "Archive");
+        assert_eq!(mailboxes[1].delimiter.as_deref(), Some("."));
+        assert_eq!(mailboxes[2].remote, "&ZeVnLIqe-");
+        assert_eq!(mailboxes[2].delimiter.as_deref(), Some("/"));
+        assert_eq!(
+            canonical_local_mailbox_path(&mailboxes[2].remote, mailboxes[2].delimiter.as_deref()),
+            "日本語"
+        );
+        assert_eq!(mailboxes[3].remote, "Földer");
+        assert_eq!(mailboxes[3].delimiter.as_deref(), Some("."));
+
+        let sent = resolve_special_mailboxes_from_response(
+            vec![MailboxPlan::new("Sent", "Sent")],
+            &response,
+        );
+        assert!(sent.iter().any(|plan| plan.remote == "&ZeVnLIqe-"));
+        assert_eq!(
+            sent_mailbox_from_response(&test_account(), &response),
+            "&ZeVnLIqe-",
+            "the raw wire mailbox remains the SELECT/APPEND identity"
         );
     }
 
@@ -15021,6 +19226,7 @@ mod tests {
     #[test]
     fn uid_after_a_body_literal_backfills_only_that_fetch_response() {
         let mut literals = vec![ImapLiteral {
+            line_index: 0,
             uid: None,
             data_item: ImapLiteralItem::Body("BODY[TEXT]".into()),
             bytes: b"requested-root-body".to_vec(),
@@ -15134,6 +19340,1165 @@ mod tests {
         assert!(parse_search_uids(&["D0001 OK searched\r\n".into()]).is_err());
         assert!(parse_search_uids(&["* SEARCH 4 broken 15\r\n".into()]).is_err());
         assert!(parse_search_uids(&["* SEARCH 0\r\n".into()]).is_err());
+        assert_eq!(
+            parse_search_uids(&["* search 16 23\r\n".into()]).unwrap(),
+            vec![16, 23]
+        );
+        assert!(parse_search_uids(&["* SEARCH 4 nope\r\n".into()]).is_err());
+        assert!(parse_search_uids(&["D0001 OK SEARCH complete\r\n".into()]).is_err());
+        assert_eq!(
+            parse_uid_validity(&["* OK [uidvalidity 765] ready\r\n".into()]),
+            Some(765)
+        );
+    }
+
+    #[test]
+    fn canonical_provider_filter_uses_the_union_of_alias_mailboxes() {
+        let expression = parse_search_query("subject:receipt in:Projects in:Archive").unwrap();
+        let mut candidate = message("Receipt", "preview");
+        candidate.mailbox = generic_mailbox_storage_identity("Projects", "Projects");
+        assert!(canonical_remote_search_match_with_mailboxes(
+            &expression,
+            &candidate,
+            &["Projects", "Archive"],
+        ));
+        assert!(!canonical_remote_search_match_with_mailboxes(
+            &expression,
+            &candidate,
+            &["Projects"],
+        ));
+    }
+
+    #[tokio::test]
+    async fn canonical_provider_filter_uses_prior_page_alias_memberships() {
+        let store = Store::in_memory().await.unwrap();
+        let account = test_account();
+        store.save_account(&account).await.unwrap();
+        let projects = store
+            .upsert_selectable_mailbox(
+                account.id,
+                &SelectableMailboxDraft {
+                    remote_path: "Projects".into(),
+                    local_path: Some("Projects".into()),
+                    hierarchy_delimiter: Some("/".into()),
+                    parent_id: None,
+                    parent_path: None,
+                    special_use: None,
+                    selectable: true,
+                    uid_validity: Some(1),
+                    catalogue_coverage: "partial".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let archive = store
+            .upsert_selectable_mailbox(
+                account.id,
+                &SelectableMailboxDraft {
+                    remote_path: "Archive".into(),
+                    local_path: Some("Archive".into()),
+                    hierarchy_delimiter: Some("/".into()),
+                    parent_id: None,
+                    parent_path: None,
+                    special_use: None,
+                    selectable: true,
+                    uid_validity: Some(1),
+                    catalogue_coverage: "partial".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let expression = parse_search_query("subject:receipt in:Projects in:Archive").unwrap();
+        let mut first_page = message("Receipt", "preview");
+        first_page.account_id = account.id.to_string();
+        first_page.mailbox = generic_mailbox_storage_identity("Projects", "Projects");
+        first_page.id = stable_message_id(account.id, &first_page.mailbox, 1);
+        first_page.uid = 1;
+        first_page.message_id = Some("<aliased@example.test>".into());
+        store
+            .upsert_messages(std::slice::from_ref(&first_page))
+            .await
+            .unwrap();
+        store
+            .set_message_mailbox_memberships(account.id, &first_page.id, &[projects.id])
+            .await
+            .unwrap();
+        assert!(
+            !canonical_remote_search_match_with_mailboxes(&expression, &first_page, &["Projects"]),
+            "page one must not claim a conjunction before its Archive alias is discovered"
+        );
+
+        let mut second_page = first_page.clone();
+        second_page.mailbox = generic_mailbox_storage_identity("Archive", "Archive");
+        second_page.id = stable_message_id(account.id, &second_page.mailbox, 2);
+        second_page.uid = 2;
+        store
+            .upsert_messages(std::slice::from_ref(&second_page))
+            .await
+            .unwrap();
+        store
+            .set_message_mailbox_memberships(account.id, &second_page.id, &[archive.id])
+            .await
+            .unwrap();
+        let paths = store
+            .logical_mailbox_paths_by_message_ids(std::slice::from_ref(&second_page.id))
+            .await
+            .unwrap();
+        let paths = paths
+            .get(&second_page.id)
+            .unwrap()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert!(canonical_remote_search_match_with_mailboxes(
+            &expression,
+            &second_page,
+            &paths,
+        ));
+    }
+
+    #[test]
+    fn normal_sync_discovers_every_selectable_list_mailbox_once() {
+        let discovered = vec![
+            ImapListMailbox {
+                flags: vec!["\\Inbox".into()],
+                delimiter: Some("/".into()),
+                remote: "INBOX".into(),
+            },
+            ImapListMailbox {
+                flags: vec!["\\HasNoChildren".into()],
+                delimiter: Some("/".into()),
+                remote: "Projects/2026".into(),
+            },
+            ImapListMailbox {
+                flags: vec!["\\Noselect".into(), "\\HasChildren".into()],
+                delimiter: Some("/".into()),
+                remote: "Projects".into(),
+            },
+            ImapListMailbox {
+                flags: vec!["\\Sent".into()],
+                delimiter: Some("/".into()),
+                remote: "Sent Items".into(),
+            },
+        ];
+        let plans = sync_mailbox_plans_from_discovered(mailbox_plans(&test_account()), &discovered);
+        assert!(plans.iter().any(|plan| plan.remote == "Projects/2026"));
+        assert!(plans
+            .iter()
+            .any(|plan| plan.remote == "Sent Items" && plan.local == "Sent"));
+        assert!(!plans.iter().any(|plan| plan.remote == "Projects"));
+        let unique_remotes = plans
+            .iter()
+            .map(|plan| &plan.remote)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(unique_remotes.len(), plans.len());
+    }
+
+    #[test]
+    fn malformed_list_record_is_not_authoritative_for_mailbox_retirement() {
+        let response = ImapResponse {
+            lines: vec![
+                "* LIST (\\HasNoChildren) \"/\" \"INBOX\"".into(),
+                "* LIST (\\HasNoChildren) \"/\"".into(),
+                "D0001 OK LIST completed".into(),
+            ],
+            literals: Vec::new(),
+        };
+        assert!(
+            !authoritative_list_response(&response),
+            "a malformed untagged LIST row must retain the prior mailbox catalogue"
+        );
+    }
+
+    #[test]
+    fn tagged_list_completion_text_is_not_mistaken_for_an_untagged_list_record() {
+        let response = ImapResponse {
+            lines: vec![
+                "* LIST (\\HasNoChildren) \"/\" \"INBOX\"".into(),
+                "D0001 OK LIST completed".into(),
+            ],
+            literals: Vec::new(),
+        };
+        assert!(authoritative_list_response(&response));
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_a_hanging_scripted_imap_command() {
+        let (mut client, server) = duplex_imap_client_and_server();
+        let registry = SearchSessionRegistry::default();
+        let request = SearchRequestV2 {
+            raw_query: "subject:needle".into(),
+            client_request_id: None,
+            account_ids: vec![],
+            scope: SearchScopeV2::default(),
+            execution_mode: SearchExecutionMode::Hybrid,
+            page_size: 50,
+            continuation: None,
+        };
+        let session = registry.begin(&request);
+        let (started, started_wait) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut server = BufReader::new(server);
+            let (_, command) = scripted_command(&mut server).await;
+            assert_eq!(command, "LIST \"\" \"*\"");
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+        });
+        let waiting_session = session.clone();
+        let waiting = tokio::spawn(async move {
+            client
+                .command_cancellable("LIST \"\" \"*\"", Some(&waiting_session))
+                .await
+        });
+        started_wait.await.expect("server observed LIST");
+        assert!(registry.cancel(session.session_id));
+        let error = timeout(Duration::from_millis(250), waiting)
+            .await
+            .expect("cancellation must not wait for the IMAP timeout")
+            .expect("task join")
+            .expect_err("hanging command must be cancelled");
+        assert!(error.to_string().contains("search cancelled"));
+        server.abort();
+    }
+
+    #[test]
+    fn provider_first_page_round_robins_mailboxes_before_returning_to_inbox() {
+        let queues = vec![3, 1, 2];
+        assert_eq!(
+            fair_candidate_mailbox_order(&queues),
+            vec![0, 1, 2, 0, 2, 0],
+            "a busy first mailbox must not starve later selectable folders"
+        );
+    }
+
+    #[test]
+    fn provider_small_page_rotation_advances_between_non_empty_mailbox_identities() {
+        let lengths = [4, 0, 0, 4];
+        let non_empty = lengths
+            .iter()
+            .enumerate()
+            .filter_map(|(index, count)| (*count > 0).then_some(index))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fair_candidate_mailbox_order_for_indexes(&lengths, &non_empty, 0)[..2],
+            [0, 3],
+            "the first page starts at the first non-empty mailbox"
+        );
+        assert_eq!(
+            fair_candidate_mailbox_order_for_indexes(&lengths, &non_empty, 1)[..2],
+            [3, 0],
+            "the continuation skips empty physical slots and starts at the other candidate mailbox"
+        );
+    }
+
+    #[test]
+    fn provider_uid_cursor_ignores_newer_arrivals_between_pages() {
+        let first_page = [105, 104, 103];
+        let last_uid = *first_page.last().unwrap();
+        // A new UID 106 prepends the next SEARCH response. A positional
+        // offset would replay 103 or skip 102; the UID anchor resumes at 102.
+        let mut next_search = vec![106, 105, 104, 103, 102, 101];
+        next_search.retain(|uid| *uid < last_uid);
+        assert_eq!(next_search, vec![102, 101]);
+    }
+
+    #[test]
+    fn provider_candidate_budget_is_fair_and_globally_bounded() {
+        let allowed = bounded_fair_candidate_lengths(&[1_000, 1_000, 1_000], 5);
+        assert_eq!(allowed, vec![2, 2, 1]);
+        assert_eq!(allowed.iter().sum::<usize>(), 5);
+    }
+
+    #[test]
+    fn cancellation_stops_provider_work_before_the_next_imap_step() {
+        let registry = crate::SearchSessionRegistry::default();
+        let request = crate::SearchRequestV2 {
+            raw_query: "body:invoice".into(),
+            client_request_id: None,
+            account_ids: Vec::new(),
+            scope: crate::SearchScopeV2::default(),
+            execution_mode: crate::SearchExecutionMode::Hybrid,
+            page_size: 50,
+            continuation: None,
+        };
+        let session = registry.begin(&request);
+        assert!(ensure_search_not_cancelled(Some(&session)).is_ok());
+        assert!(registry.cancel(session.session_id));
+        assert!(ensure_search_not_cancelled(Some(&session))
+            .unwrap_err()
+            .to_string()
+            .contains("cancelled"));
+    }
+
+    #[test]
+    fn list_discovery_keeps_selectability_delimiters_and_custom_paths() {
+        let mailbox = parse_list_mailbox_details(
+            "* LIST (\\HasNoChildren \\Sent) \"/\" \"Projects/2026\"\r\n",
+        )
+        .unwrap();
+        assert_eq!(mailbox.remote, "Projects/2026");
+        assert_eq!(mailbox.delimiter.as_deref(), Some("/"));
+        assert!(mailbox.flags.iter().any(|flag| flag == "\\Sent"));
+
+        let unselectable =
+            parse_list_mailbox_details("* LIST (\\Noselect \\HasChildren) \".\" \"Archive\"\r\n")
+                .unwrap();
+        assert!(unselectable
+            .flags
+            .iter()
+            .any(|flag| flag.eq_ignore_ascii_case("\\Noselect")));
+        assert_eq!(unselectable.delimiter.as_deref(), Some("."));
+        assert_eq!(
+            canonical_local_mailbox_path("Projects.2026", Some(".")),
+            "Projects/2026",
+            "canonical in:Projects/* paths must not expose provider delimiters"
+        );
+        assert_eq!(
+            canonical_local_mailbox_path("Projects/2026", Some(".")),
+            "Projects%2F2026",
+            "a literal slash in a dot-delimited provider mailbox is not a hierarchy separator"
+        );
+        assert_eq!(
+            canonical_local_mailbox_path("Projects%2F2026", Some(".")),
+            "Projects%252F2026",
+            "percent escaping must be reversible and cannot collide with an encoded slash"
+        );
+        assert_ne!(
+            canonical_local_mailbox_path("Projects.2026", Some(".")),
+            canonical_local_mailbox_path("Projects/2026", Some(".")),
+            "distinct remote paths must retain distinct catalogue identities"
+        );
+
+        let modified_utf7 = parse_list_mailbox_details(
+            "* LIST (\\HasNoChildren) \"/\" \"Projects/&ZeVnLIqe-\"\r\n",
+        )
+        .unwrap();
+        assert_eq!(modified_utf7.remote, "Projects/&ZeVnLIqe-");
+        assert_eq!(
+            canonical_local_mailbox_path(&modified_utf7.remote, modified_utf7.delimiter.as_deref()),
+            "Projects/日本語",
+            "modified UTF-7 is decoded only for the visible search path"
+        );
+        assert_ne!(
+            generic_mailbox_storage_identity("Projects/&ZeVnLIqe-", "Projects/日本語"),
+            generic_mailbox_storage_identity("Projects/日本語", "Projects/日本語"),
+            "wire-distinct UTF-7 and UTF-8 mailbox names retain distinct storage identities"
+        );
+    }
+
+    #[test]
+    fn special_and_ordinary_mailbox_identities_cannot_collide() {
+        let special = MailboxPlan::new("Sent", "Sent").discovered("Foo".into());
+        let ordinary_display = canonical_local_mailbox_path("Sent::Foo", None);
+        let ordinary = generic_mailbox_storage_identity("Sent::Foo", &ordinary_display);
+        assert_eq!(
+            special.storage,
+            special_mailbox_storage_identity("Sent", "Foo")
+        );
+        assert_ne!(special.storage, ordinary);
+
+        // A provider is allowed to expose all of these as separate wire
+        // names. Discovery must not trim or case/diacritic-fold them.
+        let identities = [" Foo", "Foo", "foo", "Fóo"]
+            .into_iter()
+            .map(|remote| {
+                let display = canonical_local_mailbox_path(remote, None);
+                generic_mailbox_storage_identity(remote, &display)
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(identities.len(), 4);
+    }
+
+    #[test]
+    fn special_mailbox_resolution_deduplicates_only_exact_wire_names() {
+        let plans = vec![MailboxPlan::new("Sent", "Sent")];
+        let listing = vec![
+            r#"* LIST (\HasNoChildren \Sent) "/" " Foo""#.into(),
+            r#"* LIST (\HasNoChildren \Sent) "/" "Foo""#.into(),
+            r#"* LIST (\HasNoChildren \Sent) "/" "foo""#.into(),
+            r#"* LIST (\HasNoChildren \Sent) "/" "Fóo""#.into(),
+        ];
+        let resolved = resolve_special_mailboxes(plans, &listing);
+        let discovered = resolved
+            .iter()
+            .filter(|plan| plan.local == "Sent")
+            .map(|plan| plan.remote.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            discovered,
+            std::collections::BTreeSet::from([" Foo", "Foo", "foo", "Fóo"])
+        );
+    }
+
+    #[test]
+    fn provider_candidates_are_canonically_post_filtered_and_keep_imap_flags() {
+        let expression = parse_search_query("subject:receipt AND unread").unwrap();
+        let message = parse_catalog_message(
+            &test_account(),
+            "INBOX",
+            42,
+            &["* 1 FETCH (UID 42 FLAGS (\\Answered \\Draft) BODYSTRUCTURE (\"APPLICATION\" \"PDF\" (\"NAME\" \"receipt.pdf\") NIL NIL \"BASE64\" 12 NIL (\"ATTACHMENT\" (\"FILENAME\" \"receipt.pdf\"))))".into()],
+            b"Date: Tue, 08 Sep 2026 09:00:00 +0000\r\nFrom: Sender <sender@example.test>\r\nTo: reader@example.test\r\nSubject: Invoice\r\n\r\n",
+            "receipt body".into(),
+        )
+        .unwrap();
+        assert!(message.is_answered);
+        assert!(message.is_draft);
+        assert_eq!(message.attachments.len(), 1);
+        assert_eq!(message.attachments[0].attachment.filename, "receipt.pdf");
+        assert_eq!(
+            message.attachments[0].attachment.mime_type,
+            "application/pdf"
+        );
+        assert_eq!(message.attachments[0].attachment.size_bytes, 12);
+        assert!(!canonical_remote_search_match(&expression, &message));
+
+        let safe = compile_generic_imap(
+            &parse_search_query("subject:receipt").unwrap(),
+            Utc::now().date_naive(),
+        )
+        .unwrap();
+        assert!(!format!("UID SEARCH {}", safe.criteria).starts_with("UID SEARCH X-GM-RAW"));
+        assert!(!safe.criteria.contains('\n'));
+        assert!(!safe.criteria.contains('\r'));
+    }
+
+    #[test]
+    fn provider_canonical_attachment_search_ignores_embedded_parts_but_keeps_both() {
+        let mut message = parse_catalog_message(
+            &test_account(),
+            "INBOX",
+            43,
+            &["* 1 FETCH (UID 43 FLAGS () BODYSTRUCTURE (\"APPLICATION\" \"PDF\" (\"NAME\" \"receipt.pdf\") NIL NIL \"BASE64\" 12 NIL (\"ATTACHMENT\" (\"FILENAME\" \"receipt.pdf\"))))".into()],
+            b"Date: Tue, 08 Sep 2026 09:00:00 +0000\r\nFrom: Sender <sender@example.test>\r\nTo: reader@example.test\r\nSubject: Receipt\r\n\r\n",
+            String::new(),
+        )
+        .unwrap();
+        assert_eq!(message.attachments.len(), 1);
+        message.attachments[0].attachment.presentation = AttachmentPresentation::Embedded;
+        // Keep this true to prove that an older/coarse paperclip flag cannot
+        // make an embedded signature or CID part searchable as a file.
+        message.has_attachments = true;
+        for query in ["has:attachment", "filename:receipt.pdf", "filetype:pdf"] {
+            assert!(
+                !canonical_remote_search_match(&parse_search_query(query).unwrap(), &message),
+                "{query} must ignore Embedded-only provider metadata"
+            );
+        }
+
+        message.attachments[0].attachment.presentation = AttachmentPresentation::Both;
+        for query in ["has:attachment", "filename:receipt.pdf", "filetype:pdf"] {
+            assert!(
+                canonical_remote_search_match(&parse_search_query(query).unwrap(), &message),
+                "{query} must retain a part that is both embedded and downloadable"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_matrix_uses_the_same_safe_generic_imap_criteria_for_every_preset() {
+        let expression =
+            parse_search_query("from:person@example.test subject:\"quarterly report\"").unwrap();
+        let expected = compile_generic_imap(&expression, Utc::now().date_naive())
+            .unwrap()
+            .criteria;
+        for provider in ["fastmail", "gmail", "outlook", "imap"] {
+            let criteria = compile_generic_imap(&expression, Utc::now().date_naive())
+                .unwrap()
+                .criteria;
+            assert_eq!(
+                criteria, expected,
+                "{provider} must not receive provider-native syntax"
+            );
+            assert!(!criteria.contains("X-GM-RAW"), "{provider}");
+            assert!(!criteria.contains(['\r', '\n', '\0']), "{provider}");
+        }
+    }
+
+    #[tokio::test]
+    async fn scripted_provider_matrix_exercises_public_search_and_canonical_filtering() {
+        let expression = parse_search_query("subject:Needle").unwrap();
+        let criteria = compile_generic_imap(&expression, Utc::now().date_naive())
+            .unwrap()
+            .criteria;
+        assert!(!criteria.contains("X-GM-RAW"));
+
+        for provider_id in ["fastmail", "gmail", "outlook", "imap"] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let account =
+                provider_search_test_account(provider_id, listener.local_addr().unwrap().port());
+            let store = Store::in_memory().await.unwrap();
+            store.save_account(&account).await.unwrap();
+            let service = MailService::new(store.clone());
+            service
+                .credentials()
+                .set_password(&account, "search secret")
+                .await
+                .unwrap();
+            let fixture = ProviderSearchMailboxFixture {
+                remote: "INBOX",
+                flags: "\\HasNoChildren \\Inbox",
+                uid_validity: 77,
+                messages: vec![(42, "Needle quarterly report"), (41, "Unrelated report")],
+                fail_initial_select: false,
+            };
+            let server_account = account.clone();
+            let server_criteria = criteria.clone();
+            let server = tokio::spawn(scripted_provider_search_server(
+                listener,
+                server_account,
+                server_criteria,
+                vec![fixture],
+                crate::ProviderSearchCursor::default(),
+                8,
+            ));
+
+            let page = service
+                .search_remote_expression_page(
+                    &account,
+                    &expression,
+                    Some("INBOX"),
+                    &crate::ProviderSearchCursor::default(),
+                    8,
+                    false,
+                    None,
+                )
+                .await
+                .unwrap();
+            let transcript = server.await.unwrap();
+
+            assert_eq!(page.messages.len(), 1, "{provider_id}");
+            assert_eq!(page.messages[0].subject, "Needle quarterly report");
+            assert_eq!(page.messages[0].uid, 42);
+            assert_eq!(
+                store
+                    .mailbox_catalog_state(account.id, "INBOX")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .uid_validity,
+                77,
+                "{provider_id} must bind returned UIDs to the selected mailbox identity"
+            );
+            assert!(page.coverage.iter().any(|entry| {
+                entry.mailbox == "INBOX" && entry.state == ProviderMailboxSearchState::Searched
+            }));
+            assert!(transcript
+                .iter()
+                .any(|command| command == &format!("UID SEARCH {criteria}")));
+            assert!(transcript
+                .iter()
+                .all(|command| !command.contains("X-GM-RAW")));
+        }
+    }
+
+    #[tokio::test]
+    async fn scripted_gmail_attachment_search_parses_structure_before_taking_headers() {
+        // Redacted equivalent of the live failing shape: a plain person term
+        // combined with attachment metadata in one submitted provider search.
+        let expression = parse_search_query("sender has:attachment").unwrap();
+        let criteria = compile_generic_imap(&expression, Utc::now().date_naive())
+            .unwrap()
+            .criteria;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let account = provider_search_test_account("gmail", listener.local_addr().unwrap().port());
+        let store = Store::in_memory().await.unwrap();
+        store.save_account(&account).await.unwrap();
+        let service = MailService::new(store.clone());
+        service
+            .credentials()
+            .set_password(&account, "search secret")
+            .await
+            .unwrap();
+
+        let server_account = account.clone();
+        let expected_criteria = criteria.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let stream = smtp_test_acceptor().accept(stream).await.unwrap();
+            let mut connection = BufReader::new(stream);
+            smtp_reply(&mut connection, "* OK scripted Gmail ready\r\n").await;
+
+            let (tag, command) = scripted_command(&mut connection).await;
+            assert_eq!(command, "LOGIN \"reader@example.test\" \"search secret\"");
+            smtp_reply(&mut connection, &format!("{tag} OK authenticated\r\n")).await;
+
+            let (tag, command) = scripted_command(&mut connection).await;
+            assert_eq!(command, "LIST \"\" \"*\"");
+            smtp_reply(
+                &mut connection,
+                &format!("* LIST (\\HasNoChildren \\Inbox) \"/\" \"INBOX\"\r\n{tag} OK listed\r\n"),
+            )
+            .await;
+
+            let (tag, command) = scripted_command(&mut connection).await;
+            assert_eq!(command, "SELECT \"INBOX\"");
+            smtp_reply(
+                &mut connection,
+                &format!("* 1 EXISTS\r\n* OK [UIDVALIDITY 77] stable\r\n{tag} OK selected\r\n"),
+            )
+            .await;
+
+            let (tag, command) = scripted_command(&mut connection).await;
+            assert_eq!(command, format!("UID SEARCH {expected_criteria}"));
+            smtp_reply(
+                &mut connection,
+                &format!("* SEARCH 42\r\n{tag} OK searched\r\n"),
+            )
+            .await;
+
+            let (tag, command) = scripted_command(&mut connection).await;
+            assert_eq!(command, "SELECT \"INBOX\"");
+            smtp_reply(
+                &mut connection,
+                &format!("* 1 EXISTS\r\n* OK [UIDVALIDITY 77] stable\r\n{tag} OK selected\r\n"),
+            )
+            .await;
+
+            let (tag, command) = scripted_command(&mut connection).await;
+            assert_eq!(
+                command,
+                format!(
+                    "UID FETCH 42 ({})",
+                    selective_metadata_fetch_fields(&server_account)
+                )
+            );
+            let headers = b"Date: Sun, 06 Sep 2026 10:00:00 +0000\r\nFrom: Example Sender <sender@example.test>\r\nTo: reader@example.test\r\nSubject: Claim documents\r\nMessage-ID: <gmail-attachment@example.test>\r\nContent-Type: multipart/mixed; boundary=x\r\n\r\n";
+            smtp_reply(
+                &mut connection,
+                &format!(
+                    "* 1 FETCH (UID 42 FLAGS () INTERNALDATE \"06-Sep-2026 10:00:00 +0000\" X-GM-LABELS (\\Inbox) BODYSTRUCTURE ((\"TEXT\" \"PLAIN\" (\"CHARSET\" \"UTF-8\") NIL NIL \"7BIT\" 44 1 NIL NIL NIL NIL) (\"APPLICATION\" \"PDF\" (\"NAME\" \"claim.pdf\") NIL NIL \"BASE64\" 12 NIL (\"ATTACHMENT\" (\"FILENAME\" \"claim.pdf\")) NIL NIL) \"MIXED\" (\"BOUNDARY\" \"x\") NIL NIL NIL) BODY[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES CONTENT-TYPE CONTENT-TRANSFER-ENCODING LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)] {{{}}}\r\n",
+                    headers.len()
+                ),
+            )
+            .await;
+            connection.get_mut().write_all(headers).await.unwrap();
+            smtp_reply(&mut connection, &format!(")\r\n{tag} OK metadata\r\n")).await;
+
+            let (tag, command) = scripted_command(&mut connection).await;
+            assert_eq!(command, section_mime_fetch_command(42, &[1]));
+            let mime_headers =
+                b"Content-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: 7bit\r\n\r\n";
+            smtp_reply(
+                &mut connection,
+                &format!(
+                    "* 1 FETCH (UID 42 BODY[1.MIME] {{{}}}\r\n",
+                    mime_headers.len()
+                ),
+            )
+            .await;
+            connection.get_mut().write_all(mime_headers).await.unwrap();
+            smtp_reply(&mut connection, &format!(")\r\n{tag} OK MIME headers\r\n")).await;
+
+            let (tag, command) = scripted_command(&mut connection).await;
+            assert_eq!(command, section_fetch_command(42, &[1]));
+            let body = b"The sender attached the requested claim documents.";
+            smtp_reply(
+                &mut connection,
+                &format!("* 1 FETCH (UID 42 BODY[1] {{{}}}\r\n", body.len()),
+            )
+            .await;
+            connection.get_mut().write_all(body).await.unwrap();
+            smtp_reply(&mut connection, &format!(")\r\n{tag} OK body\r\n")).await;
+
+            let (tag, command) = scripted_command(&mut connection).await;
+            assert_eq!(command, "LOGOUT");
+            smtp_reply(
+                &mut connection,
+                &format!("* BYE done\r\n{tag} OK logout\r\n"),
+            )
+            .await;
+        });
+
+        let page = service
+            .search_remote_expression_page(
+                &account,
+                &expression,
+                Some("INBOX"),
+                &crate::ProviderSearchCursor::default(),
+                8,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(page.messages.len(), 1);
+        assert_eq!(page.messages[0].uid, 42);
+        assert!(page.messages[0].has_attachments);
+        assert_eq!(page.messages[0].attachments.len(), 1);
+        assert_eq!(
+            page.messages[0].attachments[0].attachment.filename,
+            "claim.pdf"
+        );
+        assert!(canonical_remote_search_match(
+            &parse_search_query("filename:claim.pdf").unwrap(),
+            &page.messages[0]
+        ));
+        assert!(page.coverage.iter().any(|entry| {
+            entry.mailbox == "INBOX" && entry.state == ProviderMailboxSearchState::Searched
+        }));
+        assert!(!page.coverage.iter().any(|entry| {
+            entry.mailbox == "INBOX" && entry.state == ProviderMailboxSearchState::Partial
+        }));
+        assert_eq!(
+            store
+                .cached_search_body_text(&page.messages[0].id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("The sender attached the requested claim documents.")
+        );
+    }
+
+    fn fair_provider_search_fixtures() -> Vec<ProviderSearchMailboxFixture> {
+        vec![
+            ProviderSearchMailboxFixture {
+                remote: "INBOX",
+                flags: "\\HasNoChildren \\Inbox",
+                uid_validity: 77,
+                messages: vec![(102, "Needle inbox newest"), (101, "Needle inbox older")],
+                fail_initial_select: false,
+            },
+            ProviderSearchMailboxFixture {
+                remote: "Sent",
+                flags: "\\HasNoChildren \\Sent",
+                uid_validity: 77,
+                messages: Vec::new(),
+                fail_initial_select: true,
+            },
+            ProviderSearchMailboxFixture {
+                remote: "Drafts",
+                flags: "\\Noselect \\Drafts",
+                uid_validity: 77,
+                messages: Vec::new(),
+                fail_initial_select: false,
+            },
+            ProviderSearchMailboxFixture {
+                remote: "Archive",
+                flags: "\\HasNoChildren \\Archive",
+                uid_validity: 88,
+                messages: vec![
+                    (202, "Needle archive newest"),
+                    (201, "Needle archive older"),
+                ],
+                fail_initial_select: false,
+            },
+            ProviderSearchMailboxFixture {
+                remote: "Spam",
+                flags: "\\Noselect \\Junk",
+                uid_validity: 77,
+                messages: Vec::new(),
+                fail_initial_select: false,
+            },
+            ProviderSearchMailboxFixture {
+                remote: "Trash",
+                flags: "\\Noselect \\Trash",
+                uid_validity: 77,
+                messages: Vec::new(),
+                fail_initial_select: false,
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn scripted_public_provider_search_is_fair_resumable_and_keeps_partial_successes() {
+        let expression = parse_search_query("subject:Needle").unwrap();
+        let criteria = compile_generic_imap(&expression, Utc::now().date_naive())
+            .unwrap()
+            .criteria;
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+
+        let first_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut account =
+            provider_search_test_account("fastmail", first_listener.local_addr().unwrap().port());
+        store.save_account(&account).await.unwrap();
+        service
+            .credentials()
+            .set_password(&account, "search secret")
+            .await
+            .unwrap();
+        let first_server = tokio::spawn(scripted_provider_search_server(
+            first_listener,
+            account.clone(),
+            criteria.clone(),
+            fair_provider_search_fixtures(),
+            crate::ProviderSearchCursor::default(),
+            2,
+        ));
+        let first = service
+            .search_remote_expression_page(
+                &account,
+                &expression,
+                None,
+                &crate::ProviderSearchCursor::default(),
+                2,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+        first_server.await.unwrap();
+        assert_eq!(
+            first
+                .messages
+                .iter()
+                .map(|message| (message.mailbox.as_str(), message.uid))
+                .collect::<Vec<_>>(),
+            vec![("INBOX", 102), ("Archive", 202)]
+        );
+        assert!(!first.exhausted);
+        assert_eq!(first.cursor.mailbox_last_uid.get("INBOX"), Some(&102));
+        assert_eq!(first.cursor.mailbox_last_uid.get("Archive"), Some(&202));
+        assert_eq!(first.cursor.mailbox_uid_validity.get("INBOX"), Some(&77));
+        assert_eq!(first.cursor.mailbox_uid_validity.get("Archive"), Some(&88));
+        assert!(first.coverage.iter().any(|entry| {
+            entry.mailbox == "Sent" && entry.state == ProviderMailboxSearchState::Offline
+        }));
+        assert!(first.coverage.iter().any(|entry| {
+            entry.mailbox == "INBOX" && entry.state == ProviderMailboxSearchState::Searched
+        }));
+
+        let second_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        account.imap_port = second_listener.local_addr().unwrap().port();
+        let second_server = tokio::spawn(scripted_provider_search_server(
+            second_listener,
+            account.clone(),
+            criteria,
+            fair_provider_search_fixtures(),
+            first.cursor.clone(),
+            2,
+        ));
+        let second = service
+            .search_remote_expression_page(
+                &account,
+                &expression,
+                None,
+                &first.cursor,
+                2,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+        second_server.await.unwrap();
+        assert_eq!(
+            second
+                .messages
+                .iter()
+                .map(|message| (message.mailbox.as_str(), message.uid))
+                .collect::<Vec<_>>(),
+            vec![("INBOX", 101), ("Archive", 201)]
+        );
+        assert!(second.exhausted);
+    }
+
+    #[tokio::test]
+    async fn scripted_provider_small_pages_rotate_the_starting_mailbox_across_continuations() {
+        let expression = parse_search_query("subject:Needle").unwrap();
+        let criteria = compile_generic_imap(&expression, Utc::now().date_naive())
+            .unwrap()
+            .criteria;
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let first_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut account =
+            provider_search_test_account("fastmail", first_listener.local_addr().unwrap().port());
+        store.save_account(&account).await.unwrap();
+        service
+            .credentials()
+            .set_password(&account, "search secret")
+            .await
+            .unwrap();
+
+        let first_server = tokio::spawn(scripted_provider_search_server(
+            first_listener,
+            account.clone(),
+            criteria.clone(),
+            fair_provider_search_fixtures(),
+            crate::ProviderSearchCursor::default(),
+            1,
+        ));
+        let first = service
+            .search_remote_expression_page(
+                &account,
+                &expression,
+                None,
+                &crate::ProviderSearchCursor::default(),
+                1,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+        first_server.await.unwrap();
+        assert_eq!(
+            first
+                .messages
+                .iter()
+                .map(|message| (message.mailbox.as_str(), message.uid))
+                .collect::<Vec<_>>(),
+            vec![("INBOX", 102)]
+        );
+        assert_eq!(first.cursor.mailbox_round_offset, 1);
+
+        let second_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        account.imap_port = second_listener.local_addr().unwrap().port();
+        let second_server = tokio::spawn(scripted_provider_search_server(
+            second_listener,
+            account.clone(),
+            criteria,
+            fair_provider_search_fixtures(),
+            first.cursor.clone(),
+            1,
+        ));
+        let second = service
+            .search_remote_expression_page(
+                &account,
+                &expression,
+                None,
+                &first.cursor,
+                1,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+        second_server.await.unwrap();
+        assert_eq!(
+            second
+                .messages
+                .iter()
+                .map(|message| (message.mailbox.as_str(), message.uid))
+                .collect::<Vec<_>>(),
+            vec![("Archive", 202)],
+            "the second one-result page must not restart at INBOX"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_public_provider_search_stops_before_connecting() {
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let mut account = test_account();
+        account.imap_host = "127.0.0.1".into();
+        account.imap_port = 9;
+        store.save_account(&account).await.unwrap();
+        service
+            .credentials()
+            .set_password(&account, "search secret")
+            .await
+            .unwrap();
+        let registry = crate::SearchSessionRegistry::default();
+        let request = crate::SearchRequestV2 {
+            raw_query: "subject:Needle".into(),
+            client_request_id: None,
+            account_ids: vec![account.id],
+            scope: crate::SearchScopeV2::default(),
+            execution_mode: crate::SearchExecutionMode::Hybrid,
+            page_size: 2,
+            continuation: None,
+        };
+        let session = registry.begin(&request);
+        assert!(registry.cancel(session.session_id));
+
+        let error = service
+            .search_remote_expression_page(
+                &account,
+                &parse_search_query(&request.raw_query).unwrap(),
+                None,
+                &crate::ProviderSearchCursor::default(),
+                2,
+                false,
+                Some(&session),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("search cancelled"), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn scripted_public_provider_search_rejects_recycled_uids() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let account =
+            provider_search_test_account("fastmail", listener.local_addr().unwrap().port());
+        let store = Store::in_memory().await.unwrap();
+        store.save_account(&account).await.unwrap();
+        store
+            .save_mailbox_catalog_state(account.id, "INBOX", "INBOX", 76, 42, true)
+            .await
+            .unwrap();
+        let service = MailService::new(store);
+        service
+            .credentials()
+            .set_password(&account, "search secret")
+            .await
+            .unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let stream = smtp_test_acceptor().accept(stream).await.unwrap();
+            let mut connection = BufReader::new(stream);
+            smtp_reply(&mut connection, "* OK ready\r\n").await;
+            let (tag, command) = scripted_command(&mut connection).await;
+            assert_eq!(command, "LOGIN \"reader@example.test\" \"search secret\"");
+            smtp_reply(&mut connection, &format!("{tag} OK authenticated\r\n")).await;
+            let (tag, command) = scripted_command(&mut connection).await;
+            assert_eq!(command, "LIST \"\" \"*\"");
+            smtp_reply(
+                &mut connection,
+                &format!("* LIST (\\HasNoChildren \\Inbox) \"/\" \"INBOX\"\r\n{tag} OK listed\r\n"),
+            )
+            .await;
+            let (tag, command) = scripted_command(&mut connection).await;
+            assert_eq!(command, "SELECT \"INBOX\"");
+            smtp_reply(
+                &mut connection,
+                &format!("* 1 EXISTS\r\n* OK [UIDVALIDITY 77] recycled\r\n{tag} OK selected\r\n"),
+            )
+            .await;
+            let (tag, command) = scripted_command(&mut connection).await;
+            assert_eq!(
+                command, "LOGOUT",
+                "a recycled UID must never be searched or fetched"
+            );
+            smtp_reply(
+                &mut connection,
+                &format!("* BYE done\r\n{tag} OK logout\r\n"),
+            )
+            .await;
+        });
+
+        let page = service
+            .search_remote_expression_page(
+                &account,
+                &parse_search_query("subject:Needle").unwrap(),
+                Some("INBOX"),
+                &crate::ProviderSearchCursor::default(),
+                2,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert!(page.messages.is_empty());
+        assert!(page.coverage.iter().any(|entry| {
+            entry.mailbox == "INBOX" && entry.state == ProviderMailboxSearchState::MailboxChanged
+        }));
+    }
+
+    #[tokio::test]
+    async fn provider_search_continuation_rejects_a_uidvalidity_rollover_before_reusing_anchor() {
+        let expression = parse_search_query("subject:Needle").unwrap();
+        let criteria = compile_generic_imap(&expression, Utc::now().date_naive())
+            .unwrap()
+            .criteria;
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+
+        let first_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut account =
+            provider_search_test_account("fastmail", first_listener.local_addr().unwrap().port());
+        store.save_account(&account).await.unwrap();
+        service
+            .credentials()
+            .set_password(&account, "search secret")
+            .await
+            .unwrap();
+        let first_server = tokio::spawn(scripted_provider_search_server(
+            first_listener,
+            account.clone(),
+            criteria,
+            vec![ProviderSearchMailboxFixture {
+                remote: "INBOX",
+                flags: "\\HasNoChildren \\Inbox",
+                uid_validity: 77,
+                messages: vec![(42, "Needle before rollover")],
+                fail_initial_select: false,
+            }],
+            crate::ProviderSearchCursor::default(),
+            1,
+        ));
+        let first = service
+            .search_remote_expression_page(
+                &account,
+                &expression,
+                Some("INBOX"),
+                &crate::ProviderSearchCursor::default(),
+                1,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+        first_server.await.unwrap();
+        assert_eq!(first.cursor.mailbox_last_uid.get("INBOX"), Some(&42));
+        assert_eq!(first.cursor.mailbox_uid_validity.get("INBOX"), Some(&77));
+
+        // The provider now reuses the numeric UID namespace under a new
+        // UIDVALIDITY. A continuation may not issue SEARCH or FETCH with the
+        // old `42` anchor against that mailbox.
+        let second_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        account.imap_port = second_listener.local_addr().unwrap().port();
+        let second_server = tokio::spawn(async move {
+            let (stream, _) = second_listener.accept().await.unwrap();
+            let stream = smtp_test_acceptor().accept(stream).await.unwrap();
+            let mut connection = BufReader::new(stream);
+            smtp_reply(&mut connection, "* OK ready\r\n").await;
+            let (tag, command) = scripted_command(&mut connection).await;
+            assert_eq!(command, "LOGIN \"reader@example.test\" \"search secret\"");
+            smtp_reply(&mut connection, &format!("{tag} OK authenticated\r\n")).await;
+            let (tag, command) = scripted_command(&mut connection).await;
+            assert_eq!(command, "LIST \"\" \"*\"");
+            smtp_reply(
+                &mut connection,
+                &format!("* LIST (\\HasNoChildren \\Inbox) \"/\" \"INBOX\"\r\n{tag} OK listed\r\n"),
+            )
+            .await;
+            let (tag, command) = scripted_command(&mut connection).await;
+            assert_eq!(command, "SELECT \"INBOX\"");
+            smtp_reply(
+                &mut connection,
+                &format!("* 1 EXISTS\r\n* OK [UIDVALIDITY 78] rollover\r\n{tag} OK selected\r\n"),
+            )
+            .await;
+            let (tag, command) = scripted_command(&mut connection).await;
+            assert_eq!(command, "LOGOUT", "rollover must stop before UID SEARCH");
+            smtp_reply(
+                &mut connection,
+                &format!("* BYE done\r\n{tag} OK logout\r\n"),
+            )
+            .await;
+        });
+
+        let second = service
+            .search_remote_expression_page(
+                &account,
+                &expression,
+                Some("INBOX"),
+                &first.cursor,
+                1,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+        second_server.await.unwrap();
+        assert!(second.messages.is_empty());
+        assert!(second.coverage.iter().any(|entry| {
+            entry.mailbox == "INBOX" && entry.state == ProviderMailboxSearchState::MailboxChanged
+        }));
+    }
+
+    #[test]
+    fn realtime_snapshot_fetches_only_uids_above_the_watermark() {
+        // Realtime reconciliation searches the complete mailbox so it can
+        // remove archived UIDs. The fetch batch must still contain only new
+        // mail, even when SEARCH ALL returns older UIDs out of order.
+        assert_eq!(sync_uids(vec![12, 7, 11, 10], Some(10), 25), vec![11, 12]);
+        assert_eq!(sync_uids(vec![12, 7, 11, 10], Some(10), 1), vec![11]);
     }
 
     #[test]
@@ -15149,6 +20514,54 @@ mod tests {
             ]),
             vec![(41, true, false), (42, false, true)]
         );
+    }
+
+    #[tokio::test]
+    async fn scripted_mixed_case_imap_greeting_completion_uid_and_system_flags_are_accepted() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let account =
+            provider_search_test_account("fastmail", listener.local_addr().unwrap().port());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let stream = smtp_test_acceptor().accept(stream).await.unwrap();
+            let mut connection = BufReader::new(stream);
+            smtp_reply(&mut connection, "* ok mixed-case greeting\r\n").await;
+            let (tag, command) = scripted_command(&mut connection).await;
+            assert_eq!(command, "UID FETCH 7 (UID FLAGS)");
+            smtp_reply(
+                &mut connection,
+                &format!(
+                    "* 1 fetch (uid 7 flags (\\seen \\flagged \\answered \\draft))\r\n{} ok mixed-case completion\r\n",
+                    tag.to_ascii_lowercase()
+                ),
+            )
+            .await;
+            let (tag, command) = scripted_command(&mut connection).await;
+            assert_eq!(command, "LOGOUT");
+            smtp_reply(
+                &mut connection,
+                &format!("* bye done\r\n{} ok logout\r\n", tag.to_ascii_lowercase()),
+            )
+            .await;
+        });
+        let mut client = ImapClient::connect(&account).await.unwrap();
+        let response = client.command("UID FETCH 7 (UID FLAGS)").await.unwrap();
+        assert_eq!(parse_uid_flags(&response), vec![(7, true, true)]);
+        let parsed = parse_catalog_message(
+            &account,
+            "INBOX",
+            7,
+            &response,
+            b"Date: Thu, 01 Jan 2026 00:00:00 +0000\r\nFrom: sender@example.test\r\nSubject: mixed flags\r\n\r\n",
+            String::new(),
+        )
+        .unwrap();
+        assert!(parsed.is_read);
+        assert!(parsed.is_flagged);
+        assert!(parsed.is_answered);
+        assert!(parsed.is_draft);
+        let _ = client.command("LOGOUT").await;
+        server.await.unwrap();
     }
 
     #[test]
@@ -16347,7 +21760,7 @@ For you, Alex =E2=80=94 related to your saved topic."
         assert!(plans.iter().any(|plan| {
             plan.remote == "Sent Messages"
                 && plan.local == "Sent"
-                && plan.storage == "Sent::Sent Messages"
+                && plan.storage == special_mailbox_storage_identity("Sent", "Sent Messages")
         }));
     }
 
@@ -16446,6 +21859,32 @@ For you, Alex =E2=80=94 related to your saved topic."
             ".unsubscribe-0101019f81db9add-24fdafe6-2373-4ce1-b33a-659d9fc35f3f-000000@example.com"
         )
         .is_err());
+    }
+
+    #[test]
+    fn compose_recipient_validation_has_exact_send_parser_parity() {
+        let to = vec![
+            "Display Name <person@example.test>".into(),
+            "bad address".into(),
+        ];
+        let cc = vec!["\"quoted local\"@example.test".into()];
+        let bcc = vec!["user@localhost".into(), "second@example.test".into()];
+
+        let validation = validate_compose_recipients(&to, &cc, &bcc);
+        for (values, field) in [
+            (&to, &validation.to),
+            (&cc, &validation.cc),
+            (&bcc, &validation.bcc),
+        ] {
+            let expected_invalid = values
+                .iter()
+                .filter(|value| parse_recipient_mailbox(value).is_err())
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(field.invalid, expected_invalid);
+            assert_eq!(field.valid, field.invalid.is_empty());
+        }
+        assert_eq!(validation.to.invalid, vec!["bad address"]);
     }
 
     #[test]

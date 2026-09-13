@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import type { MailSummary } from "./types";
 import {
   messageRecipients,
+  hasTrailingRecipientDelimiter,
+  isValidRecipientValue,
   parseAddressList,
+  recipientAddressIdentity,
   replyRecipients,
 } from "./recipients";
 
@@ -74,5 +77,24 @@ describe("recipient parsing and replies", () => {
       to: 'Replies <reply@example.com>, "Doe, Jane" <jane@example.com>',
       cc: "Other <other@example.com>",
     });
+  });
+
+  it("keeps recipient identity, validation, and delimiter handling RFC-style", () => {
+    expect(recipientAddressIdentity('"Doe, Jane" <JANE@example.com>')).toBe(
+      "jane@example.com",
+    );
+    expect(recipientAddressIdentity("jane+archive@example.com")).toBe(
+      "jane+archive@example.com",
+    );
+    expect(isValidRecipientValue("not an address")).toBe(false);
+    expect(isValidRecipientValue("Jane <jane@example.com>")).toBe(true);
+    expect(isValidRecipientValue('"quoted local"@localhost')).toBe(true);
+    expect(recipientAddressIdentity('Local <"quoted local"@localhost>')).toBe(
+      '"quoted local"@localhost',
+    );
+    expect(
+      hasTrailingRecipientDelimiter('"Doe, Jane" <jane@example.com>,'),
+    ).toBe(true);
+    expect(hasTrailingRecipientDelimiter('"Doe, Jane')).toBe(false);
   });
 });
