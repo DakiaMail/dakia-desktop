@@ -3141,6 +3141,7 @@ impl Store {
                 ));
             }
             let now = Utc::now();
+            let mut suppressed_uids = HashSet::new();
             for observation in observations {
                 let local_message_id: Option<String> = sqlx::query_scalar(
                     "SELECT id FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?",
@@ -3151,6 +3152,18 @@ impl Store {
                 .fetch_optional(&mut *tx)
                 .await?;
                 let Some(local_message_id) = local_message_id else {
+                    if provider_message_suppressed_in_transaction(
+                        &mut tx,
+                        &account_id_text,
+                        mailbox,
+                        observation.uid,
+                        uid_validity,
+                    )
+                    .await?
+                    {
+                        suppressed_uids.insert(observation.uid);
+                        continue;
+                    }
                     tx.rollback().await?;
                     return Err(anyhow!(
                         "published Gmail header has no canonical local message"
@@ -3171,6 +3184,9 @@ impl Store {
                     .await?;
             }
             for observation in observations {
+                if suppressed_uids.contains(&observation.uid) {
+                    continue;
+                }
                 if observation
                     .labels
                     .iter()
@@ -4934,6 +4950,7 @@ impl Store {
         }
         if let Some((_gmail_receipt, observations)) = gmail_observations {
             let now = Utc::now();
+            let mut suppressed_uids = HashSet::new();
             for observation in observations {
                 let local_message_id: Option<String> = sqlx::query_scalar(
                     "SELECT id FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?",
@@ -4944,6 +4961,18 @@ impl Store {
                 .fetch_optional(&mut *tx)
                 .await?;
                 let Some(local_message_id) = local_message_id else {
+                    if provider_message_suppressed_in_transaction(
+                        &mut tx,
+                        &account_id,
+                        &receipt.mailbox,
+                        observation.uid,
+                        i64::from(receipt.uid_validity),
+                    )
+                    .await?
+                    {
+                        suppressed_uids.insert(observation.uid);
+                        continue;
+                    }
                     tx.rollback().await?;
                     return Ok(false);
                 };
@@ -4953,6 +4982,9 @@ impl Store {
                     .bind(&account_id).bind(&local_message_id).bind(&observation.gmail_message_id).execute(&mut *tx).await?;
             }
             for observation in observations {
+                if suppressed_uids.contains(&observation.uid) {
+                    continue;
+                }
                 if observation
                     .labels
                     .iter()
@@ -5731,6 +5763,39 @@ impl Store {
         Ok(sqlx::query_scalar("SELECT message.id FROM messages AS message JOIN mailbox_catalog_state AS catalogue ON catalogue.account_id = message.account_id AND catalogue.mailbox = message.mailbox JOIN accounts AS account ON account.id = message.account_id WHERE message.account_id = ? AND message.mailbox = ? AND message.uid = ? AND catalogue.uid_validity = ? AND catalogue.provider_config_generation = account.config_generation AND catalogue.provider_config_fingerprint = account.config_fingerprint AND NOT EXISTS (SELECT 1 FROM mailbox_snapshot_generations AS replacement WHERE replacement.account_id = message.account_id AND replacement.mailbox = message.mailbox AND replacement.uid_validity != catalogue.uid_validity)")
             .bind(account_id.to_string()).bind(mailbox).bind(i64::from(uid)).bind(i64::from(uid_validity))
             .fetch_optional(&self.pool).await?)
+    }
+
+    /// Whether publication intentionally omitted this exact provider locator.
+    /// A tombstone is only authoritative inside the current provider namespace.
+    pub async fn is_provider_message_suppressed(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        uid: u32,
+        uid_validity: u32,
+    ) -> Result<bool> {
+        Ok(sqlx::query_scalar(PROVIDER_MESSAGE_SUPPRESSED_SQL)
+            .bind(account_id.to_string())
+            .bind(mailbox)
+            .bind(i64::from(uid))
+            .bind(i64::from(uid_validity))
+            .fetch_one(&self.pool)
+            .await?)
+    }
+
+    /// Whether a committed Gmail label observation removed Inbox membership.
+    pub async fn is_provider_gmail_inbox_observation_removed(
+        &self,
+        account_id: AccountId,
+        uid_validity: u32,
+        gmail_message_id: &str,
+    ) -> Result<bool> {
+        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM gmail_logical_messages AS logical JOIN mailbox_catalog_state AS catalogue ON catalogue.account_id = logical.account_id AND catalogue.mailbox = 'INBOX' JOIN accounts AS account ON account.id = logical.account_id WHERE logical.account_id = ? AND logical.gmail_message_id = ? AND catalogue.uid_validity = ? AND catalogue.provider_config_generation = account.config_generation AND catalogue.provider_config_fingerprint = account.config_fingerprint AND NOT EXISTS (SELECT 1 FROM mailbox_snapshot_generations AS replacement WHERE replacement.account_id = logical.account_id AND replacement.mailbox = 'INBOX' AND replacement.uid_validity != catalogue.uid_validity) AND NOT EXISTS (SELECT 1 FROM json_each(logical.labels_json) AS label WHERE label.value COLLATE NOCASE = '\\Inbox'))")
+            .bind(account_id.to_string())
+            .bind(gmail_message_id)
+            .bind(i64::from(uid_validity))
+            .fetch_one(&self.pool)
+            .await?)
     }
 
     pub async fn message_remote_identity_is_current(
@@ -8652,6 +8717,24 @@ async fn persist_staged_uidvalidity_replacement_messages_in_transaction(
         }
         after_uid = rows.last().map(|(uid, _)| *uid);
     }
+}
+
+const PROVIDER_MESSAGE_SUPPRESSED_SQL: &str = "SELECT EXISTS(SELECT 1 FROM mailbox_action_tombstones AS tombstone JOIN mailbox_catalog_state AS catalogue ON catalogue.account_id = tombstone.account_id AND catalogue.mailbox = tombstone.mailbox JOIN accounts AS account ON account.id = tombstone.account_id WHERE tombstone.account_id = ? AND tombstone.mailbox = ? AND tombstone.uid = ? AND catalogue.uid_validity = ? AND catalogue.provider_config_generation = account.config_generation AND catalogue.provider_config_fingerprint = account.config_fingerprint AND NOT EXISTS (SELECT 1 FROM mailbox_snapshot_generations AS replacement WHERE replacement.account_id = tombstone.account_id AND replacement.mailbox = tombstone.mailbox AND replacement.uid_validity != catalogue.uid_validity))";
+
+async fn provider_message_suppressed_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    account_id: &str,
+    mailbox: &str,
+    uid: u32,
+    uid_validity: i64,
+) -> Result<bool> {
+    Ok(sqlx::query_scalar(PROVIDER_MESSAGE_SUPPRESSED_SQL)
+        .bind(account_id)
+        .bind(mailbox)
+        .bind(i64::from(uid))
+        .bind(uid_validity)
+        .fetch_one(&mut **tx)
+        .await?)
 }
 
 async fn persist_message_with_flag_policy(
@@ -18345,6 +18428,239 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn gmail_header_batches_keep_healthy_rows_and_omit_tombstoned_and_non_inbox_rows() {
+        for folder_batch in [false, true] {
+            let store = Store::in_memory().await.unwrap();
+            let account_id = uuid::Uuid::new_v4();
+            let account = account_with_id(account_id, "suppressed-gmail@example.test");
+            store.save_account(&account).await.unwrap();
+            store
+                .ensure_mailbox_catalog_identity(account_id, "INBOX", "INBOX", 7)
+                .await
+                .unwrap();
+            let account_receipt = store
+                .capture_account_provider_receipt(&account)
+                .await
+                .unwrap()
+                .unwrap();
+            let receipt = store
+                .capture_provider_write_receipt_for_account(
+                    &account,
+                    "INBOX",
+                    "INBOX",
+                    7,
+                    &[1, 2, 3],
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            // The source locator remains suppressed after a successful local move.
+            sqlx::query("INSERT INTO mailbox_action_tombstones(account_id, mailbox, uid, created_at) VALUES (?, 'INBOX', 1, ?)")
+                .bind(account_id.to_string()).bind(Utc::now()).execute(&store.pool).await.unwrap();
+            let epoch = store
+                .capture_gmail_inbox_membership_epoch(account_id)
+                .await
+                .unwrap();
+            let headers: Vec<_> = (1..=3)
+                .map(|uid| {
+                    cache_candidate_message(
+                        account_id,
+                        &format!("header-{uid}"),
+                        uid,
+                        "INBOX",
+                        Utc::now(),
+                    )
+                })
+                .collect();
+            let observations = vec![
+                GmailProviderObservation {
+                    uid: 1,
+                    gmail_message_id: "9001".into(),
+                    labels: vec!["\\Inbox".into()],
+                },
+                GmailProviderObservation {
+                    uid: 2,
+                    gmail_message_id: "9002".into(),
+                    labels: vec!["\\Inbox".into()],
+                },
+                GmailProviderObservation {
+                    uid: 3,
+                    gmail_message_id: "9003".into(),
+                    labels: vec!["\\Sent".into()],
+                },
+            ];
+            if folder_batch {
+                let folder = store
+                    .begin_folder_sync_with_provider_receipt(
+                        &account_receipt,
+                        "INBOX",
+                        "INBOX",
+                        7,
+                        Some(3),
+                    )
+                    .await
+                    .unwrap();
+                let revision = store
+                    .stage_folder_discovery_page(
+                        account_id,
+                        "INBOX",
+                        &folder.generation,
+                        folder.revision as u64,
+                        &[1, 2, 3],
+                        None,
+                        true,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    store
+                        .commit_folder_header_batch_with_gmail_observations(
+                            &account_receipt,
+                            &epoch,
+                            "INBOX",
+                            &folder.generation,
+                            revision,
+                            &headers,
+                            &observations,
+                            None,
+                            true
+                        )
+                        .await
+                        .unwrap(),
+                    revision + 1
+                );
+            } else {
+                assert!(store
+                    .commit_provider_messages_with_receipt_and_gmail_observations(
+                        &receipt,
+                        &headers,
+                        &epoch,
+                        &observations
+                    )
+                    .await
+                    .unwrap());
+            }
+            assert!(store
+                .message_by_locator(account_id, "INBOX", 1)
+                .await
+                .unwrap()
+                .is_none());
+            let healthy = store
+                .message_by_locator(account_id, "INBOX", 2)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                store
+                    .gmail_message_labels(account_id, &healthy.id)
+                    .await
+                    .unwrap(),
+                Some(vec!["\\Inbox".into()])
+            );
+            assert!(store
+                .message_by_locator(account_id, "INBOX", 3)
+                .await
+                .unwrap()
+                .is_none());
+            assert!(store
+                .is_provider_message_suppressed(account_id, "INBOX", 1, 7)
+                .await
+                .unwrap());
+            assert!(store
+                .is_provider_gmail_inbox_observation_removed(account_id, 7, "9003")
+                .await
+                .unwrap());
+            assert!(!store
+                .is_provider_gmail_inbox_observation_removed(account_id, 7, "9002")
+                .await
+                .unwrap());
+            let suppressed_logical: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM gmail_logical_messages WHERE account_id = ? AND gmail_message_id = '9001'")
+                .bind(account_id.to_string()).fetch_one(&store.pool).await.unwrap();
+            assert_eq!(suppressed_logical, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_suppression_requires_exact_locator_and_current_namespace() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let mut account = account_with_id(account_id, "suppression-guards@example.test");
+        store.save_account(&account).await.unwrap();
+        store
+            .ensure_mailbox_catalog_identity(account_id, "INBOX", "INBOX", 7)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO mailbox_action_tombstones(account_id, mailbox, uid, created_at) VALUES (?, 'INBOX', 1, ?)")
+            .bind(account_id.to_string()).bind(Utc::now()).execute(&store.pool).await.unwrap();
+        assert!(store
+            .is_provider_message_suppressed(account_id, "INBOX", 1, 7)
+            .await
+            .unwrap());
+        sqlx::query("INSERT INTO gmail_logical_messages(account_id, gmail_message_id, labels_json, observed_at) VALUES (?, 'stable-sent', ?, ?)")
+            .bind(account_id.to_string()).bind(serde_json::to_string(&vec!["\\Sent"]).unwrap()).bind(Utc::now()).execute(&store.pool).await.unwrap();
+        assert!(store
+            .is_provider_gmail_inbox_observation_removed(account_id, 7, "stable-sent")
+            .await
+            .unwrap());
+        for (id, validity, stable_id) in [
+            (uuid::Uuid::new_v4(), 7, "stable-sent"),
+            (account_id, 8, "stable-sent"),
+            (account_id, 7, "unknown"),
+        ] {
+            assert!(!store
+                .is_provider_gmail_inbox_observation_removed(id, validity, stable_id)
+                .await
+                .unwrap());
+        }
+        for (id, mailbox, uid, validity) in [
+            (uuid::Uuid::new_v4(), "INBOX", 1, 7),
+            (account_id, "Archive", 1, 7),
+            (account_id, "INBOX", 2, 7),
+            (account_id, "INBOX", 1, 8),
+        ] {
+            assert!(!store
+                .is_provider_message_suppressed(id, mailbox, uid, validity)
+                .await
+                .unwrap());
+        }
+        store
+            .begin_mailbox_snapshot_for_account(
+                &account,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 8, 1, Some(2), None),
+            )
+            .await
+            .unwrap();
+        assert!(!store
+            .is_provider_message_suppressed(account_id, "INBOX", 1, 7)
+            .await
+            .unwrap());
+        assert!(!store
+            .is_provider_gmail_inbox_observation_removed(account_id, 7, "stable-sent")
+            .await
+            .unwrap());
+        sqlx::query("DELETE FROM mailbox_snapshot_generations WHERE account_id = ?")
+            .bind(account_id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        assert!(store
+            .is_provider_message_suppressed(account_id, "INBOX", 1, 7)
+            .await
+            .unwrap());
+        account.imap_host = "replacement.example.test".into();
+        store.save_account(&account).await.unwrap();
+        assert!(!store
+            .is_provider_message_suppressed(account_id, "INBOX", 1, 7)
+            .await
+            .unwrap());
+        assert!(!store
+            .is_provider_gmail_inbox_observation_removed(account_id, 7, "stable-sent")
+            .await
+            .unwrap());
     }
 
     #[tokio::test]

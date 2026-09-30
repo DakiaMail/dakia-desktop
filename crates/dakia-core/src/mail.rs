@@ -1111,14 +1111,10 @@ impl MailService {
             &mut observations,
         )
         .await?;
-        canonicalize_committed_messages(
-            &self.store,
-            account.id,
-            mailbox,
-            u32::try_from(state.uid_validity).context("folder UIDVALIDITY is invalid")?,
-            &mut messages,
-        )
-        .await?;
+        messages = observations
+            .iter()
+            .map(|observation| observation.message.clone())
+            .collect();
         persist_header_dates(&self.store, account, &observations).await?;
         on_progress(SyncProgress {
             phase: "published",
@@ -1325,6 +1321,7 @@ impl MailService {
             Vec::with_capacity(if force_replacement { 0 } else { uids.len() });
         let mut replacement_successful = std::collections::HashSet::new();
         let mut failed_uids = Vec::new();
+        let mut intentionally_absent_uids = std::collections::HashSet::new();
         let fields = realtime_header_fetch_fields(account);
         if force_replacement {
             for uid_batch in uids.chunks(MAX_METADATA_FETCH_UIDS) {
@@ -1469,12 +1466,17 @@ impl MailService {
                                 "INBOX",
                                 snapshot_identity.uid_validity,
                                 &mut committed,
+                                &gmail_observations,
                             )
                             .await?;
                             self.store
                                 .clear_mailbox_sync_failure(account.id, "INBOX", uid)
                                 .await?;
-                            messages.push(committed.remove(0));
+                            if let Some(message) = committed.pop() {
+                                messages.push(message);
+                            } else {
+                                intentionally_absent_uids.insert(uid);
+                            }
                         }
                         Err(error) => {
                             eprintln!("Dakia rejected INBOX UID {uid} before persistence: {error}");
@@ -1494,6 +1496,7 @@ impl MailService {
             .map(|message| u32::try_from(message.uid))
             .collect::<std::result::Result<std::collections::HashSet<_>, _>>()?;
         successful.extend(replacement_successful);
+        successful.extend(intentionally_absent_uids);
         let current_failures = failed_uids
             .iter()
             .map(|(uid, _)| *uid)
@@ -2546,6 +2549,7 @@ impl MailService {
                         &item.plan.storage,
                         item.snapshot_identity.uid_validity,
                         &mut messages,
+                        &gmail_observations,
                     )
                     .await?;
                 }
@@ -2911,6 +2915,7 @@ impl MailService {
             &plan.storage,
             selected_uid_validity,
             &mut messages,
+            &gmail_observations,
         )
         .await?;
         let _ = client.command("LOGOUT").await;
@@ -3082,6 +3087,7 @@ impl MailService {
                 &item.plan.storage,
                 selected_uid_validity,
                 &mut messages,
+                &gmail_observations,
             )
             .await?;
             // A bounded SINCE refresh does not establish a new remote total,
@@ -3268,14 +3274,10 @@ impl MailService {
             &mut observations,
         )
         .await?;
-        canonicalize_committed_messages(
-            &self.store,
-            account.id,
-            &plan.storage,
-            identity.uid_validity,
-            &mut archive_messages,
-        )
-        .await?;
+        archive_messages = observations
+            .iter()
+            .map(|observation| observation.message.clone())
+            .collect();
         for observation in &observations {
             if let Some(internal_date) = observation.internal_date {
                 self.store
@@ -8217,19 +8219,34 @@ async fn canonicalize_committed_messages(
     account_id: crate::AccountId,
     mailbox: &str,
     uid_validity: u32,
-    messages: &mut [MailSummary],
+    messages: &mut Vec<MailSummary>,
+    gmail_observations: &[GmailProviderObservation],
 ) -> Result<()> {
-    for message in messages {
+    let mut retained = Vec::with_capacity(messages.len());
+    for message in messages.iter() {
         let uid = u32::try_from(message.uid).context("committed message UID is invalid")?;
-        let id = store
-            .canonical_message_id_for_locator(account_id, mailbox, uid, uid_validity)
-            .await?
-            .context("provider commit did not produce a durable message row")?;
-        *message = store
-            .message(&id)
-            .await?
-            .context("provider commit row disappeared before canonical reload")?;
+        let gmail = gmail_observations
+            .iter()
+            .find(|observation| observation.uid == uid);
+        if let Some(message) = canonical_committed_message(
+            store,
+            account_id,
+            mailbox,
+            uid_validity,
+            uid,
+            gmail.map(|observation| {
+                (
+                    observation.gmail_message_id.as_str(),
+                    observation.labels.as_slice(),
+                )
+            }),
+        )
+        .await?
+        {
+            retained.push(message);
+        }
     }
+    *messages = retained;
     Ok(())
 }
 
@@ -8238,21 +8255,81 @@ async fn canonicalize_header_observations(
     account_id: crate::AccountId,
     mailbox: &str,
     uid_validity: u32,
-    observations: &mut [HeaderProviderObservation],
+    observations: &mut Vec<HeaderProviderObservation>,
 ) -> Result<()> {
-    for observation in observations {
+    let mut retained = Vec::with_capacity(observations.len());
+    for observation in observations.iter() {
         let uid = u32::try_from(observation.message.uid)
             .context("committed observation UID is invalid")?;
-        let id = store
-            .canonical_message_id_for_locator(account_id, mailbox, uid, uid_validity)
-            .await?
-            .context("provider commit did not produce a durable observation row")?;
-        observation.message = store
-            .message(&id)
-            .await?
-            .context("provider observation disappeared before canonical reload")?;
+        if let Some(message) = canonical_committed_message(
+            store,
+            account_id,
+            mailbox,
+            uid_validity,
+            uid,
+            observation
+                .gmail_message_id
+                .as_deref()
+                .map(|id| (id, observation.gmail_labels.as_slice())),
+        )
+        .await?
+        {
+            let mut observation = observation.clone();
+            observation.message = message;
+            retained.push(observation);
+        }
     }
+    *observations = retained;
     Ok(())
+}
+
+/// A successful provider transaction may intentionally omit a moved/deleted
+/// locator, or remove Gmail Inbox membership. Return only visible committed
+/// rows, while keeping unexplained absence and stale namespaces as errors.
+async fn canonical_committed_message(
+    store: &Store,
+    account_id: crate::AccountId,
+    mailbox: &str,
+    uid_validity: u32,
+    uid: u32,
+    gmail: Option<(&str, &[String])>,
+) -> Result<Option<MailSummary>> {
+    let id = store
+        .canonical_message_id_for_locator(account_id, mailbox, uid, uid_validity)
+        .await?;
+    if let Some(id) = id.as_ref() {
+        if let Some(message) = store.message(id).await? {
+            if message.account_id == account_id.to_string()
+                && message.mailbox == mailbox
+                && message.uid == i64::from(uid)
+            {
+                return Ok(Some(message));
+            }
+        }
+    }
+    if store
+        .is_provider_message_suppressed(account_id, mailbox, uid, uid_validity)
+        .await?
+    {
+        return Ok(None);
+    }
+    if mailbox == "INBOX" {
+        if let Some((gmail_id, labels)) = gmail {
+            if !labels
+                .iter()
+                .any(|label| label.eq_ignore_ascii_case("\\Inbox"))
+                && store
+                    .is_provider_gmail_inbox_observation_removed(account_id, uid_validity, gmail_id)
+                    .await?
+            {
+                return Ok(None);
+            }
+        }
+    }
+    if id.is_none() {
+        bail!("provider commit did not produce a durable message row");
+    }
+    bail!("provider commit row disappeared before canonical reload")
 }
 
 /// Fetches one bounded sequence-number range. Providers sometimes impose a
@@ -12619,6 +12696,137 @@ mod tests {
         assert!(!transcript
             .iter()
             .any(|command| command.contains("1:900000")));
+    }
+
+    #[tokio::test]
+    async fn manual_inbox_sync_omits_removed_messages_and_advances_past_them() {
+        for (gmail, all_removed, concurrent_removal, labels_removed) in [
+            (false, false, false, false),
+            (false, true, false, false),
+            (false, false, true, false),
+            (true, false, false, false),
+            (true, false, false, true),
+        ] {
+            let store = Store::in_memory().await.unwrap();
+            let service = MailService::new(store.clone());
+            let mut account = test_account();
+            if gmail {
+                account.provider_id = "gmail".into();
+            }
+            store.save_account(&account).await.unwrap();
+            store
+                .ensure_mailbox_catalog_identity(account.id, "INBOX", "INBOX", 77)
+                .await
+                .unwrap();
+            if !concurrent_removal && !labels_removed {
+                for uid in if all_removed { vec![41, 42] } else { vec![41] } {
+                    store
+                        .upsert_catalog_messages(&[snapshot_test_message(&account, uid)])
+                        .await
+                        .unwrap();
+                    store
+                        .move_message(account.id, "INBOX", uid, "Archive", None)
+                        .await
+                        .unwrap();
+                }
+            }
+            let (mut client, server) = duplex_imap_client_and_server();
+            let server_store = store.clone();
+            let server_account = account.clone();
+            let fields = realtime_header_fetch_fields(&account);
+            let server = tokio::spawn(async move {
+                let (read, mut write) = split(server);
+                let mut read = BufReader::new(read);
+                let mut transcript = Vec::new();
+                loop {
+                    let mut line = String::new();
+                    if read.read_line(&mut line).await.unwrap() == 0 {
+                        break;
+                    }
+                    let (tag, command) = line.trim_end().split_once(' ').unwrap();
+                    transcript.push(command.to_owned());
+                    let response = if command == "SELECT INBOX" {
+                        format!("* 2 EXISTS\r\n* OK [UIDVALIDITY 77] valid\r\n* OK [UIDNEXT 43] next\r\n{tag} OK selected\r\n")
+                    } else if command == "FETCH 1:2 (UID FLAGS)" {
+                        format!("* 1 FETCH (UID 41 FLAGS ())\r\n* 2 FETCH (UID 42 FLAGS ())\r\n{tag} OK flags\r\n")
+                    } else {
+                        let uid = if command == format!("UID FETCH 41 ({fields})") {
+                            41
+                        } else {
+                            assert_eq!(command, format!("UID FETCH 42 ({fields})"));
+                            42
+                        };
+                        // Reproduce a move arriving after the FETCH receipt was
+                        // captured, before the delayed server response commits.
+                        if concurrent_removal && uid == 41 {
+                            server_store
+                                .upsert_catalog_messages(&[snapshot_test_message(
+                                    &server_account,
+                                    uid,
+                                )])
+                                .await
+                                .unwrap();
+                            server_store
+                                .move_message(server_account.id, "INBOX", uid, "Archive", None)
+                                .await
+                                .unwrap();
+                        }
+                        let headers = format!("Date: Wed, 30 Jul 2026 10:00:00 +0000\r\nFrom: Sender <sender@example.test>\r\nTo: Reader <reader@example.test>\r\nSubject: Removal regression {uid}\r\nMessage-ID: <removal-{uid}@example.test>\r\n\r\n");
+                        let gmail_fields = if gmail {
+                            let labels = if labels_removed && uid == 41 {
+                                ""
+                            } else {
+                                "\\Inbox"
+                            };
+                            format!(" X-GM-MSGID {uid} X-GM-LABELS ({labels})")
+                        } else {
+                            String::new()
+                        };
+                        format!("* 1 FETCH (UID {uid} FLAGS () INTERNALDATE \"30-Jul-2026 10:00:00 +0000\"{gmail_fields} BODY[HEADER] {{{}}}\r\n{headers})\r\n{tag} OK headers\r\n", headers.len())
+                    };
+                    write.write_all(response.as_bytes()).await.unwrap();
+                }
+                transcript
+            });
+            let result = service
+                .fetch_new_inbox_headers(&mut client, &account, 50)
+                .await;
+            drop(client);
+            let transcript = server.await.unwrap();
+            let messages = result.expect("intentionally suppressed messages must not fail sync");
+            let expected = if all_removed { vec![] } else { vec![42] };
+            assert_eq!(
+                messages
+                    .iter()
+                    .map(|message| message.uid)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(
+                store.mailbox_uids(account.id, "INBOX").await.unwrap(),
+                expected.into_iter().map(|uid| uid as u32).collect()
+            );
+            assert_eq!(
+                store
+                    .highest_mailbox_uid(account.id, "INBOX")
+                    .await
+                    .unwrap(),
+                Some(42),
+                "a skipped message is a handled outcome, not a retry gap"
+            );
+            assert!(store
+                .mailbox_sync_failure_uids(account.id, "INBOX")
+                .await
+                .unwrap()
+                .is_empty());
+            assert_eq!(
+                transcript
+                    .iter()
+                    .filter(|command| command.starts_with("UID FETCH"))
+                    .count(),
+                2
+            );
+        }
     }
 
     #[tokio::test]
