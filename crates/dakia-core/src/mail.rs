@@ -9096,6 +9096,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scripted_two_hundred_thousand_message_snapshot_uses_bounded_pages() {
+        // The old mailbox-wide UID search exceeded the response transcript
+        // limit at this size. Exercise the production sync path so discovery,
+        // flag paging, and durable catalogue publication stay bounded together.
+        assert_large_message_snapshot_is_bounded(200_000).await;
+    }
+
+    #[tokio::test]
     async fn scripted_condstore_delta_updates_only_returned_uid_and_persists_modseq() {
         let store = Store::in_memory().await.unwrap();
         let service = MailService::new(store.clone());
