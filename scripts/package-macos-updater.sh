@@ -21,6 +21,7 @@ bundle_root="$root_dir/target/aarch64-apple-darwin/release/bundle/macos"
 app="$bundle_root/Dakia.app"
 archive="$output_dir/Dakia-aarch64.app.tar.gz"
 signature="$archive.sig"
+agent="$app/Contents/Resources/agent"
 
 require_sha256() {
   expected=$1
@@ -39,6 +40,14 @@ fi
 for bundled_resource in \
   "$app/Contents/MacOS/dakia" \
   "$app/Contents/Frameworks/libonnxruntime.1.23.2.dylib" \
+  "$agent/MANIFEST.json" \
+  "$agent/package-lock.json" \
+  "$agent/package.json" \
+  "$agent/dist/cli.js" \
+  "$agent/runtime/node" \
+  "$agent/licenses/node/LICENSE" \
+  "$agent/licenses/pi/LICENSE" \
+  "$agent/licenses/npm-production.json" \
   "$app/Contents/Resources/THIRD_PARTY_NOTICES.md" \
   "$app/Contents/Resources/licenses/Apache-2.0.txt" \
   "$app/Contents/Resources/licenses/MPL-2.0.txt" \
@@ -53,6 +62,15 @@ for bundled_resource in \
     exit 1
   fi
 done
+if [ ! -d "$agent/node_modules" ]; then
+  echo "Missing bundled updater resource: $agent/node_modules" >&2
+  exit 1
+fi
+if find "$agent" -type l -print -quit | grep . >/dev/null; then
+  echo "The bundled updater agent runtime must not contain symbolic links." >&2
+  exit 1
+fi
+node "$root_dir/scripts/prepare-agent-runtime.mjs" verify "$agent" darwin arm64
 require_sha256 cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30 \
   "$app/Contents/Resources/licenses/Apache-2.0.txt"
 require_sha256 3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04 \
@@ -68,6 +86,12 @@ if ! grep -Fq "72de7110305b5e1d98d26aa0578482a230739c0c" \
   ! grep -Fq "jhu-clsp/mmBERT-small" \
     "$app/Contents/Resources/THIRD_PARTY_NOTICES.md" ||
   ! grep -Fq "ONNX Runtime 1.23.2" \
+    "$app/Contents/Resources/THIRD_PARTY_NOTICES.md" ||
+  ! grep -Fq "Node.js 22.23.2" \
+    "$app/Contents/Resources/THIRD_PARTY_NOTICES.md" ||
+  ! grep -Fq "Pi agent SDK 1.3.0" \
+    "$app/Contents/Resources/THIRD_PARTY_NOTICES.md" ||
+  ! grep -Fq "standardwebhooks" \
     "$app/Contents/Resources/THIRD_PARTY_NOTICES.md" ||
   ! grep -Fq "THIRD PARTY SOFTWARE NOTICES AND INFORMATION" \
     "$app/Contents/Resources/licenses/ONNX-Runtime-1.23.2-ThirdPartyNotices.txt"; then

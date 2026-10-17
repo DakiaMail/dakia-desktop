@@ -79,6 +79,22 @@ test("normalizes Windows runner paths before extracting the compiler cache", () 
   );
 });
 
+test("prepares the agent runtime for the release matrix target", () => {
+  const assetPreparation = workflow.match(
+    /- name: Prepare packaged assets([\s\S]*?)- name: Build target-specific CLI sidecar/,
+  )?.[1];
+  assert.ok(assetPreparation, "packaged asset preparation step is missing");
+  assert.match(
+    assetPreparation,
+    /TAURI_ENV_PLATFORM: \$\{\{ matrix\.platform \}\}/,
+  );
+  assert.match(assetPreparation, /TAURI_ENV_ARCH: \$\{\{ matrix\.arch \}\}/);
+  assert.match(
+    assetPreparation,
+    /bash \.\/scripts\/prepare-desktop-assets\.sh/,
+  );
+});
+
 test("writes canonical Windows checksums while hashing binary bytes", () => {
   const windowsAssets = workflow.match(
     /- name: Sign and assemble Windows release assets([\s\S]*?)- name: Verify macOS release asset set/,
@@ -93,6 +109,33 @@ test("writes canonical Windows checksums while hashing binary bytes", () => {
     windowsAssets,
     /sha256sum "\$expected" "\$expected\.sig" > SHA256SUMS\.txt/,
   );
+});
+
+test("verifies the installed Linux agent runtime without system Node", () => {
+  const linuxAssets = workflow.match(
+    /- name: Assemble and verify Linux release assets([\s\S]*?)- name: Sign and assemble Windows release assets/,
+  )?.[1];
+  assert.ok(linuxAssets, "Linux release asset step is missing");
+  assert.match(linuxAssets, /usr\/lib\/dakia-desktop\/agent/);
+  assert.match(linuxAssets, /prepare-agent-runtime\.mjs verify "\$agent"/);
+  assert.match(linuxAssets, /test -x "\$agent\/runtime\/node"/);
+  assert.match(linuxAssets, /PATH="\$empty_path" "\$cli"/);
+  assert.match(linuxAssets, /--json agent sessions list/);
+  assert.match(linuxAssets, /value\.sessions/);
+});
+
+test("extracts and verifies the installed Windows agent runtime", () => {
+  const windowsAssets = workflow.match(
+    /- name: Sign and assemble Windows release assets([\s\S]*?)- name: Verify macOS release asset set/,
+  )?.[1];
+  assert.ok(windowsAssets, "Windows release asset step is missing");
+  assert.match(windowsAssets, /7z\.exe x/);
+  assert.match(windowsAssets, /find "\$outer" -type f -name 'app-\*\.7z'/);
+  assert.match(windowsAssets, /test -f "\$agent\/runtime\/node\.exe"/);
+  assert.match(windowsAssets, /prepare-agent-runtime\.mjs verify "\$agent"/);
+  assert.match(windowsAssets, /PATH="\$empty_path" "\$cli"/);
+  assert.match(windowsAssets, /--json agent sessions list/);
+  assert.match(windowsAssets, /value\.sessions/);
 });
 
 test("preserves the exact bytes of every pinned classifier asset", () => {

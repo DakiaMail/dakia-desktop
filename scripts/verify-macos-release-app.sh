@@ -21,10 +21,14 @@ fi
 # the verifier smoke through the physical bundle path so resource resolution
 # exercises the extracted app instead of falling back to Contents/MacOS.
 app=$(CDPATH= cd -- "$app" && pwd -P)
+root_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
 executable="$app/Contents/MacOS/dakia-desktop"
 cli="$app/Contents/MacOS/dakia"
 runtime="$app/Contents/Frameworks/libonnxruntime.1.23.2.dylib"
+agent="$app/Contents/Resources/agent"
+agent_node="$agent/runtime/node"
+agent_cli="$agent/dist/cli.js"
 notice_policy=${DAKIA_RELEASE_NOTICE_POLICY:-current}
 
 case "$notice_policy" in
@@ -47,6 +51,14 @@ require_sha256() {
 
 for packaged_resource in \
   "$runtime" \
+  "$agent/MANIFEST.json" \
+  "$agent/package-lock.json" \
+  "$agent/package.json" \
+  "$agent_cli" \
+  "$agent_node" \
+  "$agent/licenses/node/LICENSE" \
+  "$agent/licenses/pi/LICENSE" \
+  "$agent/licenses/npm-production.json" \
   "$app/Contents/Resources/resources/email-classifier-v2/MANIFEST.json" \
   "$app/Contents/Resources/resources/email-classifier-v2/model.onnx" \
   "$app/Contents/Resources/resources/email-classifier-v2/tokenizer.json"; do
@@ -55,6 +67,15 @@ for packaged_resource in \
     exit 1
   fi
 done
+if [ ! -d "$agent/node_modules" ]; then
+  echo "Missing packaged agent dependencies: $agent/node_modules" >&2
+  exit 1
+fi
+if find "$agent" -type l -print -quit | grep . >/dev/null; then
+  echo "The packaged agent runtime must not contain symbolic links." >&2
+  exit 1
+fi
+node "$root_dir/scripts/prepare-agent-runtime.mjs" verify "$agent" darwin arm64
 for packaged_executable in "$executable" "$cli"; do
   if [ ! -f "$packaged_executable" ] || [ -L "$packaged_executable" ] || [ ! -x "$packaged_executable" ]; then
     echo "Missing or unsafe packaged Dakia executable: $packaged_executable" >&2
@@ -94,6 +115,12 @@ if [ "$notice_policy" = "current" ]; then
       "$app/Contents/Resources/THIRD_PARTY_NOTICES.md" ||
     ! grep -Fq "ONNX Runtime 1.23.2" \
       "$app/Contents/Resources/THIRD_PARTY_NOTICES.md" ||
+    ! grep -Fq "Node.js 22.23.2" \
+      "$app/Contents/Resources/THIRD_PARTY_NOTICES.md" ||
+    ! grep -Fq "Pi agent SDK 1.3.0" \
+      "$app/Contents/Resources/THIRD_PARTY_NOTICES.md" ||
+    ! grep -Fq "standardwebhooks" \
+      "$app/Contents/Resources/THIRD_PARTY_NOTICES.md" ||
     ! grep -Fq "Dakia is licensed under the Mozilla Public License 2.0" \
       "$app/Contents/Resources/THIRD_PARTY_NOTICES.md" ||
     ! grep -Fq "https://github.com/DakiaMail/dakia-desktop" \
@@ -111,13 +138,29 @@ if [ "$static_only" = true ]; then
 fi
 
 expected_team=34T9L3FGZC
-for architecture_target in "$executable" "$cli" "$runtime"; do
+for architecture_target in "$executable" "$cli" "$runtime" "$agent_node"; do
   target_archs=$(lipo -archs "$architecture_target")
   if [ "$target_archs" != "arm64" ]; then
     echo "Packaged release binary is not exactly Apple Silicon arm64: $architecture_target ($target_archs)" >&2
     exit 1
   fi
 done
+agent_minos=$(otool -l "$agent_node" | awk '
+  $1 == "minos" { found = 1; print $2; exit }
+  $1 == "version" { candidate = $2 }
+  END { if (!found && candidate != "") print candidate }
+')
+if [ -z "$agent_minos" ]; then
+  echo "Cannot determine the bundled Node.js minimum macOS version." >&2
+  exit 1
+fi
+if ! awk -v actual="$agent_minos" 'BEGIN {
+  split(actual, a, ".");
+  exit ((a[1] + 0) < 11 || ((a[1] + 0) == 11 && (a[2] + 0) <= 0)) ? 0 : 1;
+}'; then
+  echo "Bundled Node.js requires macOS $agent_minos, newer than Dakia's 11.0 minimum." >&2
+  exit 1
+fi
 if ! otool -l "$cli" | awk '
   $1 == "cmd" && $2 == "LC_RPATH" { in_rpath = 1; next }
   in_rpath && $1 == "path" {
@@ -130,6 +173,58 @@ if ! otool -l "$cli" | awk '
   exit 1
 fi
 codesign --verify --strict --verbose=2 "$cli"
+codesign --verify --strict --verbose=2 "$agent_node"
+agent_entitlements=$(codesign -d --entitlements :- "$agent_node" 2>&1)
+for entitlement in \
+  com.apple.security.cs.allow-jit \
+  com.apple.security.cs.allow-unsigned-executable-memory; do
+  if ! printf '%s\n' "$agent_entitlements" | grep -Fq "$entitlement"; then
+    echo "Bundled Node.js is missing required entitlement: $entitlement" >&2
+    exit 1
+  fi
+done
+native_files=$(mktemp "${TMPDIR:-/tmp}/dakia-agent-verify-native.XXXXXX")
+find "$agent/node_modules" -type f -print >"$native_files"
+while IFS= read -r native; do
+  if file -b "$native" | grep -q 'Mach-O'; then
+    codesign --verify --strict --verbose=2 "$native"
+    native_archs=$(lipo -archs "$native")
+    native_has_arm64=false
+    for native_arch in $native_archs; do
+      [ "$native_arch" = arm64 ] && native_has_arm64=true
+    done
+    case "$native" in
+      *darwin_arm64* | *darwin-arm64* | *darwin-universal*)
+        if [ "$native_has_arm64" != true ]; then
+          echo "Target-selected native agent dependency lacks arm64: $native ($native_archs)" >&2
+          rm -f "$native_files"
+          exit 1
+        fi
+        ;;
+    esac
+    if [ "$native_has_arm64" = true ]; then
+      native_minos=$(otool -l -arch arm64 "$native" | awk '
+        $1 == "minos" { found = 1; print $2; exit }
+        $1 == "version" { candidate = $2 }
+        END { if (!found && candidate != "") print candidate }
+      ')
+      if [ -z "$native_minos" ]; then
+        echo "Cannot determine native agent dependency minimum macOS version: $native" >&2
+        rm -f "$native_files"
+        exit 1
+      fi
+      if ! awk -v actual="$native_minos" 'BEGIN {
+        split(actual, a, ".");
+        exit ((a[1] + 0) < 11 || ((a[1] + 0) == 11 && (a[2] + 0) <= 0)) ? 0 : 1;
+      }'; then
+        echo "Native agent dependency requires macOS $native_minos, newer than Dakia's 11.0 minimum: $native" >&2
+        rm -f "$native_files"
+        exit 1
+      fi
+    fi
+  fi
+done <"$native_files"
+rm -f "$native_files"
 codesign --verify --deep --strict --verbose=2 "$app"
 app_team=$(
   codesign -dv --verbose=4 "$app" 2>&1 |
@@ -139,8 +234,12 @@ cli_team=$(
   codesign -dv --verbose=4 "$cli" 2>&1 |
     sed -n 's/^TeamIdentifier=//p'
 )
-if [ "$app_team" != "$expected_team" ] || [ "$cli_team" != "$expected_team" ]; then
-  echo "Packaged Dakia app and CLI must use expected TeamIdentifier $expected_team." >&2
+agent_team=$(
+  codesign -dv --verbose=4 "$agent_node" 2>&1 |
+    sed -n 's/^TeamIdentifier=//p'
+)
+if [ "$app_team" != "$expected_team" ] || [ "$cli_team" != "$expected_team" ] || [ "$agent_team" != "$expected_team" ]; then
+  echo "Packaged Dakia app, CLI, and agent runtime must use expected TeamIdentifier $expected_team." >&2
   exit 1
 fi
 
@@ -149,6 +248,36 @@ smoke_root=$(mktemp -d "${TMPDIR:-/tmp}/dakia-release-smoke.XXXXXX")
 output="$smoke_root/output.log"
 trap 'rm -rf "$smoke_root"' EXIT HUP INT TERM
 mkdir -p "$smoke_root/data"
+mkdir -p "$smoke_root/empty-path" "$smoke_root/agent-profile"
+
+agent_version=$(PATH="$smoke_root/empty-path" "$agent_node" --version)
+if [ "$agent_version" != "v22.23.2" ]; then
+  echo "Packaged agent runtime reported $agent_version, expected v22.23.2." >&2
+  exit 1
+fi
+agent_sessions_stdout="$smoke_root/agent-sessions.stdout"
+agent_sessions_stderr="$smoke_root/agent-sessions.stderr"
+if ! PATH="$smoke_root/empty-path" \
+  "$cli" --data-dir "$smoke_root/agent-profile" --json agent sessions list \
+  >"$agent_sessions_stdout" 2>"$agent_sessions_stderr"; then
+  echo "Packaged agent provider-free startup smoke failed." >&2
+  cat "$agent_sessions_stderr" >&2
+  exit 1
+fi
+if [ -s "$agent_sessions_stderr" ]; then
+  echo "Packaged agent provider-free startup wrote unexpected stderr output." >&2
+  cat "$agent_sessions_stderr" >&2
+  exit 1
+fi
+if ! node -e '
+  const fs = require("node:fs");
+  const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  if (!value || !Array.isArray(value.sessions) || value.sessions.length !== 0) process.exit(1);
+' "$agent_sessions_stdout"; then
+  echo "Packaged agent provider-free startup returned an unexpected schema." >&2
+  cat "$agent_sessions_stdout" >&2
+  exit 1
+fi
 
 version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")
 cli_contract_data="$smoke_root/cli-parse-contract"

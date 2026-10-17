@@ -45,6 +45,7 @@
       "icons/icon.ico"
     ],
     "resources": {
+      "resources/agent/": "agent/",
       "resources/email-classifier-v2/*": "resources/email-classifier-v2/",
       "resources/licenses/*": "licenses/",
       "../../../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"

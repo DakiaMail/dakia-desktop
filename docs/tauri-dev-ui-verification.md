@@ -16,6 +16,18 @@ For native/backend behavior, start the app with:
 npm run dev
 ```
 
+To use an isolated, fictional mailbox profile during development or native
+verification, set `DAKIA_DATA_DIR` to a non-empty absolute path. The desktop
+and `dakia` CLI then use the same local profile:
+
+```sh
+DAKIA_DATA_DIR=/private/tmp/dakia-fictional npm run dev
+DAKIA_DATA_DIR=/private/tmp/dakia-fictional dakia account list
+```
+
+This override is ignored by the dedicated release-smoke profile, which uses
+`DAKIA_RELEASE_SMOKE_DATA_DIR`.
+
 This runs `scripts/dev.sh`, which in turn runs Tauri dev and starts Vite on
 port 1420. `npm run dev:web` is only the browser demo and is not evidence for
 Tauri IPC, plugins, native windows, Keychain behavior, or external URL opening.

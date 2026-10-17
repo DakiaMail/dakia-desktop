@@ -8,7 +8,12 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
     Engine,
 };
+use dakia_core::drafts::{DraftService, LocalDraft};
 use dakia_core::storage::{ConversationTarget, MessageContentFetchAcquire};
+use dakia_core::thread_context::{
+    ThreadContext, ThreadContextBundle, ThreadContextKind, ThreadContextLocator,
+    ThreadContextRevision,
+};
 use dakia_core::{
     ai::{AiConfig, AiProvider, AiService},
     mailbox_action_destination, normalize_sender_address, provider, Account, AccountAuth,
@@ -64,6 +69,59 @@ const CLASSIFICATION_RETRY_DELAYS: [Duration; 2] =
     [Duration::from_millis(100), Duration::from_millis(500)];
 const MAX_EXPORT_FILENAME_BYTES: usize = 255;
 const MAX_DOWNLOAD_COLLISION_SUFFIX_BYTES: usize = " (9999)".len();
+
+/// Resolves the shared CLI/desktop profile override. An absolute path keeps a
+/// development launch from silently creating a profile relative to a changing
+/// working directory.
+fn resolve_desktop_data_dir(
+    default_data_dir: PathBuf,
+    configured_data_dir: Option<PathBuf>,
+) -> anyhow::Result<PathBuf> {
+    let Some(data_dir) = configured_data_dir else {
+        return Ok(default_data_dir);
+    };
+    if data_dir.as_os_str().is_empty() {
+        anyhow::bail!("DAKIA_DATA_DIR must not be empty");
+    }
+    if !data_dir.is_absolute() {
+        anyhow::bail!("DAKIA_DATA_DIR must be an absolute path");
+    }
+    Ok(data_dir)
+}
+
+#[cfg(test)]
+mod desktop_data_dir_tests {
+    use super::*;
+
+    #[test]
+    fn uses_the_tauri_profile_without_an_override() {
+        assert_eq!(
+            resolve_desktop_data_dir(PathBuf::from("/default/profile"), None).unwrap(),
+            PathBuf::from("/default/profile")
+        );
+    }
+
+    #[test]
+    fn accepts_an_absolute_isolated_profile() {
+        assert_eq!(
+            resolve_desktop_data_dir(
+                PathBuf::from("/default/profile"),
+                Some(PathBuf::from("/private/tmp/dakia-fictional")),
+            )
+            .unwrap(),
+            PathBuf::from("/private/tmp/dakia-fictional")
+        );
+    }
+
+    #[test]
+    fn rejects_empty_and_relative_overrides() {
+        assert!(resolve_desktop_data_dir(PathBuf::new(), Some(PathBuf::new())).is_err());
+        assert!(
+            resolve_desktop_data_dir(PathBuf::new(), Some(PathBuf::from("relative-profile")),)
+                .is_err()
+        );
+    }
+}
 
 struct AppState {
     store: Store,
@@ -1654,6 +1712,99 @@ struct AiInput {
     model_path: Option<PathBuf>,
     message_ids: Vec<String>,
     instruction: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadContextWriteInput {
+    target: ConversationTarget,
+    kind: ThreadContextKind,
+    content: String,
+    expected_revision: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadContextAppendInput {
+    target: ConversationTarget,
+    kind: ThreadContextKind,
+    text: String,
+    expected_revision: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadContextClearInput {
+    target: ConversationTarget,
+    kind: ThreadContextKind,
+    expected_revision: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadContextRestoreInput {
+    target: ConversationTarget,
+    kind: ThreadContextKind,
+    revision: Uuid,
+    expected_revision: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalDraftUpdateInput {
+    draft_id: String,
+    expected_revision: i64,
+    draft: ComposeMessage,
+}
+
+/// Context writes use revision checks because the CLI and desktop can both
+/// edit a document. The current document is returned only for an expected
+/// revision conflict, allowing the reader to recover without exposing raw
+/// storage diagnostics to the interface.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadContextCommandError {
+    kind: &'static str,
+    current: Option<ThreadContext>,
+}
+
+async fn thread_context_locator_for_target(
+    state: &AppState,
+    target: &ConversationTarget,
+) -> anyhow::Result<ThreadContextLocator> {
+    Ok(state
+        .store
+        .thread_context_conversation_for_target(target)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("thread context conversation was not found"))?
+        .locator)
+}
+
+async fn thread_context_write_error(
+    state: &AppState,
+    target: &ConversationTarget,
+    kind: ThreadContextKind,
+    failure: anyhow::Error,
+) -> ThreadContextCommandError {
+    if failure
+        .to_string()
+        .starts_with("thread context revision conflict")
+    {
+        let current = match thread_context_locator_for_target(state, target).await {
+            Ok(locator) => state.store.thread_context_get(locator, kind).await.ok(),
+            Err(_) => None,
+        };
+        ThreadContextCommandError {
+            kind: "conflict",
+            current,
+        }
+    } else {
+        tracing::warn!(error = %failure, "thread context operation failed");
+        ThreadContextCommandError {
+            kind: "failed",
+            current: None,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -3885,6 +4036,118 @@ async fn conversation_for_target(
 }
 
 #[tauri::command]
+async fn thread_context(
+    state: State<'_, Arc<AppState>>,
+    target: ConversationTarget,
+) -> Result<ThreadContextBundle, String> {
+    state
+        .store
+        .thread_context_bundle_for_target(&target)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Conversation context is unavailable for this message".to_owned())
+}
+
+#[tauri::command]
+async fn update_thread_context(
+    state: State<'_, Arc<AppState>>,
+    input: ThreadContextWriteInput,
+) -> Result<ThreadContext, ThreadContextCommandError> {
+    match state
+        .store
+        .thread_context_set_for_target(
+            &input.target,
+            input.kind,
+            input.content,
+            input.expected_revision,
+        )
+        .await
+    {
+        Ok(context) => Ok(context),
+        Err(failure) => {
+            Err(thread_context_write_error(state.inner(), &input.target, input.kind, failure).await)
+        }
+    }
+}
+
+#[tauri::command]
+async fn append_thread_context(
+    state: State<'_, Arc<AppState>>,
+    input: ThreadContextAppendInput,
+) -> Result<ThreadContext, ThreadContextCommandError> {
+    match state
+        .store
+        .thread_context_append_for_target(
+            &input.target,
+            input.text,
+            input.kind,
+            input.expected_revision,
+        )
+        .await
+    {
+        Ok(context) => Ok(context),
+        Err(failure) => {
+            Err(thread_context_write_error(state.inner(), &input.target, input.kind, failure).await)
+        }
+    }
+}
+
+#[tauri::command]
+async fn clear_thread_context(
+    state: State<'_, Arc<AppState>>,
+    input: ThreadContextClearInput,
+) -> Result<ThreadContext, ThreadContextCommandError> {
+    match state
+        .store
+        .thread_context_clear_for_target(&input.target, input.kind, input.expected_revision)
+        .await
+    {
+        Ok(context) => Ok(context),
+        Err(failure) => {
+            Err(thread_context_write_error(state.inner(), &input.target, input.kind, failure).await)
+        }
+    }
+}
+
+#[tauri::command]
+async fn thread_context_history(
+    state: State<'_, Arc<AppState>>,
+    target: ConversationTarget,
+    kind: ThreadContextKind,
+) -> Result<Vec<ThreadContextRevision>, String> {
+    let locator = thread_context_locator_for_target(state.inner(), &target)
+        .await
+        .map_err(error)?;
+    state
+        .store
+        .thread_context_history(locator, kind)
+        .await
+        .map_err(error)
+}
+
+#[tauri::command]
+async fn restore_thread_context(
+    state: State<'_, Arc<AppState>>,
+    input: ThreadContextRestoreInput,
+) -> Result<ThreadContext, ThreadContextCommandError> {
+    match state
+        .store
+        .thread_context_restore_for_target(
+            &input.target,
+            input.kind,
+            input.revision,
+            input.expected_revision,
+        )
+        .await
+    {
+        Ok(context) => Ok(context),
+        Err(failure) => {
+            Err(thread_context_write_error(state.inner(), &input.target, input.kind, failure).await)
+        }
+    }
+}
+
+#[tauri::command]
 async fn search_remote(
     state: State<'_, Arc<AppState>>,
     query: SearchQuery,
@@ -4797,6 +5060,69 @@ async fn sync_account(
 }
 
 #[tauri::command]
+async fn local_drafts(
+    state: State<'_, Arc<AppState>>,
+    account_id: Option<Uuid>,
+) -> Result<Vec<LocalDraft>, String> {
+    DraftService::new(state.store.clone(), MailService::new(state.store.clone()))
+        .list(account_id)
+        .await
+        .map_err(error)
+}
+
+#[tauri::command]
+async fn local_draft(
+    state: State<'_, Arc<AppState>>,
+    draft_id: String,
+) -> Result<Option<LocalDraft>, String> {
+    DraftService::new(state.store.clone(), MailService::new(state.store.clone()))
+        .get(&draft_id)
+        .await
+        .map_err(error)
+}
+
+#[tauri::command]
+async fn create_local_draft(
+    state: State<'_, Arc<AppState>>,
+    draft: ComposeMessage,
+) -> Result<LocalDraft, String> {
+    DraftService::new(state.store.clone(), MailService::new(state.store.clone()))
+        .create(draft)
+        .await
+        .map_err(error)
+}
+
+#[tauri::command]
+async fn update_local_draft(
+    state: State<'_, Arc<AppState>>,
+    input: LocalDraftUpdateInput,
+) -> Result<LocalDraft, String> {
+    DraftService::new(state.store.clone(), MailService::new(state.store.clone()))
+        .update(&input.draft_id, input.expected_revision, input.draft)
+        .await
+        .map_err(error)
+}
+
+#[tauri::command]
+async fn send_local_draft(
+    state: State<'_, Arc<AppState>>,
+    draft_id: String,
+    expected_revision: i64,
+) -> Result<String, String> {
+    let drafts = DraftService::new(state.store.clone(), MailService::new(state.store.clone()));
+    let draft = drafts
+        .get(&draft_id)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Local draft was not found".to_owned())?;
+    let account = enabled_account_for_operation(state.inner(), draft.account_id).await?;
+    drafts
+        .send_revision(&account, &draft_id, expected_revision)
+        .await
+        .map_err(error)
+}
+
+#[tauri::command]
 async fn send_message(
     state: State<'_, Arc<AppState>>,
     draft: ComposeMessage,
@@ -5337,9 +5663,14 @@ pub fn run() {
                         )
                     })?
             } else {
-                app.path()
+                let default_data_dir = app
+                    .path()
                     .app_local_data_dir()
-                    .map_err(|error| anyhow::anyhow!("local data directory: {error}"))?
+                    .map_err(|error| anyhow::anyhow!("local data directory: {error}"))?;
+                resolve_desktop_data_dir(
+                    default_data_dir,
+                    std::env::var_os("DAKIA_DATA_DIR").map(PathBuf::from),
+                )?
             };
             let resource_dir = match app.path().resource_dir() {
                 Ok(path) => path,
@@ -5468,6 +5799,12 @@ pub fn run() {
             search,
             search_smart_inbox,
             conversation_for_target,
+            thread_context,
+            update_thread_context,
+            append_thread_context,
+            clear_thread_context,
+            thread_context_history,
+            restore_thread_context,
             search_remote,
             set_message_category,
             set_message_starred,
@@ -5481,6 +5818,11 @@ pub fn run() {
             hydrate_message,
             mail_rebuild_status,
             sync_account,
+            local_drafts,
+            local_draft,
+            create_local_draft,
+            update_local_draft,
+            send_local_draft,
             send_message,
             apply_mailbox_action,
             unsubscribe_message,

@@ -65,6 +65,7 @@ import {
 import { splitQuotedText } from "../quotedHistory";
 import { EmptyState } from "./EmptyState";
 import { HtmlMessage } from "./HtmlMessage";
+import { ThreadContextPanel } from "./ThreadContextPanel";
 
 function usesMacDeleteKey() {
   return /^(Mac|iPhone|iPad|iPod)/i.test(navigator.platform);
@@ -560,6 +561,15 @@ export function Reader({
             ) : null}
           </div>
         ) : null}
+        <ThreadContextPanel
+          key={`${message.account_id}:${message.id}:${message.thread_id}:${message.mailbox}`}
+          target={{
+            accountId: message.account_id,
+            localMessageId: message.id,
+            threadId: message.thread_id,
+            mailbox: message.mailbox,
+          }}
+        />
         {threadMessages.map((threadMessage) => (
           <ThreadMessage
             key={threadMessage.id}

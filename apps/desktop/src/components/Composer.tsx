@@ -14,7 +14,7 @@ import { useTranslation } from "react-i18next";
 import { AI_FEATURES_VISIBLE } from "../features";
 import { api } from "../api";
 import type { ComposeSeed } from "../composeWindow";
-import type { Account, ComposeAttachment } from "../types";
+import type { Account, ComposeAttachment, LocalDraft } from "../types";
 import { splitAddressValues } from "../recipients";
 import { RichTextEditor } from "./RichTextEditor";
 import {
@@ -33,7 +33,12 @@ type Props = {
   seed?: ComposeSeed;
   sendState: "idle" | "sending" | "sent";
   aiConnected: boolean;
+  accountLocked?: boolean;
+  savedDrafts?: LocalDraft[];
+  activeDraftId?: string;
   onSend: (draft: Record<string, unknown>) => void;
+  onDraftChange?: (draft: Record<string, unknown>) => void;
+  onOpenDraft?: (draft: LocalDraft) => void;
   onAiDraft: (instruction: string) => Promise<string>;
 };
 
@@ -42,7 +47,12 @@ export function Composer({
   seed,
   sendState,
   aiConnected,
+  accountLocked = false,
+  savedDrafts = [],
+  activeDraftId,
   onSend,
+  onDraftChange,
+  onOpenDraft,
   onAiDraft,
 }: Props) {
   const { t } = useTranslation();
@@ -89,9 +99,9 @@ export function Composer({
   );
   const sending = sendState !== "idle";
   const canSend = Boolean(accountId && to.trim() && !sending);
-  const send = () => {
-    if (!accountId || !to.trim()) return;
-    onSend({
+  const composeDraft = useCallback(() => {
+    if (!accountId) return undefined;
+    return {
       account_id: accountId,
       to: splitAddresses(to),
       cc: splitAddresses(cc),
@@ -108,8 +118,27 @@ export function Composer({
           content_base64,
         }),
       ),
-    });
+    };
+  }, [accountId, attachments, bcc, bodyHtml, cc, seed?.inReplyTo, seed?.references, subject, to]);
+  const send = () => {
+    const draft = composeDraft();
+    if (!draft || !to.trim()) return;
+    onSend(draft);
   };
+
+  useEffect(() => {
+    const draft = composeDraft();
+    if (!draft) return;
+    const hasContent = Boolean(
+      to.trim() ||
+        cc.trim() ||
+        bcc.trim() ||
+        subject.trim() ||
+        !isRichTextEmpty(bodyHtml) ||
+        attachments.length,
+    );
+    if (hasContent) onDraftChange?.(draft);
+  }, [attachments.length, bcc, bodyHtml, cc, composeDraft, onDraftChange, subject, to]);
 
   const addAttachments = useCallback(
     (incoming: ComposeAttachment[]) => {
@@ -352,7 +381,7 @@ export function Composer({
               value={accountId ?? ""}
               onChange={(event) => setAccountId(event.currentTarget.value)}
               aria-label={t("composer.from")}
-              disabled={sending}
+              disabled={sending || accountLocked}
             >
               {accounts.map((account) => (
                 <option key={account.id} value={account.id}>
@@ -462,6 +491,26 @@ export function Composer({
           </span>
           <kbd>⌘↵</kbd>
         </button>
+        {onOpenDraft ? (
+          <details className="compose-drafts-menu">
+            <summary>{t("composer.savedDrafts")}</summary>
+            <div className="compose-drafts-list" aria-label={t("composer.savedDrafts")}>
+              {savedDrafts.length ? savedDrafts.map((draft) => (
+                <button
+                  type="button"
+                  key={draft.id}
+                  aria-current={draft.id === activeDraftId ? "page" : undefined}
+                  onClick={() => onOpenDraft(draft)}
+                  disabled={sending || draft.id === activeDraftId}
+                >
+                  {typeof draft.compose.subject === "string" && draft.compose.subject.trim()
+                    ? draft.compose.subject
+                    : t("composer.noSubject")}
+                </button>
+              )) : <span>{t("composer.noSavedDrafts")}</span>}
+            </div>
+          </details>
+        ) : null}
         {AI_FEATURES_VISIBLE && aiConnected ? (
           <button
             className="compose-ai-button"

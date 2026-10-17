@@ -33,7 +33,11 @@
     "format:check": "prettier --check \"apps/desktop/src/**/*.{ts,tsx,css}\"",
     "test": "vitest run",
     "test:translation-worker": "node scripts/test-offline-translation-worker.mjs",
-    "typecheck": "tsc --noEmit -p apps/desktop/tsconfig.json"
+    "typecheck": "tsc --noEmit -p apps/desktop/tsconfig.json",
+    "build:agent": "npm --prefix packages/dakia-agent ci --no-audit --no-fund && npm --prefix packages/dakia-agent run build",
+    "test:agent": "npm --prefix packages/dakia-agent test",
+    "bundle:agent": "./scripts/prepare-agent-runtime.sh",
+    "test:agent-runtime": "node --test scripts/prepare-agent-runtime.node-test.mjs"
   },
   "dependencies": {
     "@browsermt/bergamot-translator": "^0.4.9",

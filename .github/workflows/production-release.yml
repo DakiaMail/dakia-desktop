@@ -412,6 +412,9 @@ jobs:
           sudo apt-get install --yes libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
       - run: npm ci --ignore-scripts
       - name: Prepare packaged assets
+        env:
+          TAURI_ENV_PLATFORM: ${{ matrix.platform }}
+          TAURI_ENV_ARCH: ${{ matrix.arch }}
         run: bash ./scripts/prepare-desktop-assets.sh
       - name: Build target-specific CLI sidecar
         env:
@@ -515,7 +518,41 @@ jobs:
           test -s "$output/$expected"; test -s "$output/$expected.sig"
           (cd "$output" && shasum -a 256 "$expected" "$expected.sig" > SHA256SUMS.txt)
           node scripts/verify-updater-signature.mjs "$output/$expected" "$output/$expected.sig" apps/desktop/src-tauri/tauri.conf.json
-          "$output/$expected" --appimage-extract >/dev/null
+          extract_root="$RUNNER_TEMP/dakia-linux-appimage"
+          mkdir -p "$extract_root"
+          (
+            cd "$extract_root"
+            "$GITHUB_WORKSPACE/$output/$expected" --appimage-extract >/dev/null
+          )
+          app_root="$extract_root/squashfs-root"
+          cli="$app_root/usr/bin/dakia"
+          agent=''
+          for candidate in \
+            "$app_root/usr/lib/dakia-desktop/agent" \
+            "$app_root/usr/lib/dakia/agent"; do
+            if [[ -d "$candidate" ]]; then
+              test -z "$agent"
+              agent="$candidate"
+            fi
+          done
+          test -n "$agent"
+          test -x "$cli"
+          test -x "$agent/runtime/node"
+          test ! -e "$agent/runtime/node.exe"
+          node scripts/prepare-agent-runtime.mjs verify "$agent" linux x64
+          empty_path="$RUNNER_TEMP/dakia-linux-empty-path"
+          agent_profile="$RUNNER_TEMP/dakia-linux-agent-profile"
+          mkdir -p "$empty_path" "$agent_profile"
+          test "$(PATH="$empty_path" "$agent/runtime/node" --version)" = v22.23.2
+          PATH="$empty_path" "$cli" --data-dir "$agent_profile" --json agent sessions list \
+            >"$RUNNER_TEMP/dakia-linux-agent-sessions.json" \
+            2>"$RUNNER_TEMP/dakia-linux-agent-sessions.stderr"
+          test ! -s "$RUNNER_TEMP/dakia-linux-agent-sessions.stderr"
+          node - "$RUNNER_TEMP/dakia-linux-agent-sessions.json" <<'NODE'
+          const { readFileSync } = require('node:fs');
+          const value = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+          if (!value || !Array.isArray(value.sessions) || value.sessions.length !== 0) process.exit(1);
+          NODE
       - name: Sign and assemble Windows release assets
         if: matrix.platform == 'windows'
         env:
@@ -554,6 +591,33 @@ jobs:
             done > SHA256SUMS.txt
           )
           node scripts/verify-updater-signature.mjs "$output/$expected" "$output/$expected.sig" apps/desktop/src-tauri/tauri.conf.json
+          outer="$RUNNER_TEMP/dakia-windows-installer"
+          installed="$RUNNER_TEMP/dakia-windows-installed"
+          mkdir -p "$outer" "$installed"
+          7z.exe x -y "-o$(cygpath -w "$outer")" "$(cygpath -w "$output/$expected")" >/dev/null
+          mapfile -t app_archives < <(find "$outer" -type f -name 'app-*.7z')
+          test "${#app_archives[@]}" = 1
+          7z.exe x -y "-o$(cygpath -w "$installed")" "$(cygpath -w "${app_archives[0]}")" >/dev/null
+          mapfile -t packaged_clis < <(find "$installed" -type f -iname 'dakia.exe')
+          test "${#packaged_clis[@]}" = 1
+          cli="${packaged_clis[0]}"
+          agent="$(dirname "$cli")/agent"
+          test -f "$agent/runtime/node.exe"
+          test ! -e "$agent/runtime/node"
+          node scripts/prepare-agent-runtime.mjs verify "$agent" win x64
+          empty_path="$RUNNER_TEMP/dakia-windows-empty-path"
+          agent_profile="$RUNNER_TEMP/dakia-windows-agent-profile"
+          mkdir -p "$empty_path" "$agent_profile"
+          test "$(PATH="$empty_path" "$agent/runtime/node.exe" --version)" = v22.23.2
+          PATH="$empty_path" "$cli" --data-dir "$agent_profile" --json agent sessions list \
+            >"$RUNNER_TEMP/dakia-windows-agent-sessions.json" \
+            2>"$RUNNER_TEMP/dakia-windows-agent-sessions.stderr"
+          test ! -s "$RUNNER_TEMP/dakia-windows-agent-sessions.stderr"
+          node - "$RUNNER_TEMP/dakia-windows-agent-sessions.json" <<'NODE'
+          const { readFileSync } = require('node:fs');
+          const value = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+          if (!value || !Array.isArray(value.sessions) || value.sessions.length !== 0) process.exit(1);
+          NODE
       - name: Verify macOS release asset set
         if: matrix.platform == 'macos'
         run: |

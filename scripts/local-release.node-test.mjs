@@ -28,16 +28,76 @@ function createStaticAppFixture() {
   const app = join(fixtureRoot, "Dakia.app");
   const resources = join(app, "Contents", "Resources");
   const licenses = join(resources, "licenses");
+  const agent = join(resources, "agent");
   mkdirSync(join(app, "Contents", "MacOS"), { recursive: true });
   mkdirSync(join(app, "Contents", "Frameworks"), { recursive: true });
   mkdirSync(join(resources, "resources", "email-classifier-v2"), {
     recursive: true,
   });
   mkdirSync(licenses, { recursive: true });
+  mkdirSync(join(agent, "dist"), { recursive: true });
+  mkdirSync(join(agent, "runtime"), { recursive: true });
+  mkdirSync(join(agent, "licenses", "node"), { recursive: true });
+  mkdirSync(join(agent, "licenses", "pi"), { recursive: true });
+  mkdirSync(join(agent, "node_modules", "fixture-dependency"), {
+    recursive: true,
+  });
   writeFileSync(join(app, "Contents", "MacOS", "dakia-desktop"), "fixture");
   chmodSync(join(app, "Contents", "MacOS", "dakia-desktop"), 0o755);
   writeFileSync(join(app, "Contents", "MacOS", "dakia"), "fixture");
   chmodSync(join(app, "Contents", "MacOS", "dakia"), 0o755);
+  writeFileSync(join(agent, "dist", "cli.js"), "console.log('fixture');\n");
+  writeFileSync(
+    join(agent, "package.json"),
+    '{"name":"@dakia/agent","version":"0.1.0","type":"module"}\n',
+  );
+  writeFileSync(
+    join(agent, "package-lock.json"),
+    '{"name":"@dakia/agent","version":"0.1.0","lockfileVersion":3,"packages":{}}\n',
+  );
+  writeFileSync(
+    join(agent, "licenses", "npm-production.json"),
+    '{"schemaVersion":1,"packages":[{"name":"fixture-dependency","version":"1.0.0","license":"MIT","author":null,"repository":null,"licenseFiles":["node_modules/fixture-dependency/LICENSE"]}]}\n',
+  );
+  writeFileSync(join(agent, "licenses", "node", "LICENSE"), "fixture\n");
+  writeFileSync(join(agent, "licenses", "pi", "LICENSE"), "fixture\n");
+  writeFileSync(
+    join(agent, "node_modules", "fixture-dependency", "package.json"),
+    '{"name":"fixture-dependency","version":"1.0.0","license":"MIT"}\n',
+  );
+  writeFileSync(
+    join(agent, "node_modules", "fixture-dependency", "LICENSE"),
+    "fixture\n",
+  );
+  writeExecutable(
+    join(agent, "runtime", "node"),
+    `#!/bin/sh
+set -eu
+if [ "\${1:-}" = --version ]; then
+  printf '%s\\n' v22.23.2
+  exit 0
+fi
+case "\${1:-}" in */dist/cli.js) ;; *) exit 64 ;; esac
+test "\${2:-}" = --help
+printf '%s\\n' 'Usage: dakia agent'
+`,
+  );
+  const metadata = join(fixtureRoot, "agent-metadata.json");
+  writeFileSync(
+    metadata,
+    '{"version":"22.23.2","platform":"darwin","architecture":"arm64","archive":"node-v22.23.2-darwin-arm64.tar.gz","archiveSha256":"61130f394c1630d211dd50aecc4353d379480f36d3ac913cd85dbba1aed585c6","minimumMacOS":"11.0"}\n',
+  );
+  const manifestResult = spawnSync(
+    process.execPath,
+    [
+      join(root, "scripts", "prepare-agent-runtime.mjs"),
+      "build",
+      agent,
+      metadata,
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(manifestResult.status, 0, manifestResult.stderr);
   writeFileSync(
     join(app, "Contents", "Frameworks", "libonnxruntime.1.23.2.dylib"),
     "fixture",
@@ -134,6 +194,11 @@ case "\${1:-}" in
     test "\${2:-}" = list
     printf '[]\\n'
     ;;
+  agent)
+    test "\${2:-}" = sessions
+    test "\${3:-}" = list
+    printf '{"sessions":[]}\\n'
+    ;;
   *) exit 64 ;;
 esac
 `,
@@ -153,6 +218,7 @@ esac
 case "$1" in
   --verify) exit 0 ;;
   -dv) printf '%s\\n' TeamIdentifier=${wrongTeam ? "unexpected-team" : "34T9L3FGZC"} >&2 ;;
+  -d) printf '%s\\n' '<key>com.apple.security.cs.allow-jit</key>' '<key>com.apple.security.cs.allow-unsigned-executable-memory</key>' >&2 ;;
   *) exit 64 ;;
 esac
 `,
@@ -160,8 +226,21 @@ esac
   writeExecutable(
     join(mockBin, "otool"),
     missingFrameworkRpath
-      ? "#!/bin/sh\nexit 0\n"
+      ? `#!/bin/sh
+case "$2" in
+  */Contents/Resources/agent/runtime/node)
+    printf '%s\\n' 'Load command 1' '      cmd LC_BUILD_VERSION' '    minos 11.0'
+    ;;
+esac
+exit 0
+`
       : `#!/bin/sh
+case "$2" in
+  */Contents/Resources/agent/runtime/node)
+    printf '%s\\n' 'Load command 1' '      cmd LC_BUILD_VERSION' '    minos 11.0'
+    exit 0
+    ;;
+esac
 cat <<'OUTPUT'
 Load command 1
           cmd LC_RPATH
@@ -423,6 +502,37 @@ test("static packaged-app verification rejects a missing CLI sidecar", () => {
   }
 });
 
+test("static packaged-app verification rejects a missing agent runtime", () => {
+  const { fixtureRoot, app } = createStaticAppFixture();
+  try {
+    rmSync(join(app, "Contents", "Resources", "agent", "runtime", "node"));
+    const result = spawnSync(appVerifier, ["--static-only", app], {
+      encoding: "utf8",
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /agent\/runtime\/node/);
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("static packaged-app verification rejects a corrupted agent bundle", () => {
+  const { fixtureRoot, app } = createStaticAppFixture();
+  try {
+    writeFileSync(
+      join(app, "Contents", "Resources", "agent", "dist", "cli.js"),
+      "console.log('corrupted');\n",
+    );
+    const result = spawnSync(appVerifier, ["--static-only", app], {
+      encoding: "utf8",
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /checksum mismatch: dist\/cli\.js/);
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
 test("static packaged-app verification rejects a symlinked CLI sidecar", () => {
   const { fixtureRoot, app } = createStaticAppFixture();
   try {
@@ -466,6 +576,16 @@ test("packaged-app verification declares an isolated CLI contract smoke", () => 
   );
   assert.match(verifier, /CFBundleShortVersionString/);
   assert.match(verifier, /JSON\.parse/);
+  assert.match(
+    verifier,
+    /PATH="\$smoke_root\/empty-path" "\$agent_node" --version/,
+  );
+  assert.match(
+    verifier,
+    /"\$cli" --data-dir "\$smoke_root\/agent-profile" --json agent sessions list/,
+  );
+  assert.match(verifier, /value\.sessions/);
+  assert.match(verifier, /com\.apple\.security\.cs\.allow-jit/);
 });
 
 test("macOS CLI bundling injects the packaged framework lookup path", () => {
@@ -609,6 +729,16 @@ test("updater packaging executes the extracted signed app and CLI verifier", () 
     packager,
     /verify-macos-release-app\.sh" "\$verify_dir\/Dakia\.app"/,
   );
+  const agentVerify = packager.indexOf(
+    'prepare-agent-runtime.mjs" verify "$agent"',
+  );
+  const signingCredential = packager.indexOf("TAURI_SIGNING_PRIVATE_KEY");
+  assert.ok(agentVerify >= 0);
+  assert.ok(signingCredential > agentVerify);
+  assert.match(packager, /"\$agent\/runtime\/node"/);
+  assert.match(packager, /"\$agent\/node_modules"/);
+  assert.match(packager, /Node\.js 22\.23\.2/);
+  assert.match(packager, /Pi agent SDK 1\.3\.0/);
 });
 
 test("release tooling has no Google OAuth secret, compiler wrapper, or startup marker contract", () => {
