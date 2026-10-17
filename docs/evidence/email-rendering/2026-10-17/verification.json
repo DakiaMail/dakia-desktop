@@ -1,0 +1,439 @@
+{
+  "verified_at_utc": "2026-10-17T19:40:43.760255+00:00",
+  "checkout": "<checkout>",
+  "git_head": "fccbace81192c5b5354f681e2feb2b66971e88cf",
+  "native_engine": "macOS WKWebView",
+  "scope": "Production HtmlMessage component with production styles and redacted real receipt. Native renderer acceptance; Tauri IPC and live mailbox retrieval are outside this test.",
+  "native_executable": "<checkout>/output/playwright/receipt-native/verify-webkit",
+  "native_url": "http://127.0.0.1:1420/native-receipt-verify.html",
+  "vite_cwd": "<checkout>",
+  "commands": [
+    "npm run dev:web",
+    "swiftc -swift-version 5 -module-cache-path /private/tmp/dakia-receipt-swift-cache output/playwright/receipt-native/verify.swift -o output/playwright/receipt-native/verify-webkit",
+    "output/playwright/receipt-native/verify-webkit \"$PWD/output/playwright/receipt-native\" http://127.0.0.1:1420/native-receipt-verify.html"
+  ],
+  "native_result": {
+    "cycles": [
+      {
+        "collapsed": 971,
+        "expanded": 1073
+      },
+      {
+        "collapsed": 971,
+        "expanded": 1073
+      }
+    ],
+    "devicePixelRatio": 2,
+    "executable": "<checkout>/output/playwright/receipt-native/verify-webkit",
+    "kind": "result",
+    "macOS": "Version 26.6.2 (Build 25G83)",
+    "metrics": [
+      {
+        "amounts": [
+          {
+            "height": 24,
+            "ink": "rgb(82, 95, 127)",
+            "lines": 1,
+            "text": "US$12.34",
+            "width": 72.0625
+          },
+          {
+            "height": 24,
+            "ink": "rgb(82, 95, 127)",
+            "lines": 1,
+            "text": "US$12.34",
+            "width": 72.0625
+          }
+        ],
+        "artwork": [
+          {
+            "height": 156,
+            "loaded": true,
+            "width": 252
+          },
+          {
+            "height": 156,
+            "loaded": true,
+            "width": 96
+          },
+          {
+            "height": 156,
+            "loaded": true,
+            "width": 252
+          }
+        ],
+        "background": "rgb(246, 249, 252)",
+        "dark": false,
+        "footerBottom": 834,
+        "headerBackground": "rgb(0, 0, 0)",
+        "hostHeight": 919,
+        "name": "01-light-wide",
+        "spacerHeight": 24,
+        "width": 1000,
+        "wrapperWidth": 600
+      },
+      {
+        "amounts": [
+          {
+            "height": 24,
+            "ink": "rgb(217, 222, 219)",
+            "lines": 1,
+            "text": "US$12.34",
+            "width": 72.0625
+          },
+          {
+            "height": 24,
+            "ink": "rgb(217, 222, 219)",
+            "lines": 1,
+            "text": "US$12.34",
+            "width": 72.0625
+          }
+        ],
+        "artwork": [
+          {
+            "height": 156,
+            "loaded": true,
+            "width": 252
+          },
+          {
+            "height": 156,
+            "loaded": true,
+            "width": 96
+          },
+          {
+            "height": 156,
+            "loaded": true,
+            "width": 252
+          }
+        ],
+        "background": "rgb(25, 26, 25)",
+        "dark": true,
+        "footerBottom": 834,
+        "headerBackground": "rgb(0, 0, 0)",
+        "hostHeight": 919,
+        "name": "02-dark-wide",
+        "spacerHeight": 24,
+        "width": 1000,
+        "wrapperWidth": 600
+      },
+      {
+        "amounts": [
+          {
+            "height": 24,
+            "ink": "rgb(82, 95, 127)",
+            "lines": 1,
+            "text": "US$12.34",
+            "width": 72.0625
+          },
+          {
+            "height": 24,
+            "ink": "rgb(82, 95, 127)",
+            "lines": 1,
+            "text": "US$12.34",
+            "width": 72.0625
+          }
+        ],
+        "artwork": [
+          {
+            "height": 156,
+            "loaded": true,
+            "width": 252
+          },
+          {
+            "height": 156,
+            "loaded": true,
+            "width": 96
+          },
+          {
+            "height": 156,
+            "loaded": true,
+            "width": 252
+          }
+        ],
+        "background": "rgb(246, 249, 252)",
+        "dark": false,
+        "footerBottom": 834,
+        "headerBackground": "rgb(0, 0, 0)",
+        "hostHeight": 919,
+        "name": "03-light-again",
+        "spacerHeight": 24,
+        "width": 1000,
+        "wrapperWidth": 600
+      },
+      {
+        "amounts": [
+          {
+            "height": 24,
+            "ink": "rgb(217, 222, 219)",
+            "lines": 1,
+            "text": "US$12.34",
+            "width": 72.0625
+          },
+          {
+            "height": 24,
+            "ink": "rgb(217, 222, 219)",
+            "lines": 1,
+            "text": "US$12.34",
+            "width": 72.0625
+          }
+        ],
+        "artwork": [
+          {
+            "height": 156,
+            "loaded": true,
+            "width": 252
+          },
+          {
+            "height": 156,
+            "loaded": true,
+            "width": 96
+          },
+          {
+            "height": 156,
+            "loaded": true,
+            "width": 252
+          }
+        ],
+        "background": "rgb(25, 26, 25)",
+        "dark": true,
+        "footerBottom": 834,
+        "headerBackground": "rgb(0, 0, 0)",
+        "hostHeight": 919,
+        "name": "04-dark-again",
+        "spacerHeight": 24,
+        "width": 1000,
+        "wrapperWidth": 600
+      },
+      {
+        "amounts": [
+          {
+            "height": 24,
+            "ink": "rgb(217, 222, 219)",
+            "lines": 1,
+            "text": "US$12.34",
+            "width": 72.0625
+          },
+          {
+            "height": 24,
+            "ink": "rgb(217, 222, 219)",
+            "lines": 1,
+            "text": "US$12.34",
+            "width": 72.0625
+          }
+        ],
+        "artwork": [
+          {
+            "height": 156,
+            "loaded": true,
+            "width": 252
+          },
+          {
+            "height": 156,
+            "loaded": true,
+            "width": 96
+          },
+          {
+            "height": 156,
+            "loaded": true,
+            "width": 252
+          }
+        ],
+        "background": "rgb(25, 26, 25)",
+        "dark": true,
+        "footerBottom": 834,
+        "headerBackground": "rgb(0, 0, 0)",
+        "hostHeight": 919,
+        "name": "05-dark-640",
+        "spacerHeight": 24,
+        "width": 640,
+        "wrapperWidth": 600
+      },
+      {
+        "amounts": [
+          {
+            "height": 24,
+            "ink": "rgb(82, 95, 127)",
+            "lines": 1,
+            "text": "US$12.34",
+            "width": 72.0625
+          },
+          {
+            "height": 24,
+            "ink": "rgb(82, 95, 127)",
+            "lines": 1,
+            "text": "US$12.34",
+            "width": 72.0625
+          }
+        ],
+        "artwork": [
+          {
+            "height": 156,
+            "loaded": true,
+            "width": 252
+          },
+          {
+            "height": 156,
+            "loaded": true,
+            "width": 96
+          },
+          {
+            "height": 156,
+            "loaded": true,
+            "width": 252
+          }
+        ],
+        "background": "rgb(246, 249, 252)",
+        "dark": false,
+        "footerBottom": 834,
+        "headerBackground": "rgb(0, 0, 0)",
+        "hostHeight": 919,
+        "name": "06-light-640",
+        "spacerHeight": 24,
+        "width": 640,
+        "wrapperWidth": 600
+      }
+    ],
+    "nativeWebviewURL": "http://127.0.0.1:1420/native-receipt-verify.html",
+    "pass": true,
+    "syntheticRedactedLogo": true,
+    "trustedClicks": 11,
+    "url": "http://127.0.0.1:1420/native-receipt-verify.html",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)"
+  },
+  "original_control": {
+    "dark": {
+      "amounts": [
+        {
+          "height": 192,
+          "text": "US$12.34",
+          "width": 11.171875
+        },
+        {
+          "height": 192,
+          "text": "US$12.34",
+          "width": 11.171875
+        }
+      ],
+      "background": "rgb(246, 249, 252)",
+      "darkClass": false,
+      "spacer": false
+    },
+    "executable": "<checkout>/output/playwright/receipt-native/verify-webkit",
+    "expectedBroken": true,
+    "kind": "result",
+    "light": {
+      "amounts": [
+        {
+          "height": 192,
+          "text": "US$12.34",
+          "width": 11.171875
+        },
+        {
+          "height": 192,
+          "text": "US$12.34",
+          "width": 11.171875
+        }
+      ],
+      "background": "rgb(246, 249, 252)",
+      "darkClass": false,
+      "spacer": false
+    },
+    "macOS": "Version 26.6.2 (Build 25G83)",
+    "nativeWebviewURL": "http://127.0.0.1:1420/native-receipt-verify.html?baseline=1",
+    "pass": true,
+    "url": "http://127.0.0.1:1420/native-receipt-verify.html?baseline=1"
+  },
+  "source_sha256": {
+    "apps/desktop/src/components/HtmlMessage.tsx": "8eb90ba09d239e1101d3ad9d6fd679a6b56f1660492355ae9bee7b1cf91c1f42",
+    "apps/desktop/src/components/HtmlMessage.test.tsx": "857e361127065e943d54f8352ffdb501021927d8e13c0e9a5c13c5bbbd2eccfc",
+    "apps/desktop/src/test/fixtures/stripe-receipt-layout.html": "17a7bec66cd89cb34e9f0640245aaabad7880fde4062ec74d873479e23bf8d38",
+    "apps/desktop/src/styles.css": "57898b55e3b821d86f23000fe49004f4cf07516d4e886b502805ece3682a5c83"
+  },
+  "screenshots": {
+    "01-light-wide.png": {
+      "width": 2560,
+      "height": 2076,
+      "bytes": 313155,
+      "sha256": "769fb4a8b6a4cc415d78083b34729c6939f439d09b3e0787f37971d4bf653da9"
+    },
+    "02-dark-wide.png": {
+      "width": 2560,
+      "height": 2076,
+      "bytes": 312149,
+      "sha256": "5e63d1ee4c0e8465c2791d84cf1bbd5d145743c67bea8b9e6a8c3037c518117a"
+    },
+    "03-light-again.png": {
+      "width": 2560,
+      "height": 2076,
+      "bytes": 312979,
+      "sha256": "d72b8cff626342fd3697d5a3a96d5be0d8dd5c6acfad3710386e0484cf9c1d1a"
+    },
+    "04-dark-again.png": {
+      "width": 2560,
+      "height": 2076,
+      "bytes": 312149,
+      "sha256": "5e63d1ee4c0e8465c2791d84cf1bbd5d145743c67bea8b9e6a8c3037c518117a"
+    },
+    "05-dark-640.png": {
+      "width": 2560,
+      "height": 2076,
+      "bytes": 312162,
+      "sha256": "d3221f709906e553f7714ef512383361035772ba0952a58155c279c756c6ba8e"
+    },
+    "06-light-640.png": {
+      "width": 2560,
+      "height": 2076,
+      "bytes": 312327,
+      "sha256": "2b8846eed280f909f53e4bd7ca708ca9411eada46356a1dacb2d5addd0d2ebbe"
+    },
+    "history-expanded-0.png": {
+      "width": 2560,
+      "height": 2076,
+      "bytes": 331648,
+      "sha256": "105423d74ff18748495de7a1dd8a244aa5896b0bc1f0470756d44c2f622974a0"
+    },
+    "history-expanded-1.png": {
+      "width": 2560,
+      "height": 2076,
+      "bytes": 331648,
+      "sha256": "105423d74ff18748495de7a1dd8a244aa5896b0bc1f0470756d44c2f622974a0"
+    },
+    "history-collapsed-0.png": {
+      "width": 2560,
+      "height": 2076,
+      "bytes": 318413,
+      "sha256": "1cae789d13290a297d64bda16d7e198becd972114e2268e781d80d5be2615740"
+    },
+    "history-collapsed-1.png": {
+      "width": 2560,
+      "height": 2076,
+      "bytes": 318413,
+      "sha256": "1cae789d13290a297d64bda16d7e198becd972114e2268e781d80d5be2615740"
+    },
+    "baseline/original-light.png": {
+      "width": 2560,
+      "height": 2076,
+      "bytes": 314491,
+      "sha256": "8509648dbcc4880187b2746e18364ee31299beb52146a6fa307e7f646b675410"
+    },
+    "baseline/original-dark.png": {
+      "width": 2560,
+      "height": 2076,
+      "bytes": 313712,
+      "sha256": "5dbecb07b480833f5fb687ba9555b68cb963163284b0c08ed6e502f6d867562f"
+    }
+  },
+  "fixture_note": "Only the redacted merchant-logo URL was substituted in the harness with a local fictional SVG of the same 96x156 dimensions. Checked-in fixture unchanged.",
+  "reproduce": {
+    "html_destination": "apps/desktop/native-receipt-verify.html",
+    "tsx_destination": "apps/desktop/src/test/native-receipt-verify.tsx",
+    "baseline_destination": "apps/desktop/src/components/NativeBaselineHtmlMessage.tsx",
+    "steps": [
+      "Copy harness.html and harness.tsx to the recorded temporary destinations.",
+      "Create the temporary baseline module with baseline_source_command.",
+      "Follow README.md for the native compile, current/control runs, evidence assertions, and cleanup."
+    ],
+    "baseline_source_command": "git show 796c297:apps/desktop/src/components/HtmlMessage.tsx > apps/desktop/src/components/NativeBaselineHtmlMessage.tsx"
+  },
+  "publication_note": "Workstation paths replaced with <checkout>, local process IDs omitted, and reproduction instructions adjusted to the committed evidence directory. Measurements and source/screenshot hashes are unchanged."
+}
