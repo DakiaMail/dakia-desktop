@@ -119,6 +119,44 @@ afterEach(() => {
 });
 
 describe("Composer send feedback", () => {
+  it("opens a selected local draft without allowing its account to change", () => {
+    const onOpenDraft = vi.fn();
+    render(
+      <Composer
+        {...props}
+        sendState="idle"
+        accountLocked
+        activeDraftId="draft-1"
+        savedDrafts={[
+          {
+            id: "draft-1",
+            accountId: account.id,
+            revision: 2,
+            status: "pending",
+            compose: { subject: "Current draft" },
+            updatedAt: "2026-10-17T00:00:00Z",
+          },
+          {
+            id: "draft-2",
+            accountId: account.id,
+            revision: 1,
+            status: "pending",
+            compose: { subject: "Travel plans" },
+            updatedAt: "2026-10-17T00:00:00Z",
+          },
+        ]}
+        onOpenDraft={onOpenDraft}
+      />,
+    );
+
+    expect(screen.getByLabelText("From")).toBeDisabled();
+    fireEvent.click(screen.getByText("Saved drafts"));
+    fireEvent.click(screen.getByRole("button", { name: "Travel plans" }));
+    expect(onOpenDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "draft-2" }),
+    );
+  });
+
   it("keeps AI drafting hidden even when a provider is connected", () => {
     render(<Composer {...props} aiConnected sendState="idle" />);
 

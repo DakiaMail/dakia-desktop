@@ -37,9 +37,6 @@ if [ ! -x "$repo_root/node_modules/.bin/tauri" ] ||
   dependencies_pid=$!
 fi
 
-"$repo_root/scripts/prepare-desktop-assets.sh" &
-assets_pid=$!
-
 status=0
 if [ -n "$dependencies_pid" ]; then
   if wait "$dependencies_pid"; then
@@ -48,11 +45,13 @@ if [ -n "$dependencies_pid" ]; then
     status=1
   fi
 fi
-wait "$assets_pid" || status=1
-
 if [ "$status" -ne 0 ]; then
   exit "$status"
 fi
+
+# Asset preparation also builds the bundled agent. Its compiler and package
+# installation must not race the root dependency installation above.
+"$repo_root/scripts/prepare-desktop-assets.sh"
 
 if [ "$build_cli" = true ]; then
   npm run bundle:cli:dev

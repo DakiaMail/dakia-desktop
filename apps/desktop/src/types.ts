@@ -97,6 +97,50 @@ export type ConversationTarget = {
   threadId?: string;
   mailbox?: string;
 };
+export type ThreadContextKind = "notes" | "agentMemory";
+export type ThreadContextDocument = {
+  content: string;
+  revision: number;
+  updatedAt?: string | null;
+};
+export type ThreadContextRevision = ThreadContextDocument & {
+  id: string;
+  createdAt?: string | null;
+};
+export type ThreadContextBundle = {
+  conversation: {
+    locator: { accountId: string; conversationId: string };
+    requiresReview: boolean;
+  };
+  notes: ThreadContextDocument;
+  agentMemory: ThreadContextDocument;
+};
+export type ThreadContextWriteInput = {
+  target: ConversationTarget;
+  kind: ThreadContextKind;
+  content: string;
+  expectedRevision: number;
+};
+export type ThreadContextAppendInput = {
+  target: ConversationTarget;
+  kind: ThreadContextKind;
+  text: string;
+  expectedRevision: number;
+};
+export type ThreadContextClearInput = {
+  target: ConversationTarget;
+  kind: ThreadContextKind;
+  expectedRevision: number;
+};
+export type LocalDraft = {
+  id: string;
+  accountId: string;
+  revision: number;
+  status: "pending" | "synced" | "failed" | "send_uncertain" | "sent";
+  compose: Record<string, unknown>;
+  lastError?: string | null;
+  updatedAt: string;
+};
 export type NotificationAction = {
   accountId?: string;
   messageId?: string;

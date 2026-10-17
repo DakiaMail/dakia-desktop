@@ -36,7 +36,19 @@ test("hosted build measurement covers both Macs and Windows without release writ
   assert.match(workflow, /Installed Dakia CLI sidecar is missing/);
   assert.match(workflow, /uninstall\.exe/);
   assert.match(workflow, /group: hosted-build-measurement/);
-  assert.match(workflow, /bash \.\/scripts\/prepare-desktop-assets\.sh/);
+  const assetPreparation = workflow.match(
+    /- name: Prepare packaged assets([\s\S]*?)- name: Build target-specific CLI sidecar/,
+  )?.[1];
+  assert.ok(assetPreparation, "packaged asset preparation step is missing");
+  assert.match(
+    assetPreparation,
+    /TAURI_ENV_PLATFORM: \$\{\{ matrix\.platform \}\}/,
+  );
+  assert.match(assetPreparation, /TAURI_ENV_ARCH: \$\{\{ matrix\.arch \}\}/);
+  assert.match(
+    assetPreparation,
+    /bash \.\/scripts\/prepare-desktop-assets\.sh/,
+  );
   assert.match(workflow, /-- --locked/);
   assert.doesNotMatch(workflow, /sccache/);
   assert.match(

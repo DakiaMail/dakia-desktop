@@ -68,7 +68,9 @@ fn message_content_fetch_owner() -> &'static str {
 
 #[derive(Clone)]
 pub struct Store {
-    pool: SqlitePool,
+    /// Shared only by core storage submodules.  Product-facing code must use
+    /// Store methods so migrations and account tombstones remain centralized.
+    pub(crate) pool: SqlitePool,
     vault_key: Arc<[u8; VAULT_KEY_LEN]>,
 }
 
@@ -685,6 +687,7 @@ impl Store {
             "CREATE TABLE IF NOT EXISTS mailbox_catalog_state (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, remote_name TEXT NOT NULL, uid_validity INTEGER NOT NULL, remote_total INTEGER NOT NULL DEFAULT 0, historical_complete INTEGER NOT NULL DEFAULT 0, uid_next INTEGER, highest_modseq TEXT, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox))",
             "CREATE TABLE IF NOT EXISTS mailbox_snapshot_generations (account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, mailbox TEXT NOT NULL, generation TEXT NOT NULL, remote_name TEXT NOT NULL, uid_validity INTEGER NOT NULL, initial_exists INTEGER NOT NULL, uid_next INTEGER, highest_modseq TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox, generation))",
             "CREATE TABLE IF NOT EXISTS mailbox_snapshot_items (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, generation TEXT NOT NULL, uid INTEGER NOT NULL, is_read INTEGER NOT NULL, is_flagged INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox, generation, uid), FOREIGN KEY(account_id, mailbox, generation) REFERENCES mailbox_snapshot_generations(account_id, mailbox, generation) ON DELETE CASCADE)",
+            "CREATE TABLE IF NOT EXISTS mailbox_snapshot_expected_flags (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, generation TEXT NOT NULL, uid INTEGER NOT NULL, is_read INTEGER NOT NULL, is_flagged INTEGER NOT NULL, PRIMARY KEY(account_id, mailbox, generation, uid), FOREIGN KEY(account_id, mailbox, generation) REFERENCES mailbox_snapshot_generations(account_id, mailbox, generation) ON DELETE CASCADE)",
             "CREATE TABLE IF NOT EXISTS mailbox_snapshot_messages (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, generation TEXT NOT NULL, uid INTEGER NOT NULL, message_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox, generation, uid), FOREIGN KEY(account_id, mailbox, generation) REFERENCES mailbox_snapshot_generations(account_id, mailbox, generation) ON DELETE CASCADE)",
             "CREATE TABLE IF NOT EXISTS mailbox_snapshot_replacement_outcomes (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, generation TEXT NOT NULL, uid INTEGER NOT NULL, outcome TEXT NOT NULL CHECK(outcome IN ('message', 'excluded')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox, generation, uid), FOREIGN KEY(account_id, mailbox, generation) REFERENCES mailbox_snapshot_generations(account_id, mailbox, generation) ON DELETE CASCADE)",
             "CREATE INDEX IF NOT EXISTS mailbox_snapshot_items_generation_uid ON mailbox_snapshot_items(account_id, mailbox, generation, uid DESC)",
@@ -692,6 +695,26 @@ impl Store {
             "CREATE TABLE IF NOT EXISTS mail_rebuild_jobs (account_id TEXT PRIMARY KEY, phase TEXT NOT NULL, completed INTEGER NOT NULL DEFAULT 0, total INTEGER, reset_before_sync INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)",
             "CREATE TABLE IF NOT EXISTS deleted_account_tombstones (account_id TEXT PRIMARY KEY, deleted_at TEXT NOT NULL)",
             "CREATE TABLE IF NOT EXISTS sent_correspondents (account_id TEXT NOT NULL, address TEXT NOT NULL COLLATE NOCASE, PRIMARY KEY(account_id, address))",
+            "CREATE TABLE IF NOT EXISTS local_drafts (id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, revision INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending', 'synced', 'failed', 'send_uncertain', 'sent')), provider_uid INTEGER, provider_uid_validity INTEGER, provider_mailbox TEXT, compose_json TEXT NOT NULL, last_error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+            "CREATE INDEX IF NOT EXISTS local_drafts_account_updated ON local_drafts(account_id, updated_at DESC)",
+            "CREATE INDEX IF NOT EXISTS local_drafts_account_updated_id ON local_drafts(account_id, updated_at DESC, id DESC)",
+            "CREATE INDEX IF NOT EXISTS local_drafts_updated_id ON local_drafts(updated_at DESC, id DESC)",
+            "CREATE TABLE IF NOT EXISTS local_draft_provider_copies (draft_id TEXT NOT NULL REFERENCES local_drafts(id) ON DELETE CASCADE, uid INTEGER NOT NULL, uid_validity INTEGER NOT NULL, mailbox TEXT NOT NULL, revision INTEGER NOT NULL, cleanup_pending INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(draft_id, uid, uid_validity, mailbox))",
+            "CREATE TABLE IF NOT EXISTS account_operation_leases (account_id TEXT PRIMARY KEY, operation_kind TEXT NOT NULL, owner_token TEXT NOT NULL, expires_at_millis INTEGER NOT NULL, created_at_millis INTEGER NOT NULL, updated_at_millis INTEGER NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS agent_actions (id TEXT PRIMARY KEY, account_id TEXT NOT NULL, kind TEXT NOT NULL, binding_hash TEXT NOT NULL, status TEXT NOT NULL, response TEXT, created_at TEXT NOT NULL)",
+            "CREATE INDEX IF NOT EXISTS agent_actions_account_created ON agent_actions(account_id, created_at DESC)",
+            "CREATE TABLE IF NOT EXISTS thread_context_conversations (id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, requires_review INTEGER NOT NULL DEFAULT 0)",
+            "CREATE INDEX IF NOT EXISTS thread_context_conversations_account ON thread_context_conversations(account_id, created_at)",
+            "CREATE TABLE IF NOT EXISTS thread_context_message_keys (account_id TEXT NOT NULL, rfc_message_id TEXT NOT NULL, conversation_id TEXT NOT NULL REFERENCES thread_context_conversations(id) ON DELETE CASCADE, PRIMARY KEY(account_id, rfc_message_id))",
+            "CREATE INDEX IF NOT EXISTS thread_context_message_keys_conversation ON thread_context_message_keys(conversation_id)",
+            "CREATE TABLE IF NOT EXISTS thread_context_thread_links (account_id TEXT NOT NULL, thread_id TEXT NOT NULL, conversation_id TEXT NOT NULL REFERENCES thread_context_conversations(id) ON DELETE CASCADE, PRIMARY KEY(account_id, thread_id))",
+            "CREATE INDEX IF NOT EXISTS thread_context_thread_links_conversation ON thread_context_thread_links(conversation_id)",
+            "CREATE TABLE IF NOT EXISTS thread_context_local_message_links (account_id TEXT NOT NULL, local_message_id TEXT NOT NULL, conversation_id TEXT NOT NULL REFERENCES thread_context_conversations(id) ON DELETE CASCADE, PRIMARY KEY(account_id, local_message_id))",
+            "CREATE INDEX IF NOT EXISTS thread_context_local_message_links_conversation ON thread_context_local_message_links(conversation_id)",
+            "CREATE TABLE IF NOT EXISTS thread_context_sync_state (account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE, dirty INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS thread_context_documents (conversation_id TEXT NOT NULL REFERENCES thread_context_conversations(id) ON DELETE CASCADE, kind TEXT NOT NULL CHECK(kind IN ('notes', 'agent_memory')), content TEXT NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(conversation_id, kind))",
+            "CREATE TABLE IF NOT EXISTS thread_context_revisions (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES thread_context_conversations(id) ON DELETE CASCADE, kind TEXT NOT NULL CHECK(kind IN ('notes', 'agent_memory')), revision INTEGER NOT NULL, content TEXT NOT NULL, action TEXT NOT NULL CHECK(action IN ('set', 'append', 'clear', 'restore', 'merge')), created_at TEXT NOT NULL, source_conversation_id TEXT)",
+            "CREATE INDEX IF NOT EXISTS thread_context_revisions_history ON thread_context_revisions(conversation_id, kind, created_at DESC, id DESC)",
         ] {
             sqlx::query(statement)
                 .execute(&self.pool)
@@ -750,11 +773,19 @@ impl Store {
             "CREATE TRIGGER IF NOT EXISTS mailbox_catalog_state_require_account BEFORE INSERT ON mailbox_catalog_state WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
             "CREATE TRIGGER IF NOT EXISTS mailbox_snapshot_generations_require_account BEFORE INSERT ON mailbox_snapshot_generations WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
             "CREATE TRIGGER IF NOT EXISTS mailbox_snapshot_items_require_account BEFORE INSERT ON mailbox_snapshot_items WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS mailbox_snapshot_expected_flags_require_account BEFORE INSERT ON mailbox_snapshot_expected_flags WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
             "CREATE TRIGGER IF NOT EXISTS mailbox_snapshot_messages_require_account BEFORE INSERT ON mailbox_snapshot_messages WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
             "CREATE TRIGGER IF NOT EXISTS mailbox_snapshot_replacement_outcomes_require_account BEFORE INSERT ON mailbox_snapshot_replacement_outcomes WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
             "CREATE TRIGGER IF NOT EXISTS mailbox_sync_failures_require_account BEFORE INSERT ON mailbox_sync_failures WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
             "CREATE TRIGGER IF NOT EXISTS mail_rebuild_jobs_require_account BEFORE INSERT ON mail_rebuild_jobs WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
             "CREATE TRIGGER IF NOT EXISTS sent_correspondents_require_account BEFORE INSERT ON sent_correspondents WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS local_drafts_require_account BEFORE INSERT ON local_drafts WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS account_operation_leases_require_account BEFORE INSERT ON account_operation_leases WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS agent_actions_require_account BEFORE INSERT ON agent_actions WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS thread_context_conversations_require_account BEFORE INSERT ON thread_context_conversations WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS thread_context_local_message_links_require_account BEFORE INSERT ON thread_context_local_message_links WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS thread_context_sync_state_require_account BEFORE INSERT ON thread_context_sync_state WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS thread_context_local_message_links_follow_message_id AFTER UPDATE OF id ON messages BEGIN UPDATE thread_context_local_message_links SET local_message_id = NEW.id WHERE account_id = NEW.account_id AND local_message_id = OLD.id; END",
         ] {
             sqlx::query(statement)
                 .execute(&self.pool)
@@ -780,6 +811,31 @@ impl Store {
             )
             .execute(&self.pool)
             .await?;
+        }
+        let draft_columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
+            sqlx::query_as("PRAGMA table_info(local_drafts)")
+                .fetch_all(&self.pool)
+                .await?;
+        if !draft_columns
+            .iter()
+            .any(|column| column.1 == "provider_uid_validity")
+        {
+            sqlx::query("ALTER TABLE local_drafts ADD COLUMN provider_uid_validity INTEGER")
+                .execute(&self.pool)
+                .await?;
+        }
+        if !draft_columns
+            .iter()
+            .any(|column| column.1 == "provider_mailbox")
+        {
+            sqlx::query("ALTER TABLE local_drafts ADD COLUMN provider_mailbox TEXT")
+                .execute(&self.pool)
+                .await?;
+            if draft_columns.iter().any(|column| column.1 == "mailbox") {
+                sqlx::query("UPDATE local_drafts SET provider_mailbox = mailbox WHERE provider_mailbox IS NULL")
+                    .execute(&self.pool)
+                    .await?;
+            }
         }
         let rebuild_job_columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
             sqlx::query_as("PRAGMA table_info(mail_rebuild_jobs)")
@@ -871,6 +927,12 @@ impl Store {
         sqlx::query("CREATE INDEX IF NOT EXISTS messages_account_thread ON messages(account_id, thread_id, received_at)")
             .execute(&self.pool)
             .await?;
+        // Keep selected-thread context repair bounded when it follows an RFC
+        // identity into another current component. The expression exactly
+        // matches the normalized Message-ID join in thread_context.rs.
+        sqlx::query("CREATE INDEX IF NOT EXISTS messages_account_normalized_message_id ON messages(account_id, LOWER(TRIM(message_id))) WHERE message_id IS NOT NULL")
+            .execute(&self.pool)
+            .await?;
         for statement in [
             "CREATE INDEX IF NOT EXISTS messages_smart_representative ON messages(account_id, mailbox, thread_id, received_at DESC, id DESC)",
             "CREATE INDEX IF NOT EXISTS messages_thread_flagged ON messages(account_id, thread_id) WHERE is_flagged = 1",
@@ -943,6 +1005,9 @@ impl Store {
                 self.rebuild_threads_for_account(&account_id).await?;
             }
         }
+        // Context mappings are repaired lazily for the one account the user
+        // opens. Do not turn a first launch of a large legacy profile into an
+        // account-by-account, message-by-message migration.
         Ok(())
     }
 
@@ -1171,6 +1236,10 @@ impl Store {
                  UNION SELECT account_id FROM mailbox_action_tombstones \
                  UNION SELECT account_id FROM mail_rebuild_jobs \
                  UNION SELECT account_id FROM sent_correspondents \
+                 UNION SELECT account_id FROM local_drafts \
+                 UNION SELECT account_id FROM thread_context_conversations \
+                 UNION SELECT account_id FROM account_operation_leases \
+                 UNION SELECT account_id FROM agent_actions \
              ) AS orphan \
              WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE id = orphan.account_id)",
         )
@@ -1192,6 +1261,10 @@ impl Store {
             "DELETE FROM mailbox_action_tombstones WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = mailbox_action_tombstones.account_id)",
             "DELETE FROM mail_rebuild_jobs WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = mail_rebuild_jobs.account_id)",
             "DELETE FROM sent_correspondents WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = sent_correspondents.account_id)",
+            "DELETE FROM local_drafts WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = local_drafts.account_id)",
+            "DELETE FROM thread_context_conversations WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = thread_context_conversations.account_id)",
+            "DELETE FROM account_operation_leases WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = account_operation_leases.account_id)",
+            "DELETE FROM agent_actions WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = agent_actions.account_id)",
         ] {
             sqlx::query(statement).execute(&mut *tx).await?;
         }
@@ -1700,6 +1773,24 @@ impl Store {
             .bind(id.to_string())
             .execute(&mut *tx)
             .await?;
+        sqlx::query("DELETE FROM account_operation_leases WHERE account_id = ?")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM agent_actions WHERE account_id = ?")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        // These tables have account foreign keys on fresh profiles. Delete
+        // explicitly as well so upgraded databases receive the same cleanup.
+        sqlx::query("DELETE FROM thread_context_conversations WHERE account_id = ?")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM local_drafts WHERE account_id = ?")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("DELETE FROM messages WHERE account_id = ?")
             .bind(id.to_string())
             .execute(&mut *tx)
@@ -1813,6 +1904,22 @@ impl Store {
         messages: &[MailSummary],
         expected_flags: &[ExpectedMessageFlags],
     ) -> Result<()> {
+        let Some(first) = messages.first() else {
+            return Ok(());
+        };
+        let account_id = AccountId::parse_str(&first.account_id)
+            .context("recent catalogue message has an invalid account ID")?;
+        if messages
+            .iter()
+            .any(|message| message.account_id != first.account_id)
+        {
+            return Err(anyhow!(
+                "recent catalogue publication must contain one account"
+            ));
+        }
+        // This protects only the short provider-derived publication. Remote
+        // fetching has already completed and therefore never waits here.
+        let publish_lease = self.acquire_sync_publish(account_id).await?;
         let expected_by_locator: HashMap<(&str, &str, i64), (bool, bool)> = expected_flags
             .iter()
             .map(|expected| {
@@ -1844,6 +1951,7 @@ impl Store {
             .await?;
         }
         tx.commit().await?;
+        publish_lease.release().await?;
         Ok(())
     }
 
@@ -1886,6 +1994,11 @@ impl Store {
                 "sync batch message does not match the requested account or mailbox"
             ));
         }
+        // This guard covers only the commit. Fetching and parsing IMAP data
+        // remains fully concurrent with other account activity.
+        let publish_lease = self
+            .acquire_sync_publish(account_id.parse().context("stored account ID is invalid")?)
+            .await?;
         // Keep the existence check and all provider-derived writes in one
         // transaction.  This prevents a late realtime cycle from reporting
         // arrivals for an account removed between its IMAP fetch and local
@@ -1940,6 +2053,7 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
+        publish_lease.release().await?;
         self.rebuild_threads_for_account(&account_id).await?;
 
         Ok(if initialized && mailbox == "INBOX" {
@@ -2153,6 +2267,144 @@ impl Store {
         tx.commit().await?;
         self.rebuild_threads_for_account(&account_id.to_string())
             .await?;
+        Ok(())
+    }
+
+    /// Reconciles the local catalogue after the provider has renamed one
+    /// mailbox. Both names are exact account-scoped storage keys: `Sent::Old`
+    /// never matches a sibling such as `Sent::Older`.
+    ///
+    /// An in-flight full snapshot belongs to the old namespace, so it is
+    /// discarded rather than retargeted. Message IDs, calculated thread IDs,
+    /// and context ownership records remain unchanged.
+    pub async fn rename_mailbox_catalogue(
+        &self,
+        account_id: AccountId,
+        from: &str,
+        to: &str,
+    ) -> Result<()> {
+        if from.trim().is_empty() || to.trim().is_empty() {
+            return Err(anyhow!("mailbox names cannot be empty"));
+        }
+        if from == to {
+            return Ok(());
+        }
+        let account_id = account_id.to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let source_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE account_id = ? AND mailbox = ? UNION SELECT 1 FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ? UNION SELECT 1 FROM mailbox_sync_state WHERE account_id = ? AND mailbox = ?)",
+        )
+        .bind(&account_id)
+        .bind(from)
+        .bind(&account_id)
+        .bind(from)
+        .bind(&account_id)
+        .bind(from)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !source_exists {
+            tx.commit().await?;
+            return Ok(());
+        }
+        let destination_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE account_id = ? AND mailbox = ? UNION SELECT 1 FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ? UNION SELECT 1 FROM mailbox_sync_state WHERE account_id = ? AND mailbox = ?)",
+        )
+        .bind(&account_id)
+        .bind(to)
+        .bind(&account_id)
+        .bind(to)
+        .bind(&account_id)
+        .bind(to)
+        .fetch_one(&mut *tx)
+        .await?;
+        if destination_exists {
+            return Err(anyhow!("destination mailbox already exists locally"));
+        }
+
+        // Snapshot child rows cascade from their parent. A renamed provider
+        // namespace must start a fresh generation under its new identity.
+        sqlx::query(
+            "DELETE FROM mailbox_snapshot_generations WHERE account_id = ? AND mailbox = ?",
+        )
+        .bind(&account_id)
+        .bind(from)
+        .execute(&mut *tx)
+        .await?;
+        for table in [
+            "messages",
+            "mailbox_sync_state",
+            "mailbox_action_tombstones",
+            "mailbox_sync_failures",
+        ] {
+            let statement =
+                format!("UPDATE {table} SET mailbox = ? WHERE account_id = ? AND mailbox = ?");
+            sqlx::query(&statement)
+                .bind(to)
+                .bind(&account_id)
+                .bind(from)
+                .execute(&mut *tx)
+                .await?;
+        }
+        sqlx::query(
+            "UPDATE mailbox_catalog_state SET mailbox = ?, remote_name = ?, updated_at = ? WHERE account_id = ? AND mailbox = ?",
+        )
+        .bind(to)
+        .bind(to)
+        .bind(Utc::now())
+        .bind(&account_id)
+        .bind(from)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE local_drafts SET provider_mailbox = ?, updated_at = ? WHERE account_id = ? AND provider_mailbox = ?",
+        )
+        .bind(to)
+        .bind(Utc::now())
+        .bind(&account_id)
+        .bind(from)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("UPDATE local_draft_provider_copies SET mailbox = ? WHERE mailbox = ? AND draft_id IN (SELECT id FROM local_drafts WHERE account_id = ?)")
+            .bind(to)
+            .bind(from)
+            .bind(&account_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Reconciles the local catalogue after the provider has deleted one
+    /// mailbox. Permanent context documents intentionally outlive messages so
+    /// a later move or reappearance can recover their stable identity.
+    pub async fn delete_mailbox_catalogue(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+    ) -> Result<()> {
+        if mailbox.trim().is_empty() {
+            return Err(anyhow!("mailbox name cannot be empty"));
+        }
+        let account_id = account_id.to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        // Exact equality prevents one special-use sibling from removing
+        // another nested mailbox alias.
+        for statement in [
+            "DELETE FROM messages WHERE account_id = ? AND mailbox = ?",
+            "DELETE FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ?",
+            "DELETE FROM mailbox_sync_state WHERE account_id = ? AND mailbox = ?",
+            "DELETE FROM mailbox_snapshot_generations WHERE account_id = ? AND mailbox = ?",
+            "DELETE FROM mailbox_sync_failures WHERE account_id = ? AND mailbox = ?",
+            "DELETE FROM mailbox_action_tombstones WHERE account_id = ? AND mailbox = ?",
+        ] {
+            sqlx::query(statement)
+                .bind(&account_id)
+                .bind(mailbox)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        self.rebuild_threads_for_account(&account_id).await?;
         Ok(())
     }
 
@@ -3187,6 +3439,67 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
+        Ok(())
+    }
+
+    /// Reconciles a provider-confirmed COPYUID result into the local
+    /// catalogue. The caller must only invoke this after validating the source
+    /// mailbox UIDVALIDITY and receiving the destination UID from the server.
+    ///
+    /// Copies retain thread headers so a later bounded thread rebuild can
+    /// attach the destination locator to the existing permanent context. Body
+    /// and attachment caches are deliberately not copied because their opaque
+    /// identifiers are tied to the original local message locator.
+    pub async fn copy_message(
+        &self,
+        account_id: AccountId,
+        source_mailbox: &str,
+        source_uid: u32,
+        destination_mailbox: &str,
+        destination_uid: u32,
+    ) -> Result<()> {
+        if source_mailbox.trim().is_empty() || destination_mailbox.trim().is_empty() {
+            return Err(anyhow!("mailbox names cannot be empty"));
+        }
+        if source_mailbox == destination_mailbox && source_uid == destination_uid {
+            return Ok(());
+        }
+        let account_key = account_id.to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let destination_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?)",
+        )
+        .bind(&account_key)
+        .bind(destination_mailbox)
+        .bind(i64::from(destination_uid))
+        .fetch_one(&mut *tx)
+        .await?;
+        if destination_exists {
+            // The destination locator is immutable for one confirmed COPYUID.
+            // A retry must not replace data that a later sync may have made
+            // more complete.
+            tx.commit().await?;
+            return Ok(());
+        }
+        let Some(mut copied) = sqlx::query_as::<_, MailSummary>("SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?")
+            .bind(&account_key)
+            .bind(source_mailbox)
+            .bind(i64::from(source_uid))
+            .fetch_optional(&mut *tx)
+            .await?
+        else {
+            return Err(anyhow!("source message is not present in the local catalogue"));
+        };
+        copied.id = stable_message_id(account_id, destination_mailbox, destination_uid);
+        copied.mailbox = destination_mailbox.to_owned();
+        copied.uid = i64::from(destination_uid);
+        copied.body_text.clear();
+        copied.body_html = None;
+        copied.content_state = "headers_only".into();
+        copied.attachments.clear();
+        persist_message(&mut tx, &copied).await?;
+        tx.commit().await?;
+        self.rebuild_threads_for_account(&account_key).await?;
         Ok(())
     }
 
@@ -4246,15 +4559,40 @@ impl Store {
         if updates.is_empty() {
             return Ok(());
         }
-        let mut tx = self.pool.begin().await?;
-        for (id, thread_id) in updates {
-            sqlx::query("UPDATE messages SET thread_id = ? WHERE id = ?")
-                .bind(thread_id)
-                .bind(id)
+        // The context mapping is derived from these thread IDs. Record that
+        // it needs reconciliation in the same transaction, so a crash cannot
+        // leave freshly committed thread IDs paired with a silently stale
+        // context mapping. Reconciliation itself is lazy for the selected
+        // thread, leaving the account dirty until a future full catch-up.
+        {
+            let mut tx = self.pool.begin().await?;
+            for (id, thread_id) in updates {
+                sqlx::query("UPDATE messages SET thread_id = ? WHERE id = ?")
+                    .bind(thread_id)
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            // A rebuilt thread may have merged or split. Its previous derived
+            // mapping must not make a future target lookup treat the mapping
+            // as current. Durable RFC/local ownership candidates remain so
+            // the bounded target repair can preserve the existing context.
+            sqlx::query("DELETE FROM thread_context_thread_links WHERE account_id = ?")
+                .bind(account_id)
                 .execute(&mut *tx)
                 .await?;
+            // Some migration and compatibility callers can rebuild orphaned
+            // legacy rows before their account record is restored. Context is
+            // account-owned, so do not let its FK marker block that catalogue
+            // repair; normal live accounts always receive the marker.
+            sqlx::query("INSERT INTO thread_context_sync_state(account_id, dirty, updated_at) SELECT ?, 1, ? WHERE EXISTS (SELECT 1 FROM accounts WHERE id = ?) ON CONFLICT(account_id) DO UPDATE SET dirty = 1, updated_at = excluded.updated_at")
+                .bind(account_id)
+                .bind(Utc::now())
+                .bind(account_id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
         }
-        tx.commit().await?;
         Ok(())
     }
 }
@@ -4388,11 +4726,11 @@ impl DisjointSet {
     }
 }
 
-fn normalize_message_id(value: &str) -> Option<String> {
+pub(crate) fn normalize_message_id(value: &str) -> Option<String> {
     parse_message_ids(value).into_iter().next()
 }
 
-fn parse_message_ids(value: &str) -> Vec<String> {
+pub(crate) fn parse_message_ids(value: &str) -> Vec<String> {
     let mut remaining = value.trim_start();
     let mut ids = Vec::new();
     while !remaining.is_empty() {
@@ -8418,6 +8756,13 @@ mod tests {
     async fn recent_catalogue_refresh_preserves_completed_local_flags_on_conflict() {
         let store = Store::in_memory().await.unwrap();
         let account_id = uuid::Uuid::new_v4();
+        store
+            .save_account(&account_with_id(
+                account_id,
+                "recent-flags-conflict@example.test",
+            ))
+            .await
+            .unwrap();
         let mut existing = message("Initial subject", "preview");
         existing.id = stable_message_id(account_id, "INBOX", 12);
         existing.account_id = account_id.to_string();
@@ -8466,6 +8811,13 @@ mod tests {
     async fn recent_catalogue_refresh_applies_provider_flags_when_snapshot_is_current() {
         let store = Store::in_memory().await.unwrap();
         let account_id = uuid::Uuid::new_v4();
+        store
+            .save_account(&account_with_id(
+                account_id,
+                "recent-flags-current@example.test",
+            ))
+            .await
+            .unwrap();
         let mut existing = message("Initial", "preview");
         existing.id = stable_message_id(account_id, "INBOX", 14);
         existing.account_id = account_id.to_string();
@@ -8496,6 +8848,13 @@ mod tests {
     async fn recent_catalogue_refresh_does_not_reverse_local_unread_unstar_actions() {
         let store = Store::in_memory().await.unwrap();
         let account_id = uuid::Uuid::new_v4();
+        store
+            .save_account(&account_with_id(
+                account_id,
+                "recent-flags-local-action@example.test",
+            ))
+            .await
+            .unwrap();
         let mut existing = message("Initially read and starred", "preview");
         existing.id = stable_message_id(account_id, "INBOX", 15);
         existing.account_id = account_id.to_string();
@@ -12473,6 +12832,580 @@ mod tests {
             Some("old-secret")
         );
     }
+
+    #[tokio::test]
+    async fn snapshot_publication_preserves_flags_changed_after_snapshot_started() {
+        let store = Store::in_memory().await.unwrap();
+        let account = account_with_id(uuid::Uuid::new_v4(), "snapshot-flags@example.test");
+        store.save_account(&account).await.unwrap();
+        let mut stored = message("Snapshot flag", "preview");
+        stored.id = stable_message_id(account.id, "INBOX", 1);
+        stored.account_id = account.id.to_string();
+        stored.uid = 1;
+        stored.mailbox = "INBOX".into();
+        stored.is_read = false;
+        stored.is_flagged = false;
+        store.upsert_catalog_messages(&[stored]).await.unwrap();
+
+        let generation = store
+            .begin_mailbox_snapshot(
+                account.id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 1, 1, Some(2), None),
+            )
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(account.id, "INBOX", &generation, &[(1, true, true)])
+            .await
+            .unwrap();
+
+        // The user action completes after sync has fetched its old flags but
+        // before that sync can publish. Finalization must retain this local
+        // result and let a later sync observe the provider state again.
+        store
+            .update_mailbox_flags(account.id, "INBOX", &[(1, true, false)])
+            .await
+            .unwrap();
+        store
+            .finalize_mailbox_snapshot(account.id, "INBOX", &generation)
+            .await
+            .unwrap();
+
+        let published = store
+            .message(&stable_message_id(account.id, "INBOX", 1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(published.is_read);
+        assert!(!published.is_flagged);
+    }
+
+    #[tokio::test]
+    async fn thread_rebuild_marks_context_mapping_dirty_without_eager_reconciliation() {
+        let store = Store::in_memory().await.unwrap();
+        let account = account_with_id(uuid::Uuid::new_v4(), "context-dirty@example.test");
+        store.save_account(&account).await.unwrap();
+        let mut stored = message("Context repair", "preview");
+        stored.id = stable_message_id(account.id, "INBOX", 1);
+        stored.account_id = account.id.to_string();
+        stored.uid = 1;
+        stored.mailbox = "INBOX".into();
+        store.upsert_messages(&[stored]).await.unwrap();
+
+        let previous_thread_id: String = sqlx::query_scalar(
+            "SELECT thread_id FROM messages WHERE account_id = ? AND mailbox = 'INBOX' AND uid = 1",
+        )
+        .bind(account.id.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO thread_context_conversations(id, account_id, created_at, updated_at) VALUES (?, ?, ?, ?)")
+            .bind(&conversation_id)
+            .bind(account.id.to_string())
+            .bind(Utc::now())
+            .bind(Utc::now())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO thread_context_thread_links(account_id, thread_id, conversation_id) VALUES (?, ?, ?)")
+            .bind(account.id.to_string())
+            .bind(previous_thread_id)
+            .bind(&conversation_id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        // Force a real thread-ID correction. An unchanged rebuild is a no-op
+        // and must not invalidate an already current derived link.
+        sqlx::query("UPDATE messages SET thread_id = 'stale-thread-id' WHERE account_id = ? AND mailbox = 'INBOX' AND uid = 1")
+            .bind(account.id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        store.finish_threading_backfill(account.id).await.unwrap();
+
+        let dirty: bool =
+            sqlx::query_scalar("SELECT dirty FROM thread_context_sync_state WHERE account_id = ?")
+                .bind(account.id.to_string())
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert!(dirty);
+        let links: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM thread_context_thread_links WHERE account_id = ?",
+        )
+        .bind(account.id.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(links, 0);
+        let contexts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM thread_context_conversations WHERE account_id = ?",
+        )
+        .bind(account.id.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        // Rebuild invalidates derived thread links but does not eagerly create,
+        // delete, or scan permanent context conversations.
+        assert_eq!(contexts, 1);
+    }
+
+    #[tokio::test]
+    async fn renaming_mailbox_catalogue_keeps_context_and_scopes_exact_mailbox_keys() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let other_account_id = uuid::Uuid::new_v4();
+        store
+            .save_account(&account_with_id(account_id, "rename@example.test"))
+            .await
+            .unwrap();
+        store
+            .save_account(&account_with_id(
+                other_account_id,
+                "other-rename@example.test",
+            ))
+            .await
+            .unwrap();
+
+        let mut renamed = message("Rename me", "preview");
+        renamed.id = stable_message_id(account_id, "Sent::Old", 1);
+        renamed.account_id = account_id.to_string();
+        renamed.mailbox = "Sent::Old".into();
+        renamed.uid = 1;
+        let mut sibling = message("Keep sibling", "preview");
+        sibling.id = stable_message_id(account_id, "Sent::Older", 2);
+        sibling.account_id = account_id.to_string();
+        sibling.mailbox = "Sent::Older".into();
+        sibling.uid = 2;
+        let mut other_account = message("Keep account", "preview");
+        other_account.id = stable_message_id(other_account_id, "Sent::Old", 1);
+        other_account.account_id = other_account_id.to_string();
+        other_account.mailbox = "Sent::Old".into();
+        other_account.uid = 1;
+        store
+            .upsert_messages(&[renamed.clone(), sibling, other_account])
+            .await
+            .unwrap();
+        store
+            .save_mailbox_catalog_state(account_id, "Sent::Old", "Sent::Old", 11, 1, true)
+            .await
+            .unwrap();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO thread_context_conversations(id, account_id, created_at, updated_at) VALUES (?, ?, ?, ?)")
+            .bind(&conversation_id)
+            .bind(account_id.to_string())
+            .bind(Utc::now())
+            .bind(Utc::now())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO thread_context_local_message_links(account_id, local_message_id, conversation_id) VALUES (?, ?, ?)")
+            .bind(account_id.to_string())
+            .bind(&renamed.id)
+            .bind(&conversation_id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO thread_context_documents(conversation_id, kind, content, revision, updated_at) VALUES (?, 'notes', 'keep this note', 1, ?)")
+            .bind(&conversation_id)
+            .bind(Utc::now())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        store
+            .rename_mailbox_catalogue(account_id, "Sent::Old", "Sent::New")
+            .await
+            .unwrap();
+
+        assert!(store
+            .message_by_locator(account_id, "Sent::Old", 1)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .message_by_locator(account_id, "Sent::New", 1)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(store
+            .message_by_locator(account_id, "Sent::Older", 2)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(store
+            .message_by_locator(other_account_id, "Sent::Old", 1)
+            .await
+            .unwrap()
+            .is_some());
+        let catalogue = store
+            .mailbox_catalog_state(account_id, "Sent::New")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(catalogue.remote_name, "Sent::New");
+        let note: String = sqlx::query_scalar(
+            "SELECT content FROM thread_context_documents WHERE conversation_id = ? AND kind = 'notes'",
+        )
+        .bind(&conversation_id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(note, "keep this note");
+    }
+
+    #[tokio::test]
+    async fn deleting_mailbox_catalogue_removes_only_that_catalogue_and_retains_context() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let other_account_id = uuid::Uuid::new_v4();
+        store
+            .save_account(&account_with_id(account_id, "delete@example.test"))
+            .await
+            .unwrap();
+        store
+            .save_account(&account_with_id(
+                other_account_id,
+                "other-delete@example.test",
+            ))
+            .await
+            .unwrap();
+
+        let mut deleted = message("Delete me", "preview");
+        deleted.id = stable_message_id(account_id, "Sent::Old", 1);
+        deleted.account_id = account_id.to_string();
+        deleted.mailbox = "Sent::Old".into();
+        deleted.uid = 1;
+        let mut sibling = message("Keep sibling", "preview");
+        sibling.id = stable_message_id(account_id, "Sent::Older", 2);
+        sibling.account_id = account_id.to_string();
+        sibling.mailbox = "Sent::Older".into();
+        sibling.uid = 2;
+        let mut other_account = message("Keep account", "preview");
+        other_account.id = stable_message_id(other_account_id, "Sent::Old", 1);
+        other_account.account_id = other_account_id.to_string();
+        other_account.mailbox = "Sent::Old".into();
+        other_account.uid = 1;
+        store
+            .upsert_messages(&[deleted.clone(), sibling, other_account])
+            .await
+            .unwrap();
+        store
+            .save_mailbox_catalog_state(account_id, "Sent::Old", "Sent::Old", 11, 1, true)
+            .await
+            .unwrap();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO thread_context_conversations(id, account_id, created_at, updated_at) VALUES (?, ?, ?, ?)")
+            .bind(&conversation_id)
+            .bind(account_id.to_string())
+            .bind(Utc::now())
+            .bind(Utc::now())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO thread_context_documents(conversation_id, kind, content, revision, updated_at) VALUES (?, 'notes', 'retain this note', 1, ?)")
+            .bind(&conversation_id)
+            .bind(Utc::now())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        store
+            .delete_mailbox_catalogue(account_id, "Sent::Old")
+            .await
+            .unwrap();
+
+        assert!(store
+            .message_by_locator(account_id, "Sent::Old", 1)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .mailbox_catalog_state(account_id, "Sent::Old")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .message_by_locator(account_id, "Sent::Older", 2)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(store
+            .message_by_locator(other_account_id, "Sent::Old", 1)
+            .await
+            .unwrap()
+            .is_some());
+        let note: String = sqlx::query_scalar(
+            "SELECT content FROM thread_context_documents WHERE conversation_id = ? AND kind = 'notes'",
+        )
+        .bind(conversation_id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(note, "retain this note");
+    }
+
+    #[tokio::test]
+    async fn copy_message_clones_confirmed_locator_once_without_copying_unsafe_cache() {
+        let store = Store::in_memory().await.unwrap();
+        let account = account_with_id(uuid::Uuid::new_v4(), "copy@example.test");
+        store.save_account(&account).await.unwrap();
+        let mut source = message("Copied", "header preview");
+        source.id = stable_message_id(account.id, "INBOX", 7);
+        source.account_id = account.id.to_string();
+        source.mailbox = "INBOX".into();
+        source.uid = 7;
+        source.message_id = Some("<copy@example.test>".into());
+        source.body_text = "source body that must be refetched".into();
+        source.body_html = Some("<p>source body</p>".into());
+        source.content_state = "complete".into();
+        store.upsert_messages(&[source.clone()]).await.unwrap();
+        let conversation_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO thread_context_conversations(id, account_id, created_at, updated_at) VALUES (?, ?, ?, ?)")
+            .bind(conversation_id.to_string())
+            .bind(account.id.to_string())
+            .bind(Utc::now())
+            .bind(Utc::now())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO thread_context_message_keys(account_id, rfc_message_id, conversation_id) VALUES (?, ?, ?)")
+            .bind(account.id.to_string())
+            .bind("copy@example.test")
+            .bind(conversation_id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        store
+            .copy_message(account.id, "INBOX", 7, "Archive", 19)
+            .await
+            .unwrap();
+        let copied = store
+            .message_by_locator(account.id, "Archive", 19)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(copied.message_id.as_deref(), Some("<copy@example.test>"));
+        assert_eq!(copied.content_state, "headers_only");
+        assert!(copied.body_text.is_empty());
+        assert!(copied.body_html.is_none());
+
+        let context = store
+            .thread_context_conversation_for_target(&ConversationTarget {
+                account_id: account.id,
+                local_message_id: Some(copied.id.clone()),
+                rfc_message_id: copied.message_id.clone(),
+                thread_id: Some(copied.thread_id.clone()),
+                mailbox: Some("Archive".into()),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(context.locator.conversation_id, conversation_id);
+
+        sqlx::query("UPDATE messages SET subject = 'newer destination metadata' WHERE id = ?")
+            .bind(&copied.id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store
+            .copy_message(account.id, "INBOX", 7, "Archive", 19)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.message(&copied.id).await.unwrap().unwrap().subject,
+            "newer destination metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn normalized_message_id_lookup_uses_the_context_repair_index() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4().to_string();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+            "EXPLAIN QUERY PLAN SELECT keys.conversation_id, messages.thread_id FROM thread_context_message_keys AS keys JOIN messages INDEXED BY messages_account_normalized_message_id ON messages.account_id = keys.account_id AND messages.message_id IS NOT NULL AND LOWER(TRIM(messages.message_id)) = '<' || keys.rfc_message_id || '>' WHERE keys.account_id = ? AND keys.conversation_id IN (?)",
+        )
+        .bind(account_id)
+        .bind(conversation_id)
+        .fetch_all(&store.pool)
+        .await
+        .unwrap();
+        let details = plan
+            .iter()
+            .map(|(_, _, _, detail)| detail.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            details.contains("USING INDEX messages_account_normalized_message_id"),
+            "unexpected query plan: {details}"
+        );
+        assert!(
+            !details.contains("SCAN messages"),
+            "selected-thread context repair must not scan all messages: {details}"
+        );
+    }
+
+    #[tokio::test]
+    async fn uidvalidity_replacement_drops_headerless_recycled_uid_context_but_keeps_rfc_context() {
+        let store = Store::in_memory().await.unwrap();
+        let headerless_account = uuid::Uuid::new_v4();
+        save_test_account(&store, headerless_account).await;
+        let mut old_headerless = message("Old headerless", "old");
+        old_headerless.id = stable_message_id(headerless_account, "INBOX", 7);
+        old_headerless.account_id = headerless_account.to_string();
+        old_headerless.uid = 7;
+        old_headerless.message_id = None;
+        let old_headerless_target = ConversationTarget {
+            account_id: headerless_account,
+            local_message_id: Some(old_headerless.id.clone()),
+            rfc_message_id: None,
+            thread_id: None,
+            mailbox: Some("INBOX".into()),
+        };
+        store
+            .upsert_catalog_messages(&[old_headerless.clone()])
+            .await
+            .unwrap();
+        let old_headerless_context = store
+            .thread_context_set_for_target(
+                &old_headerless_target,
+                crate::ThreadContextKind::Notes,
+                "old headerless note",
+                0,
+            )
+            .await
+            .unwrap();
+        // Recreate the pre-finalization state after the setup write.
+        store
+            .save_mailbox_catalog_state(headerless_account, "INBOX", "INBOX", 10, 1, true)
+            .await
+            .unwrap();
+        let generation = store
+            .begin_mailbox_snapshot(
+                headerless_account,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 11, 1, Some(8), None),
+            )
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(
+                headerless_account,
+                "INBOX",
+                &generation,
+                &[(7, false, false)],
+            )
+            .await
+            .unwrap();
+        let mut new_headerless = message("Unrelated recycled UID", "new");
+        new_headerless.id = stable_message_id(headerless_account, "INBOX", 7);
+        new_headerless.account_id = headerless_account.to_string();
+        new_headerless.uid = 7;
+        new_headerless.message_id = None;
+        store
+            .finalize_mailbox_snapshot_with_replacements(
+                headerless_account,
+                "INBOX",
+                &generation,
+                &[new_headerless.clone()],
+            )
+            .await
+            .unwrap();
+        let headerless_bundle = store
+            .thread_context_bundle_for_target(&ConversationTarget {
+                account_id: headerless_account,
+                local_message_id: Some(new_headerless.id),
+                rfc_message_id: None,
+                thread_id: None,
+                mailbox: Some("INBOX".into()),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            headerless_bundle.conversation.locator.conversation_id,
+            old_headerless_context.locator.conversation_id
+        );
+        assert!(headerless_bundle.notes.content.is_empty());
+
+        let rfc_account = uuid::Uuid::new_v4();
+        save_test_account(&store, rfc_account).await;
+        let mut old_rfc = message("Old RFC", "old");
+        old_rfc.id = stable_message_id(rfc_account, "INBOX", 7);
+        old_rfc.account_id = rfc_account.to_string();
+        old_rfc.uid = 7;
+        old_rfc.message_id = Some("<continues@example.test>".into());
+        store
+            .upsert_catalog_messages(&[old_rfc.clone()])
+            .await
+            .unwrap();
+        let old_rfc_context = store
+            .thread_context_set_for_target(
+                &ConversationTarget {
+                    account_id: rfc_account,
+                    local_message_id: Some(old_rfc.id.clone()),
+                    rfc_message_id: old_rfc.message_id.clone(),
+                    thread_id: None,
+                    mailbox: Some("INBOX".into()),
+                },
+                crate::ThreadContextKind::Notes,
+                "RFC note survives",
+                0,
+            )
+            .await
+            .unwrap();
+        store
+            .save_mailbox_catalog_state(rfc_account, "INBOX", "INBOX", 10, 1, true)
+            .await
+            .unwrap();
+        let generation = store
+            .begin_mailbox_snapshot(
+                rfc_account,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 11, 1, Some(8), None),
+            )
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(rfc_account, "INBOX", &generation, &[(7, false, false)])
+            .await
+            .unwrap();
+        let mut new_rfc = message("New RFC namespace", "new");
+        new_rfc.id = stable_message_id(rfc_account, "INBOX", 7);
+        new_rfc.account_id = rfc_account.to_string();
+        new_rfc.uid = 7;
+        new_rfc.message_id = Some("<continues@example.test>".into());
+        store
+            .finalize_mailbox_snapshot_with_replacements(
+                rfc_account,
+                "INBOX",
+                &generation,
+                &[new_rfc.clone()],
+            )
+            .await
+            .unwrap();
+        let rfc_bundle = store
+            .thread_context_bundle_for_target(&ConversationTarget {
+                account_id: rfc_account,
+                local_message_id: Some(new_rfc.id),
+                rfc_message_id: new_rfc.message_id,
+                thread_id: None,
+                mailbox: Some("INBOX".into()),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            rfc_bundle.conversation.locator.conversation_id,
+            old_rfc_context.locator.conversation_id
+        );
+        assert_eq!(rfc_bundle.notes.content, "RFC note survives");
+    }
 }
 impl Store {
     /// Starts or resumes an incomplete mailbox inventory. Matching mailbox
@@ -12577,6 +13510,15 @@ impl Store {
             .bind(highest_modseq)
             .bind(now)
             .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        // A sync can spend minutes fetching a large mailbox. Preserve the
+        // local flags visible when its snapshot began, so final publication
+        // does not overwrite a user action that completed in that interval.
+        sqlx::query("INSERT INTO mailbox_snapshot_expected_flags(account_id, mailbox, generation, uid, is_read, is_flagged) SELECT account_id, mailbox, ?, uid, is_read, is_flagged FROM messages WHERE account_id = ? AND mailbox = ?")
+            .bind(&generation)
+            .bind(&account_id)
+            .bind(mailbox)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -13002,6 +13944,13 @@ impl Store {
                 ));
             }
         }
+        // This guard begins only after all remote work and input validation.
+        // Its transaction has committed before the snapshot transaction below
+        // starts, so the profile's single local SQLite connection cannot
+        // deadlock itself.
+        let publish_lease = self
+            .acquire_sync_publish(account_id.parse().context("stored account ID is invalid")?)
+            .await?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let account_removed: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM deleted_account_tombstones WHERE account_id = ?)",
@@ -13087,6 +14036,32 @@ impl Store {
             }
         }
         if replacement_namespace {
+            // Stable local IDs contain mailbox + UID but not UIDVALIDITY. A
+            // namespace rollover can therefore reuse the same local ID for
+            // unrelated provider mail. Remove only this ephemeral fallback
+            // ownership before replacing the rows; RFC Message-ID mappings
+            // remain available to recover genuine continuity.
+            sqlx::query("DELETE FROM thread_context_local_message_links WHERE account_id = ? AND local_message_id IN (SELECT id FROM messages WHERE account_id = ? AND mailbox = ?)")
+                .bind(&account_id)
+                .bind(&account_id)
+                .bind(mailbox)
+                .execute(&mut *tx)
+                .await?;
+            // Headerless mail has no RFC identity to distinguish a recycled
+            // UID from its predecessor. Its calculated thread ID can also be
+            // identical because it is derived from the stable local ID.
+            // Invalidate every derived account link so a selected target must
+            // repair from current rows instead of returning the old context.
+            sqlx::query("DELETE FROM thread_context_thread_links WHERE account_id = ?")
+                .bind(&account_id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("INSERT INTO thread_context_sync_state(account_id, dirty, updated_at) SELECT ?, 1, ? WHERE EXISTS (SELECT 1 FROM accounts WHERE id = ?) ON CONFLICT(account_id) DO UPDATE SET dirty = 1, updated_at = excluded.updated_at")
+                .bind(&account_id)
+                .bind(Utc::now())
+                .bind(&account_id)
+                .execute(&mut *tx)
+                .await?;
             clear_uidvalidity_replacement_namespace_in_transaction(&mut tx, &account_id, mailbox)
                 .await?;
         }
@@ -13122,7 +14097,13 @@ impl Store {
                 .execute(&mut *tx)
                 .await?;
         }
-        sqlx::query("UPDATE messages SET is_read = (SELECT staged.is_read FROM mailbox_snapshot_items AS staged WHERE staged.account_id = messages.account_id AND staged.mailbox = messages.mailbox AND staged.uid = messages.uid AND staged.generation = ?), is_flagged = (SELECT staged.is_flagged FROM mailbox_snapshot_items AS staged WHERE staged.account_id = messages.account_id AND staged.mailbox = messages.mailbox AND staged.uid = messages.uid AND staged.generation = ?) WHERE account_id = ? AND mailbox = ? AND EXISTS (SELECT 1 FROM mailbox_snapshot_items AS staged WHERE staged.account_id = messages.account_id AND staged.mailbox = messages.mailbox AND staged.uid = messages.uid AND staged.generation = ?)")
+        sqlx::query("UPDATE messages SET is_read = CASE WHEN NOT EXISTS (SELECT 1 FROM mailbox_snapshot_expected_flags AS expected WHERE expected.account_id = messages.account_id AND expected.mailbox = messages.mailbox AND expected.generation = ? AND expected.uid = messages.uid) OR (messages.is_read = (SELECT expected.is_read FROM mailbox_snapshot_expected_flags AS expected WHERE expected.account_id = messages.account_id AND expected.mailbox = messages.mailbox AND expected.generation = ? AND expected.uid = messages.uid) AND messages.is_flagged = (SELECT expected.is_flagged FROM mailbox_snapshot_expected_flags AS expected WHERE expected.account_id = messages.account_id AND expected.mailbox = messages.mailbox AND expected.generation = ? AND expected.uid = messages.uid)) THEN (SELECT staged.is_read FROM mailbox_snapshot_items AS staged WHERE staged.account_id = messages.account_id AND staged.mailbox = messages.mailbox AND staged.uid = messages.uid AND staged.generation = ?) ELSE messages.is_read END, is_flagged = CASE WHEN NOT EXISTS (SELECT 1 FROM mailbox_snapshot_expected_flags AS expected WHERE expected.account_id = messages.account_id AND expected.mailbox = messages.mailbox AND expected.generation = ? AND expected.uid = messages.uid) OR (messages.is_read = (SELECT expected.is_read FROM mailbox_snapshot_expected_flags AS expected WHERE expected.account_id = messages.account_id AND expected.mailbox = messages.mailbox AND expected.generation = ? AND expected.uid = messages.uid) AND messages.is_flagged = (SELECT expected.is_flagged FROM mailbox_snapshot_expected_flags AS expected WHERE expected.account_id = messages.account_id AND expected.mailbox = messages.mailbox AND expected.generation = ? AND expected.uid = messages.uid)) THEN (SELECT staged.is_flagged FROM mailbox_snapshot_items AS staged WHERE staged.account_id = messages.account_id AND staged.mailbox = messages.mailbox AND staged.uid = messages.uid AND staged.generation = ?) ELSE messages.is_flagged END WHERE account_id = ? AND mailbox = ? AND EXISTS (SELECT 1 FROM mailbox_snapshot_items AS staged WHERE staged.account_id = messages.account_id AND staged.mailbox = messages.mailbox AND staged.uid = messages.uid AND staged.generation = ?)")
+            .bind(generation)
+            .bind(generation)
+            .bind(generation)
+            .bind(generation)
+            .bind(generation)
+            .bind(generation)
             .bind(generation)
             .bind(generation)
             .bind(&account_id)
@@ -13197,6 +14178,7 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
+        publish_lease.release().await?;
         if deleted > 0 || replacement_namespace {
             self.rebuild_threads_for_account(&account_id).await?;
         }
@@ -13337,6 +14319,9 @@ impl Store {
         let remote_total =
             i64::try_from(remote_total).context("remote mailbox total is invalid")?;
         let account_id = account_id.to_string();
+        let publish_lease = self
+            .acquire_sync_publish(account_id.parse().context("stored account ID is invalid")?)
+            .await?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let current: Option<(String, i64, bool)> = sqlx::query_as(
             "SELECT remote_name, uid_validity, historical_complete FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ?",
@@ -13397,6 +14382,7 @@ impl Store {
             ));
         }
         tx.commit().await?;
+        publish_lease.release().await?;
         Ok(())
     }
 }

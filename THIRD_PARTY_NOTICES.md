@@ -90,3 +90,34 @@ Dakia uses the `whatlang` Rust crate for on-device language identification.
 Whatlang is licensed under the MIT License.
 
 Source: https://github.com/greyblake/whatlang-rs
+
+## Node.js 22.23.2
+
+Dakia bundles the official Node.js 22.23.2 runtime for the target platform and
+architecture so the Dakia agent does not depend on a user-installed Node.js.
+The macOS binaries are built with macOS 11.0 as their deployment target. The
+complete Node.js license and the notices for its bundled third-party components
+are distributed at `agent/licenses/node/LICENSE`.
+
+Source: https://github.com/nodejs/node/tree/v22.23.2
+
+Release and checksums: https://nodejs.org/download/release/v22.23.2/
+
+## Pi agent SDK 1.3.0
+
+Dakia's interactive mail agent uses `@earendil-works/pi-coding-agent` and
+`@earendil-works/pi-ai` 1.3.0. Pi is licensed under the MIT License. Pi's
+complete MIT license is distributed at `agent/licenses/pi/LICENSE`. The
+license declarations and packaged license files for the complete production
+dependency tree are recorded at `agent/licenses/npm-production.json`.
+Audited supplemental texts for packages whose published npm archive omits a
+standalone license file are distributed under
+`agent/licenses/npm-supplemental/`.
+
+The `standardwebhooks` 1.1.1 npm archive declares MIT but omits a standalone
+license file, while its linked source repository distributes Apache-2.0 at its
+root. Dakia preserves the published package metadata and README in the
+inventory and also bundles the source repository's Apache-2.0 text. This
+upstream inconsistency requires legal review before a production release.
+
+Source: https://github.com/earendil-works/pi/tree/v1.3.0

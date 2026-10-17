@@ -136,7 +136,12 @@ async fn seed_profile(directory: &Path, label: &str) -> (Account, MailSummary) {
 }
 
 fn assert_success_json(output: &Output) -> Value {
-    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(output.stderr, b"");
     serde_json::from_slice(&output.stdout).expect("CLI stdout is JSON")
 }
@@ -159,24 +164,18 @@ async fn help_version_and_invalid_input_do_not_create_profile_state() {
     let help = run(&["--data-dir", &profile_arg, "--help"]).await;
     assert_eq!(help.status.code(), Some(0));
     assert_eq!(help.stderr, b"");
-    assert_eq!(
-        help.stdout,
-        concat!(
-            "Search, read, and send mail from the terminal\n\n",
-            "Usage: dakia [OPTIONS] <COMMAND>\n\n",
-            "Commands:\n",
-            "  account     \n  sync        \n  classify    \n  search      \n",
-            "  show        \n  attachment  \n  archive     \n  spam        \n",
-            "  trash       \n  delete      \n  send        \n  ai          \n",
-            "  help        Print this message or the help of the given subcommand(s)\n\n",
-            "Options:\n",
-            "      --data-dir <DATA_DIR>  [env: DAKIA_DATA_DIR=]\n",
-            "      --json                 \n",
-            "  -h, --help                 Print help\n",
-            "  -V, --version              Print version\n"
-        )
-        .as_bytes()
-    );
+    let help_text = String::from_utf8(help.stdout).expect("help is UTF-8");
+    assert!(help_text.contains("Search, read, and send mail from the terminal"));
+    assert!(help_text.contains("Usage: dakia [OPTIONS] <COMMAND>"));
+    for command in [
+        "account", "sync", "watch", "message", "folder", "draft", "thread", "context", "agent",
+        "provider",
+    ] {
+        assert!(
+            help_text.contains(command),
+            "missing {command} from CLI help"
+        );
+    }
 
     let version = run(&["--data-dir", &profile_arg, "--version"]).await;
     assert_eq!(version.status.code(), Some(0));
@@ -198,6 +197,17 @@ async fn help_version_and_invalid_input_do_not_create_profile_state() {
         )
         .as_bytes()
     );
+
+    let json_invalid = run(&["--data-dir", &profile_arg, "--json", "message", "flag"]).await;
+    assert_eq!(json_invalid.status.code(), Some(2));
+    let error: Value = serde_json::from_slice(&json_invalid.stdout)
+        .expect("JSON argument failures must have JSON stdout");
+    assert_eq!(error["error"]["code"], "invalid_arguments");
+    assert!(error["error"]["message"]
+        .as_str()
+        .expect("error message")
+        .contains("required arguments were not provided"));
+    assert!(String::from_utf8_lossy(&json_invalid.stderr).contains("error:"));
 
     assert!(!profile.join("dakia.db").exists());
     assert!(!profile.join("vault.key").exists());
@@ -258,6 +268,84 @@ async fn data_dir_overrides_environment_and_account_list_has_a_stable_json_schem
 }
 
 #[tokio::test]
+async fn account_enable_and_thread_context_commands_persist_through_cli_restarts() {
+    let temporary = TempDir::new().expect("temporary directory");
+    let profile = temporary.path().join("profile");
+    let profile_arg = profile.to_string_lossy().into_owned();
+    let (account, message) = seed_profile(&profile, "context-cli").await;
+
+    let disabled = run(&[
+        "--data-dir",
+        &profile_arg,
+        "--json",
+        "account",
+        "disable",
+        "--account",
+        &account.id.to_string(),
+    ])
+    .await;
+    let disabled = assert_success_json(&disabled);
+    assert_eq!(disabled["id"], account.id.to_string());
+    assert_eq!(disabled["enabled"], false);
+
+    let enabled = run(&[
+        "--data-dir",
+        &profile_arg,
+        "--json",
+        "account",
+        "enable",
+        "--account",
+        &account.id.to_string(),
+    ])
+    .await;
+    assert_eq!(assert_success_json(&enabled)["enabled"], true);
+
+    let set = run(&[
+        "--data-dir",
+        &profile_arg,
+        "--json",
+        "thread",
+        "context",
+        "set",
+        "--account",
+        &account.id.to_string(),
+        "--message-id",
+        &message.id,
+        "--kind",
+        "notes",
+        "--revision",
+        "0",
+        "--text",
+        "Claim reference 123",
+    ])
+    .await;
+    let set = assert_success_json(&set);
+    assert_eq!(set["content"], "Claim reference 123");
+    assert_eq!(set["revision"], 1);
+    let conversation_id = set["locator"]["conversationId"]
+        .as_str()
+        .expect("CLI returns durable conversation ID")
+        .to_owned();
+
+    let get = run(&[
+        "--data-dir",
+        &profile_arg,
+        "--json",
+        "thread",
+        "context",
+        "get",
+        "--account",
+        &account.id.to_string(),
+        "--conversation-id",
+        &conversation_id,
+    ])
+    .await;
+    let get = assert_success_json(&get);
+    assert_eq!(get["content"], "Claim reference 123");
+    assert_eq!(get["revision"], 1);
+}
+
+#[tokio::test]
 async fn sync_rejects_an_unknown_account_and_preserves_the_ndjson_contract() {
     let temporary = TempDir::new().expect("temporary directory");
     let profile = temporary.path().join("profile");
@@ -273,8 +361,11 @@ async fn sync_rejects_an_unknown_account_and_preserves_the_ndjson_contract() {
         &unknown.to_string(),
     ])
     .await;
-    assert_eq!(missing.status.code(), Some(1));
-    assert_eq!(missing.stdout, b"");
+    assert_eq!(missing.status.code(), Some(3));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&missing.stdout).unwrap(),
+        serde_json::json!({"error":{"code":"not_found","message":"account not found"}})
+    );
     assert_eq!(missing.stderr, b"Error: account not found\n");
 
     let empty = run(&["--data-dir", &profile_arg, "--json", "sync"]).await;

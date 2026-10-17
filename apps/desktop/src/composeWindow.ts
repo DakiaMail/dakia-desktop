@@ -4,6 +4,7 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { ComposeAttachment, MailSummary } from "./types";
 
 export type ComposeSeed = {
+  draftId?: string;
   accountId?: string;
   to?: string;
   cc?: string;

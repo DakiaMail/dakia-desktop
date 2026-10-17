@@ -7,6 +7,7 @@ use crate::{
         MAX_MIME_PARTS, MAX_MULTIPART_NESTING, MAX_RAW_MESSAGE_BYTES,
     },
     oauth::OAuthTokens,
+    operations::{AccountOperationKind, AccountOperationLease, AccountOperationLeaseState},
     provider::Security,
     storage::{
         stable_message_id, Attachment, AttachmentData, AttachmentPresentation, MailSummary,
@@ -121,6 +122,15 @@ const GMAIL_CATEGORY_SIGNAL_PREFIX: &str = "Gmail category: ";
 // durable UID watermark frequently enough to preserve the near-real-time UX.
 const IMAP_IDLE_RENEWAL: Duration = Duration::from_secs(5);
 
+async fn require_active_provider_lease(lease: &AccountOperationLease) -> Result<()> {
+    match lease.state().await? {
+        AccountOperationLeaseState::Active => Ok(()),
+        AccountOperationLeaseState::Lost => bail!("Dakia lost ownership of this account operation"),
+        AccountOperationLeaseState::AccountDeleted => bail!("account was removed"),
+        AccountOperationLeaseState::AccountMissing => bail!("account does not exist"),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ComposeMessage {
     pub account_id: uuid::Uuid,
@@ -144,6 +154,51 @@ pub struct ComposeAttachment {
     pub filename: String,
     pub mime_type: String,
     pub content_base64: String,
+}
+
+/// A provider mailbox returned by IMAP `LIST`.
+///
+/// `name` is the provider's actual mailbox name and is therefore the value
+/// accepted by folder management and arbitrary move/copy operations.  It is
+/// deliberately not translated to Dakia's catalogue aliases such as
+/// `Drafts::Brouillons`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MailboxInfo {
+    pub name: String,
+    pub delimiter: Option<String>,
+    #[serde(default)]
+    pub attributes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderDraftAppend {
+    pub mailbox: String,
+    pub uid_validity: u32,
+    pub uid: Option<u32>,
+}
+
+/// IMAP system flags Dakia can safely mutate. Arbitrary atoms are excluded so
+/// a CLI argument cannot accidentally set a provider-specific control flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageFlag {
+    Seen,
+    Flagged,
+    Answered,
+    Draft,
+    Deleted,
+}
+
+impl MessageFlag {
+    fn imap_atom(self) -> &'static str {
+        match self {
+            Self::Seen => "\\Seen",
+            Self::Flagged => "\\Flagged",
+            Self::Answered => "\\Answered",
+            Self::Draft => "\\Draft",
+            Self::Deleted => "\\Deleted",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
@@ -357,6 +412,442 @@ impl MailService {
         &self.credentials
     }
 
+    /// Rejects a caller-held account snapshot once persisted account settings
+    /// have changed. Credentials are loaded by the current account identity,
+    /// so accepting a stale endpoint/configuration here could apply an
+    /// approved operation to a different provider target.
+    async fn validate_current_enabled_account(&self, account: &Account) -> Result<()> {
+        let current = self
+            .store
+            .account(account.id)
+            .await?
+            .context("account no longer exists")?;
+        if !current.enabled {
+            bail!("account is disabled");
+        }
+        if serde_json::to_value(&current)? != serde_json::to_value(account)? {
+            bail!("account settings changed; reload the account before continuing");
+        }
+        Ok(())
+    }
+
+    /// Lists provider folders without changing the local catalogue. Callers
+    /// that need message data must sync the chosen folder separately.
+    pub async fn list_folders(&self, account: &Account) -> Result<Vec<MailboxInfo>> {
+        let secret = self.credentials.secret(account).await?;
+        let mut client = ImapClient::connect(account).await?;
+        client.authenticate(account, &secret).await?;
+        let lines = client.command("LIST \"\" \"*\"").await?;
+        validate_list_response(&lines)?;
+        let folders = lines
+            .iter()
+            .filter_map(|line| parse_list_mailbox_info(line))
+            .collect();
+        let _ = client.command("LOGOUT").await;
+        Ok(folders)
+    }
+
+    /// Creates a provider folder. This operation intentionally does not add a
+    /// synthetic local catalogue row: only a successful sync makes a mailbox
+    /// authoritative locally.
+    pub async fn create_folder(&self, account: &Account, name: &str) -> Result<()> {
+        validate_mailbox_name(name)?;
+        let lease = self
+            .store
+            .operation_coordinator()
+            .await?
+            .acquire_required(account.id, AccountOperationKind::ProviderMutation)
+            .await?;
+        let result: Result<()> = async {
+            self.validate_current_enabled_account(account).await?;
+            let secret = self.credentials.secret(account).await?;
+            let mut client = ImapClient::connect(account).await?;
+            client.authenticate(account, &secret).await?;
+            client
+                .command(&format!("CREATE {}", quote_mailbox(name)))
+                .await?;
+            require_active_provider_lease(&lease).await?;
+            let _ = client.command("LOGOUT").await;
+            Ok(())
+        }
+        .await;
+        let release = lease.release().await;
+        result?;
+        release
+    }
+
+    pub async fn rename_folder(&self, account: &Account, from: &str, to: &str) -> Result<()> {
+        validate_mailbox_name(from)?;
+        validate_mailbox_name(to)?;
+        let lease = self
+            .store
+            .operation_coordinator()
+            .await?
+            .acquire_required(account.id, AccountOperationKind::ProviderMutation)
+            .await?;
+        let result: Result<()> = async {
+            self.validate_current_enabled_account(account).await?;
+            let secret = self.credentials.secret(account).await?;
+            let mut client = ImapClient::connect(account).await?;
+            client.authenticate(account, &secret).await?;
+            client
+                .command(&format!(
+                    "RENAME {} {}",
+                    quote_mailbox(from),
+                    quote_mailbox(to)
+                ))
+                .await?;
+            require_active_provider_lease(&lease).await?;
+            self.store
+                .rename_mailbox_catalogue(account.id, from, to)
+                .await?;
+            let _ = client.command("LOGOUT").await;
+            Ok(())
+        }
+        .await;
+        let release = lease.release().await;
+        result?;
+        release
+    }
+
+    pub async fn delete_folder(&self, account: &Account, name: &str) -> Result<()> {
+        validate_mailbox_name(name)?;
+        let lease = self
+            .store
+            .operation_coordinator()
+            .await?
+            .acquire_required(account.id, AccountOperationKind::ProviderMutation)
+            .await?;
+        let result: Result<()> = async {
+            self.validate_current_enabled_account(account).await?;
+            let secret = self.credentials.secret(account).await?;
+            let mut client = ImapClient::connect(account).await?;
+            client.authenticate(account, &secret).await?;
+            client
+                .command(&format!("DELETE {}", quote_mailbox(name)))
+                .await?;
+            require_active_provider_lease(&lease).await?;
+            self.store
+                .delete_mailbox_catalogue(account.id, name)
+                .await?;
+            let _ = client.command("LOGOUT").await;
+            Ok(())
+        }
+        .await;
+        let release = lease.release().await;
+        result?;
+        release
+    }
+
+    /// Moves one message to any provider folder and reconciles the local
+    /// locator only after IMAP confirms the operation. `None` means the
+    /// provider performed the move but did not advertise COPYUID; a later
+    /// sync will discover the destination instead of guessing a UID.
+    pub async fn move_message(
+        &self,
+        account: &Account,
+        source_mailbox: &str,
+        uid: u32,
+        destination_mailbox: &str,
+    ) -> Result<Option<u32>> {
+        self.move_message_checked(account, source_mailbox, uid, destination_mailbox, None)
+            .await
+    }
+
+    pub async fn move_message_at_validity(
+        &self,
+        account: &Account,
+        source_mailbox: &str,
+        uid: u32,
+        destination_mailbox: &str,
+        expected_uid_validity: i64,
+    ) -> Result<Option<u32>> {
+        self.move_message_checked(
+            account,
+            source_mailbox,
+            uid,
+            destination_mailbox,
+            Some(expected_uid_validity),
+        )
+        .await
+    }
+
+    async fn move_message_checked(
+        &self,
+        account: &Account,
+        source_mailbox: &str,
+        uid: u32,
+        destination_mailbox: &str,
+        expected_uid_validity: Option<i64>,
+    ) -> Result<Option<u32>> {
+        validate_mailbox_name(destination_mailbox)?;
+        let lease = self
+            .store
+            .operation_coordinator()
+            .await?
+            .acquire_required(account.id, AccountOperationKind::ProviderMutation)
+            .await?;
+        let result: Result<Option<u32>> = async {
+            self.validate_current_enabled_account(account).await?;
+            let state = self
+                .store
+                .mailbox_catalog_state(account.id, source_mailbox)
+                .await?
+                .context("mailbox catalogue is not initialized")?;
+            if let Some(expected) = expected_uid_validity {
+                if state.uid_validity != expected {
+                    bail!(
+                        "mailbox changed since this action was approved; review the message again"
+                    );
+                }
+            }
+            let secret = self.credentials.secret(account).await?;
+            let mut client = ImapClient::connect(account).await?;
+            let destination_uid = Self::move_message_with_client(
+                &mut client,
+                account,
+                &secret,
+                &state.remote_name,
+                state.uid_validity,
+                uid,
+                destination_mailbox,
+            )
+            .await?;
+            require_active_provider_lease(&lease).await?;
+            self.store
+                .move_message(
+                    account.id,
+                    source_mailbox,
+                    uid,
+                    destination_mailbox,
+                    destination_uid,
+                )
+                .await?;
+            Ok(destination_uid)
+        }
+        .await;
+        let release = lease.release().await;
+        let destination_uid = result?;
+        release?;
+        Ok(destination_uid)
+    }
+
+    async fn move_message_with_client<S>(
+        client: &mut ImapClient<S>,
+        account: &Account,
+        secret: &str,
+        source_remote: &str,
+        expected_uid_validity: i64,
+        uid: u32,
+        destination_mailbox: &str,
+    ) -> Result<Option<u32>>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        Self::authenticate_and_select_catalogued_mailbox(
+            client,
+            account,
+            secret,
+            source_remote,
+            expected_uid_validity,
+            "moving",
+        )
+        .await?;
+        let destination_uid = move_selected_message(
+            client,
+            uid,
+            &remote_mailbox(account, destination_mailbox),
+            "moving a message",
+        )
+        .await?;
+        let _ = client.command("LOGOUT").await;
+        Ok(destination_uid)
+    }
+
+    /// Copies one message to any provider folder. A copy is left for the next
+    /// sync because cloning a local row would invent destination UID and MIME
+    /// metadata when the server does not include COPYUID.
+    pub async fn copy_message(
+        &self,
+        account: &Account,
+        source_mailbox: &str,
+        uid: u32,
+        destination_mailbox: &str,
+    ) -> Result<Option<u32>> {
+        self.copy_message_checked(account, source_mailbox, uid, destination_mailbox, None)
+            .await
+    }
+
+    pub async fn copy_message_at_validity(
+        &self,
+        account: &Account,
+        source_mailbox: &str,
+        uid: u32,
+        destination_mailbox: &str,
+        expected_uid_validity: i64,
+    ) -> Result<Option<u32>> {
+        self.copy_message_checked(
+            account,
+            source_mailbox,
+            uid,
+            destination_mailbox,
+            Some(expected_uid_validity),
+        )
+        .await
+    }
+
+    async fn copy_message_checked(
+        &self,
+        account: &Account,
+        source_mailbox: &str,
+        uid: u32,
+        destination_mailbox: &str,
+        expected_uid_validity: Option<i64>,
+    ) -> Result<Option<u32>> {
+        validate_mailbox_name(destination_mailbox)?;
+        let lease = self
+            .store
+            .operation_coordinator()
+            .await?
+            .acquire_required(account.id, AccountOperationKind::ProviderMutation)
+            .await?;
+        let result: Result<Option<u32>> = async {
+            self.validate_current_enabled_account(account).await?;
+            let state = self
+                .store
+                .mailbox_catalog_state(account.id, source_mailbox)
+                .await?
+                .context("mailbox catalogue is not initialized")?;
+            if let Some(expected) = expected_uid_validity {
+                if state.uid_validity != expected {
+                    bail!(
+                        "mailbox changed since this action was approved; review the message again"
+                    );
+                }
+            }
+            let secret = self.credentials.secret(account).await?;
+            let mut client = ImapClient::connect(account).await?;
+            let destination_uid = Self::copy_message_with_client(
+                &mut client,
+                account,
+                &secret,
+                &state.remote_name,
+                state.uid_validity,
+                uid,
+                destination_mailbox,
+            )
+            .await?;
+            require_active_provider_lease(&lease).await?;
+            if let Some(destination_uid) = destination_uid {
+                self.store
+                    .copy_message(
+                        account.id,
+                        source_mailbox,
+                        uid,
+                        destination_mailbox,
+                        destination_uid,
+                    )
+                    .await?;
+            }
+            Ok(destination_uid)
+        }
+        .await;
+        let release = lease.release().await;
+        let destination_uid = result?;
+        release?;
+        Ok(destination_uid)
+    }
+
+    async fn copy_message_with_client<S>(
+        client: &mut ImapClient<S>,
+        account: &Account,
+        secret: &str,
+        source_remote: &str,
+        expected_uid_validity: i64,
+        uid: u32,
+        destination_mailbox: &str,
+    ) -> Result<Option<u32>>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        Self::authenticate_and_select_catalogued_mailbox(
+            client,
+            account,
+            secret,
+            source_remote,
+            expected_uid_validity,
+            "copying",
+        )
+        .await?;
+        let response = client
+            .command(&format!(
+                "UID COPY {uid} {}",
+                quote_mailbox(&remote_mailbox(account, destination_mailbox))
+            ))
+            .await?;
+        let _ = client.command("LOGOUT").await;
+        Ok(parse_copy_uid(&response))
+    }
+
+    /// Appends a complete RFC 822 message without implicitly sending it. The
+    /// caller owns any filesystem read; this boundary accepts bytes so agent
+    /// and CLI paths cannot accidentally follow a local path from mail data.
+    pub async fn import_raw_message(
+        &self,
+        account: &Account,
+        mailbox: &str,
+        raw: &[u8],
+    ) -> Result<Option<u32>> {
+        validate_mailbox_name(mailbox)?;
+        preflight_raw_message(raw)?;
+        let lease = self
+            .store
+            .operation_coordinator()
+            .await?
+            .acquire_required(account.id, AccountOperationKind::ProviderMutation)
+            .await?;
+        let result: Result<Option<u32>> = async {
+            self.validate_current_enabled_account(account).await?;
+            let secret = self.credentials.secret(account).await?;
+            let mut client = ImapClient::connect(account).await?;
+            client.authenticate(account, &secret).await?;
+            let lines = client
+                .append_with_flags(&remote_mailbox(account, mailbox), raw, "\\Seen")
+                .await?;
+            let _ = client.command("LOGOUT").await;
+            require_active_provider_lease(&lease).await?;
+            Ok(parse_append_uid(&lines))
+        }
+        .await;
+        let release = lease.release().await;
+        let appended_uid = result?;
+        release?;
+        Ok(appended_uid)
+    }
+
+    /// Creates a reply with RFC threading headers and Reply-To precedence.
+    /// It only prepares content. Sending remains an explicit operation.
+    pub fn reply_draft(
+        &self,
+        account: &Account,
+        message: &MailSummary,
+        body_text: impl Into<String>,
+    ) -> Result<ComposeMessage> {
+        compose_reply_draft(account, message, body_text.into())
+    }
+
+    /// Creates a forward draft. The original is represented as quoted text;
+    /// callers that need a byte-for-byte attachment can fetch the raw message
+    /// explicitly and add it as a `message/rfc822` ComposeAttachment.
+    pub fn forward_draft(
+        &self,
+        account: &Account,
+        message: &MailSummary,
+        body_text: impl Into<String>,
+    ) -> ComposeMessage {
+        compose_forward_draft(account, message, body_text.into())
+    }
+
     /// Verify authenticated production IMAP connectivity without fetching
     /// message data or changing remote mailbox state. This intentionally stops
     /// after capability, mailbox discovery, read-only INBOX examination, and
@@ -397,6 +888,21 @@ impl MailService {
     pub async fn sync_all(&self, account: &Account, max_messages: u32) -> Result<usize> {
         Ok(self
             .sync_all_with_progress(account, max_messages, |_| {})
+            .await?
+            .synced_count)
+    }
+
+    /// Synchronizes one explicitly selected mailbox. The caller-supplied
+    /// mailbox remains the local catalogue key while provider special-folder
+    /// mapping is still applied for the remote name.
+    pub async fn sync_mailbox(
+        &self,
+        account: &Account,
+        mailbox: &str,
+        max_messages: u32,
+    ) -> Result<usize> {
+        Ok(self
+            .sync_mailbox_with_progress(account, mailbox, max_messages, |_| {})
             .await?
             .synced_count)
     }
@@ -841,22 +1347,146 @@ impl MailService {
         uid: u32,
         flagged: bool,
     ) -> Result<()> {
-        let secret = self.credentials.secret(account).await?;
-        let mut client = ImapClient::connect(account).await?;
-        client.authenticate(account, &secret).await?;
-        client
-            .command(&format!(
-                "SELECT {}",
-                quote_imap(&remote_mailbox(account, mailbox))
-            ))
+        self.set_flags(account, mailbox, uid, &[MessageFlag::Flagged], flagged)
+            .await
+    }
+
+    /// Adds or removes closed-set IMAP system flags. This is intentionally a
+    /// delta operation, preserving provider flags that Dakia does not own.
+    pub async fn set_flags(
+        &self,
+        account: &Account,
+        mailbox: &str,
+        uid: u32,
+        flags: &[MessageFlag],
+        enabled: bool,
+    ) -> Result<()> {
+        self.set_flags_checked(account, mailbox, uid, flags, enabled, None)
+            .await
+    }
+
+    pub async fn set_flags_at_validity(
+        &self,
+        account: &Account,
+        mailbox: &str,
+        uid: u32,
+        flags: &[MessageFlag],
+        enabled: bool,
+        expected_uid_validity: i64,
+    ) -> Result<()> {
+        self.set_flags_checked(
+            account,
+            mailbox,
+            uid,
+            flags,
+            enabled,
+            Some(expected_uid_validity),
+        )
+        .await
+    }
+
+    async fn set_flags_checked(
+        &self,
+        account: &Account,
+        mailbox: &str,
+        uid: u32,
+        flags: &[MessageFlag],
+        enabled: bool,
+        expected_uid_validity: Option<i64>,
+    ) -> Result<()> {
+        if flags.is_empty() {
+            return Ok(());
+        }
+        let lease = self
+            .store
+            .operation_coordinator()
+            .await?
+            .acquire_required(account.id, AccountOperationKind::ProviderMutation)
             .await?;
-        let operation = if flagged {
+        let result: Result<()> = async {
+            self.validate_current_enabled_account(account).await?;
+            let state = self
+                .store
+                .mailbox_catalog_state(account.id, mailbox)
+                .await?
+                .context("mailbox catalogue is not initialized")?;
+            if let Some(expected) = expected_uid_validity {
+                if state.uid_validity != expected {
+                    bail!(
+                        "mailbox changed since this action was approved; review the message again"
+                    );
+                }
+            }
+            let secret = self.credentials.secret(account).await?;
+            let mut client = ImapClient::connect(account).await?;
+            Self::set_flags_with_client(
+                &mut client,
+                account,
+                &secret,
+                &state.remote_name,
+                state.uid_validity,
+                uid,
+                flags,
+                enabled,
+            )
+            .await?;
+            require_active_provider_lease(&lease).await?;
+            if let Some(message) = self
+                .store
+                .message_by_locator(account.id, mailbox, uid)
+                .await?
+            {
+                if flags.contains(&MessageFlag::Flagged) {
+                    self.store.set_message_flagged(&message.id, enabled).await?;
+                }
+                if flags.contains(&MessageFlag::Seen) {
+                    self.store.set_message_read(&message.id, enabled).await?;
+                }
+            }
+            Ok(())
+        }
+        .await;
+        let release = lease.release().await;
+        result?;
+        release
+    }
+
+    async fn set_flags_with_client<S>(
+        client: &mut ImapClient<S>,
+        account: &Account,
+        secret: &str,
+        remote_mailbox: &str,
+        expected_uid_validity: i64,
+        uid: u32,
+        flags: &[MessageFlag],
+        enabled: bool,
+    ) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        Self::authenticate_and_select_catalogued_mailbox(
+            client,
+            account,
+            secret,
+            remote_mailbox,
+            expected_uid_validity,
+            "changing flags",
+        )
+        .await?;
+        let operation = if enabled {
             "+FLAGS.SILENT"
         } else {
             "-FLAGS.SILENT"
         };
+        let atoms = flags
+            .iter()
+            .map(|flag| flag.imap_atom())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(" ");
         client
-            .command(&format!("UID STORE {uid} {operation} (\\Flagged)"))
+            .command(&format!("UID STORE {uid} {operation} ({atoms})"))
             .await?;
         let _ = client.command("LOGOUT").await;
         Ok(())
@@ -869,18 +1499,8 @@ impl MailService {
         uid: u32,
         read: bool,
     ) -> Result<()> {
-        let secret = self.credentials.secret(account).await?;
-        let mut client = ImapClient::connect(account).await?;
-        client.authenticate(account, &secret).await?;
-        client
-            .command(&format!(
-                "SELECT {}",
-                quote_imap(&remote_mailbox(account, mailbox))
-            ))
-            .await?;
-        client.command(&set_read_command(uid, read)).await?;
-        let _ = client.command("LOGOUT").await;
-        Ok(())
+        self.set_flags(account, mailbox, uid, &[MessageFlag::Seen], read)
+            .await
     }
 
     pub async fn sync_inbox_with_progress<F>(
@@ -915,6 +1535,30 @@ impl MailService {
             account,
             max_messages,
             mailbox_plans(account),
+            false,
+            on_progress,
+        )
+        .await
+    }
+
+    pub async fn sync_mailbox_with_progress<F>(
+        &self,
+        account: &Account,
+        mailbox: &str,
+        max_messages: u32,
+        on_progress: F,
+    ) -> Result<SyncResult>
+    where
+        F: FnMut(SyncProgress),
+    {
+        validate_mailbox_name(mailbox)?;
+        self.sync_mailboxes_with_progress(
+            account,
+            max_messages,
+            vec![MailboxPlan::custom(
+                remote_mailbox(account, mailbox),
+                mailbox,
+            )],
             false,
             on_progress,
         )
@@ -1098,9 +1742,9 @@ impl MailService {
         for plan in plans {
             let mut mailbox_condstore = condstore;
             let mut select_command = if mailbox_condstore {
-                format!("SELECT {} (CONDSTORE)", quote_imap(&plan.remote))
+                format!("SELECT {} (CONDSTORE)", quote_mailbox(&plan.remote))
             } else {
-                format!("SELECT {}", quote_imap(&plan.remote))
+                format!("SELECT {}", quote_mailbox(&plan.remote))
             };
             let selected = match client.command(&select_command).await {
                 Ok(selected) => selected,
@@ -1109,7 +1753,7 @@ impl MailService {
                         && error.to_string().starts_with("IMAP command failed:") =>
                 {
                     mailbox_condstore = false;
-                    select_command = format!("SELECT {}", quote_imap(&plan.remote));
+                    select_command = format!("SELECT {}", quote_mailbox(&plan.remote));
                     match client.command(&select_command).await {
                         Ok(selected) => selected,
                         Err(error) => {
@@ -1381,7 +2025,7 @@ impl MailService {
                 }
                 published = true;
                 client
-                    .command(&format!("SELECT {}", quote_imap(&item.plan.remote)))
+                    .command(&format!("SELECT {}", quote_mailbox(&item.plan.remote)))
                     .await?;
                 let end = if item.retry_uids.contains(&item.uids[item.offset]) {
                     item.offset + 1
@@ -1394,6 +2038,14 @@ impl MailService {
                     (item.offset + batch_size).min(next_retry)
                 };
                 let batch = &item.uids[item.offset..end];
+                // Capture flags before the remote fetch. Publishing through
+                // the matching CAS path below means a user action completed
+                // while this batch is in flight cannot be overwritten by the
+                // older provider FLAGS response.
+                let expected_flags = self
+                    .store
+                    .capture_recent_catalogue_expected_flags(account.id, &item.plan.storage, batch)
+                    .await?;
                 let mut messages = Vec::with_capacity(batch.len());
                 let fields = if account.provider_id == "gmail" {
                     "FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE X-GM-LABELS BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)]"
@@ -1536,7 +2188,9 @@ impl MailService {
                         )
                         .await?;
                 } else {
-                    self.store.upsert_catalog_messages(&messages).await?;
+                    self.store
+                        .upsert_recent_catalog_messages(&messages, &expected_flags)
+                        .await?;
                 }
                 for message in &messages {
                     let uid = u32::try_from(message.uid)?;
@@ -1606,9 +2260,9 @@ impl MailService {
         // the unavoidable remote-to-local race window as small as possible.
         for (index, item) in work.iter().enumerate() {
             let select_command = if item.condstore {
-                format!("SELECT {} (CONDSTORE)", quote_imap(&item.plan.remote))
+                format!("SELECT {} (CONDSTORE)", quote_mailbox(&item.plan.remote))
             } else {
-                format!("SELECT {}", quote_imap(&item.plan.remote))
+                format!("SELECT {}", quote_mailbox(&item.plan.remote))
             };
             let selected = client.command(&select_command).await?;
             let final_identity = parse_mailbox_identity(&selected)?;
@@ -1731,7 +2385,7 @@ impl MailService {
         // set. No catalogue writes occur until all UIDVALIDITY checks pass.
         for plan in plans {
             let selected = match client
-                .command(&format!("SELECT {}", quote_imap(&plan.remote)))
+                .command(&format!("SELECT {}", quote_mailbox(&plan.remote)))
                 .await
             {
                 Ok(selected) => selected,
@@ -1780,7 +2434,7 @@ impl MailService {
                 )
                 .await?;
             client
-                .command(&format!("SELECT {}", quote_imap(&item.plan.remote)))
+                .command(&format!("SELECT {}", quote_mailbox(&item.plan.remote)))
                 .await?;
             let mut messages = Vec::with_capacity(item.selected_uids.len());
             for uid in &item.selected_uids {
@@ -1852,7 +2506,7 @@ impl MailService {
         let mut client = ImapClient::connect(account).await?;
         client.authenticate(account, &secret).await?;
         let selected = client
-            .command(&format!("SELECT {}", quote_imap(&state.remote_name)))
+            .command(&format!("SELECT {}", quote_mailbox(&state.remote_name)))
             .await?;
         let current_uid_validity = parse_uid_validity(&selected)
             .context("IMAP server omitted UIDVALIDITY after SELECT")?;
@@ -1979,14 +2633,36 @@ impl MailService {
             .context("mailbox catalogue is not initialized")?;
         let secret = self.credentials.secret(account).await?;
         let mut client = ImapClient::connect(account).await?;
-        client.authenticate(account, &secret).await?;
+        Self::authenticate_and_select_catalogued_mailbox(
+            &mut client,
+            account,
+            &secret,
+            &state.remote_name,
+            state.uid_validity,
+            action,
+        )
+        .await?;
+        Ok((client, state))
+    }
+
+    async fn authenticate_and_select_catalogued_mailbox<S>(
+        client: &mut ImapClient<S>,
+        account: &Account,
+        secret: &str,
+        remote_mailbox: &str,
+        expected_uid_validity: i64,
+        action: &str,
+    ) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        client.authenticate(account, secret).await?;
         let selected = client
-            .command(&format!("SELECT {}", quote_imap(&state.remote_name)))
+            .command(&format!("SELECT {}", quote_mailbox(remote_mailbox)))
             .await?;
         let current_uid_validity = parse_uid_validity(&selected)
             .context("IMAP server omitted UIDVALIDITY after SELECT")?;
-        verify_mailbox_uid_validity(current_uid_validity, state.uid_validity, action)?;
-        Ok((client, state))
+        verify_mailbox_uid_validity(current_uid_validity, expected_uid_validity, action)
     }
 
     /// Fetches the original RFC 822 bytes for an explicit export without
@@ -2011,7 +2687,7 @@ impl MailService {
         let mut client = ImapClient::connect(account).await?;
         client.authenticate(account, &secret).await?;
         let selected = client
-            .command(&format!("SELECT {}", quote_imap(&state.remote_name)))
+            .command(&format!("SELECT {}", quote_mailbox(&state.remote_name)))
             .await?;
         let current_uid_validity = parse_uid_validity(&selected)
             .context("IMAP server omitted UIDVALIDITY after SELECT")?;
@@ -2024,6 +2700,12 @@ impl MailService {
             .context("message is no longer available")?;
         let _ = client.command("LOGOUT").await;
         Ok(raw)
+    }
+
+    /// CLI-friendly name for [`Self::fetch_raw_message`]. The bytes are the
+    /// original RFC 822 representation and are never written by core.
+    pub async fn export_raw(&self, account: &Account, mailbox: &str, uid: u32) -> Result<Vec<u8>> {
+        self.fetch_raw_message(account, mailbox, uid).await
     }
 
     /// Searches message bodies on the authoritative server. Results are
@@ -2050,7 +2732,7 @@ impl MailService {
                 continue;
             }
             if client
-                .command(&format!("SELECT {}", quote_imap(&plan.remote)))
+                .command(&format!("SELECT {}", quote_mailbox(&plan.remote)))
                 .await
                 .is_err()
             {
@@ -2150,7 +2832,7 @@ impl MailService {
         let mut updates = Vec::new();
         for plan in mailbox_plans(account) {
             if client
-                .command(&format!("SELECT {}", quote_imap(&plan.remote)))
+                .command(&format!("SELECT {}", quote_mailbox(&plan.remote)))
                 .await
                 .is_err()
             {
@@ -2186,28 +2868,89 @@ impl MailService {
         uid: u32,
         action: MailboxAction,
     ) -> Result<Option<u32>> {
-        let (remote_name, expected_uid_validity) = if matches!(action, MailboxAction::Delete) {
+        self.apply_action_checked(account, mailbox, uid, action, None)
+            .await
+    }
+
+    /// Applies an action only if the caller-approved IMAP UID namespace still
+    /// matches both Dakia's catalogue and the provider. This is required for
+    /// irreversible actions prepared by an agent, because a rebuilt mailbox
+    /// can otherwise reuse the same numeric UID for different mail.
+    pub async fn apply_action_at_validity(
+        &self,
+        account: &Account,
+        mailbox: &str,
+        uid: u32,
+        action: MailboxAction,
+        expected_uid_validity: i64,
+    ) -> Result<Option<u32>> {
+        self.apply_action_checked(account, mailbox, uid, action, Some(expected_uid_validity))
+            .await
+    }
+
+    async fn apply_action_checked(
+        &self,
+        account: &Account,
+        mailbox: &str,
+        uid: u32,
+        action: MailboxAction,
+        approved_uid_validity: Option<i64>,
+    ) -> Result<Option<u32>> {
+        let lease = self
+            .store
+            .operation_coordinator()
+            .await?
+            .acquire_required(account.id, AccountOperationKind::ProviderMutation)
+            .await?;
+        let result: Result<Option<u32>> = async {
+            self.validate_current_enabled_account(account).await?;
             let state = self
                 .store
                 .mailbox_catalog_state(account.id, mailbox)
                 .await?
                 .context("mailbox catalogue is not initialized")?;
-            (state.remote_name, Some(state.uid_validity))
-        } else {
-            (remote_mailbox(account, mailbox), None)
-        };
-        let secret = self.credentials.secret(account).await?;
-        let mut client = ImapClient::connect(account).await?;
-        Self::apply_action_with_client(
-            &mut client,
-            account,
-            &secret,
-            &remote_name,
-            uid,
-            action,
-            expected_uid_validity,
-        )
-        .await
+            if let Some(approved) = approved_uid_validity {
+                if state.uid_validity != approved {
+                    bail!(
+                        "mailbox changed since this action was approved; review the message again"
+                    );
+                }
+            }
+            let remote_name = state.remote_name;
+            let expected_uid_validity = Some(state.uid_validity);
+            let secret = self.credentials.secret(account).await?;
+            let mut client = ImapClient::connect(account).await?;
+            let destination_uid = Self::apply_action_with_client(
+                &mut client,
+                account,
+                &secret,
+                &remote_name,
+                uid,
+                action,
+                expected_uid_validity,
+            )
+            .await?;
+            require_active_provider_lease(&lease).await?;
+            let destination = mailbox_action_destination(action);
+            match destination {
+                Some(destination) => {
+                    self.store
+                        .move_message(account.id, mailbox, uid, destination, destination_uid)
+                        .await?;
+                }
+                None => {
+                    self.store
+                        .move_message(account.id, mailbox, uid, mailbox, None)
+                        .await?;
+                }
+            }
+            Ok(destination_uid)
+        }
+        .await;
+        let release = lease.release().await;
+        let destination_uid = result?;
+        release?;
+        Ok(destination_uid)
     }
 
     /// Moves every received message whose RFC-parsed From mailbox is exactly
@@ -2256,7 +2999,7 @@ impl MailService {
                 continue;
             }
             let selected = client
-                .command(&format!("SELECT {}", quote_imap(&remote)))
+                .command(&format!("SELECT {}", quote_mailbox(&remote)))
                 .await
                 .with_context(|| format!("cannot inspect received mailbox {remote}"))?;
             let uid_validity = parse_uid_validity(&selected).with_context(|| {
@@ -2331,7 +3074,7 @@ impl MailService {
                 let identities = sender_trash_remote_identities(&candidate)?;
                 for (remote, expected_uid_validity) in identities {
                     let selected = client
-                        .command(&format!("SELECT {}", quote_imap(&remote)))
+                        .command(&format!("SELECT {}", quote_mailbox(&remote)))
                         .await?;
                     let current_uid_validity = parse_uid_validity(&selected)
                         .context("IMAP server omitted UIDVALIDITY before sender cleanup move")?;
@@ -2404,7 +3147,7 @@ impl MailService {
                 bail!("permanent deletion requires IMAP UIDPLUS support");
             }
             let selected = client
-                .command(&format!("SELECT {}", quote_imap(mailbox)))
+                .command(&format!("SELECT {}", quote_mailbox(mailbox)))
                 .await?;
             let identity = parse_uid_validity(&selected)
                 .context("IMAP server omitted UIDVALIDITY after SELECT")
@@ -2435,9 +3178,16 @@ impl MailService {
             return Ok(None);
         }
 
-        client
-            .command(&format!("SELECT {}", quote_imap(mailbox)))
+        let selected = client
+            .command(&format!("SELECT {}", quote_mailbox(mailbox)))
             .await?;
+        let current_uid_validity = parse_uid_validity(&selected)
+            .context("IMAP server omitted UIDVALIDITY after SELECT")?;
+        verify_mailbox_uid_validity(
+            current_uid_validity,
+            expected_uid_validity.context("mailbox catalogue is not initialized")?,
+            "moving",
+        )?;
         let destination = match action {
             MailboxAction::Archive => &account.archive_mailbox,
             MailboxAction::Spam => &account.spam_mailbox,
@@ -2451,21 +3201,7 @@ impl MailService {
             }
             MailboxAction::Delete => unreachable!("permanent deletion returned above"),
         };
-        let response = client
-            .command(&format!("UID MOVE {uid} {}", quote_imap(destination)))
-            .await;
-        let destination_uid = if let Ok(lines) = response {
-            parse_copy_uid(&lines)
-        } else {
-            let lines = client
-                .command(&format!("UID COPY {uid} {}", quote_imap(destination)))
-                .await?;
-            client
-                .command(&format!("UID STORE {uid} +FLAGS.SILENT (\\Deleted)"))
-                .await?;
-            client.command("EXPUNGE").await?;
-            parse_copy_uid(&lines)
-        };
+        let destination_uid = move_selected_message(client, uid, destination, "moving").await?;
         let _ = client.command("LOGOUT").await;
         Ok(destination_uid)
     }
@@ -2506,6 +3242,94 @@ impl MailService {
         };
         self.send_with_smtp_endpoint(account, draft, &secret, endpoint, SMTP_SEND_TIMEOUT)
             .await
+    }
+
+    /// Appends a compose payload to the provider Drafts folder without
+    /// submitting it. A successful result may omit a UID on servers that do
+    /// not advertise APPENDUID; callers must keep the local draft durable in
+    /// that case and rediscover it during a later folder sync.
+    pub async fn save_draft_to_provider(
+        &self,
+        account: &Account,
+        draft: &ComposeMessage,
+    ) -> Result<ProviderDraftAppend> {
+        if draft.account_id != account.id {
+            bail!("draft belongs to a different account");
+        }
+        let raw = build_compose_message(account, draft)?.formatted();
+        let secret = self.credentials.secret(account).await?;
+        let mut client = ImapClient::connect(account).await?;
+        client.authenticate(account, &secret).await?;
+        let mailbox = remote_mailbox(account, "Drafts");
+        let selected = client
+            .command(&format!("SELECT {}", quote_mailbox(&mailbox)))
+            .await?;
+        let uid_validity =
+            parse_uid_validity(&selected).context("IMAP server omitted UIDVALIDITY for Drafts")?;
+        let lines = client.append_with_flags(&mailbox, &raw, "\\Draft").await?;
+        let _ = client.command("LOGOUT").await;
+        Ok(ProviderDraftAppend {
+            mailbox,
+            uid_validity,
+            uid: parse_append_uid(&lines),
+        })
+    }
+
+    /// Permanently removes exactly one provider draft after confirming the
+    /// saved UIDVALIDITY. This is used only for Dakia-owned copies recorded at
+    /// append time; it never deletes a guessed Drafts UID.
+    pub async fn delete_provider_draft_copy(
+        &self,
+        account: &Account,
+        mailbox: &str,
+        uid: u32,
+        expected_uid_validity: u32,
+    ) -> Result<()> {
+        let secret = self.credentials.secret(account).await?;
+        let mut client = ImapClient::connect(account).await?;
+        client.authenticate(account, &secret).await?;
+        Self::delete_provider_draft_copy_with_client(
+            &mut client,
+            mailbox,
+            uid,
+            expected_uid_validity,
+        )
+        .await?;
+        let _ = client.command("LOGOUT").await;
+        Ok(())
+    }
+
+    async fn delete_provider_draft_copy_with_client<S>(
+        client: &mut ImapClient<S>,
+        mailbox: &str,
+        uid: u32,
+        expected_uid_validity: u32,
+    ) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let selected = client
+            .command(&format!("SELECT {}", quote_mailbox(mailbox)))
+            .await?;
+        let actual =
+            parse_uid_validity(&selected).context("IMAP server omitted UIDVALIDITY for Drafts")?;
+        if actual != expected_uid_validity {
+            bail!("provider Drafts mailbox changed; refusing to delete a recycled UID");
+        }
+        let capabilities = client.command("CAPABILITY").await?;
+        if !supports_uidplus(&capabilities) {
+            bail!("removing a provider draft requires IMAP UIDPLUS support");
+        }
+        client
+            .command(&format!("UID STORE {uid} +FLAGS.SILENT (\\Deleted)"))
+            .await?;
+        if let Err(error) = client.command(&format!("UID EXPUNGE {uid}")).await {
+            let _ = client
+                .command(&format!("UID STORE {uid} -FLAGS.SILENT (\\Deleted)"))
+                .await;
+            return Err(error).context("could not remove provider draft");
+        }
+        Ok(())
     }
 
     /// Verify the production SMTP connection, TLS/STARTTLS upgrade, and
@@ -2868,6 +3692,107 @@ fn build_compose_message(account: &Account, draft: &ComposeMessage) -> Result<Me
                 )
             });
     Ok(builder.multipart(body)?)
+}
+
+fn compose_reply_draft(
+    account: &Account,
+    message: &MailSummary,
+    body_text: String,
+) -> Result<ComposeMessage> {
+    if message.account_id != account.id.to_string() {
+        bail!("message belongs to a different account");
+    }
+    let recipient = if message.reply_to_addresses.trim().is_empty() {
+        message.from_address.trim()
+    } else {
+        message.reply_to_addresses.trim()
+    };
+    // Validate at draft creation time. Without this, an agent could claim it
+    // prepared a reply and only discover malformed provider data on send.
+    parse_recipient_mailbox(recipient).context("message has no valid reply recipient")?;
+    let message_id = message
+        .message_id
+        .as_deref()
+        .and_then(|value| canonical_message_ids(value))
+        .context("message has no valid Message-ID for a reply")?;
+    let mut references = message
+        .reference_ids
+        .as_deref()
+        .and_then(canonical_message_ids)
+        .unwrap_or_default();
+    if !references.split_whitespace().any(|id| id == message_id) {
+        if !references.is_empty() {
+            references.push(' ');
+        }
+        references.push_str(&message_id);
+    }
+    Ok(ComposeMessage {
+        account_id: account.id,
+        to: vec![recipient.to_owned()],
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        subject: reply_subject(&message.subject),
+        body_text,
+        body_html: None,
+        in_reply_to: Some(message_id),
+        references: Some(references),
+        attachments: Vec::new(),
+    })
+}
+
+fn compose_forward_draft(
+    account: &Account,
+    message: &MailSummary,
+    body_text: String,
+) -> ComposeMessage {
+    let quoted = format!(
+        "\n\n---------- Forwarded message ----------\nFrom: {}\nDate: {}\nSubject: {}\nTo: {}\n\n{}",
+        message.from_name.as_deref().unwrap_or(&message.from_address),
+        message.received_at.to_rfc2822(),
+        message.subject,
+        message.to_addresses,
+        message.body_text,
+    );
+    ComposeMessage {
+        account_id: account.id,
+        to: Vec::new(),
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        subject: forward_subject(&message.subject),
+        body_text: format!("{body_text}{quoted}"),
+        body_html: None,
+        in_reply_to: None,
+        references: None,
+        attachments: Vec::new(),
+    }
+}
+
+fn reply_subject(subject: &str) -> String {
+    if subject
+        .trim_start()
+        .get(..3)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("re:"))
+    {
+        subject.to_owned()
+    } else {
+        format!("Re: {subject}")
+    }
+}
+
+fn forward_subject(subject: &str) -> String {
+    if subject
+        .trim_start()
+        .get(..3)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("fw:"))
+        || subject
+            .trim_start()
+            .get(..4)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("fwd:"))
+    {
+        subject.to_owned()
+    } else {
+        format!("Fwd: {subject}")
+    }
 }
 
 fn parse_recipient_mailbox(value: &str) -> Result<Mailbox> {
@@ -3346,6 +4271,17 @@ impl MailboxPlan {
         }
     }
 
+    fn custom(remote: impl Into<String>, storage: &str) -> Self {
+        Self {
+            remote: remote.into(),
+            // `local` only governs built-in special-folder family handling.
+            // A user-created folder must retain its own catalogue key.
+            local: "CUSTOM",
+            storage: storage.to_owned(),
+            skip_gmail_system_labels: false,
+        }
+    }
+
     fn gmail_archive(remote: impl Into<String>) -> Self {
         Self {
             remote: remote.into(),
@@ -3418,6 +4354,11 @@ fn resolve_special_mailboxes(plans: Vec<MailboxPlan>, lines: &[String]) -> Vec<M
 }
 
 fn parse_list_mailbox(line: &str) -> Option<(Vec<String>, String)> {
+    let info = parse_list_mailbox_info(line)?;
+    Some((info.attributes, info.name))
+}
+
+fn parse_list_mailbox_info(line: &str) -> Option<MailboxInfo> {
     let line = line.trim_start();
     let prefix = "* LIST ";
     if line.len() < prefix.len() || !line[..prefix.len()].eq_ignore_ascii_case(prefix) {
@@ -3433,10 +4374,23 @@ fn parse_list_mailbox(line: &str) -> Option<(Vec<String>, String)> {
         .map(str::to_ascii_lowercase)
         .collect::<Vec<_>>();
     let mut remainder = attributes[attributes_end + 1..].trim_start();
-    let (_, rest) = parse_imap_astring(remainder)?;
+    let (delimiter, rest) = parse_imap_astring(remainder)?;
     remainder = rest.trim_start();
     let (mailbox, _) = parse_imap_astring(remainder)?;
-    Some((flags, mailbox))
+    Some(MailboxInfo {
+        // Servers without UTF8=ACCEPT return modified UTF-7. Keep the
+        // public/provider model Unicode and only encode again at the wire.
+        name: decode_modified_utf7(&mailbox).unwrap_or(mailbox),
+        delimiter: (delimiter.to_ascii_uppercase() != "NIL").then_some(delimiter),
+        attributes: flags,
+    })
+}
+
+fn validate_mailbox_name(value: &str) -> Result<()> {
+    if value.trim().is_empty() || value.len() > 1_024 || value.contains(['\r', '\n', '\0']) {
+        bail!("mailbox name is invalid");
+    }
+    Ok(())
 }
 
 fn validate_list_response(lines: &[String]) -> Result<()> {
@@ -4827,6 +5781,7 @@ fn attachment_data_from_part(
     })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn set_read_command(uid: u32, read: bool) -> String {
     let operation = if read {
         "+FLAGS.SILENT"
@@ -5033,26 +5988,46 @@ where
     }
 
     async fn append(&mut self, mailbox: &str, message: &[u8]) -> Result<()> {
-        timeout(IMAP_COMMAND_TIMEOUT, self.append_inner(mailbox, message))
+        self.append_with_flags(mailbox, message, "\\Seen")
             .await
-            .context("IMAP APPEND timed out")?
+            .map(|_| ())
     }
 
-    async fn append_inner(&mut self, mailbox: &str, message: &[u8]) -> Result<()> {
+    async fn append_with_flags(
+        &mut self,
+        mailbox: &str,
+        message: &[u8],
+        flags: &str,
+    ) -> Result<Vec<String>> {
+        timeout(
+            IMAP_COMMAND_TIMEOUT,
+            self.append_inner(mailbox, message, flags),
+        )
+        .await
+        .context("IMAP APPEND timed out")?
+    }
+
+    async fn append_inner(
+        &mut self,
+        mailbox: &str,
+        message: &[u8],
+        flags: &str,
+    ) -> Result<Vec<String>> {
         self.tag += 1;
         let tag = format!("D{:04}", self.tag);
         self.reader
             .get_mut()
             .write_all(
                 format!(
-                    "{tag} APPEND {} (\\Seen) {{{}}}\r\n",
-                    quote_imap(mailbox),
+                    "{tag} APPEND {} ({flags}) {{{}}}\r\n",
+                    quote_mailbox(mailbox),
                     message.len()
                 )
                 .as_bytes(),
             )
             .await?;
         self.reader.get_mut().flush().await?;
+        let mut response = Vec::new();
         loop {
             let mut line = String::new();
             if self.reader.read_line(&mut line).await? == 0 {
@@ -5080,13 +6055,14 @@ where
                 if !tagged_status_is_ok(&line[tag.len()..]) {
                     bail!("IMAP APPEND failed: {}", line.trim());
                 }
+                response.push(line);
                 break;
             }
             if line.to_ascii_uppercase().starts_with("* BYE") {
                 bail!("IMAP server closed the connection during APPEND");
             }
         }
-        Ok(())
+        Ok(response)
     }
 
     async fn command_with_literal(&mut self, command: &str) -> Result<ImapResponse> {
@@ -5543,6 +6519,81 @@ fn literal_length(line: &str) -> Option<usize> {
 
 fn quote_imap(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// IMAP4rev1 mailbox names use modified UTF-7 unless UTF8=ACCEPT was
+/// negotiated. Dakia uses this portable encoding for mailbox commands, so
+/// Unicode folders work with both legacy and modern servers without changing
+/// their local Unicode identity.
+fn quote_mailbox(value: &str) -> String {
+    quote_imap(&encode_modified_utf7(value))
+}
+
+fn encode_modified_utf7(value: &str) -> String {
+    let mut output = String::new();
+    let mut non_ascii = String::new();
+    let flush = |output: &mut String, non_ascii: &mut String| {
+        if non_ascii.is_empty() {
+            return;
+        }
+        let mut utf16 = Vec::with_capacity(non_ascii.len() * 2);
+        for unit in non_ascii.encode_utf16() {
+            utf16.extend_from_slice(&unit.to_be_bytes());
+        }
+        let encoded = STANDARD
+            .encode(utf16)
+            .trim_end_matches('=')
+            .replace('/', ",");
+        output.push('&');
+        output.push_str(&encoded);
+        output.push('-');
+        non_ascii.clear();
+    };
+    for character in value.chars() {
+        if character.is_ascii() {
+            flush(&mut output, &mut non_ascii);
+            if character == '&' {
+                output.push_str("&-");
+            } else {
+                output.push(character);
+            }
+        } else {
+            non_ascii.push(character);
+        }
+    }
+    flush(&mut output, &mut non_ascii);
+    output
+}
+
+fn decode_modified_utf7(value: &str) -> Option<String> {
+    let mut output = String::new();
+    let mut remainder = value;
+    while let Some(start) = remainder.find('&') {
+        output.push_str(&remainder[..start]);
+        let encoded_start = start + 1;
+        let end = remainder[encoded_start..].find('-')? + encoded_start;
+        let token = &remainder[encoded_start..end];
+        if token.is_empty() {
+            output.push('&');
+        } else {
+            let mut base64 = token.replace(',', "/");
+            while base64.len() % 4 != 0 {
+                base64.push('=');
+            }
+            let bytes = STANDARD.decode(base64).ok()?;
+            if bytes.len() % 2 != 0 {
+                return None;
+            }
+            let units = bytes
+                .chunks_exact(2)
+                .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+                .collect::<Vec<_>>();
+            output.push_str(&String::from_utf16(&units).ok()?);
+        }
+        remainder = &remainder[end + 1..];
+    }
+    output.push_str(remainder);
+    Some(output)
 }
 
 fn parse_search_uids(lines: &[String]) -> Result<Vec<u32>> {
@@ -6020,6 +7071,56 @@ fn parse_copy_uid(lines: &[String]) -> Option<u32> {
         let end = line[start..].find(']')? + start;
         line[start..end].split_whitespace().nth(2)?.parse().ok()
     })
+}
+
+fn parse_append_uid(lines: &[String]) -> Option<u32> {
+    lines.iter().find_map(|line| {
+        let upper = line.to_ascii_uppercase();
+        let start = upper.find("[APPENDUID ")? + "[APPENDUID ".len();
+        let end = upper[start..].find(']')? + start;
+        line[start..end].split_whitespace().nth(1)?.parse().ok()
+    })
+}
+
+/// Moves a selected UID without falling back to a global EXPUNGE. Providers
+/// that do not implement MOVE must also advertise UIDPLUS before Dakia uses
+/// UID EXPUNGE, so an unrelated concurrently-deleted message is never lost.
+async fn move_selected_message<S>(
+    client: &mut ImapClient<S>,
+    uid: u32,
+    destination: &str,
+    operation: &str,
+) -> Result<Option<u32>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    match client
+        .command(&format!("UID MOVE {uid} {}", quote_mailbox(destination)))
+        .await
+    {
+        Ok(lines) => Ok(parse_copy_uid(&lines)),
+        Err(move_error) => {
+            let capabilities = client.command("CAPABILITY").await?;
+            if !supports_uidplus(&capabilities) {
+                return Err(move_error).context(format!(
+                    "{operation} requires IMAP MOVE or UIDPLUS for a safe fallback"
+                ));
+            }
+            let lines = client
+                .command(&format!("UID COPY {uid} {}", quote_mailbox(destination)))
+                .await?;
+            client
+                .command(&format!("UID STORE {uid} +FLAGS.SILENT (\\Deleted)"))
+                .await?;
+            if let Err(error) = client.command(&format!("UID EXPUNGE {uid}")).await {
+                let _ = client
+                    .command(&format!("UID STORE {uid} -FLAGS.SILENT (\\Deleted)"))
+                    .await;
+                return Err(error).context(operation.to_owned());
+            }
+            Ok(parse_copy_uid(&lines))
+        }
+    }
 }
 
 async fn parse_message(
@@ -7943,7 +9044,9 @@ mod tests {
     use crate::{provider, AccountDraft};
     use lettre::transport::smtp::client::Certificate;
     use tokio::{
-        io::{duplex, split, AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream},
+        io::{
+            duplex, split, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, DuplexStream,
+        },
         net::{TcpListener, TcpStream},
         sync::{oneshot, watch},
     };
@@ -11867,6 +12970,123 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scripted_folder_move_and_raw_append_preserve_protocol_values() {
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "CREATE \"Projects/&W6JiNw-\"")
+                    .await;
+            write
+                .write_all(format!("{tag} OK created\r\n").as_bytes())
+                .await
+                .unwrap();
+
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "UID MOVE 42 \"Archive\"")
+                    .await;
+            write
+                .write_all(format!("{tag} OK [COPYUID 17 42 99] moved\r\n").as_bytes())
+                .await
+                .unwrap();
+
+            let (tag, command) = scripted_command(&mut read).await;
+            transcript.push(command.clone());
+            assert_eq!(command, "APPEND \"Imported\" (\\Seen) {26}");
+            write.write_all(b"+ ready for literal\r\n").await.unwrap();
+            let mut raw = vec![0; 26 + 2];
+            read.read_exact(&mut raw).await.unwrap();
+            assert_eq!(&raw, b"Subject: imported\r\n\r\nhello\r\n");
+            write
+                .write_all(format!("{tag} OK [APPENDUID 31 501] appended\r\n").as_bytes())
+                .await
+                .unwrap();
+            transcript
+        });
+
+        client
+            .command(&format!("CREATE {}", quote_mailbox("Projects/客户")))
+            .await
+            .unwrap();
+        assert_eq!(
+            move_selected_message(&mut client, 42, "Archive", "moving a message")
+                .await
+                .unwrap(),
+            Some(99)
+        );
+        let append = client
+            .append_with_flags("Imported", b"Subject: imported\r\n\r\nhello", "\\Seen")
+            .await
+            .unwrap();
+        assert_eq!(parse_append_uid(&append), Some(501));
+        assert_eq!(
+            server.await.unwrap(),
+            vec![
+                "CREATE \"Projects/&W6JiNw-\"",
+                "UID MOVE 42 \"Archive\"",
+                "APPEND \"Imported\" (\\Seen) {26}",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_provider_draft_delete_checks_uidvalidity_before_exact_expunge() {
+        let (mut client, server) = duplex_imap_client_and_server();
+        let server = tokio::spawn(async move {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            let tag =
+                scripted_expect_command(&mut read, &mut transcript, "SELECT \"Drafts\"").await;
+            write
+                .write_all(
+                    format!("* OK [UIDVALIDITY 71] stable\r\n{tag} OK selected\r\n").as_bytes(),
+                )
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "CAPABILITY").await;
+            write
+                .write_all(
+                    format!("* CAPABILITY IMAP4rev1 UIDPLUS\r\n{tag} OK capability\r\n").as_bytes(),
+                )
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(
+                &mut read,
+                &mut transcript,
+                "UID STORE 501 +FLAGS.SILENT (\\Deleted)",
+            )
+            .await;
+            write
+                .write_all(format!("{tag} OK stored\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "UID EXPUNGE 501").await;
+            write
+                .write_all(format!("{tag} OK expunged\r\n").as_bytes())
+                .await
+                .unwrap();
+            transcript
+        });
+
+        MailService::delete_provider_draft_copy_with_client(&mut client, "Drafts", 501, 71)
+            .await
+            .unwrap();
+        assert_eq!(
+            server.await.unwrap(),
+            vec![
+                "SELECT \"Drafts\"",
+                "CAPABILITY",
+                "UID STORE 501 +FLAGS.SILENT (\\Deleted)",
+                "UID EXPUNGE 501",
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn scripted_permanent_delete_without_uidplus_makes_no_mutation() {
         let account = test_account();
         let (mut client, server) = duplex_imap_client_and_server();
@@ -11932,6 +13152,216 @@ mod tests {
                 "LOGOUT",
             ],
             "a UIDVALIDITY mismatch must prevent STORE and UID EXPUNGE"
+        );
+    }
+
+    #[tokio::test]
+    async fn public_message_mutations_reject_stale_uidvalidity_before_any_provider_command() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let mut account = test_account();
+        account.imap_host = "127.0.0.1".into();
+        account.imap_port = listener.local_addr().unwrap().port();
+        account.imap_security = Security::Tls;
+        store.save_account(&account).await.unwrap();
+        store
+            .save_mailbox_catalog_state(account.id, "INBOX", "INBOX", 78, 1, true)
+            .await
+            .unwrap();
+
+        let move_error = service
+            .move_message_at_validity(&account, "INBOX", 42, "Archive", 77)
+            .await
+            .unwrap_err();
+        assert!(
+            move_error
+                .to_string()
+                .contains("mailbox changed since this action was approved"),
+            "move: {move_error:#}"
+        );
+
+        let copy_error = service
+            .copy_message_at_validity(&account, "INBOX", 42, "Archive", 77)
+            .await
+            .unwrap_err();
+        assert!(
+            copy_error
+                .to_string()
+                .contains("mailbox changed since this action was approved"),
+            "copy: {copy_error:#}"
+        );
+
+        let flags_error = service
+            .set_flags_at_validity(
+                &account,
+                "INBOX",
+                42,
+                &[MessageFlag::Seen, MessageFlag::Flagged],
+                true,
+                77,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            flags_error
+                .to_string()
+                .contains("mailbox changed since this action was approved"),
+            "flags: {flags_error:#}"
+        );
+
+        assert!(
+            timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err(),
+            "stale mutations must not connect or emit any provider command"
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_public_mutation_cores_reject_live_uidvalidity_rollover_before_wire_mutation()
+    {
+        #[derive(Clone, Copy, Debug)]
+        enum Mutation {
+            Move,
+            Copy,
+            Flags,
+        }
+
+        async fn mismatch_server(server: DuplexStream) -> Vec<String> {
+            let (read, mut write) = split(server);
+            let mut read = BufReader::new(read);
+            let mut transcript = Vec::new();
+            let tag = scripted_expect_command(
+                &mut read,
+                &mut transcript,
+                "LOGIN \"reader@example.test\" \"sync secret\"",
+            )
+            .await;
+            write
+                .write_all(format!("{tag} OK authenticated\r\n").as_bytes())
+                .await
+                .unwrap();
+            let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+            write
+                .write_all(
+                    format!("* OK [UIDVALIDITY 78] replaced\r\n{tag} OK selected\r\n").as_bytes(),
+                )
+                .await
+                .unwrap();
+
+            let mut unexpected = String::new();
+            let read_result = timeout(Duration::from_millis(250), read.read_line(&mut unexpected))
+                .await
+                .expect("client must close after rejecting changed UIDVALIDITY")
+                .unwrap();
+            if read_result != 0 {
+                transcript.push(unexpected.trim_end().to_owned());
+            }
+            transcript
+        }
+
+        let account = test_account();
+        for mutation in [Mutation::Move, Mutation::Copy, Mutation::Flags] {
+            let (mut client, server) = duplex_imap_client_and_server();
+            let server = tokio::spawn(mismatch_server(server));
+            let result = match mutation {
+                Mutation::Move => MailService::move_message_with_client(
+                    &mut client,
+                    &account,
+                    "sync secret",
+                    "INBOX",
+                    77,
+                    42,
+                    "Archive",
+                )
+                .await
+                .map(|_| ()),
+                Mutation::Copy => MailService::copy_message_with_client(
+                    &mut client,
+                    &account,
+                    "sync secret",
+                    "INBOX",
+                    77,
+                    42,
+                    "Archive",
+                )
+                .await
+                .map(|_| ()),
+                Mutation::Flags => {
+                    MailService::set_flags_with_client(
+                        &mut client,
+                        &account,
+                        "sync secret",
+                        "INBOX",
+                        77,
+                        42,
+                        &[MessageFlag::Seen, MessageFlag::Flagged],
+                        true,
+                    )
+                    .await
+                }
+            };
+            let error = result.expect_err("live UIDVALIDITY rollover must reject the mutation");
+            assert!(
+                error.to_string().contains("mailbox identity changed"),
+                "{error:#}"
+            );
+            drop(client);
+            let transcript = server.await.unwrap();
+            assert_eq!(
+                transcript,
+                vec![
+                    "LOGIN \"reader@example.test\" \"sync secret\"",
+                    "SELECT \"INBOX\"",
+                ],
+                "{mutation:?} must not emit UID MOVE, UID COPY, or UID STORE after a live UIDVALIDITY mismatch"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn public_message_mutation_keeps_the_approved_account_target_immutable() {
+        let stale_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let current_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let store = Store::in_memory().await.unwrap();
+        let service = MailService::new(store.clone());
+        let mut approved_account = test_account();
+        approved_account.imap_host = "127.0.0.1".into();
+        approved_account.imap_port = stale_listener.local_addr().unwrap().port();
+        approved_account.imap_security = Security::Tls;
+        store.save_account(&approved_account).await.unwrap();
+        store
+            .save_mailbox_catalog_state(approved_account.id, "INBOX", "INBOX", 77, 1, true)
+            .await
+            .unwrap();
+
+        let mut changed_account = approved_account.clone();
+        changed_account.imap_port = current_listener.local_addr().unwrap().port();
+        changed_account.account_name = "Changed provider target".into();
+        store.save_account(&changed_account).await.unwrap();
+
+        let error = service
+            .move_message_at_validity(&approved_account, "INBOX", 42, "Archive", 77)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("account settings changed; reload the account"),
+            "{error:#}"
+        );
+        assert!(
+            timeout(Duration::from_millis(100), stale_listener.accept())
+                .await
+                .is_err(),
+            "the stale approved endpoint must receive no provider command"
+        );
+        assert!(
+            timeout(Duration::from_millis(100), current_listener.accept())
+                .await
+                .is_err(),
+            "the operation must not silently retarget the current account endpoint"
         );
     }
 
@@ -15082,6 +16512,49 @@ mod tests {
         assert_eq!(
             set_read_command(42, false),
             "UID STORE 42 -FLAGS.SILENT (\\Seen)"
+        );
+    }
+
+    #[test]
+    fn parses_folder_metadata_and_rejects_control_characters() {
+        let folder =
+            parse_list_mailbox_info("* LIST (\\HasNoChildren \\Sent) \"/\" \"Sent Items\"\r\n")
+                .unwrap();
+        assert_eq!(folder.name, "Sent Items");
+        assert_eq!(folder.delimiter.as_deref(), Some("/"));
+        assert_eq!(folder.attributes, vec!["\\hasnochildren", "\\sent"]);
+        assert!(validate_mailbox_name("Team\r\nDELETE INBOX").is_err());
+    }
+
+    #[test]
+    fn modified_utf7_round_trips_unicode_ampersand_and_nested_folder_names() {
+        let name = "Projects/客户 & notes";
+        let wire = encode_modified_utf7(name);
+        assert_eq!(wire, "Projects/&W6JiNw- &- notes");
+        assert_eq!(decode_modified_utf7(&wire).as_deref(), Some(name));
+        assert_eq!(quote_mailbox(name), "\"Projects/&W6JiNw- &- notes\"");
+
+        let listed = parse_list_mailbox_info(
+            "* LIST (\\HasNoChildren) \"/\" \"Projects/&W6JiNw- &- notes\"\r\n",
+        )
+        .unwrap();
+        assert_eq!(listed.name, name);
+        assert_eq!(listed.delimiter.as_deref(), Some("/"));
+    }
+
+    #[test]
+    fn reply_draft_uses_reply_to_and_extends_threading_headers() {
+        let account = test_account();
+        let mut message = snapshot_test_message(&account, 42);
+        message.reply_to_addresses = "Replies <replies@example.test>".into();
+        message.reference_ids = Some("<root@example.test>".into());
+        let draft = compose_reply_draft(&account, &message, "I can help".into()).unwrap();
+        assert_eq!(draft.to, vec!["Replies <replies@example.test>"]);
+        assert_eq!(draft.subject, "Re: Snapshot 42");
+        assert_eq!(draft.in_reply_to.as_deref(), Some("<42@example.test>"));
+        assert_eq!(
+            draft.references.as_deref(),
+            Some("<root@example.test> <42@example.test>")
         );
     }
 

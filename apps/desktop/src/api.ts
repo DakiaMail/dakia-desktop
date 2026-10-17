@@ -10,6 +10,7 @@ import type {
   MailRebuildProgress,
   MailCursor,
   MailSummary,
+  LocalDraft,
   ConversationTarget,
   MessageContent,
   MailThread,
@@ -25,6 +26,13 @@ import type {
   TranslationLanguageDetection,
   TranslationModelFiles,
   TranslationModelStatus,
+  ThreadContextBundle,
+  ThreadContextAppendInput,
+  ThreadContextClearInput,
+  ThreadContextDocument,
+  ThreadContextKind,
+  ThreadContextRevision,
+  ThreadContextWriteInput,
 } from "./types";
 
 const messageContentErrorKinds = new Set<MessageContentErrorKind>([
@@ -151,6 +159,41 @@ const desktopApi = {
     }),
   conversationForTarget: (target: ConversationTarget) =>
     invoke<MailThread | null>("conversation_for_target", { target }),
+  threadContext: (target: ConversationTarget) =>
+    invoke<ThreadContextBundle>("thread_context", { target }),
+  updateThreadContext: (input: ThreadContextWriteInput) =>
+    invoke<ThreadContextDocument>("update_thread_context", { input }),
+  appendThreadContext: (input: ThreadContextAppendInput) =>
+    invoke<ThreadContextDocument>("append_thread_context", { input }),
+  clearThreadContext: (input: ThreadContextClearInput) =>
+    invoke<ThreadContextDocument>("clear_thread_context", { input }),
+  threadContextHistory: (target: ConversationTarget, kind: ThreadContextKind) =>
+    invoke<ThreadContextRevision[]>("thread_context_history", { target, kind }),
+  restoreThreadContext: (
+    target: ConversationTarget,
+    kind: ThreadContextKind,
+    revision: string,
+    expectedRevision: number,
+  ) =>
+    invoke<ThreadContextDocument>("restore_thread_context", {
+      input: { target, kind, revision, expectedRevision },
+    }),
+  localDrafts: (accountId?: string) =>
+    invoke<LocalDraft[]>("local_drafts", { accountId: accountId ?? null }),
+  localDraft: (draftId: string) =>
+    invoke<LocalDraft | null>("local_draft", { draftId }),
+  createLocalDraft: (draft: Record<string, unknown>) =>
+    invoke<LocalDraft>("create_local_draft", { draft }),
+  updateLocalDraft: (
+    draftId: string,
+    expectedRevision: number,
+    draft: Record<string, unknown>,
+  ) =>
+    invoke<LocalDraft>("update_local_draft", {
+      input: { draftId, expectedRevision, draft },
+    }),
+  sendLocalDraft: (draftId: string, expectedRevision: number) =>
+    invoke<string>("send_local_draft", { draftId, expectedRevision }),
   setCategory: (messageId: string, category: string) =>
     invoke<void>("set_message_category", { messageId, category }),
   setStarred: (messageId: string, starred: boolean) =>
@@ -442,6 +485,33 @@ const demoSmartSectionIds: SmartSectionId[] = [
   "seen",
 ];
 
+const demoThreadContexts = new Map<string, ThreadContextBundle>();
+const demoThreadContextHistory = new Map<string, ThreadContextRevision[]>();
+const demoLocalDrafts = new Map<string, LocalDraft>();
+
+function demoThreadContextKey(target: ConversationTarget) {
+  return `${target.accountId}:${target.threadId ?? target.localMessageId ?? "unknown"}`;
+}
+
+function demoThreadContext(target: ConversationTarget): ThreadContextBundle {
+  const key = demoThreadContextKey(target);
+  const existing = demoThreadContexts.get(key);
+  if (existing) return existing;
+  const context: ThreadContextBundle = {
+    conversation: {
+      locator: {
+        accountId: target.accountId,
+        conversationId: target.threadId ?? target.localMessageId ?? "unknown",
+      },
+      requiresReview: false,
+    },
+    notes: { content: "", revision: 0 },
+    agentMemory: { content: "", revision: 0 },
+  };
+  demoThreadContexts.set(key, context);
+  return context;
+}
+
 const demoApi: typeof desktopApi = {
   terminalCommandStatus: async () => "notSetUp",
   installTerminalCommand: async () => undefined,
@@ -620,6 +690,95 @@ const demoApi: typeof desktopApi = {
         ),
       )[0] ?? null
     );
+  },
+  threadContext: async (target) => demoThreadContext(target),
+  updateThreadContext: async (input) => {
+    const context = demoThreadContext(input.target);
+    const property = input.kind === "notes" ? "notes" : "agentMemory";
+    const current = context[property];
+    if (current.revision !== input.expectedRevision) {
+      throw { kind: "conflict" };
+    }
+    const next = { content: input.content, revision: current.revision + 1 };
+    context[property] = next;
+    const key = `${demoThreadContextKey(input.target)}:${input.kind}`;
+    demoThreadContextHistory.set(key, [
+      { ...current, id: `demo-revision-${current.revision}` },
+      ...(demoThreadContextHistory.get(key) ?? []),
+    ]);
+    return next;
+  },
+  appendThreadContext: async (input) => {
+    const context = demoThreadContext(input.target);
+    const property = input.kind === "notes" ? "notes" : "agentMemory";
+    const current = context[property];
+    if (current.revision !== input.expectedRevision) throw { kind: "conflict" };
+    return demoApi.updateThreadContext({
+      target: input.target,
+      kind: input.kind,
+      content: current.content ? `${current.content}\n${input.text}` : input.text,
+      expectedRevision: input.expectedRevision,
+    });
+  },
+  clearThreadContext: async (input) =>
+    demoApi.updateThreadContext({
+      target: input.target,
+      kind: input.kind,
+      content: "",
+      expectedRevision: input.expectedRevision,
+    }),
+  threadContextHistory: async (target, kind) =>
+    demoThreadContextHistory.get(`${demoThreadContextKey(target)}:${kind}`) ?? [],
+  restoreThreadContext: async (target, kind, revision, expectedRevision) => {
+    const history = demoThreadContextHistory.get(
+      `${demoThreadContextKey(target)}:${kind}`,
+    ) ?? [];
+    const selected = history.find((item) => item.id === revision);
+    if (!selected) throw new Error("Context revision not found");
+    return demoApi.updateThreadContext({
+      target,
+      kind,
+      content: selected.content,
+      expectedRevision,
+    });
+  },
+  localDrafts: async (accountId) =>
+    [...demoLocalDrafts.values()].filter(
+      (draft) => !accountId || draft.accountId === accountId,
+    ),
+  localDraft: async (draftId) => demoLocalDrafts.get(draftId) ?? null,
+  createLocalDraft: async (compose) => {
+    const draft: LocalDraft = {
+      id: `demo-draft-${crypto.randomUUID()}`,
+      accountId: String(compose.account_id),
+      revision: 1,
+      status: "pending",
+      compose,
+      updatedAt: new Date().toISOString(),
+    };
+    demoLocalDrafts.set(draft.id, draft);
+    return draft;
+  },
+  updateLocalDraft: async (draftId, expectedRevision, compose) => {
+    const existing = demoLocalDrafts.get(draftId);
+    if (!existing) throw new Error("Local draft not found");
+    if (existing.revision !== expectedRevision) throw { kind: "conflict" };
+    const next: LocalDraft = {
+      ...existing,
+      revision: existing.revision + 1,
+      status: "pending",
+      compose,
+      updatedAt: new Date().toISOString(),
+    };
+    demoLocalDrafts.set(draftId, next);
+    return next;
+  },
+  sendLocalDraft: async (draftId, expectedRevision) => {
+    const existing = demoLocalDrafts.get(draftId);
+    if (!existing || existing.revision !== expectedRevision)
+      throw new Error("Local draft changed; review it before sending");
+    demoLocalDrafts.set(draftId, { ...existing, status: "sent" });
+    return "queued";
   },
   setCategory: async (messageId, category) => {
     const message = demoMessages.find((item) => item.id === messageId);
