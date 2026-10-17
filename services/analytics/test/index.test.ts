@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import worker, {
@@ -93,6 +93,15 @@ describe("usage analytics collector schema", () => {
 });
 
 describe("usage analytics collector HTTP boundary", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("allows the bundled macOS Tauri origin and returns no body or cacheable data", async () => {
     const response = await worker.fetch(
       request(
@@ -111,6 +120,21 @@ describe("usage analytics collector HTTP boundary", () => {
     expect(response.headers.get("content-security-policy")).toContain(
       "default-src 'none'",
     );
+  });
+
+  it("rejects report months older than the previous month", async () => {
+    const db = new RecordingDatabase();
+    const response = await worker.fetch(
+      request(
+        "https://analytics.dakiamail.com/v1/usage",
+        "tauri://localhost",
+        { ...payload, month: "2026-06" },
+      ),
+      environment(db),
+    );
+
+    expect(response.status).toBe(400);
+    expect(db.batches).toHaveLength(0);
   });
 
   it("rejects untrusted browser origins before reading or storing a report", async () => {
