@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -33,6 +33,23 @@ function jobCondition(job) {
   assert.ok(condition, "job condition is missing");
   return condition.trim().replace(/\s+/g, " ");
 }
+
+test("generated release metadata checks reference existing test files", () => {
+  const prepareJob = workflow.match(/\n  prepare:\n([\s\S]*?)\n  validate:\n/)?.[1];
+  assert.ok(prepareJob, "production release preparation job is missing");
+  const metadataCheck = prepareJob.match(
+    /- name: Check generated release metadata\n\s+run: \|\n([\s\S]*?)(?=\n      -|$)/,
+  )?.[1];
+  assert.ok(metadataCheck, "generated release metadata check is missing");
+  const testCommand = metadataCheck.match(/^\s+node --test (.+)$/m)?.[1];
+  assert.ok(testCommand, "metadata test command is missing");
+  const testFiles = testCommand.trim().split(/\s+/);
+  assert.equal(testFiles.length, 2, "metadata check must run both test suites");
+  for (const file of testFiles) {
+    assert.match(file, /^scripts\/[\w-]+\.node-test\.mjs$/);
+    assert.ok(statSync(resolve(root, file)).isFile(), `${file} must exist`);
+  }
+});
 
 test("release builds run after the optional preparation job is skipped", () => {
   const buildJob = workflow.match(/\n  build:\n([\s\S]*?)\n  publish:\n/)?.[1];
