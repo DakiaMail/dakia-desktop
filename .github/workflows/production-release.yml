@@ -169,7 +169,7 @@ jobs:
       - name: Check generated release metadata
         run: |
           git diff --check
-          node --test scripts/prepare-nightly-release.node-test.mjs scripts/updater-manifest.node-test.mjs
+          node --test scripts/nightly-release.node-test.mjs scripts/updater-manifest.node-test.mjs
       - id: push
         name: Commit and push prepared main
         run: |
