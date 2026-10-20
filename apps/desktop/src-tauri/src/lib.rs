@@ -8,15 +8,19 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
     Engine,
 };
-use dakia_core::storage::{ConversationTarget, MessageContentFetchAcquire};
+#[cfg(test)]
+use dakia_core::storage::SelectableMailboxDraft;
+use dakia_core::storage::{ConversationTarget, MessageContentFetchAcquire, SelectableMailbox};
 use dakia_core::{
     ai::{AiConfig, AiProvider, AiService},
-    mailbox_action_destination, normalize_sender_address, provider, Account, AccountAuth,
-    AccountDraft, Attachment, CachedMessageContent, ComposeMessage, EmailClassificationInput,
-    LocalEmailClassifier, MailConversation, MailConversationPage, MailRebuildJob, MailService,
-    MailSummary, MailboxAction, ModelClassificationUpdate, ProviderPreset, SearchQuery,
-    SenderTrashResult, SmartInboxPage, SmartInboxQuery, Store, SyncProgress, SyncResult,
-    UnsubscribeOutcome,
+    mailbox_action_destination, normalize_sender_address, parse_search_query, provider, Account,
+    AccountAuth, AccountDraft, Attachment, CachedMessageContent, ComposeMessage,
+    EmailClassificationInput, LocalEmailClassifier, MailConversation, MailConversationPage,
+    MailRebuildJob, MailService, MailSummary, MailboxAction, ModelClassificationUpdate,
+    ProviderMailboxSearchState, ProviderPreset, SearchContinuationV2, SearchCoverage,
+    SearchCoverageState, SearchErrorCategory, SearchErrorV2, SearchExecutionMode, SearchPageV2,
+    SearchQuery, SearchRequestV2, SearchSession, SearchSessionRegistry, SenderTrashResult,
+    SmartInboxPage, SmartInboxQuery, Store, SyncProgress, SyncResult, UnsubscribeOutcome,
 };
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -57,8 +61,11 @@ use translation::{
     TranslationModelStatus,
 };
 
-const REMOTE_SEARCH_CONCURRENCY: usize = 4;
 const MESSAGE_HYDRATION_CONCURRENCY: usize = 4;
+/// Keep one shared provider-operation slot for opening mail. Searches have a
+/// separate global cap, so concurrent search pages cannot consume every
+/// connection slot and make an open wait behind a whole result page.
+const REMOTE_SEARCH_CONCURRENCY: usize = MESSAGE_HYDRATION_CONCURRENCY - 1;
 const CLASSIFICATION_BATCH_SIZE: usize = 64;
 const CLASSIFICATION_RETRY_DELAYS: [Duration; 2] =
     [Duration::from_millis(100), Duration::from_millis(500)];
@@ -73,11 +80,41 @@ struct AppState {
     classification: Arc<ClassificationScheduler>,
     realtime: RealtimeSyncManager,
     remote_operation_slots: Arc<Semaphore>,
+    remote_search_slots: Arc<Semaphore>,
     mail_rebuilds: Mutex<HashMap<Uuid, MailRebuildProgress>>,
     mail_rebuild_running: Mutex<HashSet<Uuid>>,
     mail_rebuild_cancellations: MailRebuildCancellations,
     account_operations: AccountOperationLocks,
+    search_sessions: SearchSessionRegistry,
     translation_downloads: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// Serializes runtime restarts of bounded contacted-people migrations.
+    /// Account changes may arrive while an earlier drain is yielding; queued
+    /// drains are harmless no-ops once the durable cursor is complete.
+    contacted_people_migration_drain: Arc<AsyncMutex<()>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ContactedPeopleSettings {
+    enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ContactedPeopleChanged {
+    enabled: bool,
+    cleared: bool,
+}
+
+/// Incremental coverage is emitted while a submitted hybrid search is still
+/// running. The session ID and revision let every window discard progress from
+/// an older search before it changes visible coverage.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchProgressUpdate {
+    session_id: Uuid,
+    revision: u64,
+    coverage: Vec<SearchCoverage>,
 }
 
 trait EmailClassifier: Send {
@@ -495,6 +532,65 @@ async fn enabled_account_for_operation(
     Ok(account)
 }
 
+/// Search account IDs are untrusted request data. Keep local catalogue reads
+/// aligned with provider work by intersecting an explicit selection with the
+/// accounts that are currently enabled. This also prevents a disabled
+/// account's cached mail from appearing in a mixed-account result page.
+fn enabled_search_account_ids(accounts: &[Account], requested: &[Uuid]) -> Vec<Uuid> {
+    if requested.is_empty() {
+        return accounts
+            .iter()
+            .filter(|account| account.enabled)
+            .map(|account| account.id)
+            .collect();
+    }
+
+    let enabled = accounts
+        .iter()
+        .filter(|account| account.enabled)
+        .map(|account| account.id)
+        .collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    requested
+        .iter()
+        .copied()
+        .filter(|account_id| enabled.contains(account_id) && seen.insert(*account_id))
+        .collect()
+}
+
+fn explicit_search_scope_has_no_enabled_accounts(requested: &[Uuid], enabled: &[Uuid]) -> bool {
+    !requested.is_empty() && enabled.is_empty()
+}
+
+/// The legacy search command predates V2 coverage responses, but it must not
+/// let Storage's historical empty-account convention widen a disabled or
+/// deleted explicit scope into every local account.
+fn legacy_search_query_for_enabled_accounts(
+    mut query: SearchQuery,
+    accounts: &[Account],
+) -> Option<SearchQuery> {
+    let account_ids = enabled_search_account_ids(accounts, &query.account_ids);
+    if account_ids.is_empty() {
+        return None;
+    }
+    query.account_ids = account_ids;
+    Some(query)
+}
+
+/// Account mutations invalidate affected hybrid searches before changing
+/// configuration or local message state. Provider workers check the shared
+/// session token before every result write, so a stale IMAP response cannot
+/// publish after this boundary.
+async fn invalidate_searches_for_account(state: &AppState, account_id: Uuid) -> Result<(), String> {
+    state.search_sessions.cancel_account(account_id);
+    state
+        .store
+        .advance_account_search_generation(account_id)
+        .await
+        .map_err(error)?;
+    Ok(())
+}
+
 async fn restart_realtime_if_current(
     app: tauri::AppHandle,
     state: &Arc<AppState>,
@@ -579,6 +675,62 @@ mod account_operation_lock_tests {
             .expect("second operation should acquire after the first exits")
             .expect("operation task should report acquisition");
         task.await.expect("operation task should finish");
+    }
+
+    #[tokio::test]
+    async fn provider_search_lane_leaves_a_connection_slot_for_opening_mail() {
+        let all_remote_operations = Arc::new(Semaphore::new(MESSAGE_HYDRATION_CONCURRENCY));
+        let search_lane = Arc::new(Semaphore::new(REMOTE_SEARCH_CONCURRENCY));
+        let mut running_searches = Vec::new();
+        for _ in 0..REMOTE_SEARCH_CONCURRENCY {
+            let search = search_lane.clone().acquire_owned().await.unwrap();
+            let remote = all_remote_operations.clone().acquire_owned().await.unwrap();
+            running_searches.push((search, remote));
+        }
+
+        assert_eq!(all_remote_operations.available_permits(), 1);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                all_remote_operations.clone().acquire_owned(),
+            )
+            .await
+            .is_ok(),
+            "an open may acquire the reserved shared provider slot while search pages run"
+        );
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(10),
+                search_lane.clone().acquire_owned()
+            )
+            .await
+            .is_err(),
+            "a fourth search waits in the dedicated search lane"
+        );
+        drop(running_searches);
+    }
+
+    #[tokio::test]
+    async fn provider_search_does_not_wait_for_the_account_mutation_lock() {
+        let locks = Arc::new(AccountOperationLocks::default());
+        let account_id = Uuid::new_v4();
+        let _sending = locks.acquire(account_id).await;
+        let remote = Arc::new(Semaphore::new(MESSAGE_HYDRATION_CONCURRENCY));
+        let search = Arc::new(Semaphore::new(REMOTE_SEARCH_CONCURRENCY));
+        let (started, receiver) = tokio::sync::oneshot::channel();
+
+        tokio::spawn(async move {
+            // This matches the provider-search scheduling path: it reserves
+            // remote capacity but intentionally never acquires `locks`.
+            let _search = search.acquire_owned().await.unwrap();
+            let _remote = remote.acquire_owned().await.unwrap();
+            let _ = started.send(());
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), receiver)
+            .await
+            .expect("a search must begin while a same-account send owns the mutation lock")
+            .expect("search task should report start");
     }
 
     #[test]
@@ -2024,8 +2176,11 @@ mod message_content_repair_tests {
             mail_rebuild_running: Mutex::new(HashSet::new()),
             mail_rebuild_cancellations: MailRebuildCancellations::default(),
             account_operations: AccountOperationLocks::default(),
+            search_sessions: SearchSessionRegistry::default(),
             remote_operation_slots: Arc::new(Semaphore::new(MESSAGE_HYDRATION_CONCURRENCY)),
+            remote_search_slots: Arc::new(Semaphore::new(REMOTE_SEARCH_CONCURRENCY)),
             translation_downloads: Mutex::new(HashMap::new()),
+            contacted_people_migration_drain: Arc::new(AsyncMutex::new(())),
         })
     }
 
@@ -2281,6 +2436,37 @@ mod attachment_presentation_command_tests {
     use dakia_core::{storage::AttachmentData, AttachmentPresentation};
     use tempfile::tempdir;
 
+    struct NoopClassifier;
+
+    impl EmailClassifier for NoopClassifier {
+        fn classify(
+            &mut self,
+            _emails: &[EmailClassificationInput],
+        ) -> anyhow::Result<Vec<dakia_core::classification::ModelClassification>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn operation_priority_test_state(store: Store) -> Arc<AppState> {
+        Arc::new(AppState {
+            realtime: RealtimeSyncManager::new(store.clone()),
+            store,
+            data_dir: PathBuf::new(),
+            classifier: Mutex::new(Box::new(NoopClassifier)),
+            classification_owner: "operation-priority-test".into(),
+            classification: Arc::new(ClassificationScheduler::default()),
+            mail_rebuilds: Mutex::new(HashMap::new()),
+            mail_rebuild_running: Mutex::new(HashSet::new()),
+            mail_rebuild_cancellations: MailRebuildCancellations::default(),
+            account_operations: AccountOperationLocks::default(),
+            search_sessions: SearchSessionRegistry::default(),
+            remote_operation_slots: Arc::new(Semaphore::new(MESSAGE_HYDRATION_CONCURRENCY)),
+            remote_search_slots: Arc::new(Semaphore::new(REMOTE_SEARCH_CONCURRENCY)),
+            translation_downloads: Mutex::new(HashMap::new()),
+            contacted_people_migration_drain: Arc::new(AsyncMutex::new(())),
+        })
+    }
+
     fn attachment(id: &str, presentation: AttachmentPresentation) -> Attachment {
         Attachment {
             id: id.into(),
@@ -2320,6 +2506,8 @@ mod attachment_presentation_command_tests {
             unsubscribe_url: None,
             is_read: true,
             is_flagged,
+            is_answered: false,
+            is_draft: false,
             has_attachments: true,
             category: None,
             classification_confidence: None,
@@ -2525,6 +2713,176 @@ mod attachment_presentation_command_tests {
             .await
             .expect("read starred metadata")
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn foreground_open_keeps_its_reserved_slot_during_provider_search_and_backfill_load() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind scripted provider");
+        let provider_port = listener.local_addr().expect("provider address").port();
+        let store = Store::in_memory().await.expect("in-memory store");
+        let mut account = save_test_account(&store).await;
+        account.imap_host = "127.0.0.1".into();
+        account.imap_port = provider_port;
+        account.imap_security = dakia_core::provider::Security::Tls;
+        store
+            .save_account(&account)
+            .await
+            .expect("save scripted provider endpoint");
+        MailService::new(store.clone())
+            .credentials()
+            .set_password(&account, "search secret")
+            .await
+            .expect("save scripted provider credential");
+
+        let foreground = complete_message(account.id.to_string(), false);
+        let foreground_id = foreground.id.clone();
+        store
+            .upsert_messages(std::slice::from_ref(&foreground))
+            .await
+            .expect("save foreground message");
+        store
+            .cache_message_content(&foreground_id, false, cached_content(&foreground))
+            .await
+            .expect("cache foreground message");
+
+        // Leave enough real Sent work for the contacted-people backfill to
+        // remain active while the foreground read runs.
+        let mut sent = Vec::new();
+        for uid in 1..=256_i64 {
+            let mut message = complete_message(account.id.to_string(), false);
+            message.id = format!("priority-sent-{uid}");
+            message.thread_id = message.id.clone();
+            message.message_id = Some(format!("<priority-sent-{uid}@example.test>"));
+            message.mailbox = "Sent".into();
+            message.uid = uid + 1;
+            message.to_addresses = format!("Person {uid} <person{uid}@example.test>");
+            message.attachments.clear();
+            message.has_attachments = false;
+            sent.push(message);
+        }
+        store
+            .upsert_messages(&sent)
+            .await
+            .expect("save Sent backfill fixture");
+
+        let state = operation_priority_test_state(store.clone());
+        let (accepted_sender, mut accepted) = tokio::sync::mpsc::channel(REMOTE_SEARCH_CONCURRENCY);
+        let provider = tokio::spawn(async move {
+            let mut connections = Vec::new();
+            for _ in 0..REMOTE_SEARCH_CONCURRENCY {
+                let (stream, _) = listener.accept().await.expect("accept provider search");
+                connections.push(stream);
+                accepted_sender
+                    .send(())
+                    .await
+                    .expect("report provider connection");
+            }
+            std::future::pending::<()>().await;
+            connections
+        });
+
+        let mut searches = Vec::new();
+        for _ in 0..REMOTE_SEARCH_CONCURRENCY {
+            let state = state.clone();
+            let account = account.clone();
+            searches.push(tokio::spawn(async move {
+                let _search = state
+                    .remote_search_slots
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .expect("search lane remains open");
+                let _remote = state
+                    .remote_operation_slots
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .expect("remote lane remains open");
+                MailService::new(state.store.clone())
+                    .search_remote(&account, "subject:needle", Some("INBOX"), 8)
+                    .await
+            }));
+        }
+        for _ in 0..REMOTE_SEARCH_CONCURRENCY {
+            tokio::time::timeout(Duration::from_secs(2), accepted.recv())
+                .await
+                .expect("provider search must connect")
+                .expect("provider connection report");
+        }
+        assert_eq!(
+            state.remote_operation_slots.available_permits(),
+            1,
+            "provider search must leave one operation slot for foreground work"
+        );
+
+        let (first_batch_sender, first_batch) = tokio::sync::oneshot::channel();
+        let (stop_sender, mut stop) = tokio::sync::watch::channel(false);
+        let backfill_finished = Arc::new(AtomicBool::new(false));
+        let background_finished = backfill_finished.clone();
+        let backfill_store = store.clone();
+        let account_id = account.id;
+        let owner_address = account.email.clone();
+        let backfill = tokio::spawn(async move {
+            let mut first_batch_sender = Some(first_batch_sender);
+            loop {
+                let progress = backfill_store
+                    .backfill_contacted_people_from_sent(
+                        account_id,
+                        std::slice::from_ref(&owner_address),
+                        1,
+                    )
+                    .await
+                    .expect("advance people backfill");
+                if let Some(sender) = first_batch_sender.take() {
+                    let _ = sender.send(());
+                }
+                if progress.complete {
+                    background_finished.store(true, Ordering::SeqCst);
+                    break;
+                }
+                if *stop.borrow() {
+                    break;
+                }
+                tokio::select! {
+                    _ = stop.changed() => {},
+                    _ = tokio::task::yield_now() => {},
+                }
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), first_batch)
+            .await
+            .expect("people backfill must start")
+            .expect("people backfill start report");
+        assert!(
+            !backfill_finished.load(Ordering::SeqCst),
+            "people backfill must still have queued work when foreground opening starts"
+        );
+
+        let started = Instant::now();
+        let opened = tokio::time::timeout(
+            Duration::from_secs(2),
+            hydrate_messages(&state, std::slice::from_ref(&foreground_id)),
+        )
+        .await
+        .expect("foreground open must not wait behind provider searches")
+        .expect("foreground open succeeds from its complete local cache");
+        assert_eq!(opened.len(), 1);
+        assert_eq!(opened[0].body_text, "authoritative body");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "foreground open exceeded its conservative priority bound"
+        );
+
+        let _ = stop_sender.send(true);
+        backfill.await.expect("people backfill exits cleanly");
+        for search in searches {
+            search.abort();
+            let _ = search.await;
+        }
+        provider.abort();
+        let _ = provider.await;
     }
 }
 
@@ -3198,6 +3556,8 @@ mod download_tests {
             unsubscribe_url: None,
             is_read: false,
             is_flagged: false,
+            is_answered: false,
+            is_draft: false,
             has_attachments: false,
             category: None,
             classification_confidence: None,
@@ -3411,6 +3771,43 @@ async fn accounts(state: State<'_, Arc<AppState>>) -> Result<Vec<Account>, Strin
     state.store.accounts().await.map_err(error)
 }
 
+/// Search folder scopes are account-owned provider identities, not inferred
+/// labels. Return every enabled account's durable discovery rows so callers
+/// can distinguish non-selectable hierarchy nodes from searchable mailboxes.
+#[tauri::command]
+async fn list_search_mailboxes(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<SelectableMailbox>, String> {
+    let accounts = state.store.accounts().await.map_err(error)?;
+    let mut mailboxes = Vec::new();
+    for account in accounts.into_iter().filter(|account| account.enabled) {
+        mailboxes.extend(
+            state
+                .store
+                .list_selectable_mailboxes(account.id)
+                .await
+                .map_err(error)?,
+        );
+    }
+    Ok(sort_and_deduplicate_search_mailboxes(mailboxes))
+}
+
+fn sort_and_deduplicate_search_mailboxes(
+    mut mailboxes: Vec<SelectableMailbox>,
+) -> Vec<SelectableMailbox> {
+    mailboxes.sort_by(|left, right| {
+        left.account_id
+            .cmp(&right.account_id)
+            .then_with(|| left.local_path.cmp(&right.local_path))
+            .then_with(|| left.remote_path.cmp(&right.remote_path))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    mailboxes.dedup_by(|left, right| {
+        left.account_id == right.account_id && left.remote_path == right.remote_path
+    });
+    mailboxes
+}
+
 #[tauri::command]
 async fn update_account(
     app: tauri::AppHandle,
@@ -3435,6 +3832,7 @@ async fn update_account(
         MailRebuildCancellationDisposition::Retain,
     );
     let _operation = state.account_operations.acquire(input.id).await;
+    invalidate_searches_for_account(state.inner(), input.id).await?;
     let mut account = state
         .store
         .account(input.id)
@@ -3514,6 +3912,7 @@ async fn update_account(
                 .start_account(app.clone(), account.clone())
                 .await;
         }
+        kick_contacted_people_migrations(state.inner().clone());
         resume_scheduled_mail_rebuild(app, state.inner().clone(), account.clone()).await;
         return Ok(account);
     }
@@ -3583,6 +3982,7 @@ async fn update_account(
     if !namespace_changed {
         state.realtime.reconcile(app.clone()).await.map_err(error)?;
     }
+    kick_contacted_people_migrations(state.inner().clone());
     resume_scheduled_mail_rebuild(app, state.inner().clone(), account.clone()).await;
     Ok(account)
 }
@@ -3746,6 +4146,7 @@ async fn remove_account(
         MailRebuildCancellationDisposition::Remove,
     );
     let _operation = state.account_operations.acquire(account_id).await;
+    invalidate_searches_for_account(state.inner(), account_id).await?;
     let account = state
         .store
         .account(account_id)
@@ -3765,6 +4166,7 @@ async fn remove_account(
         .delete_account(account_id)
         .await
         .map_err(error)?;
+    kick_contacted_people_migrations(state.inner().clone());
     if let Err(error) = app.emit(
         "account-removed",
         serde_json::json!({ "accountId": account_id }),
@@ -3845,6 +4247,7 @@ async fn add_account(
         }
         return Err(error(save_error));
     }
+    kick_contacted_people_migrations(state.inner().clone());
     resume_scheduled_mail_rebuild(app, state.inner().clone(), account.clone()).await;
     Ok(AccountConnection {
         account,
@@ -3857,6 +4260,16 @@ async fn search(
     state: State<'_, Arc<AppState>>,
     query: SearchQuery,
 ) -> Result<MailConversationPage, String> {
+    let accounts = state.store.accounts().await.map_err(error)?;
+    let Some(query) = legacy_search_query_for_enabled_accounts(query, &accounts) else {
+        return Ok(MailConversationPage {
+            conversations: Vec::new(),
+            match_evidence: Default::default(),
+            next_cursor: None,
+            candidate_cursor: None,
+            candidate_exhausted: true,
+        });
+    };
     state
         .store
         .search_conversation_page(&query)
@@ -3873,6 +4286,497 @@ async fn search_smart_inbox(
 }
 
 #[tauri::command]
+async fn suggest_contacted_people(
+    state: State<'_, Arc<AppState>>,
+    prefix: String,
+    account_id: Option<Uuid>,
+    limit: Option<u8>,
+) -> Result<Vec<dakia_core::storage::ContactedPersonSuggestion>, String> {
+    let limit = contacted_people_suggestion_limit(limit)?;
+    if let Some(account_id) = account_id {
+        // The preferred account affects ranking. Do not leave a deleted or
+        // disabled account ID in that ranking request.
+        enabled_account_for_operation(state.inner(), account_id).await?;
+    }
+    locally_suggest_contacted_people(&state.store, &prefix, account_id, limit).await
+}
+
+fn contacted_people_suggestion_limit(limit: Option<u8>) -> Result<usize, String> {
+    let limit = limit.unwrap_or(8);
+    if limit > 8 {
+        return Err("Contacted-people suggestion limit cannot exceed 8".to_owned());
+    }
+    Ok(usize::from(limit))
+}
+
+async fn locally_suggest_contacted_people(
+    store: &Store,
+    prefix: &str,
+    account_id: Option<Uuid>,
+    limit: usize,
+) -> Result<Vec<dakia_core::storage::ContactedPersonSuggestion>, String> {
+    if !store
+        .autocomplete_suggestions_enabled()
+        .await
+        .map_err(error)?
+    {
+        return Ok(Vec::new());
+    }
+    let mut people = store
+        .suggest_contacted_people(prefix, account_id)
+        .await
+        .map_err(error)?;
+    people.truncate(limit);
+    Ok(people)
+}
+
+#[tauri::command]
+async fn hide_contacted_person(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    address: String,
+) -> Result<(), String> {
+    let enabled = state
+        .store
+        .autocomplete_suggestions_enabled()
+        .await
+        .map_err(error)?;
+    state
+        .store
+        .hide_contacted_person(&address)
+        .await
+        .map_err(error)?;
+    emit_contacted_people_changed(&app, enabled, false);
+    Ok(())
+}
+
+#[tauri::command]
+async fn clear_contacted_people(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let enabled = state
+        .store
+        .autocomplete_suggestions_enabled()
+        .await
+        .map_err(error)?;
+    state.store.clear_contacted_people().await.map_err(error)?;
+    emit_contacted_people_changed(&app, enabled, true);
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_autocomplete_settings(
+    state: State<'_, Arc<AppState>>,
+) -> Result<ContactedPeopleSettings, String> {
+    Ok(ContactedPeopleSettings {
+        enabled: state
+            .store
+            .autocomplete_suggestions_enabled()
+            .await
+            .map_err(error)?,
+    })
+}
+
+#[tauri::command]
+async fn set_autocomplete_settings(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    enabled: bool,
+) -> Result<ContactedPeopleSettings, String> {
+    state
+        .store
+        .set_autocomplete_suggestions_enabled(enabled)
+        .await
+        .map_err(error)?;
+    emit_contacted_people_changed(&app, enabled, false);
+    Ok(ContactedPeopleSettings { enabled })
+}
+
+fn emit_contacted_people_changed(app: &tauri::AppHandle, enabled: bool, cleared: bool) {
+    if let Err(error) = app.emit(
+        "contacted-people-changed",
+        ContactedPeopleChanged { enabled, cleared },
+    ) {
+        tracing::warn!(error = %error, "could not notify windows about contacted-people changes");
+    }
+}
+
+/// Validates recipient fields with the same Rust parser used to build the
+/// SMTP envelope. This boundary is intentionally synchronous and local: it
+/// cannot send mail or collect contacted-person history.
+#[tauri::command]
+fn validate_compose_recipients(
+    to: Vec<String>,
+    cc: Vec<String>,
+    bcc: Vec<String>,
+) -> dakia_core::ComposeRecipientValidation {
+    dakia_core::validate_compose_recipients(&to, &cc, &bcc)
+}
+
+#[cfg(test)]
+mod contacted_people_command_tests {
+    use super::*;
+    use dakia_core::storage::ContactedPersonRecipient;
+    use std::sync::atomic::AtomicUsize;
+
+    struct NoopClassifier;
+
+    impl EmailClassifier for NoopClassifier {
+        fn classify(
+            &mut self,
+            _emails: &[EmailClassificationInput],
+        ) -> anyhow::Result<Vec<dakia_core::classification::ModelClassification>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn contacted_people_test_state(store: Store) -> Arc<AppState> {
+        Arc::new(AppState {
+            realtime: RealtimeSyncManager::new(store.clone()),
+            store,
+            data_dir: PathBuf::new(),
+            classifier: Mutex::new(Box::new(NoopClassifier)),
+            classification_owner: "contacted-people-test".into(),
+            classification: Arc::new(ClassificationScheduler::default()),
+            mail_rebuilds: Mutex::new(HashMap::new()),
+            mail_rebuild_running: Mutex::new(HashSet::new()),
+            mail_rebuild_cancellations: MailRebuildCancellations::default(),
+            account_operations: AccountOperationLocks::default(),
+            search_sessions: SearchSessionRegistry::default(),
+            remote_operation_slots: Arc::new(Semaphore::new(MESSAGE_HYDRATION_CONCURRENCY)),
+            remote_search_slots: Arc::new(Semaphore::new(REMOTE_SEARCH_CONCURRENCY)),
+            translation_downloads: Mutex::new(HashMap::new()),
+            contacted_people_migration_drain: Arc::new(AsyncMutex::new(())),
+        })
+    }
+
+    async fn account_with_contacted_person() -> (Store, Account) {
+        let store = Store::in_memory().await.unwrap();
+        let account = AccountDraft {
+            email: "sender@example.test".into(),
+            display_name: "Sender".into(),
+            provider_id: Some("fastmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("fastmail").unwrap());
+        store.save_account(&account).await.unwrap();
+        store
+            .record_successful_outgoing_recipients(
+                account.id,
+                &[ContactedPersonRecipient {
+                    address: "recipient@example.test".into(),
+                    display_name: Some("Recipient".into()),
+                    formatted_address: Some("Recipient <recipient@example.test>".into()),
+                }],
+                std::slice::from_ref(&account.email),
+            )
+            .await
+            .unwrap();
+        (store, account)
+    }
+
+    #[tokio::test]
+    async fn contacted_people_suggestions_honor_setting_and_limit() {
+        let (store, account) = account_with_contacted_person().await;
+        assert_eq!(contacted_people_suggestion_limit(None).unwrap(), 8);
+        assert_eq!(contacted_people_suggestion_limit(Some(1)).unwrap(), 1);
+        assert!(contacted_people_suggestion_limit(Some(9)).is_err());
+
+        let suggestions = locally_suggest_contacted_people(
+            &store,
+            "recipient",
+            Some(account.id),
+            contacted_people_suggestion_limit(Some(1)).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].address, "recipient@example.test");
+
+        store
+            .set_autocomplete_suggestions_enabled(false)
+            .await
+            .unwrap();
+        assert!(
+            locally_suggest_contacted_people(&store, "", Some(account.id), 8)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn autocomplete_settings_use_the_frontend_payload_shape() {
+        assert_eq!(
+            serde_json::to_value(ContactedPeopleSettings { enabled: true }).unwrap(),
+            serde_json::json!({ "enabled": true })
+        );
+    }
+
+    #[tokio::test]
+    async fn contacted_people_background_worker_drains_more_than_one_batch_in_one_lifecycle() {
+        let store = Store::in_memory().await.unwrap();
+        let account = AccountDraft {
+            email: "sender@example.test".into(),
+            display_name: "Sender".into(),
+            provider_id: Some("fastmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("fastmail").unwrap());
+        store.save_account(&account).await.unwrap();
+        let sent = (1..=101)
+            .map(|uid| MailSummary {
+                id: format!("sent-backfill-{uid}"),
+                account_id: account.id.to_string(),
+                mailbox: "Sent".into(),
+                uid,
+                message_id: Some(format!("<sent-backfill-{uid}@example.test>")),
+                in_reply_to: None,
+                reference_ids: None,
+                thread_id: format!("sent-backfill-thread-{uid}"),
+                subject: "Sent message".into(),
+                from_name: Some("Sender".into()),
+                from_address: account.email.clone(),
+                to_addresses: format!("Person {uid} <person{uid}@example.test>"),
+                cc_addresses: String::new(),
+                bcc_addresses: String::new(),
+                reply_to_addresses: String::new(),
+                received_at: chrono::Utc::now(),
+                snippet: String::new(),
+                body_text: String::new(),
+                body_html: None,
+                content_state: "headers_only".into(),
+                unsubscribe_kind: None,
+                unsubscribe_url: None,
+                is_read: true,
+                is_flagged: false,
+                is_answered: false,
+                is_draft: false,
+                has_attachments: false,
+                category: None,
+                classification_confidence: None,
+                classification_source: None,
+                classification_signals: String::new(),
+                attachments: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        store.upsert_catalog_messages(&sent).await.unwrap();
+        let state = contacted_people_test_state(store.clone());
+        let notifications = Arc::new(AtomicUsize::new(0));
+
+        drain_contacted_people_backfill(&state, {
+            let notifications = notifications.clone();
+            move || {
+                notifications.fetch_add(1, Ordering::SeqCst);
+            }
+        })
+        .await;
+
+        let complete = store
+            .backfill_contacted_people_from_sent(
+                account.id,
+                std::slice::from_ref(&account.email),
+                100,
+            )
+            .await
+            .unwrap();
+        assert!(complete.complete);
+        assert_eq!(complete.processed_messages, 0);
+        assert!(notifications.load(Ordering::SeqCst) >= 2);
+        assert_eq!(
+            store
+                .suggest_contacted_people("person101", Some(account.id))
+                .await
+                .unwrap()
+                .first()
+                .map(|person| person.address.as_str()),
+            Some("person101@example.test")
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_account_disable_restarts_contacted_people_migration_drain_after_startup() {
+        let store = Store::in_memory().await.unwrap();
+        let active = AccountDraft {
+            email: "runtime-active@example.test".into(),
+            display_name: "Runtime active".into(),
+            provider_id: Some("fastmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("fastmail").unwrap());
+        let mut disabled = AccountDraft {
+            email: "runtime-disabled@example.test".into(),
+            display_name: "Runtime disabled".into(),
+            provider_id: Some("fastmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("fastmail").unwrap());
+        store.save_account(&active).await.unwrap();
+        store.save_account(&disabled).await.unwrap();
+
+        // Use the public accepted-send path. The final recipient is row 501,
+        // so save_account's first bounded storage batch cannot refresh it.
+        for index in 0..=500 {
+            let address = format!("runtime{index:03}@example.test");
+            let display_name = if index == 500 {
+                "Bob Final".to_string()
+            } else {
+                format!("Bob {index:03}")
+            };
+            store
+                .record_successful_outgoing_recipients(
+                    active.id,
+                    &[ContactedPersonRecipient {
+                        address,
+                        display_name: Some(display_name),
+                        formatted_address: None,
+                    }],
+                    std::slice::from_ref(&active.email),
+                )
+                .await
+                .unwrap();
+        }
+
+        store
+            .record_successful_outgoing_recipients(
+                disabled.id,
+                &[ContactedPersonRecipient {
+                    address: "runtime500@example.test".into(),
+                    display_name: Some("Alice Disabled".into()),
+                    formatted_address: None,
+                }],
+                &[disabled.email.clone()],
+            )
+            .await
+            .unwrap();
+        let state = contacted_people_test_state(store.clone());
+        disabled.enabled = false;
+        store.save_account(&disabled).await.unwrap();
+        // Startup's original worker is already absent. A runtime mutation
+        // must schedule a fresh serialized drain for the remaining batch.
+        // Two callers may race to request a continuation. The shared mutex
+        // makes the second one wait, then observe the durable complete marker.
+        kick_contacted_people_migrations(state.clone());
+        kick_contacted_people_migrations(state.clone());
+        for _ in 0..100 {
+            let final_person = store
+                .suggest_contacted_people("runtime500", Some(active.id))
+                .await
+                .unwrap();
+            if final_person
+                .first()
+                .and_then(|person| person.display_name.as_deref())
+                == Some("Bob Final")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let final_person = store
+            .suggest_contacted_people("runtime500", Some(active.id))
+            .await
+            .unwrap();
+        assert_eq!(
+            final_person
+                .first()
+                .and_then(|person| person.display_name.as_deref()),
+            Some("Bob Final"),
+            "runtime drain converges without reopening the store"
+        );
+
+        // Exercise the same runtime path for deletion. Re-enabling makes the
+        // latest disabled-account form authoritative again; deletion must
+        // drain all 501 rows back to the remaining account's form.
+        disabled.enabled = true;
+        store.save_account(&disabled).await.unwrap();
+        kick_contacted_people_migrations(state.clone());
+        for _ in 0..100 {
+            let final_person = store
+                .suggest_contacted_people("runtime500", Some(active.id))
+                .await
+                .unwrap();
+            if final_person
+                .first()
+                .and_then(|person| person.display_name.as_deref())
+                == Some("Alice Disabled")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            store
+                .suggest_contacted_people("runtime500", Some(active.id))
+                .await
+                .unwrap()
+                .first()
+                .and_then(|person| person.display_name.as_deref()),
+            Some("Alice Disabled")
+        );
+
+        store.delete_account(disabled.id).await.unwrap();
+        kick_contacted_people_migrations(state.clone());
+        for _ in 0..100 {
+            let final_person = store
+                .suggest_contacted_people("runtime500", Some(active.id))
+                .await
+                .unwrap();
+            if final_person
+                .first()
+                .and_then(|person| person.display_name.as_deref())
+                == Some("Bob Final")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            store
+                .suggest_contacted_people("runtime500", Some(active.id))
+                .await
+                .unwrap()
+                .first()
+                .and_then(|person| person.display_name.as_deref()),
+            Some("Bob Final"),
+            "deleting an account also converges without reopening the store"
+        );
+    }
+}
+
+#[tauri::command]
 async fn conversation_for_target(
     state: State<'_, Arc<AppState>>,
     target: ConversationTarget,
@@ -3882,6 +4786,1429 @@ async fn conversation_for_target(
         .conversation_for_target(&target)
         .await
         .map_err(error)
+}
+
+fn search_v2_error(error: impl std::fmt::Display) -> SearchErrorV2 {
+    // Provider and SQLite errors can include hosts, mailbox names, SQL, or
+    // server response fragments. Keep those in the native log but never copy
+    // them into an IPC error rendered by the UI.
+    tracing::warn!(error = %error, "search request failed");
+    SearchErrorV2 {
+        position: None,
+        category: SearchErrorCategory::Transient,
+        unsupported_operator: None,
+        message: "Search could not be completed. Please try again.".into(),
+    }
+}
+
+fn emit_search_progress(
+    app: &tauri::AppHandle,
+    sessions: &SearchSessionRegistry,
+    session: &SearchSession,
+    coverage: Vec<SearchCoverage>,
+) {
+    if coverage.is_empty() || !sessions.is_current(session) {
+        return;
+    }
+    let _ = app.emit(
+        "search-progress",
+        SearchProgressUpdate {
+            session_id: session.session_id,
+            revision: session.revision,
+            coverage,
+        },
+    );
+}
+
+fn expression_has_folder_predicate(expression: &dakia_core::SearchExpression) -> bool {
+    fn visit(node: &dakia_core::SearchNode) -> bool {
+        match node {
+            dakia_core::SearchNode::MatchAll => false,
+            dakia_core::SearchNode::Term(dakia_core::SearchTerm::Folder(_)) => true,
+            dakia_core::SearchNode::Term(_) => false,
+            dakia_core::SearchNode::And(nodes) | dakia_core::SearchNode::Or(nodes) => {
+                nodes.iter().any(visit)
+            }
+            dakia_core::SearchNode::Not(node) => visit(node),
+        }
+    }
+
+    visit(&expression.root)
+}
+
+/// `scope.mailbox` is ambient UI state, not a second folder predicate. A
+/// submitted `in:` expression is explicit user intent and must replace that
+/// ambient scope for local SQL and provider mailbox planning alike.
+fn effective_search_scope_mailbox(
+    request: &SearchRequestV2,
+    expression: &dakia_core::SearchExpression,
+) -> Option<String> {
+    (!expression_has_folder_predicate(expression)).then(|| request.scope.mailbox.clone())?
+}
+
+fn search_v2_query(
+    request: &SearchRequestV2,
+    account_ids: Vec<Uuid>,
+    expression: &dakia_core::SearchExpression,
+) -> SearchQuery {
+    // `in:*` is the canonical explicit opt-in to the normally hidden Spam and
+    // Trash families. Keep the caller's raw query opaque to TypeScript while
+    // preserving the parser as the only syntax authority.
+    let has_explicit_folder = expression_has_folder_predicate(expression);
+    let text = if request.scope.include_spam_trash && !has_explicit_folder {
+        if request.raw_query.trim().is_empty() {
+            "in:*".to_owned()
+        } else {
+            format!("({}) in:*", request.raw_query)
+        }
+    } else {
+        request.raw_query.clone()
+    };
+    SearchQuery {
+        text,
+        account_ids,
+        mailbox: effective_search_scope_mailbox(request, expression),
+        limit: Some(request.effective_page_size()),
+        ..SearchQuery::default()
+    }
+}
+
+fn provider_coverage_for_error(account_id: Uuid, error: &str) -> SearchCoverage {
+    let lower = error.to_ascii_lowercase();
+    let state = if lower.contains("identity changed") || lower.contains("uidvalidity") {
+        SearchCoverageState::MailboxChanged
+    } else if lower.contains("authentication") || lower.contains("credential") {
+        SearchCoverageState::AuthenticationFailed
+    } else {
+        SearchCoverageState::Offline
+    };
+    SearchCoverage {
+        account_id,
+        mailbox: None,
+        state,
+        detail: Some("Provider search was unavailable for this account.".into()),
+    }
+}
+
+fn provider_mailbox_coverage(
+    account_id: Uuid,
+    mailbox: String,
+    provider_state: ProviderMailboxSearchState,
+) -> SearchCoverage {
+    let (state, detail) = match provider_state {
+        ProviderMailboxSearchState::Searched => (SearchCoverageState::ProviderSearched, None),
+        ProviderMailboxSearchState::Partial => (
+            SearchCoverageState::ProviderPartial,
+            Some("Some provider candidates could not be fully verified for this mailbox.".into()),
+        ),
+        ProviderMailboxSearchState::SearchBodyCacheIncomplete => (
+            SearchCoverageState::LocalBodyIndex,
+            Some("Provider results were found, but some text is not available for later local pages.".into()),
+        ),
+        ProviderMailboxSearchState::MailboxChanged => (
+            SearchCoverageState::MailboxChanged,
+            Some("This mailbox changed while it was being searched.".into()),
+        ),
+        ProviderMailboxSearchState::Offline => (
+            SearchCoverageState::Offline,
+            Some("Provider search was unavailable for this mailbox.".into()),
+        ),
+    };
+    SearchCoverage {
+        account_id,
+        mailbox: Some(mailbox),
+        state,
+        detail,
+    }
+}
+
+async fn local_search_coverage(
+    store: &Store,
+    account_ids: &[Uuid],
+    mailbox: Option<String>,
+    progress: &dakia_core::storage::SearchCatalogueV2BackfillProgress,
+) -> anyhow::Result<Vec<SearchCoverage>> {
+    let mut coverage = Vec::with_capacity(account_ids.len());
+    for account_id in account_ids.iter().copied() {
+        let mailboxes = store.list_selectable_mailboxes(account_id).await?;
+        let scoped_mailboxes = mailboxes
+            .iter()
+            .filter(|candidate| {
+                candidate.selectable
+                    && mailbox.as_ref().is_none_or(|scope| {
+                        candidate.local_path == *scope || candidate.remote_path == *scope
+                    })
+            })
+            .collect::<Vec<_>>();
+        let incomplete_mailboxes = scoped_mailboxes
+            .iter()
+            .filter(|candidate| candidate.catalogue_coverage != "complete")
+            .count();
+        let mut details = Vec::new();
+        if !progress.complete {
+            details.push(format!(
+                "Local search is still indexing: {} of {} messages.",
+                progress.indexed_messages, progress.total_messages
+            ));
+        }
+        if mailboxes.is_empty() {
+            details.push(
+                "Local mailbox catalogue has not been discovered for this account yet.".into(),
+            );
+        }
+        if incomplete_mailboxes > 0 {
+            details.push(format!(
+                "Local catalogue is partial in {incomplete_mailboxes} of {} selectable mailboxes.",
+                scoped_mailboxes.len()
+            ));
+        }
+        coverage.push(SearchCoverage {
+            account_id,
+            mailbox: mailbox.clone(),
+            state: SearchCoverageState::LocalCatalogue,
+            detail: (!details.is_empty()).then(|| details.join(" ")),
+        });
+    }
+    Ok(coverage)
+}
+
+fn local_body_index_search_coverage(
+    account_id: Uuid,
+    mailbox: Option<String>,
+    coverage: &dakia_core::storage::LocalBodyIndexCoverage,
+) -> Option<SearchCoverage> {
+    (coverage.searchable_bodies < coverage.catalogue_messages).then(|| SearchCoverage {
+        account_id,
+        mailbox,
+        state: SearchCoverageState::LocalBodyIndex,
+        detail: Some(format!(
+            "Local body search is partial: {} of {} messages have searchable text.",
+            coverage.searchable_bodies, coverage.catalogue_messages
+        )),
+    })
+}
+
+#[cfg(test)]
+fn next_local_search_cursor(
+    local_capacity: usize,
+    current: Option<dakia_core::MailCursor>,
+    page: &MailConversationPage,
+) -> Option<dakia_core::MailCursor> {
+    if local_capacity == 0 {
+        return current;
+    }
+    page.next_cursor.clone().or_else(|| {
+        page.conversations
+            .last()
+            .map(|conversation| dakia_core::MailCursor {
+                received_at: conversation.latest.received_at,
+                id: conversation.latest.id.clone(),
+            })
+    })
+}
+
+/// A provider failure is terminal for that account in this submitted search.
+/// Retrying the identical unavailable/auth-failed account on every local page
+/// would create an endless continuation once local rows are exhausted. Other
+/// accounts retain their own progress and may continue normally.
+fn finish_failed_provider_account(
+    sessions: &SearchSessionRegistry,
+    session: &SearchSession,
+    account_id: Uuid,
+) {
+    if let Some((cursor, _)) = sessions.provider_progress(session, account_id) {
+        let _ = sessions.set_provider_progress(session, account_id, cursor, true);
+    }
+}
+
+fn provider_search_has_pending_pages(
+    request: &SearchRequestV2,
+    sessions: &SearchSessionRegistry,
+    session: &SearchSession,
+    account_ids: &[Uuid],
+) -> bool {
+    matches!(request.execution_mode, SearchExecutionMode::Hybrid)
+        && account_ids.iter().copied().any(|account_id| {
+            sessions
+                .provider_progress(session, account_id)
+                .is_some_and(|(_, exhausted)| !exhausted)
+        })
+        || sessions.has_pending_provider_messages(session)
+}
+
+/// Split one public page's provider candidate budget across accounts in a
+/// rotating order. The total is exactly bounded by `page_size`; when there
+/// are more accounts than slots, later rounds begin at a different account.
+fn fair_provider_round_budgets(
+    account_ids: &[Uuid],
+    page_size: usize,
+    start: usize,
+) -> Vec<(Uuid, usize)> {
+    if account_ids.is_empty() || page_size == 0 {
+        return Vec::new();
+    }
+    let count = account_ids.len();
+    let base = page_size / count;
+    let remainder = page_size % count;
+    (0..count)
+        .filter_map(|offset| {
+            let account_id = account_ids[(start + offset) % count];
+            let budget = base + usize::from(offset < remainder);
+            (budget > 0).then_some((account_id, budget))
+        })
+        .collect()
+}
+
+/// Provider workers finish by account and mailbox availability, not message
+/// date. Merge their persisted conversations with local matches using the
+/// same newest-first key users see in every mailbox, with stable account and
+/// conversation tie-breakers for equal provider timestamps.
+fn sort_hybrid_conversations_newest_first(conversations: &mut [MailConversation]) {
+    conversations.sort_by(|left, right| {
+        right
+            .latest
+            .received_at
+            .cmp(&left.latest.received_at)
+            .then_with(|| right.latest.id.cmp(&left.latest.id))
+            .then_with(|| left.account_id.cmp(&right.account_id))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+}
+
+async fn search_v2_page(
+    app: &tauri::AppHandle,
+    state: Arc<AppState>,
+    request: SearchRequestV2,
+    session: SearchSession,
+    continuation: Option<SearchContinuationV2>,
+) -> Result<SearchPageV2, SearchErrorV2> {
+    let expression = parse_search_query(&request.raw_query).map_err(SearchErrorV2::from)?;
+    if !state.search_sessions.is_current(&session) {
+        return Err(SearchErrorV2 {
+            position: None,
+            category: SearchErrorCategory::Transient,
+            unsupported_operator: None,
+            message: "This search was cancelled.".into(),
+        });
+    }
+    let accounts = state.store.accounts().await.map_err(search_v2_error)?;
+    let account_ids = enabled_search_account_ids(&accounts, &request.account_ids);
+    // An empty explicit account selection means none of those requested
+    // accounts can run, not "all accounts". Storage treats an empty list as
+    // unscoped for legacy callers, so stop here before it can widen a
+    // disabled-only saved search into another account's mail.
+    if explicit_search_scope_has_no_enabled_accounts(&request.account_ids, &account_ids) {
+        let mut seen = HashSet::new();
+        let coverage = request
+            .account_ids
+            .iter()
+            .copied()
+            .filter(|account_id| seen.insert(*account_id))
+            .map(|account_id| SearchCoverage {
+                account_id,
+                mailbox: request.scope.mailbox.clone(),
+                state: SearchCoverageState::Unsupported,
+                detail: Some("This selected account is disabled or unavailable.".into()),
+            })
+            .collect::<Vec<_>>();
+        state.search_sessions.complete(&session);
+        return Ok(SearchPageV2 {
+            conversations: Vec::new(),
+            match_evidence: Default::default(),
+            coverage,
+            continuation: None,
+            session_id: session.session_id,
+            revision: session.revision,
+        });
+    }
+    let effective_mailbox = effective_search_scope_mailbox(&request, &expression);
+    let mut query = search_v2_query(&request, account_ids.clone(), &expression);
+    // V2 resumes from the SQL candidate keyset. Keep the old result cursor
+    // only in the opaque continuation for legacy compatibility; applying it
+    // here would make an older matching reply reintroduce a conversation that
+    // was already emitted on an earlier page.
+    query.cursor = None;
+    let migration_progress = state
+        .store
+        .search_catalogue_v2_backfill_progress()
+        .await
+        .map_err(search_v2_error)?;
+    let mut coverage = local_search_coverage(
+        &state.store,
+        &account_ids,
+        effective_mailbox.clone(),
+        &migration_progress,
+    )
+    .await
+    .map_err(search_v2_error)?;
+    // A complete v2 schema only means durable headers have been indexed. Body
+    // text remains partial until each message has either a search-only fetch,
+    // complete reader cache, or starred body cache. Report that distinction on
+    // every page instead of claiming locally complete body matching.
+    for account_id in &account_ids {
+        let body_coverage = state
+            .store
+            .local_body_index_coverage(*account_id)
+            .await
+            .map_err(search_v2_error)?;
+        if let Some(entry) =
+            local_body_index_search_coverage(*account_id, effective_mailbox.clone(), &body_coverage)
+        {
+            coverage.push(entry);
+        }
+    }
+    emit_search_progress(app, &state.search_sessions, &session, coverage.clone());
+    let mut provider_messages = Vec::new();
+
+    // Do not fetch another provider round while the previous round still has
+    // queued candidates. That queue is bounded to one public page below, so a
+    // high-match account cannot grow it on every continuation.
+    let should_fetch_provider_round = matches!(request.execution_mode, SearchExecutionMode::Hybrid)
+        && !state
+            .search_sessions
+            .has_pending_provider_messages(&session);
+    if should_fetch_provider_round {
+        let active_provider_accounts = account_ids
+            .iter()
+            .copied()
+            .filter(|account_id| {
+                state
+                    .search_sessions
+                    .provider_progress(&session, *account_id)
+                    .is_some_and(|(_, exhausted)| !exhausted)
+            })
+            .collect::<Vec<_>>();
+        let page_size = request.effective_page_size() as usize;
+        let provider_round = state
+            .search_sessions
+            .next_provider_round_offset(&session, active_provider_accounts.len(), page_size)
+            .map(|start| fair_provider_round_budgets(&active_provider_accounts, page_size, start))
+            .unwrap_or_default();
+        if !provider_round.is_empty() {
+            let shared_state = state.clone();
+            let shared_expression = expression.clone();
+            let mailbox = effective_mailbox.clone();
+            let include_spam_trash = request.scope.include_spam_trash;
+            let provider_session = session.clone();
+            let progress_app = app.clone();
+            let results = run_bounded_ordered(
+                provider_round,
+                REMOTE_SEARCH_CONCURRENCY,
+                state.remote_search_slots.clone(),
+                move |(account_id, provider_page_size)| {
+                    let state = shared_state.clone();
+                    let expression = shared_expression.clone();
+                    let mailbox = mailbox.clone();
+                    let session = provider_session.clone();
+                    let include_spam_trash = include_spam_trash;
+                    let progress_app = progress_app.clone();
+                    async move {
+                        // Provider search uses its own bounded lane plus the
+                        // shared connection budget. It deliberately does not
+                        // hold the account mutation lock for the entire
+                        // multi-command IMAP page: send/open operations use
+                        // that lock and must take priority over a search.
+                        let _remote = state
+                            .remote_operation_slots
+                            .clone()
+                            .acquire_owned()
+                            .await
+                            .expect("shared operation limiter must remain open");
+                        if !state.search_sessions.is_current(&session) {
+                            return Err((account_id, "cancelled".to_owned()));
+                        }
+                        let account = match enabled_account_for_operation(&state, account_id).await
+                        {
+                            Ok(account) => account,
+                            Err(detail) => {
+                                emit_search_progress(
+                                    &progress_app,
+                                    &state.search_sessions,
+                                    &session,
+                                    vec![provider_coverage_for_error(account_id, &detail)],
+                                );
+                                return Err((account_id, detail));
+                            }
+                        };
+                        let publication_generation = state
+                            .store
+                            .account_search_generation(account_id)
+                            .await
+                            .map_err(|error| (account_id, error.to_string()))?;
+                        let (cursor, exhausted) = state
+                            .search_sessions
+                            .provider_progress(&session, account_id)
+                            .ok_or_else(|| (account_id, "cancelled".to_owned()))?;
+                        if exhausted {
+                            return Ok::<_, (Uuid, String)>((account_id, None));
+                        }
+                        let page = match MailService::new(state.store.clone())
+                            .search_remote_expression_page_with_generation(
+                                &account,
+                                &expression,
+                                mailbox.as_deref(),
+                                &cursor,
+                                provider_page_size,
+                                include_spam_trash,
+                                Some(&session),
+                                Some(publication_generation),
+                            )
+                            .await
+                        {
+                            Ok(page) => page,
+                            Err(error) => {
+                                let detail = error.to_string();
+                                emit_search_progress(
+                                    &progress_app,
+                                    &state.search_sessions,
+                                    &session,
+                                    vec![provider_coverage_for_error(account_id, &detail)],
+                                );
+                                return Err((account_id, detail));
+                            }
+                        };
+                        // Re-check after provider work so an account removed or
+                        // disabled mid-search cannot publish stale candidates.
+                        if let Err(detail) = enabled_account_for_operation(&state, account_id).await
+                        {
+                            emit_search_progress(
+                                &progress_app,
+                                &state.search_sessions,
+                                &session,
+                                vec![provider_coverage_for_error(account_id, &detail)],
+                            );
+                            return Err((account_id, detail));
+                        }
+                        if !state.search_sessions.is_current(&session) {
+                            return Err((account_id, "cancelled".to_owned()));
+                        }
+                        if !state.search_sessions.set_provider_progress(
+                            &session,
+                            account_id,
+                            page.cursor.clone(),
+                            page.exhausted,
+                        ) {
+                            return Err((account_id, "cancelled".to_owned()));
+                        }
+                        let live_coverage = page
+                            .coverage
+                            .iter()
+                            .cloned()
+                            .map(|mailbox| {
+                                provider_mailbox_coverage(
+                                    account_id,
+                                    mailbox.mailbox,
+                                    mailbox.state,
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        emit_search_progress(
+                            &progress_app,
+                            &state.search_sessions,
+                            &session,
+                            live_coverage,
+                        );
+                        Ok::<_, (Uuid, String)>((account_id, Some((page.coverage, page.messages))))
+                    }
+                },
+            )
+            .await;
+            for result in results {
+                match result {
+                    Ok((_, None)) => {}
+                    Ok((account_id, Some((mailboxes, messages)))) => {
+                        provider_messages.extend(messages);
+                        for mailbox in mailboxes {
+                            coverage.push(provider_mailbox_coverage(
+                                account_id,
+                                mailbox.mailbox,
+                                mailbox.state,
+                            ));
+                        }
+                    }
+                    Err((account_id, detail)) if detail == "cancelled" => {
+                        coverage.push(SearchCoverage {
+                            account_id,
+                            mailbox: effective_mailbox.clone(),
+                            state: SearchCoverageState::Cancelled,
+                            detail: None,
+                        })
+                    }
+                    Err((account_id, detail)) => {
+                        finish_failed_provider_account(
+                            &state.search_sessions,
+                            &session,
+                            account_id,
+                        );
+                        coverage.push(provider_coverage_for_error(account_id, &detail))
+                    }
+                }
+            }
+        }
+    }
+    if !state.search_sessions.enqueue_provider_message_ids_bounded(
+        &session,
+        provider_messages.into_iter().map(|message| message.id),
+        request.effective_page_size() as usize,
+    ) {
+        return Err(search_v2_error("This search was cancelled."));
+    }
+    if !state.search_sessions.is_current(&session) {
+        return Err(SearchErrorV2 {
+            position: None,
+            category: SearchErrorCategory::Transient,
+            unsupported_operator: None,
+            message: "This search was cancelled.".into(),
+        });
+    }
+    // Provider pages are keyed by UID, while local pages are ordered by date.
+    // Resolve freshly found provider matches directly into this session page
+    // before applying the local date cursor, so a UID-old/date-new match can
+    // never be filtered out forever by an earlier local continuation.
+    let mut provider_conversations = Vec::new();
+    let mut provider_conversation_ids = HashSet::new();
+    let page_size = request.effective_page_size() as usize;
+    for message_id in state
+        .search_sessions
+        .take_provider_message_ids(&session, page_size)
+    {
+        let Some(message) = state
+            .store
+            .message(&message_id)
+            .await
+            .map_err(search_v2_error)?
+        else {
+            continue;
+        };
+        let target = ConversationTarget {
+            account_id: message.account_id.parse().map_err(search_v2_error)?,
+            local_message_id: Some(message.id.clone()),
+            rfc_message_id: None,
+            thread_id: None,
+            mailbox: None,
+        };
+        if let Some(conversation) = state
+            .store
+            .conversation_for_target(&target)
+            .await
+            .map_err(search_v2_error)?
+        {
+            if provider_conversation_ids.insert(conversation.id.clone())
+                && state
+                    .search_sessions
+                    .mark_conversation_emitted(&session, &conversation.id)
+            {
+                provider_conversations.push(conversation);
+            }
+        }
+    }
+    let provider_keys = provider_conversations
+        .iter()
+        .map(|conversation| {
+            (
+                conversation.account_id.clone(),
+                conversation.thread_id.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    // Ask storage to evaluate the exact provider conversations against the
+    // durable search corpus. This uses cached/search-only body text and
+    // attachment metadata, never the intentionally blank list hydration.
+    let mut evidence_query = query.clone();
+    evidence_query.cursor = None;
+    let provider_evidence = state
+        .store
+        .search_match_evidence_for_conversations(&evidence_query, &provider_keys)
+        .await
+        .map_err(search_v2_error)?;
+    let local_capacity = page_size.saturating_sub(provider_conversations.len());
+    let page = if local_capacity == 0 {
+        MailConversationPage {
+            conversations: Vec::new(),
+            next_cursor: query.cursor.clone(),
+            match_evidence: Default::default(),
+            candidate_cursor: continuation
+                .as_ref()
+                .and_then(|cursor| cursor.local_candidate_cursor.clone()),
+            candidate_exhausted: false,
+        }
+    } else {
+        query.limit = Some(local_capacity as u32);
+        state
+            .store
+            .search_conversation_page_from_candidate(
+                &query,
+                continuation
+                    .as_ref()
+                    .and_then(|cursor| cursor.local_candidate_cursor.as_ref()),
+                &state.search_sessions.emitted_conversation_ids(&session),
+            )
+            .await
+            .map_err(search_v2_error)?
+    };
+    // V2 local pagination is driven exclusively by the candidate keyset
+    // below. Retaining a legacy date cursor here would create a redundant
+    // empty continuation after the final bounded local page, and would be
+    // unsafe for an older matching reply in an already-emitted conversation.
+    let next_local_cursor = None;
+    let mut conversations = provider_conversations;
+    conversations.extend(
+        page.conversations
+            .into_iter()
+            .filter(|conversation| !provider_conversation_ids.contains(&conversation.id))
+            .filter(|conversation| {
+                state
+                    .search_sessions
+                    .mark_conversation_emitted(&session, &conversation.id)
+            }),
+    );
+    sort_hybrid_conversations_newest_first(&mut conversations);
+    let provider_pending =
+        provider_search_has_pending_pages(&request, &state.search_sessions, &session, &account_ids);
+    let next_offset = continuation
+        .as_ref()
+        .map(|cursor| cursor.offset)
+        .unwrap_or_default()
+        .saturating_add(conversations.len() as u64);
+    let next_local_candidate_cursor = page.candidate_cursor.clone();
+    let continuation =
+        (next_local_cursor.is_some() || next_local_candidate_cursor.is_some() || provider_pending)
+            .then(|| {
+                SearchContinuationV2::new(&session, &request, next_offset)
+                    .with_local_cursor(next_local_cursor)
+                    .with_local_candidate_cursor(next_local_candidate_cursor)
+                    .encode()
+            });
+    let mut match_evidence = page.match_evidence;
+    match_evidence.extend(provider_evidence);
+    match_evidence.retain(|conversation_id, _| {
+        conversations
+            .iter()
+            .any(|conversation| conversation.id == *conversation_id)
+    });
+    if continuation.is_none() {
+        state.search_sessions.complete(&session);
+    }
+    Ok(SearchPageV2 {
+        conversations,
+        match_evidence,
+        coverage,
+        continuation,
+        session_id: session.session_id,
+        revision: session.revision,
+    })
+}
+
+#[tauri::command]
+async fn start_search(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    request: SearchRequestV2,
+) -> Result<SearchPageV2, SearchErrorV2> {
+    if request.continuation.is_some() {
+        return Err(SearchErrorV2 {
+            position: None,
+            category: SearchErrorCategory::Parse,
+            unsupported_operator: None,
+            message: "Use the next-page command for a search continuation.".into(),
+        });
+    }
+    parse_search_query(&request.raw_query).map_err(SearchErrorV2::from)?;
+    let app_state = state.inner().clone();
+    let session = app_state.search_sessions.begin(&request);
+    if session.is_cancelled() {
+        // A client-generated ID may have been cancelled before this command
+        // won the IPC race. Remove the one-shot cancelled session immediately
+        // rather than retaining it as an inactive registry entry.
+        app_state.search_sessions.cancel(session.session_id);
+        return Err(SearchErrorV2 {
+            position: None,
+            category: SearchErrorCategory::Transient,
+            unsupported_operator: None,
+            message: "This search was cancelled.".into(),
+        });
+    }
+    search_v2_page(&app, app_state, request, session, None).await
+}
+
+#[tauri::command]
+async fn next_search_page(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    request: SearchRequestV2,
+) -> Result<SearchPageV2, SearchErrorV2> {
+    let continuation = request
+        .decode_continuation()
+        .map_err(|_| SearchErrorV2 {
+            position: None,
+            category: SearchErrorCategory::Parse,
+            unsupported_operator: None,
+            message: "This search page is no longer valid.".into(),
+        })?
+        .ok_or_else(|| SearchErrorV2 {
+            position: None,
+            category: SearchErrorCategory::Parse,
+            unsupported_operator: None,
+            message: "A search continuation is required.".into(),
+        })?;
+    let app_state = state.inner().clone();
+    let session = app_state
+        .search_sessions
+        .current_for(continuation.session_id, &request)
+        .ok_or_else(|| SearchErrorV2 {
+            position: None,
+            category: SearchErrorCategory::Transient,
+            unsupported_operator: None,
+            message: "This search was superseded or cancelled.".into(),
+        })?;
+    search_v2_page(&app, app_state, request, session, Some(continuation)).await
+}
+
+#[tauri::command]
+async fn cancel_search(state: State<'_, Arc<AppState>>, session_id: Uuid) -> Result<(), String> {
+    state.search_sessions.cancel(session_id);
+    Ok(())
+}
+
+#[cfg(test)]
+mod search_v2_command_tests {
+    use super::*;
+
+    fn request() -> SearchRequestV2 {
+        SearchRequestV2 {
+            raw_query: "from:person@example.test".into(),
+            client_request_id: None,
+            account_ids: vec![Uuid::from_u128(7)],
+            scope: dakia_core::SearchScopeV2 {
+                mailbox: None,
+                include_spam_trash: false,
+            },
+            execution_mode: SearchExecutionMode::Hybrid,
+            page_size: 50,
+            continuation: None,
+        }
+    }
+
+    fn account_for_search_scope(email: &str) -> Account {
+        AccountDraft {
+            email: email.into(),
+            display_name: email.into(),
+            provider_id: Some("fastmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("fastmail").expect("Fastmail preset"))
+    }
+
+    fn scoped_search_message(account_id: Uuid, id: &str) -> MailSummary {
+        MailSummary {
+            id: id.into(),
+            account_id: account_id.to_string(),
+            mailbox: "Inbox".into(),
+            uid: 1,
+            message_id: Some(format!("<{id}@example.test>")),
+            in_reply_to: None,
+            reference_ids: None,
+            thread_id: format!("thread-{id}"),
+            subject: "account scope needle".into(),
+            from_name: None,
+            from_address: "sender@example.test".into(),
+            to_addresses: "recipient@example.test".into(),
+            cc_addresses: String::new(),
+            bcc_addresses: String::new(),
+            reply_to_addresses: String::new(),
+            received_at: chrono::Utc::now(),
+            snippet: "account scope needle".into(),
+            body_text: String::new(),
+            body_html: None,
+            content_state: "headers_only".into(),
+            unsubscribe_kind: None,
+            unsubscribe_url: None,
+            is_read: true,
+            is_flagged: false,
+            is_answered: false,
+            is_draft: false,
+            has_attachments: false,
+            category: None,
+            classification_confidence: None,
+            classification_source: None,
+            classification_signals: String::new(),
+            attachments: Vec::new(),
+        }
+    }
+
+    fn search_conversation(
+        account_id: Uuid,
+        id: &str,
+        received_at: chrono::DateTime<chrono::Utc>,
+    ) -> MailConversation {
+        let mut latest = scoped_search_message(account_id, id);
+        latest.received_at = received_at;
+        MailConversation {
+            id: format!("conversation-{id}"),
+            account_id: account_id.to_string(),
+            thread_id: latest.thread_id.clone(),
+            messages: vec![latest.clone()],
+            source_messages: vec![latest.clone()],
+            latest,
+            message_count: 1,
+            unread: false,
+            has_attachments: false,
+            participants: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn hybrid_results_sort_newest_first_across_local_and_provider_accounts() {
+        let base = "2026-09-12T10:00:00Z"
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .expect("timestamp");
+        let mut results = vec![
+            // Simulate completion order: a remote older mailbox, a local
+            // result, then another account's newer remote result.
+            search_conversation(Uuid::from_u128(1), "provider-old", base),
+            search_conversation(
+                Uuid::from_u128(2),
+                "local-middle",
+                base + chrono::Duration::minutes(5),
+            ),
+            search_conversation(
+                Uuid::from_u128(3),
+                "provider-new",
+                base + chrono::Duration::minutes(10),
+            ),
+        ];
+        sort_hybrid_conversations_newest_first(&mut results);
+        assert_eq!(
+            results
+                .iter()
+                .map(|conversation| conversation.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "conversation-provider-new",
+                "conversation-local-middle",
+                "conversation-provider-old",
+            ]
+        );
+    }
+
+    #[test]
+    fn search_mailbox_catalogue_is_stably_sorted_and_deduplicated_per_account_path() {
+        let mailbox =
+            |account_id: &str, remote_path: &str, local_path: &str, id: &str| SelectableMailbox {
+                id: id.into(),
+                account_id: account_id.into(),
+                remote_path: remote_path.into(),
+                local_path: local_path.into(),
+                hierarchy_delimiter: Some("/".into()),
+                parent_id: None,
+                parent_path: None,
+                special_use: None,
+                selectable: true,
+                uid_validity: None,
+                catalogue_coverage: "unknown".into(),
+            };
+        let listed = sort_and_deduplicate_search_mailboxes(vec![
+            mailbox("account-b", "Archive", "Archive", "b-archive"),
+            mailbox("account-a", "Projects", "Projects", "a-projects"),
+            mailbox("account-a", "Projects", "Projects duplicate", "a-duplicate"),
+            mailbox("account-a", "INBOX", "INBOX", "a-inbox"),
+        ]);
+        assert_eq!(
+            listed
+                .iter()
+                .map(|entry| (entry.account_id.as_str(), entry.remote_path.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("account-a", "INBOX"),
+                ("account-a", "Projects"),
+                ("account-b", "Archive"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_requested_accounts_are_excluded_from_v2_local_results_and_coverage() {
+        let store = Store::in_memory().await.expect("in-memory store");
+        let enabled = account_for_search_scope("enabled-search@example.test");
+        let mut disabled = account_for_search_scope("disabled-search@example.test");
+        disabled.enabled = false;
+        store
+            .save_account(&enabled)
+            .await
+            .expect("save enabled account");
+        store
+            .save_account(&disabled)
+            .await
+            .expect("save disabled account");
+        store
+            .upsert_messages(&[
+                scoped_search_message(enabled.id, "enabled-search-message"),
+                scoped_search_message(disabled.id, "disabled-search-message"),
+            ])
+            .await
+            .expect("save local catalogue");
+
+        let requested = vec![disabled.id, enabled.id];
+        let account_ids =
+            enabled_search_account_ids(&store.accounts().await.expect("read accounts"), &requested);
+        assert_eq!(account_ids, vec![enabled.id]);
+        assert!(!explicit_search_scope_has_no_enabled_accounts(
+            &requested,
+            &account_ids
+        ));
+        let disabled_only = vec![disabled.id];
+        let no_enabled = enabled_search_account_ids(
+            &store.accounts().await.expect("read accounts"),
+            &disabled_only,
+        );
+        assert!(no_enabled.is_empty());
+        assert!(explicit_search_scope_has_no_enabled_accounts(
+            &disabled_only,
+            &no_enabled
+        ));
+
+        let page = store
+            .search_conversation_page(&SearchQuery {
+                text: "account scope needle".into(),
+                account_ids: account_ids.clone(),
+                limit: Some(20),
+                ..SearchQuery::default()
+            })
+            .await
+            .expect("search enabled local catalogue");
+        assert_eq!(page.conversations.len(), 1);
+        assert_eq!(page.conversations[0].account_id, enabled.id.to_string());
+
+        let coverage = local_search_coverage(
+            &store,
+            &account_ids,
+            None,
+            &dakia_core::storage::SearchCatalogueV2BackfillProgress {
+                indexed_messages: 2,
+                total_messages: 2,
+                complete: true,
+            },
+        )
+        .await
+        .expect("read mailbox catalogue coverage");
+        assert_eq!(coverage.len(), 1);
+        assert_eq!(coverage[0].account_id, enabled.id);
+        // `search_v2_page` uses the same filtered list for its provider work,
+        // so a disabled account cannot be contacted or receive coverage.
+    }
+
+    #[test]
+    fn legacy_search_never_widens_a_disabled_or_missing_explicit_scope() {
+        let enabled = account_for_search_scope("legacy-enabled@example.test");
+        let mut disabled = account_for_search_scope("legacy-disabled@example.test");
+        disabled.enabled = false;
+        let accounts = vec![enabled.clone(), disabled.clone()];
+        let base = SearchQuery {
+            text: "needle".into(),
+            account_ids: vec![disabled.id],
+            ..SearchQuery::default()
+        };
+        assert!(legacy_search_query_for_enabled_accounts(base, &accounts).is_none());
+
+        let missing = SearchQuery {
+            text: "needle".into(),
+            account_ids: vec![Uuid::from_u128(99_001)],
+            ..SearchQuery::default()
+        };
+        assert!(legacy_search_query_for_enabled_accounts(missing, &accounts).is_none());
+
+        let mixed = SearchQuery {
+            text: "needle".into(),
+            account_ids: vec![disabled.id, enabled.id],
+            ..SearchQuery::default()
+        };
+        assert_eq!(
+            legacy_search_query_for_enabled_accounts(mixed, &accounts)
+                .expect("mixed scope keeps the active account")
+                .account_ids,
+            vec![enabled.id]
+        );
+    }
+
+    #[test]
+    fn failed_provider_account_does_not_leave_an_endless_v2_continuation() {
+        let sessions = SearchSessionRegistry::default();
+        let offline_account = Uuid::from_u128(801);
+        let healthy_account = Uuid::from_u128(802);
+        let mut request = request();
+        request.account_ids = vec![offline_account];
+        let session = sessions.begin(&request);
+
+        // This models an offline/auth error after no local or provider rows
+        // were found. It must not keep the public continuation alive.
+        finish_failed_provider_account(&sessions, &session, offline_account);
+        assert!(sessions
+            .provider_progress(&session, offline_account)
+            .is_some_and(|(_, exhausted)| exhausted));
+        assert!(!provider_search_has_pending_pages(
+            &request,
+            &sessions,
+            &session,
+            &request.account_ids,
+        ));
+
+        // A failure in one account does not suppress a different account's
+        // still-pending provider work.
+        let mut mixed_request = request.clone();
+        mixed_request.account_ids = vec![offline_account, healthy_account];
+        let mixed_session = sessions.begin(&mixed_request);
+        finish_failed_provider_account(&sessions, &mixed_session, offline_account);
+        assert!(provider_search_has_pending_pages(
+            &mixed_request,
+            &sessions,
+            &mixed_session,
+            &mixed_request.account_ids,
+        ));
+        let (cursor, _) = sessions
+            .provider_progress(&mixed_session, healthy_account)
+            .expect("active healthy account has fresh provider progress");
+        assert!(sessions.set_provider_progress(&mixed_session, healthy_account, cursor, true));
+        assert!(!provider_search_has_pending_pages(
+            &mixed_request,
+            &sessions,
+            &mixed_session,
+            &mixed_request.account_ids,
+        ));
+    }
+
+    #[test]
+    fn provider_round_queue_is_page_bounded_and_fair_across_high_match_accounts() {
+        let accounts = [
+            Uuid::from_u128(901),
+            Uuid::from_u128(902),
+            Uuid::from_u128(903),
+        ];
+        let first_round = fair_provider_round_budgets(&accounts, 5, 0);
+        assert_eq!(
+            first_round,
+            vec![(accounts[0], 2), (accounts[1], 2), (accounts[2], 1)]
+        );
+        assert_eq!(
+            first_round.iter().map(|(_, budget)| budget).sum::<usize>(),
+            5,
+            "one provider round can never queue more candidates than its public page"
+        );
+
+        let sessions = SearchSessionRegistry::default();
+        let mut request = request();
+        request.account_ids = accounts.to_vec();
+        request.page_size = 5;
+        let session = sessions.begin(&request);
+        let ids = first_round
+            .iter()
+            .flat_map(|(account_id, budget)| {
+                (0..*budget).map(move |index| format!("{account_id}-{index}"))
+            })
+            .collect::<Vec<_>>();
+        assert!(sessions.enqueue_provider_message_ids_bounded(&session, ids.clone(), 5));
+        assert!(sessions.has_pending_provider_messages(&session));
+        assert_eq!(sessions.take_provider_message_ids(&session, 10), ids);
+        assert!(!sessions.has_pending_provider_messages(&session));
+
+        let first_start = sessions
+            .next_provider_round_offset(&session, accounts.len(), 5)
+            .expect("active session");
+        let second_start = sessions
+            .next_provider_round_offset(&session, accounts.len(), 5)
+            .expect("active session");
+        assert_eq!(first_start, 0);
+        assert_eq!(second_start, 2, "a later round starts with another account");
+    }
+
+    #[test]
+    fn v2_query_keeps_the_raw_query_and_explicitly_widens_spam_trash() {
+        let account_id = Uuid::from_u128(7);
+        let expression = parse_search_query(&request().raw_query).unwrap();
+        let normal = search_v2_query(&request(), vec![account_id], &expression);
+        assert_eq!(normal.text, "from:person@example.test");
+        assert_eq!(normal.account_ids, vec![account_id]);
+
+        let mut widened_request = request();
+        widened_request.scope.include_spam_trash = true;
+        let widened_expression = parse_search_query(&widened_request.raw_query).unwrap();
+        let widened = search_v2_query(&widened_request, vec![account_id], &widened_expression);
+        assert_eq!(widened.text, "(from:person@example.test) in:*");
+        assert!(parse_search_query(&widened.text).is_ok());
+    }
+
+    #[test]
+    fn explicit_in_syntax_replaces_the_ambient_folder_for_local_and_provider_planning() {
+        let account_id = Uuid::from_u128(7);
+        let mut request = request();
+        request.scope.mailbox = Some("Inbox".into());
+        request.raw_query = "in:Sent from:person@example.test".into();
+        let expression = parse_search_query(&request.raw_query).unwrap();
+        assert!(expression_has_folder_predicate(&expression));
+        assert_eq!(effective_search_scope_mailbox(&request, &expression), None);
+        assert_eq!(
+            search_v2_query(&request, vec![account_id], &expression).mailbox,
+            None,
+            "local SQL must not intersect Inbox with an explicit Sent predicate"
+        );
+
+        for query in ["in:*", "in:Spam", "in:Projects/*"] {
+            request.raw_query = query.into();
+            let expression = parse_search_query(&request.raw_query).unwrap();
+            assert_eq!(
+                effective_search_scope_mailbox(&request, &expression),
+                None,
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_failures_have_safe_per_account_coverage() {
+        let coverage = provider_coverage_for_error(Uuid::nil(), "mailbox identity changed");
+        assert_eq!(coverage.state, SearchCoverageState::MailboxChanged);
+        assert_eq!(
+            coverage.detail.as_deref(),
+            Some("Provider search was unavailable for this account.")
+        );
+    }
+
+    #[test]
+    fn transient_search_errors_do_not_expose_provider_or_sqlite_details() {
+        let error = search_v2_error(
+            "SQLite error near SELECT for imap.example.test: credentials are unavailable",
+        );
+        assert_eq!(error.category, SearchErrorCategory::Transient);
+        assert_eq!(
+            error.message,
+            "Search could not be completed. Please try again."
+        );
+        assert!(!error.message.contains("SQLite"));
+        assert!(!error.message.contains("imap.example.test"));
+    }
+
+    #[test]
+    fn search_progress_payload_is_bound_to_the_current_session_revision() {
+        let update = SearchProgressUpdate {
+            session_id: Uuid::from_u128(54),
+            revision: 8,
+            coverage: vec![SearchCoverage {
+                account_id: Uuid::from_u128(9),
+                mailbox: Some("Inbox".into()),
+                state: SearchCoverageState::ProviderSearched,
+                detail: None,
+            }],
+        };
+        assert_eq!(
+            serde_json::to_value(update).unwrap(),
+            serde_json::json!({
+                "sessionId": "00000000-0000-0000-0000-000000000036",
+                "revision": 8,
+                "coverage": [{
+                    "account_id": "00000000-0000-0000-0000-000000000009",
+                    "mailbox": "Inbox",
+                    "state": "provider_searched",
+                    "detail": null,
+                }]
+            })
+        );
+    }
+
+    #[test]
+    fn provider_coverage_keeps_a_successful_folder_when_another_folder_fails() {
+        let account_id = Uuid::from_u128(9);
+        let inbox = provider_mailbox_coverage(
+            account_id,
+            "Inbox".into(),
+            ProviderMailboxSearchState::Searched,
+        );
+        let archive = provider_mailbox_coverage(
+            account_id,
+            "Archive".into(),
+            ProviderMailboxSearchState::Offline,
+        );
+        assert_eq!(inbox.state, SearchCoverageState::ProviderSearched);
+        assert_eq!(inbox.mailbox.as_deref(), Some("Inbox"));
+        assert_eq!(archive.state, SearchCoverageState::Offline);
+        assert_eq!(archive.mailbox.as_deref(), Some("Archive"));
+    }
+
+    #[test]
+    fn provider_partial_and_search_body_cache_coverage_have_distinct_meanings() {
+        let account_id = Uuid::from_u128(9);
+        let current_candidate = provider_mailbox_coverage(
+            account_id,
+            "Inbox".into(),
+            ProviderMailboxSearchState::Partial,
+        );
+        assert_eq!(
+            current_candidate.state,
+            SearchCoverageState::ProviderPartial
+        );
+        assert_eq!(
+            current_candidate.detail.as_deref(),
+            Some("Some provider candidates could not be fully verified for this mailbox.")
+        );
+        let later_local_page = provider_mailbox_coverage(
+            account_id,
+            "Inbox".into(),
+            ProviderMailboxSearchState::SearchBodyCacheIncomplete,
+        );
+        assert_eq!(later_local_page.state, SearchCoverageState::LocalBodyIndex);
+        assert_eq!(
+            later_local_page.detail.as_deref(),
+            Some("Provider results were found, but some text is not available for later local pages.")
+        );
+    }
+
+    #[tokio::test]
+    async fn incomplete_catalogue_backfill_and_partial_account_mailboxes_are_visible_in_v2_coverage(
+    ) {
+        let store = Store::in_memory().await.unwrap();
+        let account = account_for_search_scope("partial-catalogue@example.test");
+        let account_id = account.id;
+        store.save_account(&account).await.unwrap();
+        store
+            .upsert_selectable_mailbox(
+                account_id,
+                &SelectableMailboxDraft {
+                    remote_path: "Projects".into(),
+                    local_path: Some("Projects".into()),
+                    hierarchy_delimiter: Some("/".into()),
+                    parent_id: None,
+                    parent_path: None,
+                    special_use: None,
+                    selectable: true,
+                    uid_validity: Some(42),
+                    catalogue_coverage: "partial".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let progress = dakia_core::storage::SearchCatalogueV2BackfillProgress {
+            indexed_messages: 500,
+            total_messages: 1_200,
+            complete: false,
+        };
+        let coverage = local_search_coverage(&store, &[account_id], None, &progress)
+            .await
+            .unwrap();
+        assert!(coverage.iter().any(|entry| {
+            entry.state == SearchCoverageState::LocalCatalogue
+                && entry.detail.as_deref().is_some_and(|detail| {
+                    detail.contains("Local search is still indexing: 500 of 1200 messages.")
+                })
+                && entry.detail.as_deref().is_some_and(|detail| {
+                    detail.contains("Local catalogue is partial in 1 of 1 selectable mailboxes.")
+                })
+        }));
+        assert!(!coverage
+            .iter()
+            .any(|entry| entry.state == SearchCoverageState::LocalBodyIndex));
+    }
+
+    #[tokio::test]
+    async fn local_coverage_keeps_an_enabled_account_partial_until_its_mailbox_catalogue_exists() {
+        let store = Store::in_memory().await.unwrap();
+        let account = account_for_search_scope("undiscovered-mailboxes@example.test");
+        store.save_account(&account).await.unwrap();
+        let coverage = local_search_coverage(
+            &store,
+            &[account.id],
+            None,
+            &dakia_core::storage::SearchCatalogueV2BackfillProgress {
+                indexed_messages: 0,
+                total_messages: 0,
+                complete: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(coverage.len(), 1);
+        assert_eq!(coverage[0].account_id, account.id);
+        assert_eq!(
+            coverage[0].detail.as_deref(),
+            Some("Local mailbox catalogue has not been discovered for this account yet.")
+        );
+    }
+
+    #[test]
+    fn headers_only_messages_remain_visible_as_partial_body_coverage_after_migration() {
+        let entry = local_body_index_search_coverage(
+            Uuid::from_u128(11),
+            Some("Inbox".into()),
+            &dakia_core::storage::LocalBodyIndexCoverage {
+                account_id: Uuid::from_u128(11).to_string(),
+                catalogue_messages: 100,
+                searchable_bodies: 25,
+            },
+        )
+        .expect("headers-only corpus must not claim complete body coverage");
+        assert_eq!(entry.state, SearchCoverageState::LocalBodyIndex);
+        assert_eq!(entry.mailbox.as_deref(), Some("Inbox"));
+        assert_eq!(
+            entry.detail.as_deref(),
+            Some("Local body search is partial: 25 of 100 messages have searchable text.")
+        );
+    }
+
+    #[test]
+    fn contacted_people_background_backfill_emits_only_when_people_changed() {
+        let unchanged = dakia_core::storage::ContactedPeopleBackfillProgress {
+            processed_messages: 100,
+            changed_people: 0,
+            complete: false,
+        };
+        let changed = dakia_core::storage::ContactedPeopleBackfillProgress {
+            processed_messages: 1,
+            changed_people: 1,
+            complete: true,
+        };
+        assert!(!contacted_people_backfill_changed(&unchanged));
+        assert!(contacted_people_backfill_changed(&changed));
+    }
+
+    #[test]
+    fn provider_only_page_preserves_the_local_cursor_for_the_next_page() {
+        let existing = dakia_core::MailCursor {
+            received_at: chrono::Utc::now(),
+            id: "local-before-provider-page".into(),
+        };
+        let provider_only_page = MailConversationPage {
+            conversations: Vec::new(),
+            match_evidence: Default::default(),
+            next_cursor: Some(existing.clone()),
+            candidate_cursor: None,
+            candidate_exhausted: false,
+        };
+        assert_eq!(
+            next_local_search_cursor(0, Some(existing.clone()), &provider_only_page),
+            Some(existing),
+            "a full provider page must not derive a cursor from provider dates or IDs"
+        );
+        assert_eq!(
+            next_local_search_cursor(
+                0,
+                None,
+                &MailConversationPage {
+                    conversations: Vec::new(),
+                    match_evidence: Default::default(),
+                    next_cursor: None,
+                    candidate_cursor: None,
+                    candidate_exhausted: false,
+                }
+            ),
+            None,
+            "the first provider-only page leaves newer local-only matches eligible"
+        );
+    }
 }
 
 #[tauri::command]
@@ -3900,22 +6227,27 @@ async fn search_remote(
     let searches = run_bounded_ordered(
         query.account_ids.clone(),
         REMOTE_SEARCH_CONCURRENCY,
-        state.remote_operation_slots.clone(),
+        state.remote_search_slots.clone(),
         move |account_id| {
             let state = search_state.clone();
             let text = search_text.clone();
             let mailbox = search_mailbox.clone();
             async move {
-                let account = state
-                    .store
-                    .account(account_id)
+                let _remote = state
+                    .remote_operation_slots
+                    .clone()
+                    .acquire_owned()
                     .await
-                    .map_err(error)?
-                    .ok_or_else(|| "Account not found".to_owned())?;
-                MailService::new(state.store.clone())
+                    .expect("shared operation limiter must remain open");
+                let account = enabled_account_for_operation(&state, account_id).await?;
+                let hits = MailService::new(state.store.clone())
                     .search_remote(&account, &text, mailbox.as_deref(), limit)
                     .await
-                    .map_err(error)
+                    .map_err(error)?;
+                // Provider work must not publish a result after the account
+                // was disabled or removed while its IMAP command was running.
+                enabled_account_for_operation(&state, account_id).await?;
+                Ok::<_, String>(hits)
             }
         },
     )
@@ -3970,6 +6302,7 @@ async fn set_message_starred(
         .ok_or_else(|| "Message not found".to_owned())?;
     let account_id = Uuid::parse_str(&message.account_id).map_err(error)?;
     let _operation = state.account_operations.acquire(account_id).await;
+    invalidate_searches_for_account(state.inner(), account_id).await?;
     let account = enabled_account_for_operation(state.inner(), account_id).await?;
     MailService::new(state.store.clone())
         .set_flagged(&account, &message.mailbox, message.uid as u32, starred)
@@ -4017,6 +6350,7 @@ async fn set_message_read(
         .ok_or_else(|| "Message not found".to_owned())?;
     let account_id = Uuid::parse_str(&message.account_id).map_err(error)?;
     let _operation = state.account_operations.acquire(account_id).await;
+    invalidate_searches_for_account(state.inner(), account_id).await?;
     let account = enabled_account_for_operation(state.inner(), account_id).await?;
     MailService::new(state.store.clone())
         .set_read(&account, &message.mailbox, message.uid as u32, read)
@@ -4488,6 +6822,11 @@ async fn run_mail_rebuild(
     // cancellation while this rebuild is queued behind another operation.
     let cancel_receiver = state.mail_rebuild_cancellations.register(account.id);
     let _operation = state.account_operations.acquire(account.id).await;
+    if let Err(error) = invalidate_searches_for_account(&state, account.id).await {
+        state.mail_rebuild_cancellations.clear(account.id);
+        release_mail_rebuild(&state, account.id);
+        return Err(anyhow::Error::msg(error));
+    }
     let current_account = match state.store.account(account.id).await {
         Err(error) => {
             state.mail_rebuild_cancellations.clear(account.id);
@@ -4625,6 +6964,17 @@ async fn run_mail_rebuild_locked(
     if result.is_ok() {
         if let Err(error) = state.store.delete_mail_rebuild_job(account.id).await {
             result = Err(error);
+        } else {
+            // Sent-recipient learning is deliberately detached from the rebuild's
+            // account-operation lock. The worker drains short restart-safe
+            // batches, yielding between them, so a large Sent folder cannot make
+            // the successful rebuild or foreground operations wait.
+            let contacted_people_app = app.clone();
+            let contacted_people_state = state.clone();
+            tauri::async_runtime::spawn(async move {
+                continue_contacted_people_backfill(contacted_people_app, contacted_people_state)
+                    .await;
+            });
         }
         state
             .mail_rebuilds
@@ -4701,6 +7051,145 @@ async fn run_mail_rebuild_locked(
     result
 }
 
+/// Drains historical Sent recipients in short transactions. Each batch drops
+/// the account operation lock before yielding so normal message opens, sends,
+/// and rebuilds can run between batches and restart-safe markers prevent
+/// duplicate learning after an interruption.
+async fn continue_contacted_people_backfill(app: tauri::AppHandle, state: Arc<AppState>) {
+    drain_contacted_people_backfill(&state, || {
+        emit_contacted_people_changed(&app, true, false);
+    })
+    .await;
+}
+
+/// Drain every eligible account in short Sent-recipient batches. A snapshot
+/// can become stale while this worker yields, so each batch re-checks both the
+/// global collection setting and the current account before acquiring data.
+/// That makes disable/delete a clean stop rather than a background write.
+async fn drain_contacted_people_backfill<F>(state: &Arc<AppState>, mut changed: F)
+where
+    F: FnMut(),
+{
+    if !state
+        .store
+        .autocomplete_suggestions_enabled()
+        .await
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let accounts = match state.store.accounts().await {
+        Ok(accounts) => accounts,
+        Err(error) => {
+            tracing::warn!(error = %error, "could not schedule contacted-people backfill");
+            return;
+        }
+    };
+    let excluded = accounts
+        .iter()
+        .map(|account| account.email.clone())
+        .collect::<Vec<_>>();
+    for account in accounts.into_iter().filter(|account| account.enabled) {
+        if !state
+            .store
+            .autocomplete_suggestions_enabled()
+            .await
+            .unwrap_or(false)
+        {
+            return;
+        }
+        loop {
+            // The setting can change while a previous account or batch was
+            // running. Do not begin another transaction after disable.
+            if !state
+                .store
+                .autocomplete_suggestions_enabled()
+                .await
+                .unwrap_or(false)
+            {
+                return;
+            }
+            let progress = {
+                let _operation = state.account_operations.acquire(account.id).await;
+                match state.store.account(account.id).await {
+                    Ok(Some(current)) if current.enabled => state
+                        .store
+                        .backfill_contacted_people_from_sent(account.id, &excluded, 100)
+                        .await
+                        .map(Some),
+                    Ok(_) => Ok(None),
+                    Err(error) => Err(error),
+                }
+            };
+            match progress {
+                Ok(Some(progress)) => {
+                    if contacted_people_backfill_changed(&progress) {
+                        changed();
+                    }
+                    if progress.complete {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    tracing::warn!(account_id = %account.id, error = %error, "could not continue contacted-people backfill");
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn contacted_people_backfill_changed(
+    progress: &dakia_core::storage::ContactedPeopleBackfillProgress,
+) -> bool {
+    progress.changed_people > 0
+}
+
+/// Continues the additive search catalogue migration after Store::open has
+/// performed its first bounded batch. No provider or account lock is held:
+/// each call advances at most 500 rows per stage, then yields so foreground
+/// opening and sending keep precedence.
+async fn continue_search_catalogue_v2_backfill(state: Arc<AppState>) {
+    loop {
+        match state.store.advance_search_catalogue_v2_backfill().await {
+            Ok(progress) if progress.complete => return,
+            Ok(_) => tokio::task::yield_now().await,
+            Err(error) => {
+                tracing::warn!(error = %error, "could not continue search catalogue v2 backfill");
+                return;
+            }
+        }
+    }
+}
+
+/// Completes legacy contacted-people normalization and source-marker upgrades
+/// after Store::open has performed its first bounded batch. These migrations
+/// never learn an address or alter ranking statistics, so they intentionally
+/// do not emit `contacted-people-changed`; open dropdowns need refreshes only
+/// when recipient data itself changed.
+async fn continue_contacted_people_migrations(state: Arc<AppState>) {
+    loop {
+        match state.store.continue_contacted_people_migrations(500).await {
+            Ok(progress) if progress.complete => return,
+            Ok(_) => tokio::task::yield_now().await,
+            Err(error) => {
+                tracing::warn!(error = %error, "could not continue contacted-people migrations");
+                return;
+            }
+        }
+    }
+}
+
+fn kick_contacted_people_migrations(state: Arc<AppState>) {
+    tauri::async_runtime::spawn(async move {
+        let drain = state.contacted_people_migration_drain.clone();
+        let _drain = drain.lock().await;
+        continue_contacted_people_migrations(state).await;
+    });
+}
+
 #[tauri::command]
 async fn mail_rebuild_status(
     state: State<'_, Arc<AppState>>,
@@ -4770,6 +7259,11 @@ async fn sync_account(
         (result, account)
     } else {
         let _operation = state.account_operations.acquire(account_id).await;
+        // A foreground refresh may publish provider-authoritative flags and
+        // locators. Invalidate concurrent hybrid search publications before
+        // the refresh begins; the generation guard then rejects late IMAP
+        // search writes atomically in Storage.
+        invalidate_searches_for_account(state.inner(), account_id).await?;
         let account = state
             .store
             .account(account_id)
@@ -4798,15 +7292,27 @@ async fn sync_account(
 
 #[tauri::command]
 async fn send_message(
+    app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     draft: ComposeMessage,
 ) -> Result<String, String> {
     let _operation = state.account_operations.acquire(draft.account_id).await;
     let account = enabled_account_for_operation(state.inner(), draft.account_id).await?;
-    MailService::new(state.store.clone())
+    let response = MailService::new(state.store.clone())
         .send(&account, &draft)
         .await
-        .map_err(error)
+        .map_err(error)?;
+    // `MailService::send` records recipients only after the final SMTP DATA
+    // acceptance. Do not publish this event on a failed transaction.
+    if state
+        .store
+        .autocomplete_suggestions_enabled()
+        .await
+        .unwrap_or(false)
+    {
+        emit_contacted_people_changed(&app, true, false);
+    }
+    Ok(response)
 }
 
 #[tauri::command]
@@ -4886,6 +7392,8 @@ mod permanent_delete_command_tests {
             unsubscribe_url: None,
             is_read: false,
             is_flagged: false,
+            is_answered: false,
+            is_draft: false,
             has_attachments: false,
             category: None,
             classification_confidence: None,
@@ -5369,8 +7877,11 @@ pub fn run() {
                     mail_rebuild_running: Mutex::new(HashSet::new()),
                     mail_rebuild_cancellations: MailRebuildCancellations::default(),
                     account_operations: AccountOperationLocks::default(),
+                    search_sessions: SearchSessionRegistry::default(),
                     remote_operation_slots: Arc::new(Semaphore::new(MESSAGE_HYDRATION_CONCURRENCY)),
+                    remote_search_slots: Arc::new(Semaphore::new(REMOTE_SEARCH_CONCURRENCY)),
                     translation_downloads: Mutex::new(HashMap::new()),
+                    contacted_people_migration_drain: Arc::new(AsyncMutex::new(())),
                 }))
             })?;
             app.manage(state.clone());
@@ -5393,6 +7904,20 @@ pub fn run() {
             let realtime_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 kick_classification(state.clone());
+                let contacted_people_state = state.clone();
+                let contacted_people_app = realtime_app.clone();
+                tauri::async_runtime::spawn(async move {
+                    continue_contacted_people_backfill(
+                        contacted_people_app,
+                        contacted_people_state,
+                    )
+                    .await;
+                });
+                kick_contacted_people_migrations(state.clone());
+                let search_catalogue_state = state.clone();
+                tauri::async_runtime::spawn(async move {
+                    continue_search_catalogue_v2_backfill(search_catalogue_state).await;
+                });
                 let rebuilding: HashMap<_, _> = state
                     .mail_rebuilds
                     .lock()
@@ -5459,6 +7984,7 @@ pub fn run() {
             forward_attachments,
             read_dropped_files,
             accounts,
+            list_search_mailboxes,
             update_account,
             show_account_context_menu,
             show_email_address_context_menu,
@@ -5467,8 +7993,17 @@ pub fn run() {
             add_account,
             search,
             search_smart_inbox,
+            suggest_contacted_people,
+            hide_contacted_person,
+            clear_contacted_people,
+            get_autocomplete_settings,
+            set_autocomplete_settings,
+            validate_compose_recipients,
             conversation_for_target,
             search_remote,
+            start_search,
+            next_search_page,
+            cancel_search,
             set_message_category,
             set_message_starred,
             set_message_read,

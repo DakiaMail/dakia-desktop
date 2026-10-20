@@ -1,4 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { mailboxFamily } from "./mailActions";
 import { groupMessages } from "./threads";
 import type {
@@ -7,6 +8,11 @@ import type {
   Attachment,
   AiSettings,
   ComposeAttachment,
+  ComposeRecipientValidation,
+  ComposeRecipientsInput,
+  ContactedPeopleSettings,
+  ContactedPeopleChanged,
+  ContactedPersonSuggestion,
   MailRebuildProgress,
   MailCursor,
   MailSummary,
@@ -20,6 +26,9 @@ import type {
   Provider,
   SyncProgress,
   SyncResult,
+  SearchPageV2,
+  SearchMailbox,
+  SearchRequestV2,
   RealtimeSyncStatus,
   TranslationDownloadProgress,
   TranslationLanguageDetection,
@@ -80,6 +89,7 @@ const desktopApi = {
   configureTray: (openLabel: string, quitLabel: string) =>
     invoke<void>("configure_tray", { openLabel, quitLabel }),
   accounts: () => invoke<Account[]>("accounts"),
+  listSearchMailboxes: () => invoke<SearchMailbox[]>("list_search_mailboxes"),
   updateAccount: (input: Record<string, unknown>) =>
     invoke<Account>("update_account", { input }),
   showAccountContextMenu: (accountId: string, renameLabel: string) =>
@@ -149,6 +159,12 @@ const desktopApi = {
         limit: 500,
       },
     }),
+  startSearchV2: (request: SearchRequestV2) =>
+    invoke<SearchPageV2>("start_search", { request }),
+  nextSearchPageV2: (request: SearchRequestV2) =>
+    invoke<SearchPageV2>("next_search_page", { request }),
+  cancelSearchV2: (sessionId: string) =>
+    invoke<void>("cancel_search", { sessionId }),
   conversationForTarget: (target: ConversationTarget) =>
     invoke<MailThread | null>("conversation_for_target", { target }),
   setCategory: (messageId: string, category: string) =>
@@ -222,6 +238,31 @@ const desktopApi = {
     invoke<ComposeAttachment[]>("read_dropped_files", { receipt }),
   send: (draft: Record<string, unknown>) =>
     invoke<string>("send_message", { draft }),
+  validateComposeRecipients: (input: ComposeRecipientsInput) =>
+    invoke<ComposeRecipientValidation>("validate_compose_recipients", {
+      to: input.to,
+      cc: input.cc,
+      bcc: input.bcc,
+    }),
+  suggestContactedPeople: (prefix: string, accountId?: string) =>
+    invoke<ContactedPersonSuggestion[]>("suggest_contacted_people", {
+      prefix,
+      accountId: accountId ?? null,
+      limit: 8,
+    }),
+  hideContactedPerson: (address: string) =>
+    invoke<void>("hide_contacted_person", { address }),
+  clearContactedPeople: () => invoke<void>("clear_contacted_people"),
+  contactedPeopleSettings: () =>
+    invoke<ContactedPeopleSettings>("get_autocomplete_settings"),
+  setContactedPeopleSettings: (enabled: boolean) =>
+    invoke<ContactedPeopleSettings>("set_autocomplete_settings", { enabled }),
+  onContactedPeopleChanged: (
+    handler: (change: ContactedPeopleChanged) => void,
+  ) =>
+    listen<ContactedPeopleChanged>("contacted-people-changed", (event) =>
+      handler(event.payload),
+    ),
   action: (
     accountId: string,
     mailbox: string,
@@ -478,6 +519,7 @@ const demoApi: typeof desktopApi = {
   ],
   configureTray: async () => undefined,
   accounts: async () => [demoAccount],
+  listSearchMailboxes: async (): Promise<SearchMailbox[]> => [],
   updateAccount: async (input) => {
     const value = input as Record<string, string | number>;
     Object.assign(demoAccount, {
@@ -593,6 +635,13 @@ const demoApi: typeof desktopApi = {
           .includes(text.toLowerCase()),
     );
   },
+  startSearchV2: async () => {
+    throw new Error("Versioned search is unavailable in the demo client");
+  },
+  nextSearchPageV2: async () => {
+    throw new Error("Versioned search is unavailable in the demo client");
+  },
+  cancelSearchV2: async () => undefined,
   conversationForTarget: async (target) => {
     const exact = target.localMessageId
       ? demoMessages.find(
@@ -764,6 +813,19 @@ const demoApi: typeof desktopApi = {
   cancelTranslationModelInstall: async () => undefined,
   removeTranslationModel: async () => undefined,
   sendDesktopNotification: async () => undefined,
+  validateComposeRecipients: async () => ({
+    to: { valid: true, invalid: [] },
+    cc: { valid: true, invalid: [] },
+    bcc: { valid: true, invalid: [] },
+  }),
+  suggestContactedPeople: async () => [],
+  hideContactedPerson: async () => undefined,
+  clearContactedPeople: async () => undefined,
+  contactedPeopleSettings: async () => ({ enabled: true }),
+  setContactedPeopleSettings: async (enabled: boolean) => ({ enabled }),
+  onContactedPeopleChanged: async (
+    _handler: (change: ContactedPeopleChanged) => void,
+  ) => (() => {}) as UnlistenFn,
 };
 
 const isTauri =

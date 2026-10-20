@@ -8,6 +8,7 @@ import type {
   Account,
   AccountConnection,
   AiSettings,
+  ContactedPeopleChanged,
   MailArrival,
   MailHydrated,
   MailRebuildProgress,
@@ -15,6 +16,7 @@ import type {
   NotificationSettings,
   NotificationAction,
   RealtimeSyncStatus,
+  SearchProgressUpdate,
 } from "./types";
 
 export type NativeView = "account" | "settings";
@@ -160,6 +162,24 @@ export function onNotificationSettingsChanged(
   return listen<NotificationSettings>(
     "notification-settings-changed",
     (event) => handler(event.payload),
+  );
+}
+
+export function onContactedPeopleChanged(
+  handler: (change: ContactedPeopleChanged) => void,
+): Promise<UnlistenFn> {
+  if (!isTauri()) return Promise.resolve(() => undefined);
+  return listen<ContactedPeopleChanged>("contacted-people-changed", (event) =>
+    handler(event.payload),
+  );
+}
+
+export function onSearchProgress(
+  handler: (progress: SearchProgressUpdate) => void,
+): Promise<UnlistenFn> {
+  if (!isTauri()) return Promise.resolve(() => undefined);
+  return listen<SearchProgressUpdate>("search-progress", (event) =>
+    handler(event.payload),
   );
 }
 

@@ -1099,7 +1099,7 @@ describe("Reader unsubscribe action", () => {
   });
 
   it("preserves unsupported raw mailbox headers without making them interactive", () => {
-    const rawRecipient = '"Jane Doe"@example.com, valid@example.com';
+    const rawRecipient = "invalid mailbox value, valid@example.com";
     render(
       <MantineProvider>
         <Reader

@@ -113,6 +113,235 @@ describe("Tauri payload contracts", () => {
     ).resolves.toEqual(fixture.messageContent.providerSignature);
   });
 
+  it("subscribes to the contacted-people privacy event with its exact payload", async () => {
+    const handler = vi.fn();
+    eventMocks.listen.mockImplementation(
+      async (
+        event: string,
+        listener: (event: {
+          payload: { enabled: boolean; cleared: boolean };
+        }) => void,
+      ) => {
+        expect(event).toBe("contacted-people-changed");
+        listener({ payload: { enabled: false, cleared: true } });
+        return vi.fn();
+      },
+    );
+    const { api } = await import("./api");
+
+    await api.onContactedPeopleChanged(handler);
+
+    expect(handler).toHaveBeenCalledWith({ enabled: false, cleared: true });
+  });
+
+  it("subscribes to versioned search-progress coverage with its exact payload", async () => {
+    const handler = vi.fn();
+    const progress = {
+      sessionId: "search-session",
+      revision: 4,
+      coverage: [
+        {
+          account_id: "account-1",
+          mailbox: "INBOX",
+          state: "provider_searched",
+          detail: null,
+        },
+      ],
+    };
+    eventMocks.listen.mockImplementation(
+      async (
+        event: string,
+        listener: (event: { payload: unknown }) => void,
+      ) => {
+        expect(event).toBe("search-progress");
+        listener({ payload: progress });
+        return vi.fn();
+      },
+    );
+    const { onSearchProgress } = await import("./nativeWindows");
+
+    await onSearchProgress(handler);
+
+    expect(handler).toHaveBeenCalledWith(progress);
+  });
+
+  it("preserves the complete versioned search request and response contracts", async () => {
+    const request = {
+      client_request_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      raw_query: 'from:"Mara Example" has:attachment',
+      account_ids: ["11111111-1111-4111-8111-111111111111"],
+      scope: {
+        mailbox: "Archive::All Mail",
+        include_spam_trash: true,
+      },
+      execution_mode: "hybrid" as const,
+      page_size: 25,
+      continuation: null,
+    };
+    const firstPage = {
+      conversations: [],
+      match_evidence: {
+        "thread-01": {
+          primary_message_id: "message-02",
+          matched_message_ids: ["message-01", "message-02"],
+          match_count: 2,
+          excerpt: "Mara Example attached the report",
+        },
+      },
+      coverage: [
+        {
+          account_id: request.account_ids[0],
+          mailbox: request.scope.mailbox,
+          state: "provider_partial",
+          detail: "More provider results are available",
+        },
+      ],
+      continuation: "opaque-search-continuation",
+      session_id: "22222222-2222-4222-8222-222222222222",
+      revision: 7,
+    };
+    const nextRequest = {
+      ...request,
+      continuation: firstPage.continuation,
+    };
+    const nextPage = {
+      ...firstPage,
+      match_evidence: {},
+      coverage: [],
+      continuation: null,
+      revision: 8,
+    };
+    apiMocks.invoke.mockImplementation((command: string) => {
+      if (command === "start_search") return Promise.resolve(firstPage);
+      if (command === "next_search_page") return Promise.resolve(nextPage);
+      return Promise.resolve(undefined);
+    });
+    const { api } = await import("./api");
+
+    await expect(api.startSearchV2(request)).resolves.toEqual(firstPage);
+    await expect(api.nextSearchPageV2(nextRequest)).resolves.toEqual(nextPage);
+    await expect(
+      api.cancelSearchV2(firstPage.session_id),
+    ).resolves.toBeUndefined();
+
+    expect(apiMocks.invoke.mock.calls).toEqual([
+      ["start_search", { request }],
+      ["next_search_page", { request: nextRequest }],
+      ["cancel_search", { sessionId: firstPage.session_id }],
+    ]);
+    expect(firstPage).toHaveProperty("session_id");
+    expect(firstPage).not.toHaveProperty("sessionId");
+    expect(firstPage.match_evidence["thread-01"]).toEqual({
+      primary_message_id: "message-02",
+      matched_message_ids: ["message-01", "message-02"],
+      match_count: 2,
+      excerpt: "Mara Example attached the report",
+    });
+  });
+
+  it("preserves the native SearchErrorV2 envelope", async () => {
+    const searchError = {
+      position: 5,
+      category: "unsupported",
+      unsupported_operator: "near",
+      message: "This search operator is not supported yet.",
+    };
+    apiMocks.invoke.mockRejectedValueOnce(searchError);
+    const { api } = await import("./api");
+
+    await expect(
+      api.startSearchV2({
+        raw_query: "near:person",
+        account_ids: [],
+        scope: { include_spam_trash: false },
+        execution_mode: "local",
+        page_size: 50,
+        continuation: null,
+      }),
+    ).rejects.toEqual(searchError);
+    expect(searchError).toHaveProperty("unsupported_operator", "near");
+    expect(searchError).not.toHaveProperty("unsupportedOperator");
+  });
+
+  it("uses exact contacted-people commands and preserves account ownership and hidden state", async () => {
+    const suggestion = {
+      address: "mara@example.test",
+      display_name: "Mara Example",
+      formatted_address: "Mara Example <mara@example.test>",
+      account_id: "33333333-3333-4333-8333-333333333333",
+      account_send_count: 4,
+      account_last_contacted_at: "2026-09-11T09:30:00Z",
+      last_contacted_at: "2026-09-11T09:30:00Z",
+      hidden: false,
+    };
+    apiMocks.invoke.mockImplementation((command: string) => {
+      if (command === "suggest_contacted_people") {
+        return Promise.resolve([suggestion]);
+      }
+      if (command === "get_autocomplete_settings") {
+        return Promise.resolve({ enabled: true });
+      }
+      if (command === "set_autocomplete_settings") {
+        return Promise.resolve({ enabled: false });
+      }
+      return Promise.resolve(undefined);
+    });
+    const { api } = await import("./api");
+
+    await expect(
+      api.suggestContactedPeople("mar", suggestion.account_id),
+    ).resolves.toEqual([suggestion]);
+    await expect(
+      api.hideContactedPerson(suggestion.address),
+    ).resolves.toBeUndefined();
+    await expect(api.clearContactedPeople()).resolves.toBeUndefined();
+    await expect(api.contactedPeopleSettings()).resolves.toEqual({
+      enabled: true,
+    });
+    await expect(api.setContactedPeopleSettings(false)).resolves.toEqual({
+      enabled: false,
+    });
+
+    expect(apiMocks.invoke.mock.calls).toEqual([
+      [
+        "suggest_contacted_people",
+        { prefix: "mar", accountId: suggestion.account_id, limit: 8 },
+      ],
+      ["hide_contacted_person", { address: suggestion.address }],
+      ["clear_contacted_people"],
+      ["get_autocomplete_settings"],
+      ["set_autocomplete_settings", { enabled: false }],
+    ]);
+    expect(suggestion).toHaveProperty("account_id", suggestion.account_id);
+    expect(suggestion).toHaveProperty("hidden", false);
+    expect(suggestion).not.toHaveProperty("accountId");
+  });
+
+  it("sends an explicit null account for global contacted-people suggestions", async () => {
+    apiMocks.invoke.mockResolvedValueOnce([]);
+    const { api } = await import("./api");
+
+    await api.suggestContactedPeople("");
+
+    expect(apiMocks.invoke).toHaveBeenCalledWith("suggest_contacted_people", {
+      prefix: "",
+      accountId: null,
+      limit: 8,
+    });
+  });
+
+  it("loads selectable search mailboxes through the exact native command", async () => {
+    const mailboxes = [
+      { localPath: "Projects/Client A", selectable: true },
+      { localPath: "Projects", selectable: false },
+    ];
+    apiMocks.invoke.mockResolvedValueOnce(mailboxes);
+    const { api } = await import("./api");
+
+    await expect(api.listSearchMailboxes()).resolves.toEqual(mailboxes);
+    expect(apiMocks.invoke).toHaveBeenCalledWith("list_search_mailboxes");
+  });
+
   it("uses the fixture's exact command names, top-level argument keys, and sync Channel", async () => {
     const progress = vi.fn();
     apiMocks.invoke.mockImplementation(

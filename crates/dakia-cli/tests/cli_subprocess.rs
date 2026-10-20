@@ -120,6 +120,8 @@ async fn seed_profile(directory: &Path, label: &str) -> (Account, MailSummary) {
         unsubscribe_url: None,
         is_read: false,
         is_flagged: false,
+        is_answered: false,
+        is_draft: false,
         has_attachments: false,
         category: None,
         classification_confidence: None,
@@ -319,6 +321,195 @@ async fn restart_preserves_seeded_state_without_cross_profile_leakage() {
     assert_eq!(messages[0]["id"], message_b.id);
     assert_eq!(messages[0]["account_id"], account_b.id.to_string());
     assert_ne!(messages[0]["id"], message_a.id);
+}
+
+#[tokio::test]
+async fn search_uses_fastmail_syntax_without_changing_success_json_shape() {
+    let temporary = TempDir::new().expect("temporary directory");
+    let profile = temporary.path().join("profile");
+    let (account, message) = seed_profile(&profile, "syntax").await;
+    let profile_arg = profile.to_string_lossy().into_owned();
+
+    // The CLI sends raw text only to Dakia's shared parser. These expressions
+    // exercise quoted phrases, field predicates, implicit AND, explicit OR,
+    // and NOT rather than the old whitespace-prefix FTS behaviour.
+    for expression in [
+        "subject:\"syntax durable\" from:sender@example.test",
+        "subject:missing OR subject:durable",
+        "durable NOT subject:missing",
+    ] {
+        let output = run(&[
+            "--data-dir",
+            &profile_arg,
+            "--json",
+            "search",
+            expression,
+            "--account",
+            &account.id.to_string(),
+        ])
+        .await;
+        let results = assert_success_json(&output);
+        let results = results.as_array().expect("search result remains an array");
+        assert_eq!(results.len(), 1, "expression {expression:?}");
+        assert_eq!(results[0]["id"], message.id);
+        // This is the existing message JSON schema. Search syntax must not
+        // turn a successful CLI invocation into a versioned response object.
+        assert!(results[0].get("subject").is_some());
+        assert!(results[0].get("from_address").is_some());
+    }
+}
+
+#[tokio::test]
+async fn search_legacy_filters_continue_to_narrow_a_parsed_query() {
+    let temporary = TempDir::new().expect("temporary directory");
+    let profile = temporary.path().join("profile");
+    let (account, message) = seed_profile(&profile, "legacy-search").await;
+    let profile_arg = profile.to_string_lossy().into_owned();
+
+    let output = run(&[
+        "--data-dir",
+        &profile_arg,
+        "--json",
+        "search",
+        "durable",
+        "--account",
+        &account.id.to_string(),
+        "--mailbox",
+        "INBOX",
+        "--from",
+        "sender@example.test",
+        "--unread",
+        "--limit",
+        "1",
+    ])
+    .await;
+    let results = assert_success_json(&output);
+    let results = results.as_array().expect("search result remains an array");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["id"], message.id);
+}
+
+#[tokio::test]
+async fn search_legacy_filters_apply_before_limit_with_a_compound_query() {
+    let temporary = TempDir::new().expect("temporary directory");
+    let profile = temporary.path().join("profile");
+    let (account, message) = seed_profile(&profile, "legacy-limit").await;
+    let store = Store::open(profile.join("dakia.db"))
+        .await
+        .expect("open seeded profile");
+
+    // Put a non-matching message ahead of the matching one. A legacy filter
+    // applied after `--limit 1` would return an empty result instead of the
+    // older matching message.
+    let mut matching = message.clone();
+    matching.received_at = Utc::now() - chrono::Duration::minutes(2);
+    matching.is_read = false;
+    let mut newer_non_matching = matching.clone();
+    newer_non_matching.id = "legacy-limit-newer".into();
+    newer_non_matching.uid = 2;
+    newer_non_matching.thread_id = "legacy-limit-newer-thread".into();
+    newer_non_matching.from_address = "other@example.test".into();
+    newer_non_matching.is_read = true;
+    newer_non_matching.received_at = Utc::now();
+    store
+        .upsert_messages(&[matching.clone(), newer_non_matching])
+        .await
+        .expect("seed competing messages");
+    drop(store);
+
+    let profile_arg = profile.to_string_lossy().into_owned();
+    let output = run(&[
+        "--data-dir",
+        &profile_arg,
+        "--json",
+        "search",
+        "durable OR missing",
+        "--account",
+        &account.id.to_string(),
+        "--mailbox",
+        "INBOX",
+        "--from",
+        "sender",
+        "--unread",
+        "--limit",
+        "1",
+    ])
+    .await;
+    let results = assert_success_json(&output);
+    let results = results.as_array().expect("search result remains an array");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["id"], matching.id);
+}
+
+#[tokio::test]
+async fn search_disabled_account_scope_returns_no_local_or_remote_results() {
+    let temporary = TempDir::new().expect("temporary directory");
+    let profile = temporary.path().join("profile");
+    let (disabled_account, _) = seed_profile(&profile, "disabled-search").await;
+    let (_, active_message) = seed_profile(&profile, "active-search").await;
+    let store = Store::open(profile.join("dakia.db"))
+        .await
+        .expect("open seeded profile");
+    let mut disabled = disabled_account.clone();
+    disabled.enabled = false;
+    store
+        .save_account(&disabled)
+        .await
+        .expect("disable scoped account");
+    drop(store);
+
+    let profile_arg = profile.to_string_lossy().into_owned();
+    let disabled_account_id = disabled_account.id.to_string();
+    for remote in [false, true] {
+        let mut arguments = vec![
+            "--data-dir",
+            profile_arg.as_str(),
+            "--json",
+            "search",
+            "durable",
+            "--account",
+            &disabled_account_id,
+        ];
+        if remote {
+            arguments.push("--remote");
+        }
+        let output = run(&arguments).await;
+        let results = assert_success_json(&output);
+        assert_eq!(
+            results,
+            Value::Array(Vec::new()),
+            "disabled-only scope must not widen to {}",
+            if remote { "remote" } else { "local" }
+        );
+    }
+
+    // The profile does contain a matching enabled-account message. Returning
+    // it here would prove the empty intersection was treated as all accounts.
+    assert_eq!(active_message.subject, "active-search durable subject");
+}
+
+#[tokio::test]
+async fn search_reports_malformed_and_deferred_syntax_with_a_stable_json_error() {
+    let temporary = TempDir::new().expect("temporary directory");
+    let profile = temporary.path().join("profile");
+    let (_, _) = seed_profile(&profile, "invalid-search").await;
+    let profile_arg = profile.to_string_lossy().into_owned();
+
+    for (query, category, operator) in [
+        ("subject:\"unterminated", "parse", None),
+        ("memo:project", "unsupported", Some("memo")),
+    ] {
+        let output = run(&["--data-dir", &profile_arg, "--json", "search", query]).await;
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(output.stderr, b"");
+        let error = serde_json::from_slice::<Value>(&output.stdout).expect("JSON error envelope");
+        assert_eq!(error["error"]["category"], category);
+        assert!(error["error"]["position"].is_number());
+        assert_eq!(error["error"]["unsupported_operator"].as_str(), operator);
+        assert!(error["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("search query error at byte")));
+    }
 }
 
 #[tokio::test]

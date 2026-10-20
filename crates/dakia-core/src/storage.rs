@@ -1,7 +1,26 @@
-use crate::{account::Account, provider, AccountAuth, AccountId};
+use crate::{
+    account::Account,
+    provider,
+    search::{
+        parse_search_query, AttachmentPredicate, FolderScope, SearchExpression, SearchNode,
+        SearchTerm,
+    },
+    search_eval::{
+        display_imap_mailbox_name, evaluate_search, generic_mailbox_storage_identity,
+        normalize_search_text, special_mailbox_storage_identity, SearchableAttachment,
+        SearchableMessage,
+    },
+    search_session::SearchMatchEvidence,
+    search_sql::{compile_sql_candidate, SqlSearchBind, SqlSearchCandidate},
+    AccountAuth, AccountId,
+};
 use anyhow::{anyhow, Context, Result};
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine,
+};
 use chrono::{DateTime, Utc};
+use mail_parser::{Address as ParsedAddress, HeaderName, HeaderValue, MessageParser};
 use ring::{
     aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM},
     rand::{SecureRandom, SystemRandom},
@@ -10,10 +29,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
-    FromRow, SqlitePool,
+    FromRow, Sqlite, SqlitePool, Transaction,
 };
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs::{File, FileTimes, OpenOptions},
     io::{ErrorKind, Read, Write},
     path::{Path, PathBuf},
@@ -21,6 +40,7 @@ use std::{
     sync::{Arc, OnceLock},
     time::{Duration, Instant, SystemTime},
 };
+use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -33,6 +53,38 @@ const VAULT_NONCE_LEN: usize = 12;
 /// authoritative cache and is intentionally not counted here.
 const MESSAGE_CONTENT_CACHE_MAX_BYTES: i64 = 512 * 1024 * 1024;
 const MESSAGE_CONTENT_CACHE_RECENT_WINDOW_DAYS: i64 = 30;
+/// Complete text parts fetched for provider search are useful to subsequent
+/// local result pages, but are not reader-ready content. Keep their separate
+/// text-only cache bounded so a broad remote search cannot grow without bound
+/// or displace the reader cache's HTML and attachment metadata.
+const MESSAGE_SEARCH_BODY_TEXT_CACHE_MAX_BYTES: i64 = 256 * 1024 * 1024;
+const SEARCH_CATALOGUE_V2_MIGRATION_BATCH_SIZE: i64 = 500;
+/// Older profiles need a small, durable upgrade for autocomplete's normalized
+/// search data and provider-safe Sent source markers. Keep this deliberately
+/// separate from the search catalogue migration: opening a profile must not
+/// read its complete contacted-people history into memory.
+const CONTACTED_PEOPLE_MIGRATION_BATCH_SIZE: i64 = 500;
+const CONTACTED_PEOPLE_NORMALIZED_MIGRATION_CURSOR_KEY: &str =
+    "contacted_people_normalized_migration_cursor";
+const CONTACTED_PEOPLE_NORMALIZED_MIGRATION_COMPLETE_KEY: &str =
+    "contacted_people_normalized_migration_complete";
+const CONTACTED_PEOPLE_SOURCE_MIGRATION_CURSOR_KEY: &str =
+    "contacted_people_source_migration_cursor";
+const CONTACTED_PEOPLE_SOURCE_MIGRATION_COMPLETE_KEY: &str =
+    "contacted_people_source_migration_complete";
+/// Existing profiles stored all-account totals on `contacted_people`. Version
+/// one rebuilds those denormalized fields from enabled accounts once, so the
+/// fast suggestion path can use them without grouping every account stat on
+/// each keystroke.
+const CONTACTED_PEOPLE_ENABLED_AGGREGATES_VERSION_KEY: &str =
+    "contacted_people_enabled_aggregates_version";
+const CONTACTED_PEOPLE_ENABLED_AGGREGATES_CURSOR_KEY: &str =
+    "contacted_people_enabled_aggregates_cursor";
+/// Marks the one-way conversion from historical human-readable mailbox
+/// namespaces to provider-safe opaque namespaces.  This is intentionally
+/// separate from the search-index marker: it changes durable locator keys,
+/// not the indexed search data itself.
+const OPAQUE_MAILBOX_STORAGE_IDENTITIES_MIGRATION_BATCH_SIZE: i64 = 500;
 /// Attachment presentation and opaque IDs change when the selected HTML/MIME
 /// branch changes. Version 3 invalidates IDs written by the full-message
 /// parser, whose downloadable-only numbering can otherwise select a different
@@ -125,6 +177,117 @@ pub struct MailboxChangedSinceFlags<'a> {
 }
 
 type MailboxSnapshotGenerationState = (String, i64, i64, Option<i64>, Option<String>);
+type ContactedPeopleSourceMigrationRow = (
+    i64,
+    String,
+    String,
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+    Option<String>,
+);
+type SelectableMailboxIdentityRow = (
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+);
+type SearchAttachment = (Option<String>, Option<String>);
+type LegacyContactedPeopleMailboxCandidate =
+    (String, String, Option<String>, Option<String>, Option<i64>);
+
+/// Values that are atomically published after cataloguing a mailbox.
+///
+/// Keep the fields together so the generation check cannot accidentally be
+/// paired with data from a different selected mailbox response.
+struct MailboxCatalogStateWrite<'a> {
+    mailbox: &'a str,
+    remote_name: &'a str,
+    uid_validity: u32,
+    remote_total: usize,
+    historical_complete: bool,
+}
+
+/// One outgoing recipient that may be learned after SMTP accepts a message.
+///
+/// The address is authoritative. `formatted_address` is optional because the
+/// SMTP envelope commonly has no display name; when absent, the store creates
+/// a safe RFC-style display form from `display_name` and `address`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ContactedPersonRecipient {
+    pub address: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub formatted_address: Option<String>,
+}
+
+impl ContactedPersonRecipient {
+    pub fn address_only(address: impl Into<String>) -> Self {
+        Self {
+            address: address.into(),
+            display_name: None,
+            formatted_address: None,
+        }
+    }
+}
+
+/// A local autocomplete result. Counts are intentionally included so callers
+/// can retain an already-ranked list while the compose account changes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromRow)]
+pub struct ContactedPersonSuggestion {
+    pub address: String,
+    pub display_name: Option<String>,
+    pub formatted_address: String,
+    pub first_contacted_at: DateTime<Utc>,
+    pub last_contacted_at: DateTime<Utc>,
+    pub send_count: i64,
+    pub account_send_count: i64,
+    pub account_last_contacted_at: Option<DateTime<Utc>>,
+    /// The preferred account contribution that supplied the affinity fields.
+    /// Global fallback suggestions have no account-specific backing row.
+    pub account_id: Option<String>,
+    /// Suggestions normally exclude hidden people, but exposing the state
+    /// keeps the public contract explicit and safe for future administrative
+    /// views that may include them.
+    pub hidden: bool,
+}
+
+/// Result of one bounded historical Sent-mail scan. A completed scan can be
+/// called again safely: marker rows make newly catalogued older Sent messages
+/// discoverable without counting previously seen messages a second time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ContactedPeopleBackfillProgress {
+    pub processed_messages: usize,
+    /// Number of recipients whose suggestion statistics changed in this
+    /// batch. Suppressed, empty, duplicate, and SMTP-correlated rows leave
+    /// this at zero so callers need not refresh autocomplete UI state.
+    pub changed_people: usize,
+    pub complete: bool,
+}
+
+/// Progress for the one-time, restart-safe contacted-people schema upgrades.
+/// `changed_people` deliberately remains zero: these upgrades only add search
+/// keys and idempotency markers, never recipient statistics or suggestions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ContactedPeopleMigrationProgress {
+    pub normalized_people: usize,
+    pub source_markers: usize,
+    pub changed_people: usize,
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ContactedPeopleMigrationBatch {
+    processed: usize,
+    complete: bool,
+}
 
 /// Cancellation-safe ownership of one provider body fetch. Dropping the
 /// owning future schedules claim release so later readers do not wait for a
@@ -220,6 +383,13 @@ pub struct MailSummary {
     pub unsubscribe_url: Option<String>,
     pub is_read: bool,
     pub is_flagged: bool,
+    /// Provider `\\Answered` state. False only means the provider did not
+    /// report the flag or explicitly cleared it.
+    #[serde(default)]
+    pub is_answered: bool,
+    /// Provider `\\Draft` state. This is not inferred from mailbox names.
+    #[serde(default)]
+    pub is_draft: bool,
     pub has_attachments: bool,
     pub category: Option<String>,
     pub classification_confidence: Option<f64>,
@@ -250,6 +420,69 @@ pub struct MailboxSyncState {
     /// The selected mailbox is a new UID namespace and needs a replacement
     /// catalogue, not an incremental UID sync.
     pub uid_validity_changed: bool,
+}
+
+/// Provider-discovered mailbox identity. `id` is a local opaque identifier;
+/// callers must not derive it from the provider path or hierarchy delimiter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectableMailbox {
+    pub id: String,
+    pub account_id: String,
+    /// Provider path used in IMAP commands.
+    pub remote_path: String,
+    /// Stable local catalogue path. This initially matches `remote_path`, but
+    /// is kept separate so provider delimiters never leak into local scope.
+    pub local_path: String,
+    pub hierarchy_delimiter: Option<String>,
+    pub parent_id: Option<String>,
+    pub parent_path: Option<String>,
+    pub special_use: Option<String>,
+    pub selectable: bool,
+    pub uid_validity: Option<i64>,
+    /// `unknown`, `partial`, or `complete`; providers can update it without
+    /// changing the mailbox identity row.
+    pub catalogue_coverage: String,
+}
+
+/// Input for an idempotent provider mailbox discovery update.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectableMailboxDraft {
+    pub remote_path: String,
+    #[serde(default)]
+    pub local_path: Option<String>,
+    #[serde(default)]
+    pub hierarchy_delimiter: Option<String>,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    #[serde(default)]
+    pub parent_path: Option<String>,
+    #[serde(default)]
+    pub special_use: Option<String>,
+    #[serde(default = "selectable_by_default")]
+    pub selectable: bool,
+    #[serde(default)]
+    pub uid_validity: Option<i64>,
+    #[serde(default = "unknown_catalogue_coverage")]
+    pub catalogue_coverage: String,
+}
+
+fn selectable_by_default() -> bool {
+    true
+}
+
+fn unknown_catalogue_coverage() -> String {
+    "unknown".into()
+}
+
+/// A logical local message locator and one of its provider mailbox members.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageMailboxMembership {
+    pub message_id: String,
+    pub mailbox_id: String,
+    pub account_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -283,7 +516,63 @@ pub struct MailCursor {
 #[serde(rename_all = "camelCase")]
 pub struct MailConversationPage {
     pub conversations: Vec<MailConversation>,
+    /// Additive exact-match evidence for search pages. The legacy
+    /// `search_conversations` API still returns conversations alone.
+    #[serde(default)]
+    pub match_evidence: BTreeMap<String, SearchMatchEvidence>,
     pub next_cursor: Option<MailCursor>,
+    /// Internal keyset progress for V2 local search. It is deliberately not
+    /// serialized: the desktop continuation is the only public carrier.
+    #[serde(skip)]
+    pub candidate_cursor: Option<MailCursor>,
+    #[serde(skip)]
+    pub candidate_exhausted: bool,
+}
+
+/// Durable progress for the yielding v2 search catalogue backfill. The
+/// header stage is the broad corpus limiter, so its values make coverage
+/// state visible without exposing SQLite row IDs to desktop callers.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchCatalogueV2BackfillProgress {
+    pub indexed_messages: i64,
+    pub total_messages: i64,
+    pub complete: bool,
+}
+
+/// Per-account local body-search coverage. A complete catalogue does not
+/// imply every message body is locally searchable: headers-only rows remain
+/// eligible for provider search until one authoritative body cache is filled.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalBodyIndexCoverage {
+    pub account_id: String,
+    pub catalogue_messages: i64,
+    pub searchable_bodies: i64,
+}
+
+struct SearchConversationMatches {
+    representatives: Vec<MailSummary>,
+    matched_by_thread: HashMap<(String, String), Vec<MailSummary>>,
+    candidate_cursor: Option<MailCursor>,
+    exhausted: bool,
+}
+
+/// Keep the work performed by a local search turn bounded even when the SQL
+/// compiler deliberately broadens a predicate (NOT, incomplete catalogue,
+/// and attachment predicates).  This is a candidate budget, not a result
+/// limit: canonical Rust evaluation still decides every returned match.
+const SEARCH_CANDIDATE_SCAN_CHUNK: usize = 256;
+/// A draft preview or one V2 local page may inspect at most this many broad
+/// SQL candidates.  A no-match NOT expression must yield an incomplete page
+/// and continuation, not monopolize the SQLite connection until every one of
+/// 50,000 rows has been evaluated.
+const SEARCH_CANDIDATE_SCAN_BUDGET: usize = SEARCH_CANDIDATE_SCAN_CHUNK;
+
+struct SearchCandidateChunk {
+    rows: Vec<MailSummary>,
+    matches: Vec<bool>,
+    exhausted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -666,22 +955,37 @@ impl Store {
         for statement in [
             "CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, data TEXT NOT NULL, created_at TEXT NOT NULL)",
             "CREATE TABLE IF NOT EXISTS credentials (name TEXT PRIMARY KEY, nonce BLOB NOT NULL, ciphertext BLOB NOT NULL, updated_at TEXT NOT NULL)",
-            "CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, account_id TEXT NOT NULL, mailbox TEXT NOT NULL, uid INTEGER NOT NULL, message_id TEXT, in_reply_to TEXT, reference_ids TEXT, thread_id TEXT NOT NULL, threading_scanned INTEGER NOT NULL DEFAULT 1, recipient_headers_scanned INTEGER NOT NULL DEFAULT 1, subject TEXT NOT NULL, from_name TEXT, from_address TEXT NOT NULL, to_addresses TEXT NOT NULL, cc_addresses TEXT NOT NULL DEFAULT '', bcc_addresses TEXT NOT NULL DEFAULT '', reply_to_addresses TEXT NOT NULL DEFAULT '', received_at TEXT NOT NULL, snippet TEXT NOT NULL, body_text TEXT NOT NULL, unsubscribe_kind TEXT, unsubscribe_url TEXT, unsubscribe_scanned INTEGER NOT NULL DEFAULT 0, is_read INTEGER NOT NULL DEFAULT 0, is_flagged INTEGER NOT NULL DEFAULT 0, has_attachments INTEGER NOT NULL DEFAULT 0, category TEXT, classification_confidence REAL, classification_source TEXT, classification_signals TEXT NOT NULL DEFAULT '', UNIQUE(account_id, mailbox, uid))",
+            "CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, account_id TEXT NOT NULL, mailbox TEXT NOT NULL, uid INTEGER NOT NULL, message_id TEXT, in_reply_to TEXT, reference_ids TEXT, thread_id TEXT NOT NULL, threading_scanned INTEGER NOT NULL DEFAULT 1, recipient_headers_scanned INTEGER NOT NULL DEFAULT 1, subject TEXT NOT NULL, from_name TEXT, from_address TEXT NOT NULL, to_addresses TEXT NOT NULL, cc_addresses TEXT NOT NULL DEFAULT '', bcc_addresses TEXT NOT NULL DEFAULT '', reply_to_addresses TEXT NOT NULL DEFAULT '', received_at TEXT NOT NULL, snippet TEXT NOT NULL, body_text TEXT NOT NULL, unsubscribe_kind TEXT, unsubscribe_url TEXT, unsubscribe_scanned INTEGER NOT NULL DEFAULT 0, is_read INTEGER NOT NULL DEFAULT 0, is_flagged INTEGER NOT NULL DEFAULT 0, is_answered INTEGER NOT NULL DEFAULT 0, is_draft INTEGER NOT NULL DEFAULT 0, has_attachments INTEGER NOT NULL DEFAULT 0, category TEXT, classification_confidence REAL, classification_source TEXT, classification_signals TEXT NOT NULL DEFAULT '', UNIQUE(account_id, mailbox, uid))",
             "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(subject, from_name, from_address, to_addresses, body_text, content='messages', content_rowid='rowid')",
             "CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN INSERT INTO messages_fts(rowid, subject, from_name, from_address, to_addresses, body_text) VALUES (new.rowid, new.subject, new.from_name, new.from_address, new.to_addresses, new.body_text); END",
             "CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN INSERT INTO messages_fts(messages_fts, rowid, subject, from_name, from_address, to_addresses, body_text) VALUES ('delete', old.rowid, old.subject, old.from_name, old.from_address, old.to_addresses, old.body_text); END",
             "CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN INSERT INTO messages_fts(messages_fts, rowid, subject, from_name, from_address, to_addresses, body_text) VALUES ('delete', old.rowid, old.subject, old.from_name, old.from_address, old.to_addresses, old.body_text); INSERT INTO messages_fts(rowid, subject, from_name, from_address, to_addresses, body_text) VALUES (new.rowid, new.subject, new.from_name, new.from_address, new.to_addresses, new.body_text); END",
             "CREATE INDEX IF NOT EXISTS messages_account_mailbox_date ON messages(account_id, mailbox, received_at DESC)",
+            // Local search keysets order an account-wide corpus by this exact
+            // tuple. Without it a broad draft preview sorts every catalogue
+            // row before the bounded LIMIT can take effect.
+            "CREATE INDEX IF NOT EXISTS messages_account_received_id ON messages(account_id, received_at DESC, id DESC)",
             "CREATE TABLE IF NOT EXISTS mailbox_sync_state (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, initialized_at TEXT NOT NULL, highest_uid INTEGER, uid_validity INTEGER, PRIMARY KEY(account_id, mailbox))",
+            "CREATE TABLE IF NOT EXISTS selectable_mailboxes (id TEXT PRIMARY KEY, account_id TEXT NOT NULL, remote_path TEXT NOT NULL, local_path TEXT NOT NULL, hierarchy_delimiter TEXT, parent_id TEXT REFERENCES selectable_mailboxes(id) ON DELETE SET NULL ON UPDATE CASCADE, parent_path TEXT, special_use TEXT, selectable INTEGER NOT NULL DEFAULT 1, uid_validity INTEGER, catalogue_coverage TEXT NOT NULL DEFAULT 'unknown' CHECK(catalogue_coverage IN ('unknown', 'partial', 'complete')), updated_at TEXT NOT NULL, UNIQUE(account_id, remote_path))",
+            "CREATE INDEX IF NOT EXISTS selectable_mailboxes_account_local_path ON selectable_mailboxes(account_id, local_path, remote_path)",
+            "CREATE TABLE IF NOT EXISTS message_mailbox_memberships (message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, mailbox_id TEXT NOT NULL REFERENCES selectable_mailboxes(id) ON DELETE CASCADE ON UPDATE CASCADE, account_id TEXT NOT NULL, PRIMARY KEY(message_id, mailbox_id))",
+            "CREATE INDEX IF NOT EXISTS message_mailbox_memberships_account_message ON message_mailbox_memberships(account_id, message_id)",
             "CREATE TABLE IF NOT EXISTS mailbox_action_tombstones (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, uid INTEGER NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox, uid))",
             "CREATE TABLE IF NOT EXISTS attachments (id TEXT PRIMARY KEY, message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, filename TEXT NOT NULL, mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, is_inline INTEGER NOT NULL DEFAULT 0, presentation TEXT NOT NULL DEFAULT 'unknown', is_potentially_unsafe INTEGER NOT NULL DEFAULT 0, data BLOB NOT NULL)",
             "CREATE INDEX IF NOT EXISTS attachments_message_id ON attachments(message_id)",
+            "CREATE TABLE IF NOT EXISTS message_attachment_catalogue (message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, attachment_id TEXT NOT NULL DEFAULT '', filename TEXT NOT NULL, mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, is_inline INTEGER NOT NULL DEFAULT 0, presentation TEXT NOT NULL DEFAULT 'unknown', PRIMARY KEY(message_id, attachment_id))",
+            "CREATE INDEX IF NOT EXISTS message_attachment_catalogue_message_id ON message_attachment_catalogue(message_id)",
             "CREATE TABLE IF NOT EXISTS starred_message_bodies (message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, body_text TEXT NOT NULL, body_html TEXT, attachment_presentation_version INTEGER NOT NULL DEFAULT 0, cached_at TEXT NOT NULL)",
             "CREATE TABLE IF NOT EXISTS starred_attachment_metadata (id TEXT PRIMARY KEY, message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, filename TEXT NOT NULL, mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, is_inline INTEGER NOT NULL DEFAULT 0, presentation TEXT NOT NULL DEFAULT 'unknown', is_potentially_unsafe INTEGER NOT NULL DEFAULT 0)",
             "CREATE TABLE IF NOT EXISTS message_content_cache (message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, content_state TEXT NOT NULL CHECK(content_state = 'complete'), body_text TEXT NOT NULL, body_html TEXT, unsubscribe_kind TEXT, attachments_json TEXT NOT NULL, byte_size INTEGER NOT NULL CHECK(byte_size >= 0), last_accessed INTEGER NOT NULL)",
             "CREATE INDEX IF NOT EXISTS message_content_cache_lru ON message_content_cache(last_accessed, message_id)",
+            "CREATE TABLE IF NOT EXISTS message_search_body_text (message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, body_text TEXT NOT NULL, byte_size INTEGER NOT NULL CHECK(byte_size >= 0), last_indexed INTEGER NOT NULL)",
+            "CREATE INDEX IF NOT EXISTS message_search_body_text_lru ON message_search_body_text(last_indexed, message_id)",
             "CREATE TABLE IF NOT EXISTS message_content_fetches (message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, claimed_at TEXT NOT NULL, claim_owner TEXT NOT NULL DEFAULT '')",
             "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS opaque_mailbox_storage_identity_progress (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), last_account_id TEXT NOT NULL DEFAULT '', last_mailbox TEXT NOT NULL DEFAULT '', complete INTEGER NOT NULL DEFAULT 0)",
+            "CREATE TABLE IF NOT EXISTS opaque_mailbox_storage_identity_unresolved (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, noted_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox))",
+            "CREATE TABLE IF NOT EXISTS search_catalogue_v2_progress (stage TEXT PRIMARY KEY, last_rowid INTEGER NOT NULL DEFAULT 0, target_rowid INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 0)",
             "CREATE TABLE IF NOT EXISTS mailbox_catalog_state (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, remote_name TEXT NOT NULL, uid_validity INTEGER NOT NULL, remote_total INTEGER NOT NULL DEFAULT 0, historical_complete INTEGER NOT NULL DEFAULT 0, uid_next INTEGER, highest_modseq TEXT, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox))",
             "CREATE TABLE IF NOT EXISTS mailbox_snapshot_generations (account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, mailbox TEXT NOT NULL, generation TEXT NOT NULL, remote_name TEXT NOT NULL, uid_validity INTEGER NOT NULL, initial_exists INTEGER NOT NULL, uid_next INTEGER, highest_modseq TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox, generation))",
             "CREATE TABLE IF NOT EXISTS mailbox_snapshot_items (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, generation TEXT NOT NULL, uid INTEGER NOT NULL, is_read INTEGER NOT NULL, is_flagged INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox, generation, uid), FOREIGN KEY(account_id, mailbox, generation) REFERENCES mailbox_snapshot_generations(account_id, mailbox, generation) ON DELETE CASCADE)",
@@ -692,6 +996,24 @@ impl Store {
             "CREATE TABLE IF NOT EXISTS mail_rebuild_jobs (account_id TEXT PRIMARY KEY, phase TEXT NOT NULL, completed INTEGER NOT NULL DEFAULT 0, total INTEGER, reset_before_sync INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)",
             "CREATE TABLE IF NOT EXISTS deleted_account_tombstones (account_id TEXT PRIMARY KEY, deleted_at TEXT NOT NULL)",
             "CREATE TABLE IF NOT EXISTS sent_correspondents (account_id TEXT NOT NULL, address TEXT NOT NULL COLLATE NOCASE, PRIMARY KEY(account_id, address))",
+            "CREATE TABLE IF NOT EXISTS account_search_generations (account_id TEXT PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 0)",
+            "CREATE TABLE IF NOT EXISTS contacted_people (canonical_address TEXT PRIMARY KEY, display_name TEXT, formatted_address TEXT NOT NULL, first_contacted_at TEXT NOT NULL, last_contacted_at TEXT NOT NULL, send_count INTEGER NOT NULL CHECK(send_count >= 0), hidden_at TEXT, hidden_sequence INTEGER NOT NULL DEFAULT 0, normalized_display_name TEXT NOT NULL DEFAULT '', normalized_address TEXT NOT NULL DEFAULT '', normalized_display_tokens TEXT NOT NULL DEFAULT '', normalized_address_tokens TEXT NOT NULL DEFAULT '')",
+            "CREATE TABLE IF NOT EXISTS contacted_people_account_stats (canonical_address TEXT NOT NULL REFERENCES contacted_people(canonical_address) ON DELETE CASCADE ON UPDATE CASCADE, account_id TEXT NOT NULL, first_contacted_at TEXT NOT NULL, last_contacted_at TEXT NOT NULL, send_count INTEGER NOT NULL CHECK(send_count >= 0), display_name TEXT, formatted_address TEXT, PRIMARY KEY(canonical_address, account_id))",
+            "CREATE INDEX IF NOT EXISTS contacted_people_account_recency ON contacted_people_account_stats(account_id, last_contacted_at DESC, canonical_address)",
+            "CREATE INDEX IF NOT EXISTS contacted_people_visible_global_rank ON contacted_people(send_count DESC, last_contacted_at DESC, canonical_address) WHERE hidden_at IS NULL",
+            "CREATE INDEX IF NOT EXISTS contacted_people_visible_recent ON contacted_people(last_contacted_at DESC, canonical_address) WHERE hidden_at IS NULL",
+            "CREATE INDEX IF NOT EXISTS contacted_people_visible_normalized_address ON contacted_people(normalized_address) WHERE hidden_at IS NULL",
+            "CREATE INDEX IF NOT EXISTS contacted_people_normalized_migration ON contacted_people(normalized_address)",
+            "CREATE TABLE IF NOT EXISTS contacted_people_backfill_progress (account_id TEXT PRIMARY KEY, processed_messages INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS contacted_people_backfill_messages (account_id TEXT NOT NULL, message_id TEXT NOT NULL, PRIMARY KEY(account_id, message_id))",
+            "CREATE TABLE IF NOT EXISTS contacted_people_legacy_unresolved_sources (account_id TEXT NOT NULL, message_id TEXT NOT NULL, PRIMARY KEY(account_id, message_id))",
+            "CREATE INDEX IF NOT EXISTS contacted_people_backfill_messages_message ON contacted_people_backfill_messages(message_id)",
+            "CREATE TABLE IF NOT EXISTS contacted_people_backfill_sources (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, uid_validity INTEGER NOT NULL, uid INTEGER NOT NULL, PRIMARY KEY(account_id, mailbox, uid_validity, uid))",
+            "CREATE TABLE IF NOT EXISTS contacted_people_backfill_rfc_messages (account_id TEXT NOT NULL, rfc_message_id TEXT NOT NULL, PRIMARY KEY(account_id, rfc_message_id))",
+            "CREATE TABLE IF NOT EXISTS contacted_people_outgoing_messages (account_id TEXT NOT NULL, rfc_message_id TEXT NOT NULL, recorded_at TEXT NOT NULL, PRIMARY KEY(account_id, rfc_message_id))",
+            "CREATE INDEX IF NOT EXISTS contacted_people_outgoing_messages_account ON contacted_people_outgoing_messages(account_id, recorded_at)",
+            "CREATE TABLE IF NOT EXISTS contacted_people_sent_provider_cutoffs (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, generation INTEGER NOT NULL, uid_validity INTEGER NOT NULL, cutoff_uid INTEGER NOT NULL, captured_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox, generation))",
+            "CREATE INDEX IF NOT EXISTS contacted_people_sent_provider_cutoffs_account_generation ON contacted_people_sent_provider_cutoffs(account_id, generation, mailbox)",
         ] {
             sqlx::query(statement)
                 .execute(&self.pool)
@@ -729,6 +1051,62 @@ impl Store {
                 .execute(&self.pool)
                 .await?;
         }
+        let contacted_people_stats_columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
+            sqlx::query_as("PRAGMA table_info(contacted_people_account_stats)")
+                .fetch_all(&self.pool)
+                .await?;
+        for (name, definition) in [("display_name", "TEXT"), ("formatted_address", "TEXT")] {
+            if !contacted_people_stats_columns
+                .iter()
+                .any(|column| column.1 == name)
+            {
+                sqlx::query(&format!(
+                    "ALTER TABLE contacted_people_account_stats ADD COLUMN {name} {definition}"
+                ))
+                .execute(&self.pool)
+                .await?;
+            }
+        }
+        let contacted_people_columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
+            sqlx::query_as("PRAGMA table_info(contacted_people)")
+                .fetch_all(&self.pool)
+                .await?;
+        for name in [
+            "normalized_display_name",
+            "normalized_address",
+            "normalized_display_tokens",
+            "normalized_address_tokens",
+        ] {
+            if !contacted_people_columns
+                .iter()
+                .any(|column| column.1 == name)
+            {
+                sqlx::query(&format!(
+                    "ALTER TABLE contacted_people ADD COLUMN {name} TEXT NOT NULL DEFAULT ''"
+                ))
+                .execute(&self.pool)
+                .await?;
+            }
+        }
+        if !contacted_people_columns
+            .iter()
+            .any(|column| column.1 == "hidden_sequence")
+        {
+            sqlx::query("ALTER TABLE contacted_people ADD COLUMN hidden_sequence INTEGER NOT NULL DEFAULT 0")
+                .execute(&self.pool)
+                .await?;
+        }
+        // Start legacy contacted-people upgrades, but only with one bounded
+        // batch. The desktop startup worker resumes any remainder after open.
+        self.continue_contacted_people_migrations(CONTACTED_PEOPLE_MIGRATION_BATCH_SIZE as u32)
+            .await?;
+        // Previous builds represented Clear as a permanent provider-backfill
+        // ban. Preserve its privacy guarantee while upgrading to a precise
+        // provider-identity cutoff: start at generation one and fail closed
+        // until the Sent SELECT hook captures each mailbox boundary.
+        sqlx::query("INSERT INTO app_meta(key, value) SELECT 'contacted_people_collection_generation', '1' WHERE EXISTS (SELECT 1 FROM app_meta WHERE key = 'contacted_people_cleared_at') AND NOT EXISTS (SELECT 1 FROM app_meta WHERE key = 'contacted_people_collection_generation')")
+            .execute(&self.pool)
+            .await?;
         // A CLI and the desktop can open this database concurrently. Preserve
         // every fresh lease regardless of process owner; only work old enough
         // to have outlived the foreground wait window is safe to discard.
@@ -746,6 +1124,8 @@ impl Store {
             "CREATE TRIGGER IF NOT EXISTS accounts_updates_require_live_identity BEFORE UPDATE ON accounts WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
             "CREATE TRIGGER IF NOT EXISTS messages_require_account BEFORE INSERT ON messages WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
             "CREATE TRIGGER IF NOT EXISTS mailbox_sync_state_require_account BEFORE INSERT ON mailbox_sync_state WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS selectable_mailboxes_require_account BEFORE INSERT ON selectable_mailboxes WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS message_mailbox_memberships_require_account BEFORE INSERT ON message_mailbox_memberships WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
             "CREATE TRIGGER IF NOT EXISTS mailbox_action_tombstones_require_account BEFORE INSERT ON mailbox_action_tombstones WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
             "CREATE TRIGGER IF NOT EXISTS mailbox_catalog_state_require_account BEFORE INSERT ON mailbox_catalog_state WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
             "CREATE TRIGGER IF NOT EXISTS mailbox_snapshot_generations_require_account BEFORE INSERT ON mailbox_snapshot_generations WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
@@ -755,6 +1135,14 @@ impl Store {
             "CREATE TRIGGER IF NOT EXISTS mailbox_sync_failures_require_account BEFORE INSERT ON mailbox_sync_failures WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
             "CREATE TRIGGER IF NOT EXISTS mail_rebuild_jobs_require_account BEFORE INSERT ON mail_rebuild_jobs WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
             "CREATE TRIGGER IF NOT EXISTS sent_correspondents_require_account BEFORE INSERT ON sent_correspondents WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS contacted_people_stats_require_account BEFORE INSERT ON contacted_people_account_stats WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS contacted_people_backfill_progress_require_account BEFORE INSERT ON contacted_people_backfill_progress WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS contacted_people_backfill_messages_require_account BEFORE INSERT ON contacted_people_backfill_messages WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS contacted_people_legacy_unresolved_sources_require_account BEFORE INSERT ON contacted_people_legacy_unresolved_sources WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS contacted_people_backfill_sources_require_account BEFORE INSERT ON contacted_people_backfill_sources WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS contacted_people_backfill_rfc_messages_require_account BEFORE INSERT ON contacted_people_backfill_rfc_messages WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS contacted_people_outgoing_messages_require_account BEFORE INSERT ON contacted_people_outgoing_messages WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
+            "CREATE TRIGGER IF NOT EXISTS contacted_people_sent_provider_cutoffs_require_account BEFORE INSERT ON contacted_people_sent_provider_cutoffs WHEN EXISTS (SELECT 1 FROM deleted_account_tombstones WHERE account_id = NEW.account_id) BEGIN SELECT RAISE(ABORT, 'account was removed'); END",
         ] {
             sqlx::query(statement)
                 .execute(&self.pool)
@@ -916,6 +1304,18 @@ impl Store {
             }
         }
         self.initialize_classification_policy().await?;
+        for (name, definition) in [
+            ("is_answered", "INTEGER NOT NULL DEFAULT 0"),
+            ("is_draft", "INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            if !columns.iter().any(|column| column.1 == name) {
+                sqlx::query(&format!(
+                    "ALTER TABLE messages ADD COLUMN {name} {definition}"
+                ))
+                .execute(&self.pool)
+                .await?;
+            }
+        }
         self.migrate_attachment_presentation_metadata().await?;
         if !sync_state_exists {
             sqlx::query("INSERT OR IGNORE INTO mailbox_sync_state(account_id, mailbox, initialized_at) SELECT id, 'INBOX', ? FROM accounts")
@@ -934,6 +1334,13 @@ impl Store {
         // updates. External-content FTS triggers must match the active table
         // definition or SQLite can report a malformed database.
         self.migrate_to_metadata_catalogue().await?;
+        self.migrate_selectable_mailboxes().await?;
+        self.migrate_opaque_mailbox_storage_identities().await?;
+        self.migrate_search_catalogue_v2().await?;
+        self.migrate_contacted_people_enabled_aggregates(
+            CONTACTED_PEOPLE_MIGRATION_BATCH_SIZE as u32,
+        )
+        .await?;
         if thread_schema_changed {
             let account_ids: Vec<String> =
                 sqlx::query_scalar("SELECT DISTINCT account_id FROM messages")
@@ -1096,13 +1503,75 @@ impl Store {
         Ok(())
     }
 
+    /// Converts legacy all-account denormalized person fields to enabled-only
+    /// values. Account stats retain disabled contributions, so re-enabling an
+    /// account can restore them without re-learning mail.
+    async fn migrate_contacted_people_enabled_aggregates(
+        &self,
+        limit: u32,
+    ) -> Result<ContactedPeopleMigrationBatch> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if contacted_people_migration_complete_in_tx(
+            &mut tx,
+            CONTACTED_PEOPLE_ENABLED_AGGREGATES_VERSION_KEY,
+        )
+        .await?
+        {
+            tx.commit().await?;
+            return Ok(ContactedPeopleMigrationBatch {
+                processed: 0,
+                complete: true,
+            });
+        }
+        let cursor = contacted_people_migration_cursor_in_tx(
+            &mut tx,
+            CONTACTED_PEOPLE_ENABLED_AGGREGATES_CURSOR_KEY,
+        )
+        .await?;
+        let rows: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT rowid, canonical_address FROM contacted_people WHERE rowid > ? ORDER BY rowid LIMIT ?",
+        )
+        .bind(cursor)
+        .bind(i64::from(limit.clamp(1, CONTACTED_PEOPLE_MIGRATION_BATCH_SIZE as u32)))
+        .fetch_all(&mut *tx)
+        .await?;
+        for (_, address) in &rows {
+            recompute_enabled_contacted_people_aggregate_for_in_tx(&mut tx, address).await?;
+        }
+        let last_rowid = rows.last().map(|row| row.0);
+        let has_more = if let Some(last_rowid) = last_rowid {
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM contacted_people WHERE rowid > ?)")
+                .bind(last_rowid)
+                .fetch_one(&mut *tx)
+                .await?
+        } else {
+            false
+        };
+        finish_contacted_people_migration_batch_in_tx(
+            &mut tx,
+            CONTACTED_PEOPLE_ENABLED_AGGREGATES_CURSOR_KEY,
+            CONTACTED_PEOPLE_ENABLED_AGGREGATES_VERSION_KEY,
+            last_rowid,
+            has_more,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(ContactedPeopleMigrationBatch {
+            processed: rows.len(),
+            complete: !has_more,
+        })
+    }
     /// Legacy attachment rows only record MIME transport disposition. Rather
     /// than guessing whether a CID/logo is a user-facing file, discard stale
     /// attachment metadata and let the next authoritative MIME fetch classify
     /// the selected HTML branch. This also prevents stale paperclips from
     /// surviving the schema upgrade.
     async fn migrate_attachment_presentation_metadata(&self) -> Result<()> {
-        for table in ["attachments", "starred_attachment_metadata"] {
+        for table in [
+            "attachments",
+            "starred_attachment_metadata",
+            "message_attachment_catalogue",
+        ] {
             let columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
                 sqlx::query_as(&format!("PRAGMA table_info({table})"))
                     .fetch_all(&self.pool)
@@ -1115,6 +1584,7 @@ impl Store {
                 .await?;
             }
         }
+        self.migrate_message_attachment_catalogue_identity().await?;
         let starred_body_columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
             sqlx::query_as("PRAGMA table_info(starred_message_bodies)")
                 .fetch_all(&self.pool)
@@ -1154,6 +1624,47 @@ impl Store {
         Ok(())
     }
 
+    /// The original metadata primary key collapsed distinct MIME parts with
+    /// identical visible metadata. Preserve each opaque part identity instead
+    /// of merging its presentation into a synthetic third state. Legacy rows
+    /// receive a stable rowid-derived identity because no stronger part ID was
+    /// persisted by those builds.
+    async fn migrate_message_attachment_catalogue_identity(&self) -> Result<()> {
+        let columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
+            sqlx::query_as("PRAGMA table_info(message_attachment_catalogue)")
+                .fetch_all(&self.pool)
+                .await?;
+        if columns.iter().any(|column| column.1 == "attachment_id") {
+            return Ok(());
+        }
+        let mut tx = self.pool.begin().await?;
+        for trigger in [
+            "message_attachment_catalogue_ai",
+            "starred_attachment_catalogue_ai",
+        ] {
+            sqlx::query(&format!("DROP TRIGGER IF EXISTS {trigger}"))
+                .execute(&mut *tx)
+                .await?;
+        }
+        sqlx::query("CREATE TABLE message_attachment_catalogue_rebuilt (message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, attachment_id TEXT NOT NULL, filename TEXT NOT NULL, mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, is_inline INTEGER NOT NULL DEFAULT 0, presentation TEXT NOT NULL DEFAULT 'unknown', PRIMARY KEY(message_id, attachment_id))")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT INTO message_attachment_catalogue_rebuilt(message_id, attachment_id, filename, mime_type, size_bytes, is_inline, presentation) SELECT message_id, 'legacy:' || rowid, filename, mime_type, size_bytes, is_inline, presentation FROM message_attachment_catalogue")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DROP TABLE message_attachment_catalogue")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("ALTER TABLE message_attachment_catalogue_rebuilt RENAME TO message_attachment_catalogue")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS message_attachment_catalogue_message_id ON message_attachment_catalogue(message_id)")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Repairs databases written by builds that could delete `accounts` while
     /// provider work was still publishing.  Tombstone every discovered
     /// orphan in the same transaction before deleting its local state, so a
@@ -1165,18 +1676,40 @@ impl Store {
              SELECT orphan.account_id, ? FROM ( \
                  SELECT account_id FROM messages \
                  UNION SELECT account_id FROM mailbox_sync_state \
+                 UNION SELECT account_id FROM selectable_mailboxes \
+                 UNION SELECT account_id FROM message_mailbox_memberships \
                  UNION SELECT account_id FROM mailbox_catalog_state \
                  UNION SELECT account_id FROM mailbox_snapshot_generations \
                  UNION SELECT account_id FROM mailbox_sync_failures \
                  UNION SELECT account_id FROM mailbox_action_tombstones \
                  UNION SELECT account_id FROM mail_rebuild_jobs \
                  UNION SELECT account_id FROM sent_correspondents \
+                 UNION SELECT account_id FROM contacted_people_account_stats \
+                 UNION SELECT account_id FROM contacted_people_backfill_progress \
+                 UNION SELECT account_id FROM contacted_people_backfill_messages \
+                 UNION SELECT account_id FROM contacted_people_legacy_unresolved_sources \
+                 UNION SELECT account_id FROM contacted_people_backfill_sources \
+                 UNION SELECT account_id FROM contacted_people_backfill_rfc_messages \
+                 UNION SELECT account_id FROM contacted_people_outgoing_messages \
+                 UNION SELECT account_id FROM contacted_people_sent_provider_cutoffs \
              ) AS orphan \
              WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE id = orphan.account_id)",
         )
         .bind(Utc::now())
         .execute(&mut *tx)
         .await?;
+        // Deleting an orphan account's stats directly leaves the denormalized
+        // global person row with that account's name, count, and timestamps.
+        // Use the same aggregate-rebuild path as an intentional account
+        // deletion before the generic orphan cleanup below.
+        let orphan_people_accounts: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT stats.account_id FROM contacted_people_account_stats stats WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = stats.account_id)",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        for account_id in orphan_people_accounts {
+            remove_contacted_people_account_contribution_in_tx(&mut tx, &account_id).await?;
+        }
         // Delete message dependents explicitly before their parent. Modern
         // schema revisions also cascade these rows, but explicit cleanup
         // repairs older local schemas that may not have had those FKs.
@@ -1185,6 +1718,8 @@ impl Store {
             "DELETE FROM starred_message_bodies WHERE message_id IN (SELECT id FROM messages WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = messages.account_id))",
             "DELETE FROM attachments WHERE message_id IN (SELECT id FROM messages WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = messages.account_id))",
             "DELETE FROM messages WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = messages.account_id)",
+            "DELETE FROM message_mailbox_memberships WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = message_mailbox_memberships.account_id)",
+            "DELETE FROM selectable_mailboxes WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = selectable_mailboxes.account_id)",
             "DELETE FROM mailbox_sync_state WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = mailbox_sync_state.account_id)",
             "DELETE FROM mailbox_catalog_state WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = mailbox_catalog_state.account_id)",
             "DELETE FROM mailbox_snapshot_generations WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = mailbox_snapshot_generations.account_id)",
@@ -1192,11 +1727,216 @@ impl Store {
             "DELETE FROM mailbox_action_tombstones WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = mailbox_action_tombstones.account_id)",
             "DELETE FROM mail_rebuild_jobs WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = mail_rebuild_jobs.account_id)",
             "DELETE FROM sent_correspondents WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = sent_correspondents.account_id)",
+            "DELETE FROM contacted_people_account_stats WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = contacted_people_account_stats.account_id)",
+            "DELETE FROM contacted_people_backfill_progress WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = contacted_people_backfill_progress.account_id)",
+            "DELETE FROM contacted_people_backfill_messages WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = contacted_people_backfill_messages.account_id)",
+            "DELETE FROM contacted_people_legacy_unresolved_sources WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = contacted_people_legacy_unresolved_sources.account_id)",
+            "DELETE FROM contacted_people_backfill_sources WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = contacted_people_backfill_sources.account_id)",
+            "DELETE FROM contacted_people_backfill_rfc_messages WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = contacted_people_backfill_rfc_messages.account_id)",
+            "DELETE FROM contacted_people_outgoing_messages WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = contacted_people_outgoing_messages.account_id)",
+            "DELETE FROM contacted_people_sent_provider_cutoffs WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE accounts.id = contacted_people_sent_provider_cutoffs.account_id)",
+            "DELETE FROM contacted_people WHERE NOT EXISTS (SELECT 1 FROM contacted_people_account_stats WHERE contacted_people_account_stats.canonical_address = contacted_people.canonical_address)",
         ] {
             sqlx::query(statement).execute(&mut *tx).await?;
         }
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Continues the one-time contacted-people upgrades in durable, bounded
+    /// transactions. `open` performs one 500-row starter batch; a background
+    /// caller should yield between calls until `complete` is true. Neither
+    /// upgrade changes recipient statistics, so callers must not emit a
+    /// contacted-people data-change event merely for this progress.
+    pub async fn continue_contacted_people_migrations(
+        &self,
+        limit: u32,
+    ) -> Result<ContactedPeopleMigrationProgress> {
+        let limit = i64::from(limit.clamp(1, CONTACTED_PEOPLE_MIGRATION_BATCH_SIZE as u32));
+        let normalized = self
+            .migrate_contacted_people_normalized_search(limit)
+            .await?;
+        let sources = self
+            .migrate_contacted_people_backfill_sources(limit)
+            .await?;
+        let active_aggregates = self
+            .migrate_contacted_people_enabled_aggregates(limit as u32)
+            .await?;
+        Ok(ContactedPeopleMigrationProgress {
+            normalized_people: normalized.processed,
+            source_markers: sources.processed,
+            changed_people: 0,
+            complete: normalized.complete && sources.complete && active_aggregates.complete,
+        })
+    }
+
+    /// Backfills additive normalized fields for profiles created before
+    /// contacted-people search was indexed. Normalization is intentionally
+    /// performed in Rust so it has the exact same Unicode and diacritic
+    /// semantics as live writes and autocomplete queries.
+    async fn migrate_contacted_people_normalized_search(
+        &self,
+        limit: i64,
+    ) -> Result<ContactedPeopleMigrationBatch> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if contacted_people_migration_complete_in_tx(
+            &mut tx,
+            CONTACTED_PEOPLE_NORMALIZED_MIGRATION_COMPLETE_KEY,
+        )
+        .await?
+        {
+            tx.commit().await?;
+            return Ok(ContactedPeopleMigrationBatch {
+                processed: 0,
+                complete: true,
+            });
+        }
+        let cursor = contacted_people_migration_cursor_in_tx(
+            &mut tx,
+            CONTACTED_PEOPLE_NORMALIZED_MIGRATION_CURSOR_KEY,
+        )
+        .await?;
+        let people: Vec<(i64, String, Option<String>)> = sqlx::query_as(
+            "SELECT rowid, canonical_address, display_name FROM contacted_people WHERE normalized_address = '' AND rowid > ? ORDER BY rowid LIMIT ?",
+        )
+        .bind(cursor)
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await?;
+        let last_rowid = people.last().map(|row| row.0);
+        for (_, address, display_name) in &people {
+            update_contacted_people_normalized_search_in_tx(
+                &mut tx,
+                address,
+                display_name.as_deref(),
+            )
+            .await?;
+        }
+        let has_more = match last_rowid {
+            Some(last_rowid) => sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM contacted_people WHERE normalized_address = '' AND rowid > ?)",
+            )
+            .bind(last_rowid)
+            .fetch_one(&mut *tx)
+            .await?,
+            None => false,
+        };
+        finish_contacted_people_migration_batch_in_tx(
+            &mut tx,
+            CONTACTED_PEOPLE_NORMALIZED_MIGRATION_CURSOR_KEY,
+            CONTACTED_PEOPLE_NORMALIZED_MIGRATION_COMPLETE_KEY,
+            last_rowid,
+            has_more,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(ContactedPeopleMigrationBatch {
+            processed: people.len(),
+            complete: !has_more,
+        })
+    }
+
+    /// Upgrades legacy account/message-id markers to provider-safe source
+    /// identities while their current mailbox identity is still available.
+    /// The legacy table is the scan driver, including rows whose message has
+    /// already been evicted: advancing past an unresolvable row prevents a
+    /// restart loop while deliberately not treating it as a future UID match.
+    async fn migrate_contacted_people_backfill_sources(
+        &self,
+        limit: i64,
+    ) -> Result<ContactedPeopleMigrationBatch> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if contacted_people_migration_complete_in_tx(
+            &mut tx,
+            CONTACTED_PEOPLE_SOURCE_MIGRATION_COMPLETE_KEY,
+        )
+        .await?
+        {
+            tx.commit().await?;
+            return Ok(ContactedPeopleMigrationBatch {
+                processed: 0,
+                complete: true,
+            });
+        }
+        let cursor = contacted_people_migration_cursor_in_tx(
+            &mut tx,
+            CONTACTED_PEOPLE_SOURCE_MIGRATION_CURSOR_KEY,
+        )
+        .await?;
+        let rows: Vec<ContactedPeopleSourceMigrationRow> =
+            sqlx::query_as(
+                "SELECT legacy.rowid, legacy.account_id, legacy.message_id, m.mailbox, c.uid_validity, m.uid, m.message_id FROM contacted_people_backfill_messages legacy LEFT JOIN messages m ON m.account_id = legacy.account_id AND m.id = legacy.message_id LEFT JOIN mailbox_catalog_state c ON c.account_id = m.account_id AND c.mailbox = m.mailbox WHERE legacy.rowid > ? ORDER BY legacy.rowid LIMIT ?",
+            )
+            .bind(cursor)
+            .bind(limit)
+            .fetch_all(&mut *tx)
+            .await?;
+        let last_rowid = rows.last().map(|row| row.0);
+        for (_, account_id, legacy_message_id, mailbox, uid_validity, uid, message_id) in &rows {
+            let (Some(mailbox), Some(uid)) = (mailbox.as_deref(), uid) else {
+                if let Some((mailbox, uid, is_v2)) =
+                    legacy_contacted_people_marker_locator(account_id, legacy_message_id)
+                {
+                    if let Some((target, uid_validity)) =
+                        resolve_evicted_legacy_contacted_people_source_in_tx(
+                            &mut tx, account_id, &mailbox, is_v2,
+                        )
+                        .await?
+                    {
+                        sqlx::query("INSERT OR IGNORE INTO contacted_people_backfill_sources(account_id, mailbox, uid_validity, uid) VALUES (?, ?, ?, ?)")
+                            .bind(account_id)
+                            .bind(target)
+                            .bind(uid_validity.unwrap_or(-1))
+                            .bind(uid)
+                            .execute(&mut *tx)
+                            .await?;
+                        continue;
+                    }
+                }
+                sqlx::query("INSERT OR IGNORE INTO contacted_people_legacy_unresolved_sources(account_id, message_id) VALUES (?, ?)")
+                    .bind(account_id)
+                    .bind(legacy_message_id)
+                    .execute(&mut *tx)
+                    .await?;
+                continue;
+            };
+            sqlx::query("INSERT OR IGNORE INTO contacted_people_backfill_sources(account_id, mailbox, uid_validity, uid) VALUES (?, ?, ?, ?)")
+                .bind(account_id)
+                .bind(mailbox)
+                .bind(uid_validity.unwrap_or(-1))
+                .bind(uid)
+                .execute(&mut *tx)
+                .await?;
+            if let Some(rfc_message_id) = message_id.as_deref().and_then(normalize_message_id) {
+                sqlx::query("INSERT OR IGNORE INTO contacted_people_backfill_rfc_messages(account_id, rfc_message_id) VALUES (?, ?)")
+                    .bind(account_id)
+                    .bind(rfc_message_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+        let has_more = match last_rowid {
+            Some(last_rowid) => sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM contacted_people_backfill_messages WHERE rowid > ?)",
+            )
+            .bind(last_rowid)
+            .fetch_one(&mut *tx)
+            .await?,
+            None => false,
+        };
+        finish_contacted_people_migration_batch_in_tx(
+            &mut tx,
+            CONTACTED_PEOPLE_SOURCE_MIGRATION_CURSOR_KEY,
+            CONTACTED_PEOPLE_SOURCE_MIGRATION_COMPLETE_KEY,
+            last_rowid,
+            has_more,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(ContactedPeopleMigrationBatch {
+            processed: rows.len(),
+            complete: !has_more,
+        })
     }
 
     /// Dakia's first desktop build stored a relational Electron profile using
@@ -1358,7 +2098,7 @@ impl Store {
         for legacy in messages {
             let received_at = legacy_received_at(legacy.date.as_deref());
             let flags = legacy.flags.to_ascii_lowercase();
-            sqlx::query("INSERT INTO messages(id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, threading_scanned, recipient_headers_scanned, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, unsubscribe_scanned, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, NULL, ?, ?, '', '', '', ?, ?, '', NULL, 'headers_only', NULL, NULL, 0, ?, ?, 0, NULL, NULL, NULL, '')")
+            sqlx::query("INSERT INTO messages(id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, threading_scanned, recipient_headers_scanned, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, unsubscribe_scanned, is_read, is_flagged, is_answered, is_draft, has_attachments, category, classification_confidence, classification_source, classification_signals) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, NULL, ?, ?, '', '', '', ?, ?, '', NULL, 'headers_only', NULL, NULL, 0, ?, ?, 0, 0, 0, NULL, NULL, NULL, '')")
                 .bind(&legacy.id)
                 .bind(&legacy.account_id)
                 .bind(&legacy.mailbox)
@@ -1440,6 +2180,653 @@ impl Store {
         Ok(())
     }
 
+    /// Seeds durable local mailbox identities from the compatibility state.
+    /// The legacy table remains the source of existing sync watermarks while
+    /// provider discovery progressively enriches these rows.
+    async fn migrate_selectable_mailboxes(&self) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO selectable_mailboxes(id, account_id, remote_path, local_path, hierarchy_delimiter, parent_id, parent_path, special_use, selectable, uid_validity, catalogue_coverage, updated_at) \
+             SELECT lower(hex(randomblob(16))), account_id, remote_name, mailbox, NULL, NULL, NULL, NULL, 1, uid_validity, CASE WHEN historical_complete = 1 THEN 'complete' ELSE 'partial' END, updated_at \
+             FROM mailbox_catalog_state legacy \
+             WHERE NOT EXISTS (SELECT 1 FROM selectable_mailboxes mailbox WHERE mailbox.account_id = legacy.account_id AND mailbox.remote_path = legacy.remote_name)",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Converts the mailbox key used by durable local rows only where the
+    /// selectable-mailbox catalogue proves the provider identity.  Earlier
+    /// builds encoded a resolved special mailbox as `Sent::Foo`, which is
+    /// ambiguous because a provider may also expose an ordinary mailbox with
+    /// that exact literal name.  Do not infer from punctuation, case, or a
+    /// display path: the exact raw remote path, special-use flag and, when
+    /// present, UIDVALIDITY must agree before a row is moved.
+    ///
+    /// One transaction covers both the provider locator and every local
+    /// dependent.  A crash therefore leaves either the old namespace or the
+    /// complete new namespace, never a half-moved cache or source marker.
+    async fn migrate_opaque_mailbox_storage_identities(&self) -> Result<()> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO opaque_mailbox_storage_identity_progress(singleton) VALUES (1)",
+        )
+        .execute(&mut *tx)
+        .await?;
+        let (last_account_id, last_mailbox, complete): (String, String, bool) = sqlx::query_as(
+            "SELECT last_account_id, last_mailbox, complete FROM opaque_mailbox_storage_identity_progress WHERE singleton = 1",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if complete {
+            tx.commit().await?;
+            return Ok(());
+        }
+
+        let account_data: Vec<(String, String)> = sqlx::query_as("SELECT id, data FROM accounts")
+            .fetch_all(&mut *tx)
+            .await?;
+        let mut accounts = HashMap::new();
+        for (id, data) in account_data {
+            // A corrupt account record is already unusable for provider work.
+            // Keep its legacy namespace untouched rather than making a
+            // mailbox-identity decision from incomplete data.
+            if let Ok(account) = deserialize_account(&data) {
+                accounts.insert(id, account);
+            }
+        }
+
+        let selectable: Vec<SelectableMailboxIdentityRow> = sqlx::query_as(
+            "SELECT id, account_id, remote_path, local_path, hierarchy_delimiter, special_use, uid_validity FROM selectable_mailboxes",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        let catalogue_states: Vec<(String, String, String, i64)> = sqlx::query_as(
+            "SELECT account_id, mailbox, remote_name, uid_validity FROM mailbox_catalog_state",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        let catalogue_by_locator = catalogue_states
+            .iter()
+            .map(|(account_id, mailbox, remote_name, uid_validity)| {
+                (
+                    (account_id.clone(), mailbox.clone()),
+                    (remote_name.clone(), *uid_validity),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        // A mailbox can have no current message while still owning a sync
+        // watermark, tombstone, or contacted-people source marker.  Include
+        // every such durable namespace in the compatibility pass.
+        let legacy_locators: Vec<(String, String)> = sqlx::query_as(
+            "WITH locators AS ( \
+               SELECT DISTINCT account_id, mailbox FROM messages \
+               UNION SELECT DISTINCT account_id, mailbox FROM mailbox_catalog_state \
+               UNION SELECT DISTINCT account_id, mailbox FROM mailbox_sync_state \
+               UNION SELECT DISTINCT account_id, mailbox FROM mailbox_action_tombstones \
+               UNION SELECT DISTINCT account_id, mailbox FROM contacted_people_backfill_sources \
+             ) SELECT account_id, mailbox FROM locators \
+             WHERE account_id > ? OR (account_id = ? AND mailbox > ?) \
+             ORDER BY account_id, mailbox LIMIT ?",
+        )
+        .bind(&last_account_id)
+        .bind(&last_account_id)
+        .bind(&last_mailbox)
+        .bind(OPAQUE_MAILBOX_STORAGE_IDENTITIES_MIGRATION_BATCH_SIZE)
+        .fetch_all(&mut *tx)
+        .await?;
+        let last_locator = legacy_locators.last().cloned();
+        if last_locator.is_none() {
+            sqlx::query("UPDATE opaque_mailbox_storage_identity_progress SET complete = 1 WHERE singleton = 1")
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            return Ok(());
+        }
+
+        let mut migrations = Vec::new();
+        for (account_id, legacy_mailbox) in legacy_locators {
+            if is_opaque_mailbox_storage_identity(&legacy_mailbox) {
+                continue;
+            }
+            let Some(account) = accounts.get(&account_id) else {
+                continue;
+            };
+            let state = catalogue_by_locator.get(&(account_id.clone(), legacy_mailbox.clone()));
+            let mut candidates = selectable
+                .iter()
+                .filter(|(_, candidate_account, ..)| candidate_account == &account_id)
+                .filter_map(|candidate| {
+                    opaque_mailbox_migration_target(
+                        account,
+                        &legacy_mailbox,
+                        state.map(|(remote, uid_validity)| (remote.as_str(), *uid_validity)),
+                        candidate,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut targets = candidates
+                .iter()
+                .map(|(_, target)| target.clone())
+                .collect::<HashSet<_>>();
+            // More than one compatible target is an unresolved identity
+            // collision.  Leave it alone so the next authoritative LIST and
+            // catalogue rebuild can resolve it safely.
+            if targets.len() != 1 {
+                note_unresolved_opaque_mailbox_locator_in_tx(&mut tx, &account_id, &legacy_mailbox)
+                    .await?;
+                continue;
+            }
+            let (selectable_id, target) = candidates.remove(0);
+            targets.clear();
+            if target == legacy_mailbox {
+                continue;
+            }
+            if !opaque_mailbox_target_is_safe_in_tx(&mut tx, &account_id, &legacy_mailbox, &target)
+                .await?
+            {
+                note_unresolved_opaque_mailbox_locator_in_tx(&mut tx, &account_id, &legacy_mailbox)
+                    .await?;
+                continue;
+            }
+            migrations.push((account_id, legacy_mailbox, target, selectable_id));
+        }
+
+        let mut remaining_message_budget =
+            usize::try_from(OPAQUE_MAILBOX_STORAGE_IDENTITIES_MIGRATION_BATCH_SIZE)
+                .expect("positive migration batch size");
+        let mut incomplete_locator = None;
+        for (account_id, legacy_mailbox, target, selectable_id) in migrations {
+            if remaining_message_budget == 0 {
+                incomplete_locator = Some((account_id, legacy_mailbox));
+                break;
+            }
+            // The catalogue record is the source of truth for the raw remote
+            // identity.  Its local path becomes the new opaque storage key.
+            sqlx::query(
+                "UPDATE selectable_mailboxes SET local_path = ? WHERE id = ? AND account_id = ?",
+            )
+            .bind(&target)
+            .bind(&selectable_id)
+            .bind(&account_id)
+            .execute(&mut *tx)
+            .await?;
+
+            migrate_mailbox_catalogue_state_in_tx(&mut tx, &account_id, &legacy_mailbox, &target)
+                .await?;
+            migrate_mailbox_sync_state_in_tx(&mut tx, &account_id, &legacy_mailbox, &target)
+                .await?;
+            sqlx::query(
+                "INSERT INTO mailbox_action_tombstones(account_id, mailbox, uid, created_at) \
+                 SELECT account_id, ?, uid, created_at FROM mailbox_action_tombstones \
+                 WHERE account_id = ? AND mailbox = ? \
+                 ON CONFLICT(account_id, mailbox, uid) DO UPDATE SET \
+                   created_at = CASE WHEN excluded.created_at > mailbox_action_tombstones.created_at THEN excluded.created_at ELSE mailbox_action_tombstones.created_at END",
+            )
+            .bind(&target)
+            .bind(&account_id)
+            .bind(&legacy_mailbox)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "INSERT OR IGNORE INTO contacted_people_backfill_sources(account_id, mailbox, uid_validity, uid) \
+                 SELECT account_id, ?, uid_validity, uid FROM contacted_people_backfill_sources \
+                 WHERE account_id = ? AND mailbox = ?",
+            )
+            .bind(&target)
+            .bind(&account_id)
+            .bind(&legacy_mailbox)
+            .execute(&mut *tx)
+            .await?;
+
+            let messages: Vec<(String, i64)> = sqlx::query_as(
+                "SELECT id, uid FROM messages WHERE account_id = ? AND mailbox = ? ORDER BY id LIMIT ?",
+            )
+            .bind(&account_id)
+            .bind(&legacy_mailbox)
+            .bind(i64::try_from(remaining_message_budget).expect("migration batch fits i64"))
+            .fetch_all(&mut *tx)
+            .await?;
+            remaining_message_budget = remaining_message_budget.saturating_sub(messages.len());
+            let account_uuid = AccountId::parse_str(&account_id)
+                .context("stored message has an invalid account identity")?;
+            for (old_message_id, uid) in messages {
+                let uid = u32::try_from(uid).context("stored message UID is outside IMAP range")?;
+                let new_message_id = stable_message_id(account_uuid, &target, uid);
+                let published_target_exists: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?)",
+                )
+                .bind(&account_id)
+                .bind(&target)
+                .bind(i64::from(uid))
+                .fetch_one(&mut *tx)
+                .await?;
+                if published_target_exists {
+                    merge_legacy_message_into_published_opaque_row_in_tx(
+                        &mut tx,
+                        &account_id,
+                        &old_message_id,
+                        &new_message_id,
+                    )
+                    .await?;
+                    continue;
+                }
+                rewrite_attachment_identity_in_tx(&mut tx, &old_message_id, &new_message_id)
+                    .await?;
+                sqlx::query(
+                    "UPDATE messages SET id = ?, mailbox = ? WHERE id = ? AND account_id = ?",
+                )
+                .bind(&new_message_id)
+                .bind(&target)
+                .bind(&old_message_id)
+                .bind(&account_id)
+                .execute(&mut *tx)
+                .await?;
+                // Foreign-key cascades perform these updates in current
+                // profiles.  Keep explicit fallbacks for historical SQLite
+                // connections that opened before foreign keys were enabled.
+                for table in [
+                    "message_mailbox_memberships",
+                    "attachments",
+                    "message_attachment_catalogue",
+                    "starred_message_bodies",
+                    "starred_attachment_metadata",
+                    "message_content_cache",
+                    "message_search_body_text",
+                    "message_content_fetches",
+                ] {
+                    sqlx::query(&format!(
+                        "UPDATE {table} SET message_id = ? WHERE message_id = ?"
+                    ))
+                    .bind(&new_message_id)
+                    .bind(&old_message_id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                for table in [
+                    "contacted_people_backfill_messages",
+                    "contacted_people_legacy_unresolved_sources",
+                ] {
+                    sqlx::query(&format!(
+                        "INSERT OR IGNORE INTO {table}(account_id, message_id) SELECT account_id, ? FROM {table} WHERE account_id = ? AND message_id = ?"
+                    ))
+                    .bind(&new_message_id)
+                    .bind(&account_id)
+                    .bind(&old_message_id)
+                    .execute(&mut *tx)
+                    .await?;
+                    sqlx::query(&format!(
+                        "DELETE FROM {table} WHERE account_id = ? AND message_id = ?"
+                    ))
+                    .bind(&account_id)
+                    .bind(&old_message_id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                rewrite_cached_attachment_identity_in_tx(&mut tx, &new_message_id, &old_message_id)
+                    .await?;
+            }
+            let has_remaining_messages: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE account_id = ? AND mailbox = ?)",
+            )
+            .bind(&account_id)
+            .bind(&legacy_mailbox)
+            .fetch_one(&mut *tx)
+            .await?;
+            if has_remaining_messages {
+                incomplete_locator = Some((account_id, legacy_mailbox));
+                break;
+            }
+            // Keep the old locator's UIDVALIDITY and source markers through
+            // every partial batch. The final batch is the only point at which
+            // no old message can need that proof again.
+            for table in [
+                "mailbox_catalog_state",
+                "mailbox_sync_state",
+                "mailbox_action_tombstones",
+                "contacted_people_backfill_sources",
+            ] {
+                sqlx::query(&format!(
+                    "DELETE FROM {table} WHERE account_id = ? AND mailbox = ?"
+                ))
+                .bind(&account_id)
+                .bind(&legacy_mailbox)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+
+        let (last_account_id, last_mailbox) = if incomplete_locator.is_some() {
+            // Retry this source locator next turn. The keyset cursor remains
+            // before it, while each committed transaction has already moved
+            // at most the fixed message budget.
+            (last_account_id, last_mailbox)
+        } else {
+            last_locator.expect("non-empty batch")
+        };
+        sqlx::query("UPDATE opaque_mailbox_storage_identity_progress SET last_account_id = ?, last_mailbox = ?, complete = 0 WHERE singleton = 1")
+            .bind(last_account_id)
+            .bind(last_mailbox)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Adds searchable catalogue structures without replacing the legacy FTS
+    /// table. Keeping these side-by-side makes the migration restart-safe and
+    /// avoids deleting cached message data merely to change an index shape.
+    async fn migrate_search_catalogue_v2(&self) -> Result<()> {
+        // `messages_fts_v2` started life as an external-content FTS table.
+        // That shape is unsafe for a resumable build: before a legacy row has
+        // reached its backfill batch, an UPDATE/DELETE trigger cannot issue an
+        // FTS5 special delete for a row which has no index entry yet. Store the
+        // indexed columns in this additive table instead. Normal FTS DELETE
+        // and INSERT OR REPLACE are then idempotent whether a row was indexed
+        // by a prior batch, by a live write, or by neither.
+        let v2_definition: Option<String> = sqlx::query_scalar(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts_v2'",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        let v2_uses_external_messages = v2_definition.as_deref().is_some_and(|definition| {
+            definition
+                .to_ascii_lowercase()
+                .contains("content='messages'")
+        });
+        if v2_uses_external_messages {
+            for statement in [
+                "DROP TRIGGER IF EXISTS messages_fts_v2_ai",
+                "DROP TRIGGER IF EXISTS messages_fts_v2_ad",
+                "DROP TRIGGER IF EXISTS messages_fts_v2_au",
+                "DROP TABLE messages_fts_v2",
+                "DELETE FROM search_catalogue_v2_progress WHERE stage = 'headers'",
+                "DELETE FROM app_meta WHERE key = 'search_catalogue_v2'",
+            ] {
+                sqlx::query(statement).execute(&self.pool).await?;
+            }
+        }
+        // The initial development form used FTS5's contentless delete command
+        // against an ordinary FTS table. Replace those two triggers on open so
+        // an interrupted development build cannot leave body-cache writes
+        // failing with a generic SQLite logic error.
+        for statement in [
+            // Recreate these on every open so a database interrupted between
+            // the old and new trigger definitions is repaired before any live
+            // catalogue write can run.
+            "DROP TRIGGER IF EXISTS messages_fts_v2_ai",
+            "DROP TRIGGER IF EXISTS messages_fts_v2_ad",
+            "DROP TRIGGER IF EXISTS messages_fts_v2_au",
+            "DROP TRIGGER IF EXISTS message_cached_bodies_fts_ad",
+            "DROP TRIGGER IF EXISTS message_cached_bodies_fts_au",
+            // Attachment cache eviction must not erase durable header-only
+            // catalogue metadata written by persist_message.
+            "DROP TRIGGER IF EXISTS message_attachment_catalogue_ad",
+            "DROP TRIGGER IF EXISTS starred_attachment_catalogue_ad",
+            // Recreate the insert triggers too: older databases have the
+            // pre-presentation definition under the same trigger names.
+            "DROP TRIGGER IF EXISTS message_attachment_catalogue_ai",
+            "DROP TRIGGER IF EXISTS starred_attachment_catalogue_ai",
+        ] {
+            sqlx::query(statement).execute(&self.pool).await?;
+        }
+        for statement in [
+            "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts_v2 USING fts5(subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, snippet)",
+            "CREATE TRIGGER IF NOT EXISTS messages_fts_v2_ai AFTER INSERT ON messages BEGIN INSERT INTO messages_fts_v2(rowid, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, snippet) VALUES (new.rowid, new.subject, new.from_name, new.from_address, new.to_addresses, new.cc_addresses, new.bcc_addresses, new.snippet); END",
+            "CREATE TRIGGER IF NOT EXISTS messages_fts_v2_ad AFTER DELETE ON messages BEGIN DELETE FROM messages_fts_v2 WHERE rowid = old.rowid; END",
+            "CREATE TRIGGER IF NOT EXISTS messages_fts_v2_au AFTER UPDATE ON messages BEGIN DELETE FROM messages_fts_v2 WHERE rowid = old.rowid; INSERT INTO messages_fts_v2(rowid, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, snippet) VALUES (new.rowid, new.subject, new.from_name, new.from_address, new.to_addresses, new.cc_addresses, new.bcc_addresses, new.snippet); END",
+            "CREATE VIRTUAL TABLE IF NOT EXISTS message_cached_bodies_fts USING fts5(message_id UNINDEXED, body_text)",
+            "CREATE TRIGGER IF NOT EXISTS message_cached_bodies_fts_ai AFTER INSERT ON message_content_cache BEGIN INSERT INTO message_cached_bodies_fts(rowid, message_id, body_text) VALUES (new.rowid, new.message_id, new.body_text); END",
+            "CREATE TRIGGER IF NOT EXISTS message_cached_bodies_fts_ad AFTER DELETE ON message_content_cache BEGIN DELETE FROM message_cached_bodies_fts WHERE rowid = old.rowid; END",
+            "CREATE TRIGGER IF NOT EXISTS message_cached_bodies_fts_au AFTER UPDATE ON message_content_cache BEGIN DELETE FROM message_cached_bodies_fts WHERE rowid = old.rowid; INSERT INTO message_cached_bodies_fts(rowid, message_id, body_text) VALUES (new.rowid, new.message_id, new.body_text); END",
+            "CREATE VIRTUAL TABLE IF NOT EXISTS message_search_bodies_fts USING fts5(message_id UNINDEXED, body_text)",
+            "CREATE TRIGGER IF NOT EXISTS message_search_bodies_fts_ai AFTER INSERT ON message_search_body_text BEGIN INSERT INTO message_search_bodies_fts(rowid, message_id, body_text) VALUES (new.rowid, new.message_id, new.body_text); END",
+            "CREATE TRIGGER IF NOT EXISTS message_search_bodies_fts_ad AFTER DELETE ON message_search_body_text BEGIN DELETE FROM message_search_bodies_fts WHERE rowid = old.rowid; END",
+            "CREATE TRIGGER IF NOT EXISTS message_search_bodies_fts_au AFTER UPDATE ON message_search_body_text BEGIN DELETE FROM message_search_bodies_fts WHERE rowid = old.rowid; INSERT INTO message_search_bodies_fts(rowid, message_id, body_text) VALUES (new.rowid, new.message_id, new.body_text); END",
+            "CREATE TRIGGER IF NOT EXISTS message_attachment_catalogue_ai AFTER INSERT ON attachments BEGIN INSERT INTO message_attachment_catalogue(message_id, attachment_id, filename, mime_type, size_bytes, is_inline, presentation) VALUES (new.message_id, new.id, new.filename, new.mime_type, new.size_bytes, new.is_inline, new.presentation) ON CONFLICT(message_id, attachment_id) DO UPDATE SET filename = excluded.filename, mime_type = excluded.mime_type, size_bytes = excluded.size_bytes, is_inline = excluded.is_inline, presentation = excluded.presentation; END",
+            "CREATE TRIGGER IF NOT EXISTS starred_attachment_catalogue_ai AFTER INSERT ON starred_attachment_metadata BEGIN INSERT INTO message_attachment_catalogue(message_id, attachment_id, filename, mime_type, size_bytes, is_inline, presentation) VALUES (new.message_id, new.id, new.filename, new.mime_type, new.size_bytes, new.is_inline, new.presentation) ON CONFLICT(message_id, attachment_id) DO UPDATE SET filename = excluded.filename, mime_type = excluded.mime_type, size_bytes = excluded.size_bytes, is_inline = excluded.is_inline, presentation = excluded.presentation; END",
+        ] {
+            sqlx::query(statement).execute(&self.pool).await?;
+        }
+        let legacy_indexed: Option<String> =
+            sqlx::query_scalar("SELECT value FROM app_meta WHERE key = 'search_catalogue_v2'")
+                .fetch_optional(&self.pool)
+                .await?;
+        // Builds written before the resumable migration marker had already
+        // completed their v2 header/cache/attachment rebuild synchronously.
+        // Preserve that finished work rather than duplicating FTS rows.
+        if legacy_indexed.as_deref() == Some("1") {
+            for stage in [
+                "headers",
+                "cached_bodies",
+                "attachments",
+                "starred_attachments",
+            ] {
+                sqlx::query("INSERT OR IGNORE INTO search_catalogue_v2_progress(stage, complete) VALUES (?, 1)")
+                    .bind(stage)
+                    .execute(&self.pool)
+                    .await?;
+            }
+        } else {
+            self.migrate_search_catalogue_v2_stage(
+                "headers",
+                "messages",
+                "INSERT OR REPLACE INTO messages_fts_v2(rowid, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, snippet) SELECT rowid, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, snippet FROM messages WHERE rowid > ? AND rowid <= ? ORDER BY rowid",
+            )
+            .await?;
+            self.migrate_search_catalogue_v2_stage(
+                "cached_bodies",
+                "message_content_cache",
+                "INSERT OR REPLACE INTO message_cached_bodies_fts(rowid, message_id, body_text) SELECT rowid, message_id, body_text FROM message_content_cache WHERE rowid > ? AND rowid <= ? ORDER BY rowid",
+            )
+            .await?;
+            self.migrate_search_catalogue_v2_stage(
+                "attachments",
+                "attachments",
+                "INSERT INTO message_attachment_catalogue(message_id, attachment_id, filename, mime_type, size_bytes, is_inline, presentation) SELECT message_id, id, filename, mime_type, size_bytes, is_inline, presentation FROM attachments WHERE rowid > ? AND rowid <= ? ORDER BY rowid ON CONFLICT(message_id, attachment_id) DO UPDATE SET filename = excluded.filename, mime_type = excluded.mime_type, size_bytes = excluded.size_bytes, is_inline = excluded.is_inline, presentation = excluded.presentation",
+            )
+            .await?;
+            self.migrate_search_catalogue_v2_stage(
+                "starred_attachments",
+                "starred_attachment_metadata",
+                "INSERT INTO message_attachment_catalogue(message_id, attachment_id, filename, mime_type, size_bytes, is_inline, presentation) SELECT message_id, id, filename, mime_type, size_bytes, is_inline, presentation FROM starred_attachment_metadata WHERE rowid > ? AND rowid <= ? ORDER BY rowid ON CONFLICT(message_id, attachment_id) DO UPDATE SET filename = excluded.filename, mime_type = excluded.mime_type, size_bytes = excluded.size_bytes, is_inline = excluded.is_inline, presentation = excluded.presentation",
+            )
+            .await?;
+        }
+        self.migrate_search_catalogue_v2_stage(
+            "search_bodies",
+            "message_search_body_text",
+            "INSERT OR REPLACE INTO message_search_bodies_fts(rowid, message_id, body_text) SELECT rowid, message_id, body_text FROM message_search_body_text WHERE rowid > ? AND rowid <= ? ORDER BY rowid",
+        )
+        .await?;
+        if self.search_catalogue_v2_complete().await? {
+            sqlx::query("INSERT INTO app_meta(key, value) VALUES ('search_catalogue_v2', '1') ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Moves one committed, fixed-size source slice into a v2 search index.
+    /// Keeping the cursor and insert in one transaction makes an interrupted
+    /// open restart from the last published batch instead of rebuilding all
+    /// 50,000-plus rows in one foreground startup.
+    async fn migrate_search_catalogue_v2_stage(
+        &self,
+        stage: &str,
+        source_table: &str,
+        insert_sql: &str,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("INSERT OR IGNORE INTO search_catalogue_v2_progress(stage) VALUES (?)")
+            .bind(stage)
+            .execute(&mut *tx)
+            .await?;
+        let (last_rowid, mut target_rowid, complete): (i64, i64, bool) = sqlx::query_as(
+            "SELECT last_rowid, target_rowid, complete FROM search_catalogue_v2_progress WHERE stage = ?",
+        )
+        .bind(stage)
+        .fetch_one(&mut *tx)
+        .await?;
+        if complete {
+            tx.commit().await?;
+            return Ok(());
+        }
+        if target_rowid == 0 {
+            target_rowid = sqlx::query_scalar(&format!(
+                "SELECT COALESCE(MAX(rowid), 0) FROM {source_table}"
+            ))
+            .fetch_one(&mut *tx)
+            .await?;
+            sqlx::query("UPDATE search_catalogue_v2_progress SET target_rowid = ? WHERE stage = ?")
+                .bind(target_rowid)
+                .bind(stage)
+                .execute(&mut *tx)
+                .await?;
+        }
+        let batch_rowids: Vec<i64> = sqlx::query_scalar(&format!(
+            "SELECT rowid FROM {source_table} WHERE rowid > ? AND rowid <= ? ORDER BY rowid LIMIT ?"
+        ))
+        .bind(last_rowid)
+        .bind(target_rowid)
+        .bind(SEARCH_CATALOGUE_V2_MIGRATION_BATCH_SIZE)
+        .fetch_all(&mut *tx)
+        .await?;
+        let Some(next_rowid) = batch_rowids.last().copied() else {
+            sqlx::query("UPDATE search_catalogue_v2_progress SET complete = 1 WHERE stage = ?")
+                .bind(stage)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            return Ok(());
+        };
+        sqlx::query(insert_sql)
+            .bind(last_rowid)
+            .bind(next_rowid)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE search_catalogue_v2_progress SET last_rowid = ? WHERE stage = ?")
+            .bind(next_rowid)
+            .bind(stage)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn search_catalogue_v2_complete(&self) -> Result<bool> {
+        let incomplete: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM search_catalogue_v2_progress WHERE stage IN ('headers', 'cached_bodies', 'attachments', 'starred_attachments', 'search_bodies') AND complete = 0",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(incomplete == 0)
+    }
+
+    /// Advances each independent v2 catalogue source by at most one fixed
+    /// batch. Call this from a yielding background task after startup; it is
+    /// intentionally safe to call again after interruption or restart.
+    pub async fn advance_search_catalogue_v2_backfill(
+        &self,
+    ) -> Result<SearchCatalogueV2BackfillProgress> {
+        // Share the yielding low-priority maintenance cadence with the search
+        // catalogue. Each call converts at most one opaque-locator batch, so
+        // a profile upgrade cannot monopolize startup or message opening.
+        self.migrate_opaque_mailbox_storage_identities().await?;
+        self.migrate_search_catalogue_v2_stage(
+            "headers",
+            "messages",
+            "INSERT OR REPLACE INTO messages_fts_v2(rowid, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, snippet) SELECT rowid, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, snippet FROM messages WHERE rowid > ? AND rowid <= ? ORDER BY rowid",
+        )
+        .await?;
+        self.migrate_search_catalogue_v2_stage(
+            "cached_bodies",
+            "message_content_cache",
+            "INSERT OR REPLACE INTO message_cached_bodies_fts(rowid, message_id, body_text) SELECT rowid, message_id, body_text FROM message_content_cache WHERE rowid > ? AND rowid <= ? ORDER BY rowid",
+        )
+        .await?;
+        self.migrate_search_catalogue_v2_stage(
+            "attachments",
+            "attachments",
+            "INSERT INTO message_attachment_catalogue(message_id, attachment_id, filename, mime_type, size_bytes, is_inline, presentation) SELECT message_id, id, filename, mime_type, size_bytes, is_inline, presentation FROM attachments WHERE rowid > ? AND rowid <= ? ORDER BY rowid ON CONFLICT(message_id, attachment_id) DO UPDATE SET filename = excluded.filename, mime_type = excluded.mime_type, size_bytes = excluded.size_bytes, is_inline = excluded.is_inline, presentation = excluded.presentation",
+        )
+        .await?;
+        self.migrate_search_catalogue_v2_stage(
+            "starred_attachments",
+            "starred_attachment_metadata",
+            "INSERT INTO message_attachment_catalogue(message_id, attachment_id, filename, mime_type, size_bytes, is_inline, presentation) SELECT message_id, id, filename, mime_type, size_bytes, is_inline, presentation FROM starred_attachment_metadata WHERE rowid > ? AND rowid <= ? ORDER BY rowid ON CONFLICT(message_id, attachment_id) DO UPDATE SET filename = excluded.filename, mime_type = excluded.mime_type, size_bytes = excluded.size_bytes, is_inline = excluded.is_inline, presentation = excluded.presentation",
+        )
+        .await?;
+        self.migrate_search_catalogue_v2_stage(
+            "search_bodies",
+            "message_search_body_text",
+            "INSERT OR REPLACE INTO message_search_bodies_fts(rowid, message_id, body_text) SELECT rowid, message_id, body_text FROM message_search_body_text WHERE rowid > ? AND rowid <= ? ORDER BY rowid",
+        )
+        .await?;
+        if self.search_catalogue_v2_complete().await? {
+            sqlx::query("INSERT INTO app_meta(key, value) VALUES ('search_catalogue_v2', '1') ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+                .execute(&self.pool)
+                .await?;
+        }
+        self.search_catalogue_v2_backfill_progress().await
+    }
+
+    pub async fn search_catalogue_v2_backfill_progress(
+        &self,
+    ) -> Result<SearchCatalogueV2BackfillProgress> {
+        let header: Option<(i64, i64, bool)> = sqlx::query_as(
+            "SELECT last_rowid, target_rowid, complete FROM search_catalogue_v2_progress WHERE stage = 'headers'",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some((indexed_messages, total_messages, complete)) = header else {
+            return Ok(SearchCatalogueV2BackfillProgress {
+                indexed_messages: 0,
+                total_messages: 0,
+                complete: false,
+            });
+        };
+        let opaque_locator_complete: bool = sqlx::query_scalar(
+            "SELECT COALESCE((SELECT complete FROM opaque_mailbox_storage_identity_progress WHERE singleton = 1), 0)",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(SearchCatalogueV2BackfillProgress {
+            indexed_messages,
+            total_messages,
+            // The desktop background loop uses this flag as its stop signal.
+            // Keep it false until both maintenance streams finish, otherwise
+            // an already-built FTS catalogue would strand locator rows after
+            // the first 500-message compatibility batch.
+            complete: complete
+                && self.search_catalogue_v2_complete().await?
+                && opaque_locator_complete,
+        })
+    }
+
+    /// Counts body text available from a search-only response, a complete
+    /// foreground reader cache, or the durable starred cache. All lookups are
+    /// keyed by message ID and the outer message scan is account-indexed.
+    pub async fn local_body_index_coverage(
+        &self,
+        account_id: AccountId,
+    ) -> Result<LocalBodyIndexCoverage> {
+        let account_key = account_id.to_string();
+        let (catalogue_messages, searchable_bodies): (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*), COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM message_search_body_text s WHERE s.message_id = m.id) OR EXISTS (SELECT 1 FROM message_content_cache c WHERE c.message_id = m.id AND c.content_state = 'complete') OR EXISTS (SELECT 1 FROM starred_message_bodies b WHERE b.message_id = m.id AND b.attachment_presentation_version = ?) THEN 1 ELSE 0 END), 0) FROM messages m WHERE m.account_id = ?",
+        )
+        .bind(ATTACHMENT_PRESENTATION_VERSION)
+        .bind(&account_key)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(LocalBodyIndexCoverage {
+            account_id: account_key,
+            catalogue_messages,
+            searchable_bodies,
+        })
+    }
+
     pub async fn set_secret(&self, name: &str, secret: &str) -> Result<()> {
         let nonce = random_bytes::<VAULT_NONCE_LEN>()?;
         let ciphertext = encrypt_secret(&self.vault_key, nonce, name, secret)?;
@@ -1473,8 +2860,15 @@ impl Store {
 
     pub async fn save_account(&self, account: &Account) -> Result<()> {
         let mut tx = self.pool.begin().await?;
-        save_account_in_transaction(&mut tx, account).await?;
+        let active_membership_changed = save_account_in_transaction(&mut tx, account).await?;
         tx.commit().await?;
+        if active_membership_changed {
+            // Small histories converge immediately; large histories advance
+            // one bounded writer batch and the existing background worker
+            // resumes through `continue_contacted_people_migrations`.
+            self.continue_contacted_people_migrations(CONTACTED_PEOPLE_MIGRATION_BATCH_SIZE as u32)
+                .await?;
+        }
         Ok(())
     }
 
@@ -1495,9 +2889,13 @@ impl Store {
             ));
         }
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        save_account_in_transaction(&mut tx, account).await?;
+        let active_membership_changed = save_account_in_transaction(&mut tx, account).await?;
         save_mail_rebuild_job_in_transaction(&mut tx, job).await?;
         tx.commit().await?;
+        if active_membership_changed {
+            self.continue_contacted_people_migrations(CONTACTED_PEOPLE_MIGRATION_BATCH_SIZE as u32)
+                .await?;
+        }
         Ok(())
     }
 
@@ -1527,7 +2925,7 @@ impl Store {
             ));
         }
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        save_account_in_transaction(&mut tx, account).await?;
+        let active_membership_changed = save_account_in_transaction(&mut tx, account).await?;
         save_mail_rebuild_job_in_transaction(&mut tx, job).await?;
         if let Some(previous_secret_name) = previous_secret_name {
             sqlx::query("DELETE FROM credentials WHERE name = ?")
@@ -1536,6 +2934,10 @@ impl Store {
                 .await?;
         }
         tx.commit().await?;
+        if active_membership_changed {
+            self.continue_contacted_people_migrations(CONTACTED_PEOPLE_MIGRATION_BATCH_SIZE as u32)
+                .await?;
+        }
         Ok(())
     }
 
@@ -1551,16 +2953,7 @@ impl Store {
         let nonce = random_bytes::<VAULT_NONCE_LEN>()?;
         let ciphertext = encrypt_secret(&self.vault_key, nonce, secret_name, secret)?;
         let mut tx = self.pool.begin().await?;
-        let deleted: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM deleted_account_tombstones WHERE account_id = ?)",
-        )
-        .bind(account.id.to_string())
-        .fetch_one(&mut *tx)
-        .await?;
-        if deleted {
-            tx.rollback().await?;
-            return Err(anyhow!("account was removed"));
-        }
+        let active_membership_changed = save_account_in_transaction(&mut tx, account).await?;
         sqlx::query("INSERT INTO credentials(name, nonce, ciphertext, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET nonce=excluded.nonce, ciphertext=excluded.ciphertext, updated_at=excluded.updated_at")
             .bind(secret_name)
             .bind(nonce.as_slice())
@@ -1568,14 +2961,11 @@ impl Store {
             .bind(Utc::now())
             .execute(&mut *tx)
             .await?;
-        sqlx::query("INSERT INTO accounts(id, email, data, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET email=excluded.email, data=excluded.data")
-            .bind(account.id.to_string())
-            .bind(&account.email)
-            .bind(serde_json::to_string(account)?)
-            .bind(account.created_at)
-            .execute(&mut *tx)
-            .await?;
         tx.commit().await?;
+        if active_membership_changed {
+            self.continue_contacted_people_migrations(CONTACTED_PEOPLE_MIGRATION_BATCH_SIZE as u32)
+                .await?;
+        }
         Ok(())
     }
 
@@ -1667,8 +3057,18 @@ impl Store {
 
     pub async fn delete_account(&self, id: AccountId) -> Result<()> {
         let mut tx = self.pool.begin().await?;
+        let account_id = id.to_string();
+        sqlx::query("INSERT OR IGNORE INTO account_search_generations(account_id, generation) SELECT ?, 0 WHERE EXISTS (SELECT 1 FROM accounts WHERE id = ?)")
+            .bind(&account_id)
+            .bind(&account_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE account_search_generations SET generation = generation + 1 WHERE account_id = ?")
+            .bind(&account_id)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("INSERT INTO deleted_account_tombstones(account_id, deleted_at) VALUES (?, ?) ON CONFLICT(account_id) DO UPDATE SET deleted_at=excluded.deleted_at")
-            .bind(id.to_string())
+            .bind(&account_id)
             .bind(Utc::now())
             .execute(&mut *tx)
             .await?;
@@ -1700,6 +3100,16 @@ impl Store {
             .bind(id.to_string())
             .execute(&mut *tx)
             .await?;
+        remove_contacted_people_account_contribution_in_tx(&mut tx, &id.to_string()).await?;
+        sqlx::query("DELETE FROM app_meta WHERE key IN (?, ?)")
+            .bind(CONTACTED_PEOPLE_ENABLED_AGGREGATES_CURSOR_KEY)
+            .bind(CONTACTED_PEOPLE_ENABLED_AGGREGATES_VERSION_KEY)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM selectable_mailboxes WHERE account_id = ?")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("DELETE FROM messages WHERE account_id = ?")
             .bind(id.to_string())
             .execute(&mut *tx)
@@ -1709,7 +3119,966 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
+        self.continue_contacted_people_migrations(CONTACTED_PEOPLE_MIGRATION_BATCH_SIZE as u32)
+            .await?;
         Ok(())
+    }
+
+    /// Returns the current account generation used to reject stale provider
+    /// search publications. The row is created only for a live account.
+    pub async fn account_search_generation(&self, id: AccountId) -> Result<i64> {
+        let account_id = id.to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query("INSERT OR IGNORE INTO account_search_generations(account_id, generation) SELECT ?, 0 WHERE EXISTS (SELECT 1 FROM accounts WHERE id = ?)")
+            .bind(&account_id)
+            .bind(&account_id)
+            .execute(&mut *tx)
+            .await?;
+        let generation = sqlx::query_scalar(
+            "SELECT generation FROM account_search_generations WHERE account_id = ?",
+        )
+        .bind(&account_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| anyhow!("account does not exist"))?;
+        tx.commit().await?;
+        Ok(generation)
+    }
+
+    /// Invalidates provider-search publications for one account. Call this in
+    /// the same foreground mutation path before configuration, rebuild, or
+    /// local flag state changes become authoritative.
+    pub async fn advance_account_search_generation(&self, id: AccountId) -> Result<i64> {
+        let account_id = id.to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query("INSERT OR IGNORE INTO account_search_generations(account_id, generation) SELECT ?, 0 WHERE EXISTS (SELECT 1 FROM accounts WHERE id = ?)")
+            .bind(&account_id)
+            .bind(&account_id)
+            .execute(&mut *tx)
+            .await?;
+        let updated = sqlx::query(
+            "UPDATE account_search_generations SET generation = generation + 1 WHERE account_id = ?",
+        )
+        .bind(&account_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if updated != 1 {
+            tx.rollback().await?;
+            return Err(anyhow!("account does not exist"));
+        }
+        let generation: i64 = sqlx::query_scalar(
+            "SELECT generation FROM account_search_generations WHERE account_id = ?",
+        )
+        .bind(&account_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(generation)
+    }
+
+    /// Creates or refreshes a provider-discovered mailbox without changing the
+    /// legacy mailbox-sync row. Repeating the same discovery preserves the
+    /// opaque local ID and atomically updates its metadata.
+    pub async fn upsert_selectable_mailbox(
+        &self,
+        account_id: AccountId,
+        draft: &SelectableMailboxDraft,
+    ) -> Result<SelectableMailbox> {
+        self.upsert_selectable_mailbox_with_generation(account_id, draft, None)
+            .await?
+            .ok_or_else(|| anyhow!("account does not exist"))
+    }
+
+    /// Generation-bound provider-search counterpart. `None` means a
+    /// foreground mutation made this discovery stale, so no mailbox metadata
+    /// is published.
+    pub async fn upsert_selectable_mailbox_if_account_generation(
+        &self,
+        account_id: AccountId,
+        generation: i64,
+        draft: &SelectableMailboxDraft,
+    ) -> Result<Option<SelectableMailbox>> {
+        self.upsert_selectable_mailbox_with_generation(account_id, draft, Some(generation))
+            .await
+    }
+
+    async fn upsert_selectable_mailbox_with_generation(
+        &self,
+        account_id: AccountId,
+        draft: &SelectableMailboxDraft,
+        expected_generation: Option<i64>,
+    ) -> Result<Option<SelectableMailbox>> {
+        // The provider's raw mailbox path is a wire identity.  Reject an
+        // all-whitespace value, but never trim a valid name: ` Foo` and
+        // `Foo` are distinct IMAP mailboxes and must retain distinct opaque
+        // storage namespaces.
+        let remote_path = draft.remote_path.as_str();
+        if remote_path.trim().is_empty() {
+            return Err(anyhow!("selectable mailbox remote path cannot be empty"));
+        }
+        if !matches!(
+            draft.catalogue_coverage.as_str(),
+            "unknown" | "partial" | "complete"
+        ) {
+            return Err(anyhow!("invalid mailbox catalogue coverage"));
+        }
+        let account_key = account_id.to_string();
+        let local_path = draft
+            .local_path
+            .as_deref()
+            .filter(|path| !path.trim().is_empty())
+            .unwrap_or(remote_path);
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if let Some(generation) = expected_generation {
+            if !account_search_generation_matches_in_tx(&mut tx, &account_key, generation).await? {
+                tx.rollback().await?;
+                return Ok(None);
+            }
+        }
+        if let Some(parent_id) = draft.parent_id.as_deref() {
+            let parent_account: Option<String> =
+                sqlx::query_scalar("SELECT account_id FROM selectable_mailboxes WHERE id = ?")
+                    .bind(parent_id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            if parent_account.as_deref() != Some(account_key.as_str()) {
+                return Err(anyhow!("mailbox parent does not belong to this account"));
+            }
+        }
+        sqlx::query("INSERT INTO selectable_mailboxes(id, account_id, remote_path, local_path, hierarchy_delimiter, parent_id, parent_path, special_use, selectable, uid_validity, catalogue_coverage, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(account_id, remote_path) DO UPDATE SET local_path=excluded.local_path, hierarchy_delimiter=excluded.hierarchy_delimiter, parent_id=excluded.parent_id, parent_path=excluded.parent_path, special_use=excluded.special_use, selectable=excluded.selectable, uid_validity=excluded.uid_validity, catalogue_coverage=excluded.catalogue_coverage, updated_at=excluded.updated_at")
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(&account_key)
+            .bind(remote_path)
+            .bind(local_path)
+            .bind(&draft.hierarchy_delimiter)
+            .bind(&draft.parent_id)
+            .bind(&draft.parent_path)
+            .bind(&draft.special_use)
+            .bind(draft.selectable)
+            .bind(draft.uid_validity)
+            .bind(&draft.catalogue_coverage)
+            .bind(Utc::now())
+            .execute(&mut *tx)
+            .await?;
+        let mailbox = sqlx::query_as::<_, SelectableMailbox>("SELECT id, account_id, remote_path, local_path, hierarchy_delimiter, parent_id, parent_path, special_use, selectable, uid_validity, catalogue_coverage FROM selectable_mailboxes WHERE account_id = ? AND remote_path = ?")
+            .bind(&account_key)
+            .bind(remote_path)
+            .fetch_one(&mut *tx)
+            .await?;
+        let has_unresolved: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM opaque_mailbox_storage_identity_unresolved WHERE account_id = ?)",
+        )
+        .bind(&account_key)
+        .fetch_one(&mut *tx)
+        .await?;
+        if has_unresolved {
+            // A new LIST/SELECT result may be the first authoritative raw
+            // path, special-use flag, or UIDVALIDITY for an old locator.
+            // Retry it on the next bounded maintenance turn, but do not
+            // rewind completed profiles with no unresolved rows.
+            sqlx::query(
+                "DELETE FROM opaque_mailbox_storage_identity_unresolved WHERE account_id = ?",
+            )
+            .bind(&account_key)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("UPDATE opaque_mailbox_storage_identity_progress SET last_account_id = '', last_mailbox = '', complete = 0 WHERE singleton = 1")
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(Some(mailbox))
+    }
+
+    pub async fn selectable_mailbox_catalogue(
+        &self,
+        account_id: AccountId,
+    ) -> Result<Vec<SelectableMailbox>> {
+        Ok(sqlx::query_as::<_, SelectableMailbox>("SELECT id, account_id, remote_path, local_path, hierarchy_delimiter, parent_id, parent_path, special_use, selectable, uid_validity, catalogue_coverage FROM selectable_mailboxes WHERE account_id = ? ORDER BY local_path, remote_path, id")
+            .bind(account_id.to_string())
+            .fetch_all(&self.pool)
+            .await?)
+    }
+
+    /// Alias kept short for callers that only need the provider mailbox list.
+    pub async fn list_selectable_mailboxes(
+        &self,
+        account_id: AccountId,
+    ) -> Result<Vec<SelectableMailbox>> {
+        self.selectable_mailbox_catalogue(account_id).await
+    }
+
+    pub async fn delete_selectable_mailbox(
+        &self,
+        account_id: AccountId,
+        mailbox_id: &str,
+    ) -> Result<bool> {
+        let deleted =
+            sqlx::query("DELETE FROM selectable_mailboxes WHERE id = ? AND account_id = ?")
+                .bind(mailbox_id)
+                .bind(account_id.to_string())
+                .execute(&self.pool)
+                .await?
+                .rows_affected();
+        Ok(deleted == 1)
+    }
+
+    /// Applies a successful, complete provider LIST as the authoritative
+    /// mailbox namespace for one account. Rows absent from the response are
+    /// retired together with their cached catalogue namespace and logical
+    /// memberships. A failed or malformed LIST must never call this method.
+    pub async fn retire_selectable_mailboxes_absent_from_authoritative_list(
+        &self,
+        account_id: AccountId,
+        listed_remote_paths: &HashSet<String>,
+    ) -> Result<usize> {
+        let account_key = account_id.to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let existing = sqlx::query_as::<_, SelectableMailbox>(
+            "SELECT id, account_id, remote_path, local_path, hierarchy_delimiter, parent_id, parent_path, special_use, selectable, uid_validity, catalogue_coverage FROM selectable_mailboxes WHERE account_id = ?",
+        )
+        .bind(&account_key)
+        .fetch_all(&mut *tx)
+        .await?;
+        let stale = existing
+            .into_iter()
+            .filter(|mailbox| !listed_remote_paths.contains(&mailbox.remote_path))
+            .collect::<Vec<_>>();
+        if stale.is_empty() {
+            tx.commit().await?;
+            return Ok(0);
+        }
+
+        // Current normal sync stores a stable opaque mailbox locator, while
+        // older profiles may still carry local or remote-path locators. Clear
+        // every unambiguous representation before the foreign-key cascade
+        // removes memberships, so stale folders cannot remain locally found.
+        let mut locators = HashSet::new();
+        for mailbox in &stale {
+            locators.insert(mailbox.remote_path.clone());
+            locators.insert(mailbox.local_path.clone());
+            locators.insert(selectable_mailbox_storage_locator(mailbox));
+        }
+        let remote_paths = stale
+            .iter()
+            .map(|mailbox| mailbox.remote_path.as_str())
+            .collect::<Vec<_>>();
+        let remote_placeholders = vec!["?"; remote_paths.len()].join(",");
+        let state_sql = format!(
+            "SELECT mailbox FROM mailbox_catalog_state WHERE account_id = ? AND remote_name IN ({remote_placeholders})"
+        );
+        let mut state_query = sqlx::query_scalar::<_, String>(&state_sql).bind(&account_key);
+        for remote_path in &remote_paths {
+            state_query = state_query.bind(remote_path);
+        }
+        locators.extend(state_query.fetch_all(&mut *tx).await?);
+
+        if !locators.is_empty() {
+            let locators = locators.into_iter().collect::<Vec<_>>();
+            let placeholders = vec!["?"; locators.len()].join(",");
+            let delete_messages = format!(
+                "DELETE FROM messages WHERE account_id = ? AND mailbox IN ({placeholders})"
+            );
+            let mut delete_query = sqlx::query(&delete_messages).bind(&account_key);
+            for locator in &locators {
+                delete_query = delete_query.bind(locator);
+            }
+            delete_query.execute(&mut *tx).await?;
+        }
+
+        let delete_state = format!(
+            "DELETE FROM mailbox_catalog_state WHERE account_id = ? AND remote_name IN ({remote_placeholders})"
+        );
+        let mut delete_state_query = sqlx::query(&delete_state).bind(&account_key);
+        for remote_path in &remote_paths {
+            delete_state_query = delete_state_query.bind(remote_path);
+        }
+        delete_state_query.execute(&mut *tx).await?;
+
+        let stale_ids = stale
+            .iter()
+            .map(|mailbox| mailbox.id.as_str())
+            .collect::<Vec<_>>();
+        let id_placeholders = vec!["?"; stale_ids.len()].join(",");
+        let delete_mailboxes = format!(
+            "DELETE FROM selectable_mailboxes WHERE account_id = ? AND id IN ({id_placeholders})"
+        );
+        let mut delete_mailboxes_query = sqlx::query(&delete_mailboxes).bind(&account_key);
+        for id in &stale_ids {
+            delete_mailboxes_query = delete_mailboxes_query.bind(id);
+        }
+        delete_mailboxes_query.execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(stale.len())
+    }
+
+    /// Replaces the discovered mailbox members for one locally stable message
+    /// ID. The transaction rejects a cross-account mailbox before deleting an
+    /// existing membership, so an invalid provider update cannot widen scope.
+    pub async fn set_message_mailbox_memberships(
+        &self,
+        account_id: AccountId,
+        message_id: &str,
+        mailbox_ids: &[String],
+    ) -> Result<()> {
+        self.set_message_mailbox_memberships_with_generation(
+            account_id,
+            message_id,
+            mailbox_ids,
+            None,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Generation-bound provider-search counterpart. It returns false rather
+    /// than replacing logical mailbox membership after a concurrent account
+    /// reset, reconfiguration, disable, or flag mutation.
+    pub async fn set_message_mailbox_memberships_if_account_generation(
+        &self,
+        account_id: AccountId,
+        generation: i64,
+        message_id: &str,
+        mailbox_ids: &[String],
+    ) -> Result<bool> {
+        self.set_message_mailbox_memberships_with_generation(
+            account_id,
+            message_id,
+            mailbox_ids,
+            Some(generation),
+        )
+        .await
+    }
+
+    async fn set_message_mailbox_memberships_with_generation(
+        &self,
+        account_id: AccountId,
+        message_id: &str,
+        mailbox_ids: &[String],
+        expected_generation: Option<i64>,
+    ) -> Result<bool> {
+        let account_key = account_id.to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if let Some(generation) = expected_generation {
+            if !account_search_generation_matches_in_tx(&mut tx, &account_key, generation).await? {
+                tx.rollback().await?;
+                return Ok(false);
+            }
+        }
+        let message_account: Option<String> =
+            sqlx::query_scalar("SELECT account_id FROM messages WHERE id = ?")
+                .bind(message_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if message_account.as_deref() != Some(account_key.as_str()) {
+            return Err(anyhow!("message does not belong to this account"));
+        }
+        let unique_mailbox_ids = mailbox_ids.iter().collect::<HashSet<_>>();
+        for mailbox_id in &unique_mailbox_ids {
+            let mailbox_account: Option<String> =
+                sqlx::query_scalar("SELECT account_id FROM selectable_mailboxes WHERE id = ?")
+                    .bind(mailbox_id.as_str())
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            if mailbox_account.as_deref() != Some(account_key.as_str()) {
+                return Err(anyhow!("mailbox does not belong to this account"));
+            }
+        }
+        sqlx::query(
+            "DELETE FROM message_mailbox_memberships WHERE message_id = ? AND account_id = ?",
+        )
+        .bind(message_id)
+        .bind(&account_key)
+        .execute(&mut *tx)
+        .await?;
+        for mailbox_id in unique_mailbox_ids {
+            sqlx::query("INSERT INTO message_mailbox_memberships(message_id, mailbox_id, account_id) VALUES (?, ?, ?)")
+                .bind(message_id)
+                .bind(mailbox_id)
+                .bind(&account_key)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    pub async fn list_message_mailbox_memberships(
+        &self,
+        account_id: AccountId,
+        message_id: &str,
+    ) -> Result<Vec<MessageMailboxMembership>> {
+        Ok(sqlx::query_as::<_, MessageMailboxMembership>("SELECT message_id, mailbox_id, account_id FROM message_mailbox_memberships WHERE account_id = ? AND message_id = ? ORDER BY mailbox_id")
+            .bind(account_id.to_string())
+            .bind(message_id)
+            .fetch_all(&self.pool)
+            .await?)
+    }
+
+    /// Binds every durable message in one catalogue namespace to the exact
+    /// selectable mailbox that produced it. This is used after a complete
+    /// snapshot so replacement imports and interrupted older syncs are healed
+    /// with one transaction instead of one transaction per message.
+    pub async fn bind_catalog_mailbox_memberships(
+        &self,
+        account_id: AccountId,
+        storage_mailbox: &str,
+        selectable_mailbox_id: &str,
+    ) -> Result<()> {
+        let account_key = account_id.to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mailbox_account: Option<String> =
+            sqlx::query_scalar("SELECT account_id FROM selectable_mailboxes WHERE id = ?")
+                .bind(selectable_mailbox_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if mailbox_account.as_deref() != Some(account_key.as_str()) {
+            tx.rollback().await?;
+            return Err(anyhow!("mailbox does not belong to this account"));
+        }
+        sqlx::query("DELETE FROM message_mailbox_memberships WHERE account_id = ? AND message_id IN (SELECT id FROM messages WHERE account_id = ? AND mailbox = ?)")
+            .bind(&account_key)
+            .bind(&account_key)
+            .bind(storage_mailbox)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT INTO message_mailbox_memberships(message_id, mailbox_id, account_id) SELECT id, ?, account_id FROM messages WHERE account_id = ? AND mailbox = ?")
+            .bind(selectable_mailbox_id)
+            .bind(&account_key)
+            .bind(storage_mailbox)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Records the unique final recipients of one SMTP-accepted outgoing
+    /// message. The caller supplies every configured account address that
+    /// must be excluded; addresses are never learned from draft text or from
+    /// inbound mail through this API.
+    pub async fn record_successful_outgoing_recipients(
+        &self,
+        account_id: AccountId,
+        recipients: &[ContactedPersonRecipient],
+        excluded_addresses: &[String],
+    ) -> Result<usize> {
+        let sequence = self.reserve_contacted_people_action_sequence().await?;
+        self.record_successful_outgoing_recipients_at_sequence(
+            account_id,
+            recipients,
+            excluded_addresses,
+            sequence,
+        )
+        .await
+    }
+
+    pub async fn record_successful_outgoing_recipients_at_sequence(
+        &self,
+        account_id: AccountId,
+        recipients: &[ContactedPersonRecipient],
+        excluded_addresses: &[String],
+        accepted_sequence: i64,
+    ) -> Result<usize> {
+        // Capture acceptance order before waiting for the SQLite writer. A
+        // later Clear/Hide must win even when this accepted-send task obtains
+        // the write lock afterwards.
+        let accepted_at = Utc::now();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        ensure_live_contacted_people_account(&mut tx, &account_id.to_string()).await?;
+        if !autocomplete_suggestions_enabled_in_tx(&mut tx).await? {
+            tx.commit().await?;
+            return Ok(0);
+        }
+        if contacted_people_clear_sequence_in_tx(&mut tx).await? >= accepted_sequence {
+            tx.commit().await?;
+            return Ok(0);
+        }
+        let recorded = record_contacted_people_in_tx(
+            &mut tx,
+            &account_id.to_string(),
+            recipients,
+            excluded_addresses,
+            accepted_at,
+            true,
+            Some(accepted_sequence),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(recorded)
+    }
+
+    /// Records an SMTP-accepted message with its generated RFC Message-ID.
+    /// The account-scoped source marker and recipient statistics commit
+    /// together, so a later provider Sent copy cannot count the same send a
+    /// second time.
+    pub async fn record_successful_outgoing_recipients_with_message_id(
+        &self,
+        account_id: AccountId,
+        rfc_message_id: &str,
+        recipients: &[ContactedPersonRecipient],
+        excluded_addresses: &[String],
+    ) -> Result<usize> {
+        let sequence = self.reserve_contacted_people_action_sequence().await?;
+        self.record_successful_outgoing_recipients_with_message_id_at_sequence(
+            account_id,
+            rfc_message_id,
+            recipients,
+            excluded_addresses,
+            sequence,
+        )
+        .await
+    }
+
+    pub async fn record_successful_outgoing_recipients_with_message_id_at_sequence(
+        &self,
+        account_id: AccountId,
+        rfc_message_id: &str,
+        recipients: &[ContactedPersonRecipient],
+        excluded_addresses: &[String],
+        accepted_sequence: i64,
+    ) -> Result<usize> {
+        let rfc_message_id = normalize_message_id(rfc_message_id)
+            .ok_or_else(|| anyhow!("outgoing RFC Message-ID is invalid"))?;
+        let account_id = account_id.to_string();
+        let accepted_at = Utc::now();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        ensure_live_contacted_people_account(&mut tx, &account_id).await?;
+        // Keep this SMTP acceptance marker even if a later privacy action or
+        // disabled collection makes the recipient-stat portion a no-op. A
+        // provider Sent copy can arrive after the next trusted cutoff, so it
+        // must still be recognised as this already accepted message.
+        let inserted = sqlx::query("INSERT OR IGNORE INTO contacted_people_outgoing_messages(account_id, rfc_message_id, recorded_at) VALUES (?, ?, ?)")
+            .bind(&account_id)
+            .bind(&rfc_message_id)
+            .bind(accepted_at)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            == 1;
+        if !autocomplete_suggestions_enabled_in_tx(&mut tx).await? {
+            tx.commit().await?;
+            return Ok(0);
+        }
+        if contacted_people_clear_sequence_in_tx(&mut tx).await? >= accepted_sequence {
+            tx.commit().await?;
+            return Ok(0);
+        }
+        if !inserted {
+            tx.commit().await?;
+            return Ok(0);
+        }
+        let recorded = record_contacted_people_in_tx(
+            &mut tx,
+            &account_id,
+            recipients,
+            excluded_addresses,
+            accepted_at,
+            true,
+            Some(accepted_sequence),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(recorded)
+    }
+
+    /// Returns at most eight local, non-hidden contacted people. Ranking is
+    /// deterministic and intentionally happens after retrieval so Unicode
+    /// display names and address parts receive the same comparison rules as
+    /// the compose UI.
+    pub async fn suggest_contacted_people(
+        &self,
+        query: &str,
+        preferred_account_id: Option<AccountId>,
+    ) -> Result<Vec<ContactedPersonSuggestion>> {
+        let preferred_account_id = preferred_account_id.map(|id| id.to_string());
+        // SQLite's built-in lower() is ASCII-only. Canonicalise configured
+        // owner addresses in Rust as a final guard so an address learned
+        // before a Unicode account address is configured is never suggested.
+        let self_addresses: HashSet<String> =
+            sqlx::query_scalar::<_, String>("SELECT email FROM accounts")
+                .fetch_all(&self.pool)
+                .await?
+                .into_iter()
+                .filter_map(|address| canonical_contacted_address(&address))
+                .collect();
+        let query = normalize_contacted_people_match(query);
+        if query.is_empty() {
+            // Keep focus-without-typing bounded in SQLite. The preferred CTE
+            // uses the account-recency index, and the fallback uses the
+            // visible global-rank index. This is the same deterministic
+            // ordering as the general matcher, without loading every local
+            // person into Rust merely to show eight recent suggestions.
+            let suggestions: Vec<ContactedPersonSuggestion> = sqlx::query_as(
+                "WITH preferred AS (SELECT p.canonical_address AS address, p.display_name, p.formatted_address, p.first_contacted_at, p.last_contacted_at, p.send_count, s.send_count AS account_send_count, s.last_contacted_at AS account_last_contacted_at, s.account_id AS account_id, 0 AS hidden FROM contacted_people_account_stats s JOIN contacted_people p ON p.canonical_address = s.canonical_address WHERE s.account_id = ? AND p.hidden_at IS NULL AND EXISTS (SELECT 1 FROM contacted_people_account_stats enabled JOIN accounts a ON a.id = enabled.account_id WHERE enabled.canonical_address = p.canonical_address AND json_extract(a.data, '$.enabled') = 1) AND NOT EXISTS (SELECT 1 FROM accounts a WHERE lower(a.email) = p.canonical_address) ORDER BY s.last_contacted_at DESC, p.last_contacted_at DESC, p.canonical_address ASC LIMIT 8), fallback AS (SELECT p.canonical_address AS address, p.display_name, p.formatted_address, p.first_contacted_at, p.last_contacted_at, p.send_count, 0 AS account_send_count, NULL AS account_last_contacted_at, NULL AS account_id, 0 AS hidden FROM contacted_people p WHERE p.hidden_at IS NULL AND EXISTS (SELECT 1 FROM contacted_people_account_stats enabled JOIN accounts a ON a.id = enabled.account_id WHERE enabled.canonical_address = p.canonical_address AND json_extract(a.data, '$.enabled') = 1) AND NOT EXISTS (SELECT 1 FROM accounts a WHERE lower(a.email) = p.canonical_address) AND NOT EXISTS (SELECT 1 FROM contacted_people_account_stats s WHERE s.canonical_address = p.canonical_address AND s.account_id = ?) ORDER BY p.last_contacted_at DESC, p.canonical_address ASC LIMIT 8) SELECT address, display_name, formatted_address, first_contacted_at, last_contacted_at, send_count, account_send_count, account_last_contacted_at, account_id, hidden FROM preferred UNION ALL SELECT address, display_name, formatted_address, first_contacted_at, last_contacted_at, send_count, account_send_count, account_last_contacted_at, account_id, hidden FROM fallback LIMIT 8",
+            )
+            .bind(&preferred_account_id)
+            .bind(&preferred_account_id)
+            .fetch_all(&self.pool)
+            .await?;
+            return Ok(suggestions
+                .into_iter()
+                .filter(|suggestion| !self_addresses.contains(&suggestion.address))
+                .collect());
+        }
+        // Match and rank in SQLite. This deliberately keeps the substring
+        // fallback inside the database: it may scan local rows, but it never
+        // copies an unbounded people history into Rust while the user types.
+        // Every value is bound, including punctuation-only input.
+        let word_prefix_probe = query
+            .chars()
+            .all(char::is_alphanumeric)
+            .then(|| format!(" {query}"));
+        Ok(sqlx::query_as::<_, ContactedPersonSuggestion>(
+            "SELECT p.canonical_address AS address, p.display_name, p.formatted_address, p.first_contacted_at, p.last_contacted_at, p.send_count, COALESCE(s.send_count, 0) AS account_send_count, s.last_contacted_at AS account_last_contacted_at, s.account_id AS account_id, 0 AS hidden FROM contacted_people p LEFT JOIN contacted_people_account_stats s ON s.canonical_address = p.canonical_address AND s.account_id = ? WHERE p.hidden_at IS NULL AND EXISTS (SELECT 1 FROM contacted_people_account_stats enabled JOIN accounts a ON a.id = enabled.account_id WHERE enabled.canonical_address = p.canonical_address AND json_extract(a.data, '$.enabled') = 1) AND NOT EXISTS (SELECT 1 FROM accounts a WHERE lower(a.email) = p.canonical_address) AND (substr(COALESCE(NULLIF(p.normalized_address, ''), p.canonical_address), 1, length(?)) = ? OR (? IS NOT NULL AND (instr(p.normalized_display_tokens, ?) > 0 OR instr(p.normalized_address_tokens, ?) > 0)) OR instr(p.normalized_display_name, ?) > 0 OR instr(COALESCE(NULLIF(p.normalized_address, ''), p.canonical_address), ?) > 0) ORDER BY CASE WHEN substr(COALESCE(NULLIF(p.normalized_address, ''), p.canonical_address), 1, length(?)) = ? THEN 0 WHEN ? IS NOT NULL AND (instr(p.normalized_display_tokens, ?) > 0 OR instr(p.normalized_address_tokens, ?) > 0) THEN 1 ELSE 2 END, CASE WHEN COALESCE(s.send_count, 0) > 0 THEN 1 ELSE 0 END DESC, s.last_contacted_at DESC, p.send_count DESC, p.last_contacted_at DESC, p.canonical_address ASC LIMIT 8",
+        )
+        .bind(&preferred_account_id)
+        .bind(&query)
+        .bind(&query)
+        .bind(&word_prefix_probe)
+        .bind(&word_prefix_probe)
+        .bind(&word_prefix_probe)
+        .bind(&query)
+        .bind(&query)
+        .bind(&query)
+        .bind(&query)
+        .bind(&word_prefix_probe)
+        .bind(&word_prefix_probe)
+        .bind(&word_prefix_probe)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .filter(|suggestion| !self_addresses.contains(&suggestion.address))
+        .collect())
+    }
+
+    /// Hides an address across every account without deleting its historical
+    /// statistics. A later SMTP-accepted send to the exact address restores
+    /// the suggestion as part of the same write transaction.
+    pub async fn hide_contacted_person(&self, address: &str) -> Result<()> {
+        let canonical_address = canonical_contacted_address(address)
+            .ok_or_else(|| anyhow!("contacted person address is invalid"))?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let sequence = next_contacted_people_action_sequence_in_tx(&mut tx).await?;
+        sqlx::query("UPDATE contacted_people SET hidden_at = ?, hidden_sequence = ? WHERE canonical_address = ?")
+            .bind(Utc::now())
+            .bind(sequence)
+            .bind(canonical_address)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Clears all local autocomplete history while retaining durable backfill
+    /// markers. The clear advances a provider-identity generation. Each Sent
+    /// mailbox must subsequently capture its UIDVALIDITY and highest UID
+    /// before provider-derived recipients may learn again.
+    pub async fn clear_contacted_people(&self) -> Result<()> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let sequence = next_contacted_people_action_sequence_in_tx(&mut tx).await?;
+        let cleared_at = Utc::now();
+        // Keep the per-message markers. They are an idempotency boundary, not
+        // user-visible history. The durable generation makes provider
+        // backfill fail closed until a Sent SELECT captures a trusted UID
+        // boundary, without using provider-controlled message timestamps.
+        sqlx::query("DELETE FROM contacted_people")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT INTO app_meta(key, value) VALUES ('contacted_people_cleared_at', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+            .bind(cleared_at.to_rfc3339())
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT INTO app_meta(key, value) VALUES ('contacted_people_clear_sequence', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+            .bind(sequence.to_string())
+            .execute(&mut *tx)
+            .await?;
+        advance_contacted_people_collection_generation_in_tx(&mut tx).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Reserves a causal token immediately after SMTP acceptance. Callers
+    /// must pass this token to the sequence-aware recorder before any later
+    /// Sent append or UI action can interleave.
+    pub async fn reserve_contacted_people_action_sequence(&self) -> Result<i64> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let sequence = next_contacted_people_action_sequence_in_tx(&mut tx).await?;
+        tx.commit().await?;
+        Ok(sequence)
+    }
+
+    /// Whether composer and search person suggestions may use the local
+    /// contacted-people index. This is enabled for existing profiles until a
+    /// user explicitly turns it off.
+    pub async fn autocomplete_suggestions_enabled(&self) -> Result<bool> {
+        let value: Option<String> = sqlx::query_scalar(
+            "SELECT value FROM app_meta WHERE key = 'autocomplete_suggestions_enabled'",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(!matches!(value.as_deref(), Some("0") | Some("false")))
+    }
+
+    /// Persists the local autocomplete preference without altering already
+    /// learned history. Each actual state transition advances the pending
+    /// provider boundary, so messages that existed during a disabled period
+    /// cannot appear after a later re-enable.
+    pub async fn set_autocomplete_suggestions_enabled(&self, enabled: bool) -> Result<()> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let was_enabled = autocomplete_suggestions_enabled_in_tx(&mut tx).await?;
+        sqlx::query("INSERT INTO app_meta(key, value) VALUES ('autocomplete_suggestions_enabled', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+            .bind(if enabled { "1" } else { "0" })
+            .execute(&mut *tx)
+            .await?;
+        if was_enabled != enabled {
+            advance_contacted_people_collection_generation_in_tx(&mut tx).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Removes one account's contribution while retaining people that have
+    /// been contacted from another still-configured account.
+    pub async fn remove_contacted_people_account_contribution(
+        &self,
+        account_id: AccountId,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        remove_contacted_people_account_contribution_in_tx(&mut tx, &account_id.to_string())
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Captures a Sent mailbox's provider identity boundary after a Clear or
+    /// collection-setting transition. Call this immediately after SELECT has
+    /// established `uid_validity` and the highest UID, before cataloguing any
+    /// rows from that selected mailbox. Repeating the same UIDVALIDITY leaves
+    /// the original cutoff unchanged; a UIDVALIDITY rollover replaces it.
+    pub async fn capture_contacted_people_sent_provider_cutoff(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        uid_validity: u64,
+        highest_uid: u64,
+    ) -> Result<()> {
+        if !is_contacted_people_sent_mailbox(mailbox) {
+            return Err(anyhow!("contacted-people cutoff requires a Sent mailbox"));
+        }
+        let account_id = account_id.to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        ensure_live_contacted_people_account(&mut tx, &account_id).await?;
+        let generation = contacted_people_collection_generation_in_tx(&mut tx).await?;
+        if generation > 0 {
+            sqlx::query("INSERT INTO contacted_people_sent_provider_cutoffs(account_id, mailbox, generation, uid_validity, cutoff_uid, captured_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(account_id, mailbox, generation) DO UPDATE SET uid_validity = excluded.uid_validity, cutoff_uid = excluded.cutoff_uid, captured_at = excluded.captured_at WHERE contacted_people_sent_provider_cutoffs.uid_validity <> excluded.uid_validity")
+                .bind(&account_id)
+                .bind(mailbox)
+                .bind(generation)
+                .bind(i64::try_from(uid_validity)?)
+                .bind(i64::try_from(highest_uid)?)
+                .bind(Utc::now())
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Processes a bounded number of catalogued Sent rows. Each source
+    /// message receives a durable marker in the same transaction as its
+    /// recipient stats, so retries and interruptions cannot double count.
+    /// Drafts and rows without a usable To/Cc/Bcc address are still marked
+    /// complete without recipient writes, so they never cause an unbounded
+    /// retry loop. Rows whose recipient headers have not yet been fetched are
+    /// deliberately left unmarked: otherwise a header-only catalogue pass
+    /// could permanently lose later Cc/Bcc data.
+    pub async fn backfill_contacted_people_from_sent(
+        &self,
+        account_id: AccountId,
+        excluded_addresses: &[String],
+        limit: u32,
+    ) -> Result<ContactedPeopleBackfillProgress> {
+        let account_id = account_id.to_string();
+        let limit = i64::from(limit.clamp(1, 500));
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        ensure_live_contacted_people_account(&mut tx, &account_id).await?;
+        // Earlier builds could record a Sent source before the mailbox's
+        // UIDVALIDITY was known. Promote that one deliberately-unknown source
+        // to its now-trusted identity before selecting work. This prevents a
+        // Message-ID-less row from being learned twice, while still allowing a
+        // later UIDVALIDITY rollover to represent a new provider message.
+        sqlx::query(
+            "INSERT OR IGNORE INTO contacted_people_backfill_sources(account_id, mailbox, uid_validity, uid) \
+             SELECT m.account_id, m.mailbox, catalogue.uid_validity, m.uid \
+             FROM messages m JOIN mailbox_catalog_state catalogue ON catalogue.account_id = m.account_id AND catalogue.mailbox = m.mailbox \
+             WHERE m.account_id = ? AND m.recipient_headers_scanned = 1 \
+             AND (m.mailbox = 'Sent' OR m.mailbox LIKE 'Sent::%') \
+             AND EXISTS (SELECT 1 FROM contacted_people_backfill_sources unknown_source WHERE unknown_source.account_id = m.account_id AND unknown_source.mailbox = m.mailbox AND unknown_source.uid_validity = -1 AND unknown_source.uid = m.uid)",
+        )
+        .bind(&account_id)
+        .execute(&mut *tx)
+        .await?;
+        let rows: Vec<ContactedPeopleBackfillRow> = sqlx::query_as(
+            "SELECT m.id AS message_id, m.message_id AS rfc_message_id, m.mailbox, m.uid, catalogue.uid_validity AS mailbox_uid_validity, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.is_draft, m.received_at FROM messages m LEFT JOIN mailbox_catalog_state catalogue ON catalogue.account_id = m.account_id AND catalogue.mailbox = m.mailbox WHERE m.account_id = ? AND m.recipient_headers_scanned = 1 AND (m.mailbox = 'Sent' OR m.mailbox LIKE 'Sent::%') AND NOT EXISTS (SELECT 1 FROM contacted_people_backfill_sources seen WHERE seen.account_id = m.account_id AND seen.mailbox = m.mailbox AND seen.uid_validity = COALESCE(catalogue.uid_validity, -1) AND seen.uid = m.uid) ORDER BY m.received_at ASC, m.id ASC LIMIT ?",
+        )
+        .bind(&account_id)
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await?;
+        // The scheduler checks this setting before calling us, but that check
+        // can race with a user disabling collection. Recheck while holding
+        // this write transaction immediately before any recipient write or
+        // durable source-marker update. A disabled batch is a true no-op.
+        if !autocomplete_suggestions_enabled_in_tx(&mut tx).await? {
+            tx.rollback().await?;
+            return Ok(ContactedPeopleBackfillProgress {
+                processed_messages: 0,
+                changed_people: 0,
+                complete: false,
+            });
+        }
+        let collection_generation = contacted_people_collection_generation_in_tx(&mut tx).await?;
+        let provider_cutoffs = if collection_generation > 0 {
+            contacted_people_sent_provider_cutoffs_in_tx(
+                &mut tx,
+                &account_id,
+                collection_generation,
+            )
+            .await?
+        } else {
+            Vec::new()
+        };
+        let mut changed_people = 0;
+        for row in &rows {
+            let recipients = parse_contacted_people_headers(&[
+                row.to_addresses.as_str(),
+                row.cc_addresses.as_str(),
+                row.bcc_addresses.as_str(),
+            ]);
+            let already_recorded_after_smtp = match row
+                .rfc_message_id
+                .as_deref()
+                .and_then(normalize_message_id)
+            {
+                Some(rfc_message_id) => sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM contacted_people_outgoing_messages WHERE account_id = ? AND rfc_message_id = ?)",
+                )
+                .bind(&account_id)
+                .bind(rfc_message_id)
+                .fetch_one(&mut *tx)
+                .await?,
+                None => false,
+            };
+            let already_backfilled_rfc = match row
+                .rfc_message_id
+                .as_deref()
+                .and_then(normalize_message_id)
+            {
+                Some(rfc_message_id) => sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM contacted_people_backfill_rfc_messages WHERE account_id = ? AND rfc_message_id = ?)",
+                )
+                .bind(&account_id)
+                .bind(rfc_message_id)
+                .fetch_one(&mut *tx)
+                .await?,
+                None => false,
+            };
+            // This is the critical interleaving guard. The legacy migration
+            // may still be walking more than its startup 500 rows while the
+            // Sent backfill starts. A legacy marker means this message's
+            // contribution is already represented in the aggregate, so only
+            // promote its source identity below and never add it again.
+            let source_migration_pending = !contacted_people_migration_complete_in_tx(
+                &mut tx,
+                CONTACTED_PEOPLE_SOURCE_MIGRATION_COMPLETE_KEY,
+            )
+            .await?;
+            let was_unresolved_legacy: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM contacted_people_legacy_unresolved_sources WHERE account_id = ? AND message_id = ?)",
+            )
+            .bind(&account_id)
+            .bind(&row.message_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            let already_backfilled_legacy: bool = was_unresolved_legacy || (source_migration_pending && sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM contacted_people_backfill_messages WHERE account_id = ? AND message_id = ?)",
+            )
+            .bind(&account_id)
+            .bind(&row.message_id)
+            .fetch_one(&mut *tx)
+            .await?);
+            let is_after_provider_cutoff = collection_generation == 0
+                || provider_cutoffs
+                    .iter()
+                    .find(|cutoff| cutoff.mailbox == row.mailbox)
+                    .is_some_and(|cutoff| {
+                        row.mailbox_uid_validity == Some(cutoff.uid_validity)
+                            && row.uid > cutoff.cutoff_uid
+                    });
+            if !row.is_draft
+                && is_after_provider_cutoff
+                && !already_recorded_after_smtp
+                && !already_backfilled_rfc
+                && !already_backfilled_legacy
+            {
+                changed_people += record_contacted_people_in_tx(
+                    &mut tx,
+                    &account_id,
+                    &recipients,
+                    excluded_addresses,
+                    row.received_at,
+                    false,
+                    None,
+                )
+                .await?;
+            }
+            sqlx::query("INSERT OR IGNORE INTO contacted_people_backfill_messages(account_id, message_id) VALUES (?, ?)")
+                .bind(&account_id)
+                .bind(&row.message_id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("INSERT INTO contacted_people_backfill_sources(account_id, mailbox, uid_validity, uid) VALUES (?, ?, ?, ?)")
+                .bind(&account_id)
+                .bind(&row.mailbox)
+                .bind(row.mailbox_uid_validity.unwrap_or(-1))
+                .bind(row.uid)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM contacted_people_legacy_unresolved_sources WHERE account_id = ? AND message_id = ?")
+                .bind(&account_id)
+                .bind(&row.message_id)
+                .execute(&mut *tx)
+                .await?;
+            if let Some(rfc_message_id) =
+                row.rfc_message_id.as_deref().and_then(normalize_message_id)
+            {
+                sqlx::query("INSERT OR IGNORE INTO contacted_people_backfill_rfc_messages(account_id, rfc_message_id) VALUES (?, ?)")
+                    .bind(&account_id)
+                    .bind(rfc_message_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+        let has_more: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM messages m LEFT JOIN mailbox_catalog_state catalogue ON catalogue.account_id = m.account_id AND catalogue.mailbox = m.mailbox WHERE m.account_id = ? AND m.recipient_headers_scanned = 1 AND (m.mailbox = 'Sent' OR m.mailbox LIKE 'Sent::%') AND NOT EXISTS (SELECT 1 FROM contacted_people_backfill_sources seen WHERE seen.account_id = m.account_id AND seen.mailbox = m.mailbox AND seen.uid_validity = COALESCE(catalogue.uid_validity, -1) AND seen.uid = m.uid))",
+        )
+        .bind(&account_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        sqlx::query("INSERT INTO contacted_people_backfill_progress(account_id, processed_messages, complete, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(account_id) DO UPDATE SET processed_messages = contacted_people_backfill_progress.processed_messages + excluded.processed_messages, complete = excluded.complete, updated_at = excluded.updated_at")
+            .bind(&account_id)
+            .bind(i64::try_from(rows.len())?)
+            .bind(!has_more)
+            .bind(Utc::now())
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(ContactedPeopleBackfillProgress {
+            processed_messages: rows.len(),
+            changed_people,
+            complete: !has_more,
+        })
     }
 
     /// Deletes only provider-derived local mail state for an account. Account
@@ -1717,7 +4086,25 @@ impl Store {
     /// full catalogue sync can rebuild from the authoritative provider.
     pub async fn reset_account_mail_index(&self, id: AccountId) -> Result<()> {
         let account_id = id.to_string();
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        // A reset invalidates every remote locator and local flag for this
+        // account. Keep the invalidation in this transaction so a provider
+        // search cannot write a result between a separate generation bump and
+        // the destructive reset.
+        sqlx::query("INSERT OR IGNORE INTO account_search_generations(account_id, generation) SELECT ?, 0 WHERE EXISTS (SELECT 1 FROM accounts WHERE id = ?)")
+            .bind(&account_id)
+            .bind(&account_id)
+            .execute(&mut *tx)
+            .await?;
+        let advanced = sqlx::query("UPDATE account_search_generations SET generation = generation + 1 WHERE account_id = ?")
+            .bind(&account_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        if advanced != 1 {
+            tx.rollback().await?;
+            return Err(anyhow!("account does not exist"));
+        }
         for statement in [
             "DELETE FROM starred_attachment_metadata WHERE message_id IN (SELECT id FROM messages WHERE account_id = ?)",
             "DELETE FROM starred_message_bodies WHERE message_id IN (SELECT id FROM messages WHERE account_id = ?)",
@@ -1781,6 +4168,35 @@ impl Store {
         Ok(())
     }
 
+    /// Provider-search-only catalogue publication. The generation comparison
+    /// and writes share one immediate transaction, closing the gap between a
+    /// caller's last cancellation check and its stale IMAP response write.
+    /// Returns false without changing state when a foreground account mutation
+    /// has advanced the generation.
+    pub async fn upsert_catalog_messages_if_account_generation(
+        &self,
+        account_id: AccountId,
+        generation: i64,
+        messages: &[MailSummary],
+    ) -> Result<bool> {
+        let account_key = account_id.to_string();
+        if messages
+            .iter()
+            .any(|message| message.account_id != account_key)
+        {
+            return Err(anyhow!("catalogue batch does not belong to this account"));
+        }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if !account_search_generation_matches_in_tx(&mut tx, &account_key, generation).await? {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        for message in messages {
+            persist_message(&mut tx, message).await?;
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
     /// Captures local flags before a remote catalogue fetch. The returned
     /// values are later used as compare-and-swap preconditions at publication.
     pub async fn capture_recent_catalogue_expected_flags(
@@ -2113,17 +4529,77 @@ impl Store {
         remote_total: usize,
         historical_complete: bool,
     ) -> Result<()> {
+        self.save_mailbox_catalog_state_with_generation(
+            account_id,
+            MailboxCatalogStateWrite {
+                mailbox,
+                remote_name,
+                uid_validity,
+                remote_total,
+                historical_complete,
+            },
+            None,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Returns false without publication if a foreground mutation advanced
+    /// the account generation while provider search was in flight.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "This established public Store API has separate scalar arguments for the mailbox snapshot it publishes."
+    )]
+    pub async fn save_mailbox_catalog_state_if_account_generation(
+        &self,
+        account_id: AccountId,
+        generation: i64,
+        mailbox: &str,
+        remote_name: &str,
+        uid_validity: u32,
+        remote_total: usize,
+        historical_complete: bool,
+    ) -> Result<bool> {
+        self.save_mailbox_catalog_state_with_generation(
+            account_id,
+            MailboxCatalogStateWrite {
+                mailbox,
+                remote_name,
+                uid_validity,
+                remote_total,
+                historical_complete,
+            },
+            Some(generation),
+        )
+        .await
+    }
+
+    async fn save_mailbox_catalog_state_with_generation(
+        &self,
+        account_id: AccountId,
+        state: MailboxCatalogStateWrite<'_>,
+        expected_generation: Option<i64>,
+    ) -> Result<bool> {
+        let account_key = account_id.to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if let Some(generation) = expected_generation {
+            if !account_search_generation_matches_in_tx(&mut tx, &account_key, generation).await? {
+                tx.rollback().await?;
+                return Ok(false);
+            }
+        }
         sqlx::query("INSERT INTO mailbox_catalog_state(account_id, mailbox, remote_name, uid_validity, remote_total, historical_complete, uid_next, highest_modseq, updated_at) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?) ON CONFLICT(account_id, mailbox) DO UPDATE SET remote_name=excluded.remote_name, uid_validity=excluded.uid_validity, remote_total=excluded.remote_total, historical_complete=excluded.historical_complete, updated_at=excluded.updated_at")
-            .bind(account_id.to_string())
-            .bind(mailbox)
-            .bind(remote_name)
-            .bind(uid_validity)
-            .bind(remote_total as i64)
-            .bind(historical_complete)
+            .bind(&account_key)
+            .bind(state.mailbox)
+            .bind(state.remote_name)
+            .bind(state.uid_validity)
+            .bind(state.remote_total as i64)
+            .bind(state.historical_complete)
             .bind(Utc::now())
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
-        Ok(())
+        tx.commit().await?;
+        Ok(true)
     }
 
     pub async fn reset_mailbox_catalog(&self, account_id: AccountId, mailbox: &str) -> Result<()> {
@@ -2425,7 +4901,7 @@ impl Store {
     }
 
     pub async fn message(&self, id: &str) -> Result<Option<MailSummary>> {
-        const SQL: &str = "SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE id = ?";
+        const SQL: &str = "SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, is_answered, is_draft, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE id = ?";
         let mut message = sqlx::query_as::<_, MailSummary>(SQL)
             .bind(id)
             .fetch_optional(&self.pool)
@@ -2448,7 +4924,17 @@ impl Store {
     }
 
     pub async fn set_message_flagged(&self, id: &str, flagged: bool) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let account_id: Option<String> =
+            sqlx::query_scalar("SELECT account_id FROM messages WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some(account_id) = account_id else {
+            tx.rollback().await?;
+            return Err(anyhow!("message does not exist"));
+        };
+        advance_account_search_generation_in_tx(&mut tx, &account_id).await?;
         sqlx::query("UPDATE messages SET is_flagged = ? WHERE id = ?")
             .bind(flagged)
             .bind(id)
@@ -2474,11 +4960,23 @@ impl Store {
     }
 
     pub async fn set_message_read(&self, id: &str, read: bool) -> Result<()> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let account_id: Option<String> =
+            sqlx::query_scalar("SELECT account_id FROM messages WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some(account_id) = account_id else {
+            tx.rollback().await?;
+            return Err(anyhow!("message does not exist"));
+        };
+        advance_account_search_generation_in_tx(&mut tx, &account_id).await?;
         sqlx::query("UPDATE messages SET is_read = ? WHERE id = ?")
             .bind(read)
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -2652,6 +5150,113 @@ impl Store {
         .await
     }
 
+    /// Stores an authoritative complete text-part response obtained while
+    /// searching. This is intentionally separate from `message_content_cache`:
+    /// it never records HTML, attachment metadata, or a reader-complete state.
+    /// Returns `false` if the message disappeared or the text exceeds the
+    /// search-cache budget before it could be stored.
+    pub async fn cache_search_body_text(&self, message_id: &str, body_text: &str) -> Result<bool> {
+        self.cache_search_body_text_with_budget(
+            message_id,
+            body_text,
+            MESSAGE_SEARCH_BODY_TEXT_CACHE_MAX_BYTES,
+            None,
+        )
+        .await
+    }
+
+    /// Generation-bound counterpart used only for provider search results.
+    /// It cannot overwrite a newer reader/search cache after an account
+    /// mutation has become authoritative.
+    pub async fn cache_search_body_text_if_account_generation(
+        &self,
+        account_id: AccountId,
+        generation: i64,
+        message_id: &str,
+        body_text: &str,
+    ) -> Result<bool> {
+        self.cache_search_body_text_with_budget(
+            message_id,
+            body_text,
+            MESSAGE_SEARCH_BODY_TEXT_CACHE_MAX_BYTES,
+            Some((account_id.to_string(), generation)),
+        )
+        .await
+    }
+
+    async fn cache_search_body_text_with_budget(
+        &self,
+        message_id: &str,
+        body_text: &str,
+        max_bytes: i64,
+        expected_generation: Option<(String, i64)>,
+    ) -> Result<bool> {
+        let byte_size = i64::try_from(body_text.len()).context("search body text is too large")?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if let Some((account_id, generation)) = expected_generation.as_ref() {
+            if !account_search_generation_matches_in_tx(&mut tx, account_id, *generation).await? {
+                tx.rollback().await?;
+                return Ok(false);
+            }
+        }
+        if byte_size > max_bytes {
+            sqlx::query("DELETE FROM message_search_body_text WHERE message_id = ?")
+                .bind(message_id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            return Ok(false);
+        }
+
+        let stored = sqlx::query(
+            "INSERT INTO message_search_body_text(message_id, body_text, byte_size, last_indexed) SELECT ?, ?, ?, (SELECT COALESCE(MAX(last_indexed), 0) + 1 FROM message_search_body_text) WHERE EXISTS (SELECT 1 FROM messages WHERE id = ?) ON CONFLICT(message_id) DO UPDATE SET body_text = excluded.body_text, byte_size = excluded.byte_size, last_indexed = excluded.last_indexed",
+        )
+        .bind(message_id)
+        .bind(body_text)
+        .bind(byte_size)
+        .bind(message_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if stored == 0 {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+
+        loop {
+            let used_bytes: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(SUM(byte_size), 0) FROM message_search_body_text",
+            )
+            .fetch_one(&mut *tx)
+            .await?;
+            if used_bytes <= max_bytes {
+                break;
+            }
+            let removed = sqlx::query(
+                "DELETE FROM message_search_body_text WHERE message_id = (SELECT message_id FROM message_search_body_text ORDER BY last_indexed, message_id LIMIT 1)",
+            )
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            if removed == 0 {
+                break;
+            }
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Returns text cached by a provider search, without presenting it as
+    /// reader-ready content or updating its eviction order.
+    pub async fn cached_search_body_text(&self, message_id: &str) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT body_text FROM message_search_body_text WHERE message_id = ?",
+        )
+        .bind(message_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
     async fn cache_message_content_with_budget(
         &self,
         message_id: &str,
@@ -2756,7 +5361,7 @@ impl Store {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<MailSummary>> {
-        const SQL: &str = "WITH uncached AS (SELECT m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, m.body_text, m.body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, m.classification_signals, ROW_NUMBER() OVER (PARTITION BY CASE WHEN m.message_id IS NULL OR trim(m.message_id) = '' THEN m.id ELSE m.message_id END ORDER BY m.received_at DESC, m.id DESC) AS duplicate_rank FROM messages m LEFT JOIN message_content_cache c ON c.message_id = m.id LEFT JOIN starred_message_bodies b ON b.message_id = m.id AND b.attachment_presentation_version = ? WHERE m.account_id = ? AND m.mailbox IN ('INBOX', 'Sent', 'Archive') AND m.received_at >= ? AND ((m.is_flagged = 0 AND c.message_id IS NULL) OR (m.is_flagged = 1 AND b.message_id IS NULL))) SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM uncached WHERE duplicate_rank = 1 ORDER BY received_at DESC, id DESC LIMIT ? OFFSET ?";
+        const SQL: &str = "WITH uncached AS (SELECT m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, m.body_text, m.body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.is_answered, m.is_draft, m.has_attachments, m.category, m.classification_confidence, m.classification_source, m.classification_signals, ROW_NUMBER() OVER (PARTITION BY CASE WHEN m.message_id IS NULL OR trim(m.message_id) = '' THEN m.id ELSE m.message_id END ORDER BY m.received_at DESC, m.id DESC) AS duplicate_rank FROM messages m LEFT JOIN message_content_cache c ON c.message_id = m.id LEFT JOIN starred_message_bodies b ON b.message_id = m.id AND b.attachment_presentation_version = ? WHERE m.account_id = ? AND m.mailbox IN ('INBOX', 'Sent', 'Archive') AND m.received_at >= ? AND ((m.is_flagged = 0 AND c.message_id IS NULL) OR (m.is_flagged = 1 AND b.message_id IS NULL))) SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, is_answered, is_draft, has_attachments, category, classification_confidence, classification_source, classification_signals FROM uncached WHERE duplicate_rank = 1 ORDER BY received_at DESC, id DESC LIMIT ? OFFSET ?";
         Ok(sqlx::query_as::<_, MailSummary>(SQL)
             .bind(ATTACHMENT_PRESENTATION_VERSION)
             .bind(account_id.to_string())
@@ -2899,7 +5504,7 @@ impl Store {
         account_id: AccountId,
         limit: u32,
     ) -> Result<Vec<MailSummary>> {
-        const SQL: &str = "SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE account_id = ? AND mailbox = 'INBOX' AND content_state != 'complete' ORDER BY received_at DESC LIMIT ?";
+        const SQL: &str = "SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, is_answered, is_draft, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE account_id = ? AND mailbox = 'INBOX' AND content_state != 'complete' ORDER BY received_at DESC LIMIT ?";
         Ok(sqlx::query_as::<_, MailSummary>(SQL)
             .bind(account_id.to_string())
             .bind(i64::from(limit))
@@ -2912,7 +5517,7 @@ impl Store {
         account_id: AccountId,
         limit: u32,
     ) -> Result<Vec<MailSummary>> {
-        const SQL: &str = "SELECT m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, m.body_text, m.body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, m.classification_signals FROM messages m LEFT JOIN starred_message_bodies b ON b.message_id = m.id WHERE m.account_id = ? AND m.is_flagged = 1 AND (b.message_id IS NULL OR b.attachment_presentation_version != ?) ORDER BY m.received_at DESC LIMIT ?";
+        const SQL: &str = "SELECT m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, m.body_text, m.body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.is_answered, m.is_draft, m.has_attachments, m.category, m.classification_confidence, m.classification_source, m.classification_signals FROM messages m LEFT JOIN starred_message_bodies b ON b.message_id = m.id WHERE m.account_id = ? AND m.is_flagged = 1 AND (b.message_id IS NULL OR b.attachment_presentation_version != ?) ORDER BY m.received_at DESC LIMIT ?";
         Ok(sqlx::query_as::<_, MailSummary>(SQL)
             .bind(account_id.to_string())
             .bind(ATTACHMENT_PRESENTATION_VERSION)
@@ -3310,7 +5915,7 @@ impl Store {
     pub async fn search(&self, query: &SearchQuery) -> Result<Vec<MailSummary>> {
         self.search_with_projection(
             query,
-            "m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, m.body_text, m.body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, m.classification_signals",
+            "m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, m.body_text, m.body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.is_answered, m.is_draft, m.has_attachments, m.category, m.classification_confidence, m.classification_source, m.classification_signals",
         )
         .await
     }
@@ -3318,33 +5923,179 @@ impl Store {
     async fn search_with_projection(
         &self,
         query: &SearchQuery,
-        projection: &str,
+        _projection: &str,
     ) -> Result<Vec<MailSummary>> {
         let limit = query.limit.unwrap_or(100).clamp(1, 500) as i64;
-        let mut sql = format!("SELECT {projection} FROM messages m");
-        if !query.text.trim().is_empty() {
-            sql.push_str(" JOIN messages_fts f ON f.rowid=m.rowid");
+        let expression = parse_search_query(&query.text)?;
+        let mut rows = self.search_matching_messages(query, &expression).await?;
+        if let Some(cursor) = &query.cursor {
+            rows.retain(|message| {
+                message.received_at < cursor.received_at
+                    || (message.received_at == cursor.received_at && message.id < cursor.id)
+            });
         }
-        sql.push_str(" WHERE 1=1");
-        if !query.text.trim().is_empty() {
-            sql.push_str(" AND messages_fts MATCH ?");
+        rows.truncate(limit as usize);
+        Ok(rows)
+    }
+
+    /// Finds conversations by messages matching the requested view, then
+    /// hydrates their allowed account-wide members. This intentionally keeps
+    /// mailbox membership separate from reader membership.
+    pub async fn search_conversations(&self, query: &SearchQuery) -> Result<Vec<MailConversation>> {
+        Ok(self.search_conversation_page(query).await?.conversations)
+    }
+
+    /// Re-evaluates the canonical local expression for selected persisted
+    /// conversation keys and returns exact evidence from those matching rows.
+    /// Provider and Tauri callers must pass local account/thread IDs, never a
+    /// provider UID, and must not derive evidence from list-hydrated bodies.
+    pub async fn search_match_evidence_for_conversations(
+        &self,
+        query: &SearchQuery,
+        conversation_keys: &[(String, String)],
+    ) -> Result<BTreeMap<String, SearchMatchEvidence>> {
+        if conversation_keys.is_empty() {
+            return Ok(BTreeMap::new());
         }
+        let expression = parse_search_query(&query.text)?;
+        let matches = self
+            .search_matching_messages_for_threads(query, &expression, conversation_keys)
+            .await?;
+        Ok(matches
+            .into_iter()
+            .map(|((account_id, thread_id), matches)| {
+                (
+                    format!("{account_id}:{thread_id}"),
+                    search_match_evidence(&matches),
+                )
+            })
+            .collect())
+    }
+
+    async fn search_matching_messages_for_threads(
+        &self,
+        query: &SearchQuery,
+        expression: &SearchExpression,
+        conversation_keys: &[(String, String)],
+    ) -> Result<HashMap<(String, String), Vec<MailSummary>>> {
+        let mut matches: HashMap<(String, String), Vec<MailSummary>> = HashMap::new();
+        let mut cursor = None;
+        loop {
+            let chunk = self
+                .search_matching_message_chunk(
+                    query,
+                    expression,
+                    cursor.as_ref(),
+                    Some(conversation_keys),
+                    SEARCH_CANDIDATE_SCAN_CHUNK,
+                )
+                .await?;
+            let last_cursor = chunk.rows.last().map(search_message_cursor);
+            for (message, matched) in chunk.rows.into_iter().zip(chunk.matches) {
+                if matched {
+                    let key = (message.account_id.clone(), message.thread_id.clone());
+                    matches.entry(key).or_default().push(message);
+                }
+            }
+            if chunk.exhausted || last_cursor.is_none() {
+                break;
+            }
+            cursor = last_cursor;
+        }
+        Ok(matches)
+    }
+
+    /// Fetches the local search corpus once, then evaluates the parsed AST
+    /// against the same projection for flat and conversation search. SQLite
+    /// retains the account, mailbox, and legacy-filter predicates so the
+    /// evaluator never crosses an account or view boundary; text evaluation
+    /// stays in Rust because it is the canonical Unicode/phrase/prefix
+    /// implementation shared with provider verification.
+    async fn search_matching_messages(
+        &self,
+        query: &SearchQuery,
+        expression: &SearchExpression,
+    ) -> Result<Vec<MailSummary>> {
+        let mut cursor = None;
+        let mut matches = Vec::new();
+        loop {
+            let chunk = self
+                .search_matching_message_chunk(
+                    query,
+                    expression,
+                    cursor.as_ref(),
+                    None,
+                    SEARCH_CANDIDATE_SCAN_CHUNK,
+                )
+                .await?;
+            let last_cursor = chunk.rows.last().map(search_message_cursor);
+            matches.extend(
+                chunk
+                    .rows
+                    .into_iter()
+                    .zip(chunk.matches)
+                    .filter_map(|(row, matched)| matched.then_some(row)),
+            );
+            if chunk.exhausted {
+                return Ok(matches);
+            }
+            cursor = last_cursor;
+            // A non-exhausted keyset batch always contains at least one row.
+            // Keep this defensive return so a malformed database response
+            // cannot spin a draft preview forever.
+            if cursor.is_none() {
+                return Ok(matches);
+            }
+        }
+    }
+
+    /// Fetch one keyset-bounded candidate batch and evaluate it canonically.
+    /// `thread_keys` is used for exact evidence after a conversation page has
+    /// chosen its representatives, so old matching messages in that thread
+    /// remain visible without rescanning the entire mailbox.
+    async fn search_matching_message_chunk(
+        &self,
+        query: &SearchQuery,
+        expression: &SearchExpression,
+        cursor: Option<&MailCursor>,
+        thread_keys: Option<&[(String, String)]>,
+        limit: usize,
+    ) -> Result<SearchCandidateChunk> {
+        // The compiler only narrows SQLite candidates. It intentionally
+        // broadens branches it cannot prove safe (notably partial OR/NOT
+        // branches), and the canonical evaluator below remains authoritative.
+        let today = Utc::now().date_naive();
+        let catalogue_complete = self.search_catalogue_v2_complete().await?;
+        let candidate =
+            if !catalogue_complete || expression_contains_no_attachment(&expression.root) {
+                // `has:noattachment` is evaluated over user-facing attachments.
+                // A catalogue row for an inline CID image must therefore not
+                // remove its message from the candidate set before the canonical
+                // evaluator has a chance to apply that distinction. A partial
+                // restart-safe v2 migration has the same requirement: its FTS
+                // and attachment catalogue cannot omit older canonical matches.
+                SqlSearchCandidate {
+                    predicate: "1 = 1".into(),
+                    binds: Vec::new(),
+                    requires_post_filter: true,
+                }
+            } else {
+                compile_sql_candidate(expression, today)?
+            };
+        let projection = "m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, COALESCE(s.body_text, c.body_text, b.body_text, m.body_text) AS body_text, m.body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.is_answered, m.is_draft, m.has_attachments, m.category, m.classification_confidence, m.classification_source, m.classification_signals";
+        let mut sql = format!("SELECT {projection} FROM messages m LEFT JOIN message_search_body_text s ON s.message_id = m.id LEFT JOIN message_content_cache c ON c.message_id = m.id LEFT JOIN starred_message_bodies b ON b.message_id = m.id WHERE 1=1");
         if !query.account_ids.is_empty() {
             sql.push_str(" AND m.account_id IN (");
             sql.push_str(&vec!["?"; query.account_ids.len()].join(","));
             sql.push(')');
         }
-        if query.mailbox.is_some() {
-            if query
-                .mailbox
-                .as_deref()
-                .is_some_and(is_special_mailbox_family)
-            {
+        if let Some(mailbox) = query.mailbox.as_deref() {
+            if is_special_mailbox_family(mailbox) {
                 sql.push_str(" AND (m.mailbox = ? OR m.mailbox LIKE ?)");
             } else {
                 sql.push_str(" AND m.mailbox = ?");
             }
-        } else {
+        } else if positive_folder_scopes(&expression.root).is_empty() {
             sql.push_str(" AND m.mailbox NOT IN ('Spam', 'Trash') AND m.mailbox NOT LIKE 'Spam::%' AND m.mailbox NOT LIKE 'Trash::%'");
         }
         if query.from.is_some() {
@@ -3365,19 +6116,34 @@ impl Store {
         if query.category.is_some() {
             sql.push_str(" AND m.category = ?");
         }
-        if query.cursor.is_some() {
+        if let Some(thread_keys) = thread_keys {
+            if thread_keys.is_empty() {
+                return Ok(SearchCandidateChunk {
+                    rows: Vec::new(),
+                    matches: Vec::new(),
+                    exhausted: true,
+                });
+            }
+            sql.push_str(" AND (");
+            sql.push_str(
+                &vec!["(m.account_id = ? AND m.thread_id = ?)"; thread_keys.len()].join(" OR "),
+            );
+            sql.push(')');
+        }
+        sql.push_str(" AND (");
+        sql.push_str(&candidate.predicate);
+        sql.push(')');
+        if cursor.is_some() {
             sql.push_str(" AND (m.received_at < ? OR (m.received_at = ? AND m.id < ?))");
         }
-        sql.push_str(" ORDER BY m.received_at DESC, m.id DESC LIMIT ?");
+        sql.push_str(" ORDER BY m.received_at DESC, m.id DESC");
+        sql.push_str(" LIMIT ?");
 
         let mut statement = sqlx::query_as::<_, MailSummary>(&sql);
-        if !query.text.trim().is_empty() {
-            statement = statement.bind(fts_query(&query.text));
-        }
         for account_id in &query.account_ids {
             statement = statement.bind(account_id.to_string());
         }
-        if let Some(mailbox) = &query.mailbox {
+        if let Some(mailbox) = query.mailbox.as_deref() {
             statement = statement.bind(mailbox);
             if is_special_mailbox_family(mailbox) {
                 statement = statement.bind(format!("{mailbox}::%"));
@@ -3389,20 +6155,215 @@ impl Store {
         if let Some(category) = &query.category {
             statement = statement.bind(category);
         }
-        if let Some(cursor) = &query.cursor {
+        if let Some(thread_keys) = thread_keys {
+            for (account_id, thread_id) in thread_keys {
+                statement = statement.bind(account_id).bind(thread_id);
+            }
+        }
+        for bind in candidate.binds {
+            statement = match bind {
+                SqlSearchBind::Text(value) => statement.bind(value),
+                SqlSearchBind::Integer(value) => statement.bind(value),
+            };
+        }
+        if let Some(cursor) = cursor {
             statement = statement
                 .bind(cursor.received_at)
                 .bind(cursor.received_at)
                 .bind(&cursor.id);
         }
-        Ok(statement.bind(limit).fetch_all(&self.pool).await?)
+        statement = statement.bind(limit.saturating_add(1) as i64);
+        let rows = statement.fetch_all(&self.pool).await?;
+        let exhausted = rows.len() <= limit;
+        let rows = rows.into_iter().take(limit).collect::<Vec<_>>();
+        if rows.is_empty() {
+            return Ok(SearchCandidateChunk {
+                rows,
+                matches: Vec::new(),
+                exhausted: true,
+            });
+        }
+
+        let ids = rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>();
+        let attachments = self.search_attachments_by_message_id(&ids).await?;
+        let mailbox_memberships = self.search_mailbox_paths_by_message_id(&ids).await?;
+        let matches = rows
+            .iter()
+            .map(|row| {
+                let from = row
+                    .from_name
+                    .as_deref()
+                    .map(|name| format!("{name} <{}>", row.from_address))
+                    .unwrap_or_else(|| row.from_address.clone());
+                let attachment_rows = attachments.get(&row.id).map(Vec::as_slice).unwrap_or(&[]);
+                let mut searchable_attachments = attachment_rows
+                    .iter()
+                    .map(|(filename, mime_type)| SearchableAttachment {
+                        filename: filename.as_deref(),
+                        mime_type: mime_type.as_deref(),
+                    })
+                    .collect::<Vec<_>>();
+                // Older catalogued messages can know that an attachment
+                // exists before their MIME metadata is refreshed. Preserve
+                // correct has/no-attachment semantics without inventing a
+                // filename or type for them.
+                if !attachments.contains_key(&row.id) && row.has_attachments {
+                    searchable_attachments.push(SearchableAttachment::default());
+                }
+                // A message can have one physical row per provider mailbox.
+                // Folder evaluation is logical, so expose every catalogue
+                // local path from same-account RFC Message-ID aliases while
+                // retaining the row's legacy storage mailbox as a fallback
+                // for profiles that have not received membership data yet.
+                let mut searchable_mailboxes = mailbox_memberships
+                    .get(&row.id)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>();
+                searchable_mailboxes.push(row.mailbox.as_str());
+                let body = if row.body_text.is_empty() {
+                    row.snippet.as_str()
+                } else {
+                    row.body_text.as_str()
+                };
+                evaluate_search(
+                    expression,
+                    &SearchableMessage {
+                        from: &from,
+                        to: &row.to_addresses,
+                        cc: &row.cc_addresses,
+                        bcc: &row.bcc_addresses,
+                        subject: &row.subject,
+                        body,
+                        mailbox: &row.mailbox,
+                        mailboxes: &searchable_mailboxes,
+                        received_on: row.received_at.date_naive(),
+                        attachments: &searchable_attachments,
+                        is_read: row.is_read,
+                        is_flagged: row.is_flagged,
+                        is_replied: row.is_answered,
+                        is_draft: row.is_draft,
+                    },
+                    today,
+                )
+            })
+            .collect();
+        Ok(SearchCandidateChunk {
+            rows,
+            matches,
+            exhausted,
+        })
     }
 
-    /// Finds conversations by messages matching the requested view, then
-    /// hydrates their allowed account-wide members. This intentionally keeps
-    /// mailbox membership separate from reader membership.
-    pub async fn search_conversations(&self, query: &SearchQuery) -> Result<Vec<MailConversation>> {
-        Ok(self.search_conversation_page(query).await?.conversations)
+    async fn search_attachments_by_message_id(
+        &self,
+        ids: &[String],
+    ) -> Result<HashMap<String, Vec<SearchAttachment>>> {
+        let mut attachments: HashMap<String, Vec<SearchAttachment>> = HashMap::new();
+        for chunk in ids.chunks(400) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!("SELECT message_id, filename, mime_type, is_inline, presentation FROM message_attachment_catalogue WHERE message_id IN ({placeholders})");
+            let mut statement =
+                sqlx::query_as::<_, (String, String, String, bool, AttachmentPresentation)>(&sql);
+            for id in chunk {
+                statement = statement.bind(id);
+            }
+            let rows = statement.fetch_all(&self.pool).await?;
+            for (message_id, filename, mime_type, is_inline, presentation) in rows {
+                let message_attachments = attachments.entry(message_id).or_default();
+                match presentation {
+                    // A CID part can be both shown in HTML and deliberately
+                    // offered as a file. The provider's canonical matching
+                    // uses this same distinction.
+                    AttachmentPresentation::Downloadable | AttachmentPresentation::Both => {
+                        message_attachments.push((Some(filename), Some(mime_type)));
+                    }
+                    // An embedded-only resource is never a user-facing
+                    // attachment, even if older headers still carry a broad
+                    // `has_attachments` bit.
+                    AttachmentPresentation::Embedded => {}
+                    AttachmentPresentation::Unknown if !is_inline => {
+                        // Legacy rows have only the transport disposition. A
+                        // non-inline part can establish has/no-attachment
+                        // state, but its filename and MIME type are not
+                        // trusted for filename/filetype matching.
+                        message_attachments.push((None, None));
+                    }
+                    AttachmentPresentation::Unknown => {}
+                }
+            }
+        }
+        Ok(attachments)
+    }
+
+    /// Loads the user-visible local paths for every logical message selected
+    /// as a search candidate. A provider may expose the same RFC message in
+    /// more than one physical mailbox row, and a folder query must see the
+    /// union of their memberships. The direct-ID branch also covers messages
+    /// without a valid RFC Message-ID.
+    async fn search_mailbox_paths_by_message_id(
+        &self,
+        ids: &[String],
+    ) -> Result<HashMap<String, Vec<String>>> {
+        let mut memberships: HashMap<String, Vec<String>> = HashMap::new();
+        if ids.is_empty()
+            || !sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM message_mailbox_memberships LIMIT 1)",
+            )
+            .fetch_one(&self.pool)
+            .await?
+        {
+            // Legacy and ordinary catalogues can rely entirely on the
+            // message row's mailbox fallback. Avoid joining every candidate
+            // back through the messages table when no logical memberships
+            // exist anywhere yet. Besides saving work during migration, this
+            // keeps broad local previews bounded while their mailbox
+            // catalogue is still being built.
+            return Ok(memberships);
+        }
+        for chunk in ids.chunks(300) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT candidate.id, mailbox.local_path \
+                 FROM messages candidate \
+                 JOIN messages logical ON logical.account_id = candidate.account_id \
+                 JOIN message_mailbox_memberships membership \
+                   ON membership.message_id = logical.id \
+                  AND membership.account_id = candidate.account_id \
+                 JOIN selectable_mailboxes mailbox \
+                   ON mailbox.id = membership.mailbox_id \
+                  AND mailbox.account_id = membership.account_id \
+                 WHERE candidate.id IN ({placeholders}) \
+                   AND (logical.id = candidate.id OR (candidate.message_id IS NOT NULL \
+                        AND logical.message_id IS NOT NULL \
+                        AND lower(trim(logical.message_id)) = lower(trim(candidate.message_id)))) \
+                 ORDER BY candidate.id, mailbox.local_path, mailbox.id"
+            );
+            let mut statement = sqlx::query_as::<_, (String, String)>(&sql);
+            for id in chunk {
+                statement = statement.bind(id);
+            }
+            for (message_id, local_path) in statement.fetch_all(&self.pool).await? {
+                let paths = memberships.entry(message_id).or_default();
+                if !paths.contains(&local_path) {
+                    paths.push(local_path);
+                }
+            }
+        }
+        Ok(memberships)
+    }
+
+    /// Returns every user-visible local mailbox path for each supplied local
+    /// message ID. Paths include memberships persisted on same-account
+    /// physical aliases with the same canonical RFC Message-ID, so provider
+    /// pages can apply the same logical folder semantics as local search.
+    pub async fn logical_mailbox_paths_by_message_ids(
+        &self,
+        ids: &[String],
+    ) -> Result<HashMap<String, Vec<String>>> {
+        self.search_mailbox_paths_by_message_id(ids).await
     }
 
     /// Resolves a notification or deep-link target without applying list
@@ -3458,7 +6419,7 @@ impl Store {
             .as_deref()
             .and_then(normalize_message_id)
         {
-            let candidates = sqlx::query_as::<_, MailSummary>("SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE account_id = ? AND LOWER(TRIM(message_id)) = ?")
+            let candidates = sqlx::query_as::<_, MailSummary>("SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, is_answered, is_draft, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE account_id = ? AND LOWER(TRIM(message_id)) = ?")
                 .bind(&account_id)
                 .bind(format!("<{rfc_message_id}>"))
                 .fetch_all(&self.pool)
@@ -3496,7 +6457,7 @@ impl Store {
             .as_deref()
             .filter(|thread_id| !thread_id.trim().is_empty())
         {
-            let exists = sqlx::query_as::<_, MailSummary>("SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE account_id = ? AND thread_id = ? ORDER BY received_at, id")
+            let exists = sqlx::query_as::<_, MailSummary>("SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, is_answered, is_draft, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE account_id = ? AND thread_id = ? ORDER BY received_at, id")
                 .bind(&account_id)
                 .bind(thread_id)
                 .fetch_all(&self.pool)
@@ -3519,7 +6480,7 @@ impl Store {
         thread_id: &str,
         mailbox: Option<&str>,
     ) -> Result<Option<MailConversation>> {
-        let mut source_messages = sqlx::query_as::<_, MailSummary>("SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, '' AS body_text, NULL AS body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, '' AS classification_signals FROM messages WHERE account_id = ? AND thread_id = ? ORDER BY received_at, id")
+        let mut source_messages = sqlx::query_as::<_, MailSummary>("SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, '' AS body_text, NULL AS body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, is_answered, is_draft, has_attachments, category, classification_confidence, classification_source, '' AS classification_signals FROM messages WHERE account_id = ? AND thread_id = ? ORDER BY received_at, id")
             .bind(account_id)
             .bind(thread_id)
             .fetch_all(&self.pool)
@@ -3546,17 +6507,46 @@ impl Store {
         &self,
         query: &SearchQuery,
     ) -> Result<MailConversationPage> {
+        self.search_conversation_page_from_candidate(query, None, &[])
+            .await
+    }
+
+    /// Session callers resume this path with an opaque candidate cursor and
+    /// the conversations already emitted by that session.  The result cursor
+    /// remains available for legacy callers, but is intentionally separate
+    /// from candidate progress so broad predicates cannot rescan the whole
+    /// corpus on every V2 page.
+    pub async fn search_conversation_page_from_candidate(
+        &self,
+        query: &SearchQuery,
+        candidate_cursor: Option<&MailCursor>,
+        excluded_conversation_ids: &[String],
+    ) -> Result<MailConversationPage> {
+        let expression = parse_search_query(&query.text)?;
+        let positive_system_scopes = positive_folder_scopes(&expression.root);
+        let include_system_mailboxes = query
+            .mailbox
+            .as_deref()
+            .is_some_and(is_special_mailbox_family)
+            || !positive_system_scopes.is_empty();
         let limit = query.limit.unwrap_or(100).clamp(1, 500);
         let mut match_query = query.clone();
         // Select one representative matching message per conversation before
         // paging. Paging raw messages and grouping afterwards makes a thread
         // straddle pages, causing duplicates and unreliable `hasMore`.
         match_query.limit = Some(limit.saturating_add(1));
-        let mut matching = self.search_conversation_matches(&match_query).await?;
-        let has_more = matching.len() > limit as usize;
-        matching.truncate(limit as usize);
+        let mut matching = self
+            .search_conversation_matches_from_candidate(
+                &match_query,
+                candidate_cursor,
+                excluded_conversation_ids,
+            )
+            .await?;
+        let has_more = matching.representatives.len() > limit as usize;
+        matching.representatives.truncate(limit as usize);
         let next_cursor = has_more.then(|| {
             let last = matching
+                .representatives
                 .last()
                 .expect("a page with more results contains a cursor source");
             MailCursor {
@@ -3564,32 +6554,57 @@ impl Store {
                 id: last.id.clone(),
             }
         });
+        // The lookahead row is intentionally not consumed. Continuing from
+        // the final returned representative may revisit a few non-matching
+        // candidates, but it cannot skip the lookahead conversation and the
+        // session's emitted-ID set prevents overlap.
+        let next_candidate_cursor = has_more.then(|| {
+            matching
+                .representatives
+                .last()
+                .map(search_message_cursor)
+                .expect("a page with a lookahead has a returned representative")
+        });
         let isolated = query
             .mailbox
             .as_deref()
             .is_some_and(|mailbox| matches!(mailbox, "Spam" | "Trash"));
-        if query.mailbox.is_none() {
+        if !include_system_mailboxes {
             matching
+                .representatives
                 .retain(|message| !matches!(mailbox_family(&message.mailbox), "Spam" | "Trash"));
         }
 
         let keys = matching
+            .representatives
             .iter()
             .map(|message| (message.account_id.clone(), message.thread_id.clone()))
             .collect::<Vec<_>>();
         if keys.is_empty() {
             return Ok(MailConversationPage {
                 conversations: Vec::new(),
+                match_evidence: BTreeMap::new(),
                 next_cursor: None,
+                candidate_cursor: if matching.exhausted {
+                    None
+                } else {
+                    next_candidate_cursor.or(matching.candidate_cursor)
+                },
+                candidate_exhausted: matching.exhausted,
             });
         }
 
         let mut hydrated = Vec::new();
+        let matching_message_ids = matching
+            .representatives
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<HashSet<_>>();
         // Keep well below SQLite's conservative parameter limit while avoiding
         // one hydration query per conversation.
         for chunk in keys.chunks(300) {
             let predicates = vec!["(account_id = ? AND thread_id = ?)"; chunk.len()].join(" OR ");
-            let sql = format!("SELECT m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, '' AS body_text, NULL AS body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, '' AS classification_signals FROM messages m WHERE ({predicates}) ORDER BY m.received_at, m.id");
+            let sql = format!("SELECT m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, '' AS body_text, NULL AS body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.is_answered, m.is_draft, m.has_attachments, m.category, m.classification_confidence, m.classification_source, '' AS classification_signals FROM messages m WHERE ({predicates}) ORDER BY m.received_at, m.id");
             let mut statement = sqlx::query_as::<_, MailSummary>(&sql);
             for (account_id, thread_id) in chunk {
                 statement = statement.bind(account_id).bind(thread_id);
@@ -3600,8 +6615,17 @@ impl Store {
             let mailbox = query.mailbox.as_deref().unwrap_or_default();
             hydrated.retain(|message| mailbox_family(&message.mailbox) == mailbox);
         } else {
-            hydrated
-                .retain(|message| !matches!(mailbox_family(&message.mailbox), "Spam" | "Trash"));
+            hydrated.retain(|message| {
+                !is_system_mailbox(&message.mailbox)
+                    // A logical label can live on a physical Spam/Trash row.
+                    // Keep the already canonically matched representative even
+                    // when its physical storage mailbox cannot itself explain
+                    // the positive folder scope.
+                    || matching_message_ids.contains(message.id.as_str())
+                    || positive_system_scopes
+                        .iter()
+                        .any(|scope| folder_scope_matches_system_mailbox(scope, &message.mailbox))
+            });
         }
 
         let mut grouped: HashMap<(String, String), Vec<MailSummary>> = HashMap::new();
@@ -3634,12 +6658,33 @@ impl Store {
                 )
             })
             .collect::<HashMap<_, _>>();
+        let conversations = keys
+            .into_iter()
+            .filter_map(|key| conversations.get(&key).cloned())
+            .collect::<Vec<_>>();
+        let match_evidence = conversations
+            .iter()
+            .filter_map(|conversation| {
+                let key = (
+                    conversation.account_id.clone(),
+                    conversation.thread_id.clone(),
+                );
+                matching
+                    .matched_by_thread
+                    .get(&key)
+                    .map(|matches| (conversation.id.clone(), search_match_evidence(matches)))
+            })
+            .collect();
         Ok(MailConversationPage {
-            conversations: keys
-                .into_iter()
-                .filter_map(|key| conversations.get(&key).cloned())
-                .collect(),
+            conversations,
+            match_evidence,
             next_cursor,
+            candidate_cursor: if matching.exhausted {
+                None
+            } else {
+                next_candidate_cursor.or(matching.candidate_cursor)
+            },
+            candidate_exhausted: matching.exhausted,
         })
     }
 
@@ -3752,7 +6797,7 @@ impl Store {
         keys.sort();
         keys.dedup();
         let conversations = self
-            .hydrate_conversations_by_keys(&keys, Some("INBOX"))
+            .hydrate_conversations_by_keys(&keys, Some("INBOX"), false)
             .await?;
 
         Ok(SmartInboxPage {
@@ -3780,18 +6825,22 @@ impl Store {
         &self,
         keys: &[(String, String)],
         preferred_mailbox: Option<&str>,
+        include_system_mailboxes: bool,
     ) -> Result<HashMap<(String, String), MailConversation>> {
         let mut hydrated = Vec::new();
         for chunk in keys.chunks(300) {
             let predicates = vec!["(account_id = ? AND thread_id = ?)"; chunk.len()].join(" OR ");
-            let sql = format!("SELECT m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, '' AS body_text, NULL AS body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, '' AS classification_signals FROM messages m WHERE ({predicates}) ORDER BY m.received_at, m.id");
+            let sql = format!("SELECT m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, '' AS body_text, NULL AS body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.is_answered, m.is_draft, m.has_attachments, m.category, m.classification_confidence, m.classification_source, '' AS classification_signals FROM messages m WHERE ({predicates}) ORDER BY m.received_at, m.id");
             let mut statement = sqlx::query_as::<_, MailSummary>(&sql);
             for (account_id, thread_id) in chunk {
                 statement = statement.bind(account_id).bind(thread_id);
             }
             hydrated.extend(statement.fetch_all(&self.pool).await?);
         }
-        hydrated.retain(|message| !matches!(mailbox_family(&message.mailbox), "Spam" | "Trash"));
+        if !include_system_mailboxes {
+            hydrated
+                .retain(|message| !matches!(mailbox_family(&message.mailbox), "Spam" | "Trash"));
+        }
         let mut grouped: HashMap<(String, String), Vec<MailSummary>> = HashMap::new();
         for message in hydrated {
             grouped
@@ -3838,124 +6887,259 @@ impl Store {
             .collect())
     }
 
-    async fn search_conversation_matches(&self, query: &SearchQuery) -> Result<Vec<MailSummary>> {
+    /// Searches candidate rows by a stable `(received_at, id)` keyset.  The
+    /// caller supplies already-emitted conversations only for a session-bound
+    /// continuation; direct callers retain the historical result-cursor path.
+    /// This lets broad canonical predicates stop after a page plus lookahead
+    /// instead of evaluating an entire mailbox on every keystroke.
+    async fn search_conversation_matches_from_candidate(
+        &self,
+        query: &SearchQuery,
+        candidate_cursor: Option<&MailCursor>,
+        excluded_conversation_ids: &[String],
+    ) -> Result<SearchConversationMatches> {
+        // Existing list-state filters are conversation-wide, while the AST is
+        // message-wide. Keep their complete-conversation path until it can be
+        // compiled into an equally exact bounded predicate.
+        if query.unread_only
+            || query.read_only
+            || query.flagged_only
+            || query.unflagged_only
+            || query.category.is_some()
+        {
+            return self.search_conversation_matches_full(query).await;
+        }
+        let limit = query.limit.unwrap_or(100).clamp(1, 501) as usize;
+        let scan_chunk = SEARCH_CANDIDATE_SCAN_CHUNK;
+        let expression = parse_search_query(&query.text)?;
+        let mut expression_query = query.clone();
+        expression_query.unread_only = false;
+        expression_query.read_only = false;
+        expression_query.flagged_only = false;
+        expression_query.unflagged_only = false;
+        expression_query.category = None;
+
+        let mut cursor = candidate_cursor.cloned();
+        let mut seen_threads = excluded_conversation_ids
+            .iter()
+            .filter_map(|id| id.split_once(':'))
+            .map(|(account_id, thread_id)| (account_id.to_owned(), thread_id.to_owned()))
+            .collect::<HashSet<_>>();
+        let mut representatives = Vec::new();
+        let mut last_scanned = cursor.clone();
+        let mut scanned = 0usize;
+        loop {
+            let chunk = self
+                .search_matching_message_chunk(
+                    &expression_query,
+                    &expression,
+                    cursor.as_ref(),
+                    None,
+                    scan_chunk,
+                )
+                .await?;
+            if chunk.rows.is_empty() {
+                return Ok(SearchConversationMatches {
+                    matched_by_thread: HashMap::new(),
+                    representatives,
+                    candidate_cursor: last_scanned,
+                    exhausted: true,
+                });
+            }
+            let chunk_last = chunk.rows.last().map(search_message_cursor);
+            for (message, matched) in chunk.rows.iter().zip(&chunk.matches) {
+                last_scanned = Some(search_message_cursor(message));
+                scanned = scanned.saturating_add(1);
+                if !matched {
+                    continue;
+                }
+                let key = (message.account_id.clone(), message.thread_id.clone());
+                if !seen_threads.insert(key) {
+                    continue;
+                }
+                // A direct legacy cursor denotes the newest matching message
+                // in a thread. When scanning from the top, remember threads
+                // before that cursor as excluded so an older matching reply
+                // cannot reintroduce a conversation on a later page.
+                if candidate_cursor.is_none()
+                    && query.cursor.as_ref().is_some_and(|result_cursor| {
+                        message.received_at > result_cursor.received_at
+                            || (message.received_at == result_cursor.received_at
+                                && message.id >= result_cursor.id)
+                    })
+                {
+                    continue;
+                }
+                representatives.push(message.clone());
+                if representatives.len() >= limit {
+                    let keys = representatives
+                        .iter()
+                        .map(|message| (message.account_id.clone(), message.thread_id.clone()))
+                        .collect::<Vec<_>>();
+                    let matched_by_thread = self
+                        .search_matching_messages_for_threads(&expression_query, &expression, &keys)
+                        .await?;
+                    return Ok(SearchConversationMatches {
+                        representatives,
+                        matched_by_thread,
+                        candidate_cursor: last_scanned,
+                        exhausted: false,
+                    });
+                }
+            }
+            if scanned >= SEARCH_CANDIDATE_SCAN_BUDGET {
+                let keys = representatives
+                    .iter()
+                    .map(|message| (message.account_id.clone(), message.thread_id.clone()))
+                    .collect::<Vec<_>>();
+                let matched_by_thread = self
+                    .search_matching_messages_for_threads(&expression_query, &expression, &keys)
+                    .await?;
+                return Ok(SearchConversationMatches {
+                    representatives,
+                    matched_by_thread,
+                    candidate_cursor: last_scanned,
+                    exhausted: false,
+                });
+            }
+            if chunk.exhausted {
+                let keys = representatives
+                    .iter()
+                    .map(|message| (message.account_id.clone(), message.thread_id.clone()))
+                    .collect::<Vec<_>>();
+                let matched_by_thread = self
+                    .search_matching_messages_for_threads(&expression_query, &expression, &keys)
+                    .await?;
+                return Ok(SearchConversationMatches {
+                    representatives,
+                    matched_by_thread,
+                    candidate_cursor: last_scanned,
+                    exhausted: true,
+                });
+            }
+            cursor = chunk_last;
+        }
+    }
+
+    async fn search_conversation_matches_full(
+        &self,
+        query: &SearchQuery,
+    ) -> Result<SearchConversationMatches> {
         // Conversation pages request one look-ahead candidate, so this
         // internal query intentionally accepts 501 while the public page size
         // remains capped at 500.
-        let limit = query.limit.unwrap_or(100).clamp(1, 501) as i64;
-        let projection = "m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, '' AS body_text, NULL AS body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, '' AS classification_signals";
-        let mut sql = format!("WITH matching AS (SELECT {projection}, ROW_NUMBER() OVER (PARTITION BY m.account_id, m.thread_id ORDER BY m.received_at DESC, m.id DESC) AS thread_rank FROM messages m");
-        if !query.text.trim().is_empty() {
-            sql.push_str(" JOIN messages_fts f ON f.rowid=m.rowid");
-        }
-        sql.push_str(" WHERE 1=1");
-        if !query.text.trim().is_empty() {
-            sql.push_str(" AND messages_fts MATCH ?");
-        }
-        if !query.account_ids.is_empty() {
-            sql.push_str(" AND m.account_id IN (");
-            sql.push_str(&vec!["?"; query.account_ids.len()].join(","));
-            sql.push(')');
-        }
-        if query.mailbox.is_some() {
-            if query
-                .mailbox
-                .as_deref()
-                .is_some_and(is_special_mailbox_family)
-            {
-                sql.push_str(" AND (m.mailbox = ? OR m.mailbox LIKE ?)");
-            } else {
-                sql.push_str(" AND m.mailbox = ?");
+        let limit = query.limit.unwrap_or(100).clamp(1, 501) as usize;
+        let expression = parse_search_query(&query.text)?;
+        // State and category filters are conversation properties in existing
+        // list views. Evaluate the parsed expression first, then apply those
+        // legacy scalar filters to the complete scoped conversation below.
+        let mut expression_query = query.clone();
+        expression_query.unread_only = false;
+        expression_query.read_only = false;
+        expression_query.flagged_only = false;
+        expression_query.unflagged_only = false;
+        expression_query.category = None;
+        let matching = self
+            .search_matching_messages(&expression_query, &expression)
+            .await?;
+        let mut representatives = Vec::new();
+        let mut seen_threads = HashSet::new();
+        let mut matched_by_thread: HashMap<(String, String), Vec<MailSummary>> = HashMap::new();
+        for message in matching {
+            let key = (message.account_id.clone(), message.thread_id.clone());
+            if seen_threads.insert(key.clone()) {
+                representatives.push(message.clone());
             }
+            matched_by_thread.entry(key).or_default().push(message);
+        }
+        let keys = representatives
+            .iter()
+            .map(|message| (message.account_id.clone(), message.thread_id.clone()))
+            .collect::<Vec<_>>();
+        let isolated_special_mailbox = query
+            .mailbox
+            .as_deref()
+            .is_some_and(is_special_mailbox_family);
+        let include_system_mailboxes = query
+            .mailbox
+            .as_deref()
+            .is_some_and(is_special_mailbox_family)
+            || !positive_folder_scopes(&expression.root).is_empty();
+        let conversations = if isolated_special_mailbox {
+            HashMap::new()
         } else {
-            sql.push_str(" AND m.mailbox NOT IN ('Spam', 'Trash') AND m.mailbox NOT LIKE 'Spam::%' AND m.mailbox NOT LIKE 'Trash::%'");
-        }
-        if query.from.is_some() {
-            sql.push_str(" AND m.from_address LIKE ?");
-        }
-        if query.unflagged_only {
-            sql.push_str(" AND NOT EXISTS (SELECT 1 FROM messages flagged WHERE flagged.account_id = m.account_id AND flagged.thread_id = m.thread_id AND flagged.is_flagged = 1)");
-        }
-        sql.push_str(") SELECT matching.* FROM matching WHERE thread_rank = 1");
-        // Category is a conversation property in Smart views: use the latest
-        // scoped mailbox representative, rather than allowing an older row to
-        // put the same conversation in a second category.
-        if query.category.is_some() {
-            sql.push_str(" AND category = ?");
-        }
-        // Starred membership belongs to the conversation, but its ordering
-        // and continuation must use the newest scoped representative.
-        if query.flagged_only {
-            sql.push_str(" AND EXISTS (SELECT 1 FROM messages flagged WHERE flagged.account_id = matching.account_id AND flagged.thread_id = matching.thread_id AND flagged.is_flagged = 1)");
-        }
-        // A conversation remains unread when any member in the mailbox scope
-        // is unread, even if its latest representative has already been read.
-        if query.unread_only {
-            sql.push_str(" AND EXISTS (SELECT 1 FROM messages unread WHERE unread.account_id = matching.account_id AND unread.thread_id = matching.thread_id AND unread.is_read = 0");
-            if let Some(mailbox) = query.mailbox.as_deref() {
-                if is_special_mailbox_family(mailbox) {
-                    sql.push_str(" AND (unread.mailbox = ? OR unread.mailbox LIKE ?)");
-                } else {
-                    sql.push_str(" AND unread.mailbox = ?");
-                }
-            } else {
-                sql.push_str(" AND unread.mailbox NOT IN ('Spam', 'Trash') AND unread.mailbox NOT LIKE 'Spam::%' AND unread.mailbox NOT LIKE 'Trash::%'");
+            self.hydrate_conversations_by_keys(
+                &keys,
+                query.mailbox.as_deref(),
+                include_system_mailboxes,
+            )
+            .await?
+        };
+        representatives.retain(|representative| {
+            if isolated_special_mailbox {
+                return query
+                    .category
+                    .as_ref()
+                    .is_none_or(|category| representative.category.as_ref() == Some(category))
+                    && (!query.flagged_only || representative.is_flagged)
+                    && (!query.unflagged_only || !representative.is_flagged)
+                    && (!query.unread_only || !representative.is_read)
+                    && (!query.read_only || representative.is_read);
             }
-            sql.push(')');
-        }
-        // A seen conversation has no unread member in the mailbox scope.
-        if query.read_only {
-            sql.push_str(" AND NOT EXISTS (SELECT 1 FROM messages unread WHERE unread.account_id = matching.account_id AND unread.thread_id = matching.thread_id AND unread.is_read = 0");
-            if let Some(mailbox) = query.mailbox.as_deref() {
-                if is_special_mailbox_family(mailbox) {
-                    sql.push_str(" AND (unread.mailbox = ? OR unread.mailbox LIKE ?)");
-                } else {
-                    sql.push_str(" AND unread.mailbox = ?");
-                }
-            } else {
-                sql.push_str(" AND unread.mailbox NOT IN ('Spam', 'Trash') AND unread.mailbox NOT LIKE 'Spam::%' AND unread.mailbox NOT LIKE 'Trash::%'");
-            }
-            sql.push(')');
-        }
-        if query.cursor.is_some() {
-            sql.push_str(" AND (received_at < ? OR (received_at = ? AND id < ?))");
-        }
-        sql.push_str(" ORDER BY received_at DESC, id DESC LIMIT ?");
-
-        let mut statement = sqlx::query_as::<_, MailSummary>(&sql);
-        if !query.text.trim().is_empty() {
-            statement = statement.bind(fts_query(&query.text));
-        }
-        for account_id in &query.account_ids {
-            statement = statement.bind(account_id.to_string());
-        }
-        if let Some(mailbox) = &query.mailbox {
-            statement = statement.bind(mailbox);
-            if is_special_mailbox_family(mailbox) {
-                statement = statement.bind(format!("{mailbox}::%"));
-            }
-        }
-        if let Some(from) = &query.from {
-            statement = statement.bind(format!("%{from}%"));
-        }
-        if let Some(category) = &query.category {
-            statement = statement.bind(category);
-        }
-        if query.unread_only || query.read_only {
-            if let Some(mailbox) = query.mailbox.as_deref() {
-                statement = statement.bind(mailbox);
-                if is_special_mailbox_family(mailbox) {
-                    statement = statement.bind(format!("{mailbox}::%"));
-                }
-            }
-        }
+            let Some(conversation) = conversations.get(&(
+                representative.account_id.clone(),
+                representative.thread_id.clone(),
+            )) else {
+                return false;
+            };
+            let scoped = conversation
+                .source_messages
+                .iter()
+                .filter(|message| {
+                    query.mailbox.as_deref().map_or_else(
+                        || {
+                            include_system_mailboxes
+                                || !matches!(mailbox_family(&message.mailbox), "Spam" | "Trash")
+                        },
+                        |mailbox| {
+                            if is_special_mailbox_family(mailbox) {
+                                mailbox_family(&message.mailbox) == mailbox_family(mailbox)
+                            } else {
+                                message.mailbox == mailbox
+                            }
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+            let Some(latest) = scoped.iter().max_by(|left, right| {
+                left.received_at
+                    .cmp(&right.received_at)
+                    .then_with(|| left.id.cmp(&right.id))
+            }) else {
+                return false;
+            };
+            query
+                .category
+                .as_ref()
+                .is_none_or(|category| latest.category.as_ref() == Some(category))
+                && (!query.flagged_only || scoped.iter().any(|message| message.is_flagged))
+                && (!query.unflagged_only || scoped.iter().all(|message| !message.is_flagged))
+                && (!query.unread_only || scoped.iter().any(|message| !message.is_read))
+                && (!query.read_only || scoped.iter().all(|message| message.is_read))
+        });
         if let Some(cursor) = &query.cursor {
-            statement = statement
-                .bind(cursor.received_at)
-                .bind(cursor.received_at)
-                .bind(&cursor.id);
+            representatives.retain(|message| {
+                message.received_at < cursor.received_at
+                    || (message.received_at == cursor.received_at && message.id < cursor.id)
+            });
         }
-        Ok(statement.bind(limit).fetch_all(&self.pool).await?)
+        representatives.truncate(limit);
+        Ok(SearchConversationMatches {
+            representatives,
+            matched_by_thread,
+            candidate_cursor: None,
+            exhausted: true,
+        })
     }
 
     pub async fn messages_by_ids(&self, ids: &[String]) -> Result<Vec<MailSummary>> {
@@ -3963,7 +7147,7 @@ impl Store {
             return Ok(Vec::new());
         }
         let placeholders = vec!["?"; ids.len()].join(",");
-        let sql = format!("SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE id IN ({placeholders}) ORDER BY received_at");
+        let sql = format!("SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, is_answered, is_draft, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE id IN ({placeholders}) ORDER BY received_at");
         let mut query = sqlx::query_as::<_, MailSummary>(&sql);
         for id in ids {
             query = query.bind(id);
@@ -3977,7 +7161,7 @@ impl Store {
         mailbox: &str,
         uid: u32,
     ) -> Result<Option<MailSummary>> {
-        Ok(sqlx::query_as::<_, MailSummary>("SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?")
+        Ok(sqlx::query_as::<_, MailSummary>("SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, is_answered, is_draft, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?")
             .bind(account_id.to_string())
             .bind(mailbox)
             .bind(uid)
@@ -4002,7 +7186,7 @@ impl Store {
 
     /// Newly synced messages that have not yet been classified.
     pub async fn messages_for_model_classification(&self) -> Result<Vec<MailSummary>> {
-        const SQL: &str = "SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE classification_source IS NULL AND content_state = 'complete' ORDER BY received_at DESC";
+        const SQL: &str = "SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, is_answered, is_draft, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE classification_source IS NULL AND content_state = 'complete' ORDER BY received_at DESC";
         Ok(sqlx::query_as::<_, MailSummary>(SQL)
             .fetch_all(&self.pool)
             .await?)
@@ -4015,7 +7199,7 @@ impl Store {
         &self,
         limit: usize,
     ) -> Result<Vec<MailSummary>> {
-        const SQL: &str = "SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE classification_source IS NULL AND content_state = 'complete' ORDER BY received_at DESC, id DESC LIMIT ?";
+        const SQL: &str = "SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, is_answered, is_draft, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE classification_source IS NULL AND content_state = 'complete' ORDER BY received_at DESC, id DESC LIMIT ?";
         Ok(sqlx::query_as::<_, MailSummary>(SQL)
             .bind(limit.clamp(1, 1_000) as i64)
             .fetch_all(&self.pool)
@@ -4046,7 +7230,7 @@ impl Store {
     /// Messages eligible for an explicitly requested model reclassification.
     /// User-selected categories are deliberately excluded.
     pub async fn messages_for_model_reclassification(&self) -> Result<Vec<MailSummary>> {
-        const SQL: &str = "SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE content_state = 'complete' AND (classification_source IS NULL OR classification_source = 'model') ORDER BY received_at DESC";
+        const SQL: &str = "SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, is_answered, is_draft, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE content_state = 'complete' AND (classification_source IS NULL OR classification_source = 'model') ORDER BY received_at DESC";
         Ok(sqlx::query_as::<_, MailSummary>(SQL)
             .fetch_all(&self.pool)
             .await?)
@@ -4346,6 +7530,611 @@ fn is_special_mailbox_family(mailbox: &str) -> bool {
 }
 
 #[derive(FromRow)]
+struct ContactedPeopleBackfillRow {
+    message_id: String,
+    rfc_message_id: Option<String>,
+    mailbox: String,
+    uid: i64,
+    mailbox_uid_validity: Option<i64>,
+    to_addresses: String,
+    cc_addresses: String,
+    bcc_addresses: String,
+    is_draft: bool,
+    received_at: DateTime<Utc>,
+}
+
+#[derive(FromRow)]
+struct ContactedPeopleSentProviderCutoff {
+    mailbox: String,
+    uid_validity: i64,
+    cutoff_uid: i64,
+}
+
+async fn account_search_generation_matches_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    account_id: &str,
+    generation: i64,
+) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM accounts a JOIN account_search_generations g ON g.account_id = a.id WHERE a.id = ? AND g.generation = ?)",
+    )
+    .bind(account_id)
+    .bind(generation)
+    .fetch_one(&mut **tx)
+    .await?)
+}
+
+/// Advances a live account's provider-search generation inside the caller's
+/// already authoritative transaction. Legacy catalogue rows can outlive their
+/// account record in older profiles; normal local read/star maintenance must
+/// still be able to repair those rows. A deletion tombstone is different: it
+/// is an explicit fence and must continue to reject every late local write.
+async fn advance_account_search_generation_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    account_id: &str,
+) -> Result<()> {
+    let removed: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM deleted_account_tombstones WHERE account_id = ?)",
+    )
+    .bind(account_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if removed {
+        return Err(anyhow!("account was removed"));
+    }
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM accounts WHERE id = ?)")
+        .bind(account_id)
+        .fetch_one(&mut **tx)
+        .await?;
+    if !exists {
+        // This is a pre-generation legacy/orphan row, not an account that
+        // exists for provider search. Do not create a generation row: guarded
+        // provider publication remains unable to revive it.
+        return Ok(());
+    }
+    sqlx::query("INSERT OR IGNORE INTO account_search_generations(account_id, generation) SELECT ?, 0 WHERE EXISTS (SELECT 1 FROM accounts WHERE id = ?)")
+        .bind(account_id)
+        .bind(account_id)
+        .execute(&mut **tx)
+        .await?;
+    let updated = sqlx::query(
+        "UPDATE account_search_generations SET generation = generation + 1 WHERE account_id = ?",
+    )
+    .bind(account_id)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    debug_assert_eq!(updated, 1, "existing account must own a generation row");
+    Ok(())
+}
+
+async fn ensure_live_contacted_people_account(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    account_id: &str,
+) -> Result<()> {
+    let removed: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM deleted_account_tombstones WHERE account_id = ?)",
+    )
+    .bind(account_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if removed {
+        return Err(anyhow!("account was removed"));
+    }
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM accounts WHERE id = ?)")
+        .bind(account_id)
+        .fetch_one(&mut **tx)
+        .await?;
+    if !exists {
+        return Err(anyhow!("account does not exist"));
+    }
+    Ok(())
+}
+
+/// Legacy marker rows persisted only a stable message ID. For an evicted
+/// Message-ID-less Sent row, recover its exact old locator only when the ID
+/// format is reversible; the selectable catalogue below still provides the
+/// authority needed to map it to an opaque mailbox.
+fn legacy_contacted_people_marker_locator(
+    account_id: &str,
+    message_id: &str,
+) -> Option<(String, i64, bool)> {
+    let prefix = format!("{account_id}:");
+    let encoded = message_id.strip_prefix(&prefix)?;
+    let (mailbox, uid, is_v2) = if let Some(encoded) = encoded.strip_prefix("v2:") {
+        let (mailbox, uid) = encoded.rsplit_once(':')?;
+        let mailbox = String::from_utf8(URL_SAFE_NO_PAD.decode(mailbox).ok()?).ok()?;
+        (mailbox, uid, true)
+    } else {
+        let (mailbox, uid) = encoded.rsplit_once(':')?;
+        // Before v2, `stable_message_id` replaced colons with underscores.
+        // Keep that encoded segment intact until selectable metadata proves
+        // the exact original locator, since underscores themselves are legal.
+        (mailbox.to_owned(), uid, false)
+    };
+    Some((mailbox, uid.parse().ok()?, is_v2))
+}
+
+async fn resolve_evicted_legacy_contacted_people_source_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    account_id: &str,
+    marker_mailbox: &str,
+    marker_is_v2: bool,
+) -> Result<Option<(String, Option<i64>)>> {
+    let candidates: Vec<LegacyContactedPeopleMailboxCandidate> = sqlx::query_as(
+        "SELECT remote_path, local_path, special_use, hierarchy_delimiter, uid_validity \
+         FROM selectable_mailboxes WHERE account_id = ?",
+    )
+    .bind(account_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut matches = Vec::new();
+    for (remote_path, local_path, special_use, delimiter, uid_validity) in candidates {
+        let special = special_use.as_deref().map(str::to_ascii_lowercase);
+        let special_family = match special.as_deref() {
+            Some("\\sent") => Some("Sent"),
+            Some("\\drafts") => Some("Drafts"),
+            Some("\\archive") | Some("\\all") => Some("Archive"),
+            Some("\\junk") | Some("\\spam") => Some("Spam"),
+            Some("\\trash") => Some("Trash"),
+            _ => None,
+        };
+        let (legacy_mailbox, target) = match special_family {
+            Some(family) => (
+                format!("{family}::{remote_path}"),
+                special_mailbox_storage_identity(family, &remote_path),
+            ),
+            None => (
+                remote_path.clone(),
+                generic_mailbox_storage_identity(
+                    &remote_path,
+                    &opaque_mailbox_display_path(&remote_path, delimiter.as_deref()),
+                ),
+            ),
+        };
+        let marker_matches = if marker_is_v2 {
+            marker_mailbox == legacy_mailbox
+        } else {
+            marker_mailbox == legacy_mailbox.replace(':', "_")
+        };
+        // The opaque migration may have completed its first locator batch
+        // before this legacy marker batch runs. Accept either the original
+        // authoritative local alias or its computed opaque successor.
+        if marker_matches && (local_path == legacy_mailbox || local_path == target) {
+            matches.push((target, uid_validity));
+        }
+    }
+    matches.sort();
+    matches.dedup();
+    Ok((matches.len() == 1).then(|| matches.remove(0)))
+}
+
+fn is_contacted_people_sent_mailbox(mailbox: &str) -> bool {
+    matches!(mailbox_family(mailbox), "Sent")
+}
+
+async fn contacted_people_collection_generation_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+) -> Result<i64> {
+    let value: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM app_meta WHERE key = 'contacted_people_collection_generation'",
+    )
+    .fetch_optional(&mut **tx)
+    .await?;
+    value
+        .map(|value| {
+            value
+                .parse::<i64>()
+                .context("contacted-people collection generation is invalid")
+        })
+        .transpose()
+        .map(|value| value.unwrap_or(0))
+}
+
+async fn next_contacted_people_action_sequence_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+) -> Result<i64> {
+    let current: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM app_meta WHERE key = 'contacted_people_action_sequence'",
+    )
+    .fetch_optional(&mut **tx)
+    .await?;
+    let next = current
+        .as_deref()
+        .unwrap_or("0")
+        .parse::<i64>()
+        .context("contacted-people action sequence is invalid")?
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("contacted-people action sequence overflow"))?;
+    sqlx::query("INSERT INTO app_meta(key, value) VALUES ('contacted_people_action_sequence', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+        .bind(next.to_string())
+        .execute(&mut **tx)
+        .await?;
+    Ok(next)
+}
+
+async fn advance_contacted_people_collection_generation_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+) -> Result<i64> {
+    let generation = contacted_people_collection_generation_in_tx(tx).await?;
+    let next = generation
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("contacted-people collection generation overflow"))?;
+    sqlx::query("INSERT INTO app_meta(key, value) VALUES ('contacted_people_collection_generation', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+        .bind(next.to_string())
+        .execute(&mut **tx)
+        .await?;
+    Ok(next)
+}
+
+async fn contacted_people_sent_provider_cutoffs_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    account_id: &str,
+    generation: i64,
+) -> Result<Vec<ContactedPeopleSentProviderCutoff>> {
+    Ok(sqlx::query_as("SELECT mailbox, uid_validity, cutoff_uid FROM contacted_people_sent_provider_cutoffs WHERE account_id = ? AND generation = ?")
+        .bind(account_id)
+        .bind(generation)
+        .fetch_all(&mut **tx)
+        .await?)
+}
+
+async fn autocomplete_suggestions_enabled_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+) -> Result<bool> {
+    let value: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM app_meta WHERE key = 'autocomplete_suggestions_enabled'",
+    )
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(!matches!(value.as_deref(), Some("0") | Some("false")))
+}
+
+async fn contacted_people_clear_sequence_in_tx(tx: &mut Transaction<'_, Sqlite>) -> Result<i64> {
+    let value: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM app_meta WHERE key = 'contacted_people_clear_sequence'",
+    )
+    .fetch_optional(&mut **tx)
+    .await?;
+    value
+        .as_deref()
+        .unwrap_or("0")
+        .parse()
+        .context("contacted-people clear sequence is invalid")
+}
+
+async fn remove_contacted_people_account_contribution_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    account_id: &str,
+) -> Result<()> {
+    for statement in [
+        "DELETE FROM contacted_people_backfill_messages WHERE account_id = ?",
+        "DELETE FROM contacted_people_legacy_unresolved_sources WHERE account_id = ?",
+        "DELETE FROM contacted_people_backfill_sources WHERE account_id = ?",
+        "DELETE FROM contacted_people_backfill_rfc_messages WHERE account_id = ?",
+        "DELETE FROM contacted_people_backfill_progress WHERE account_id = ?",
+        "DELETE FROM contacted_people_outgoing_messages WHERE account_id = ?",
+        "DELETE FROM contacted_people_sent_provider_cutoffs WHERE account_id = ?",
+        "DELETE FROM contacted_people_account_stats WHERE account_id = ?",
+    ] {
+        sqlx::query(statement)
+            .bind(account_id)
+            .execute(&mut **tx)
+            .await?;
+    }
+    sqlx::query(
+        "UPDATE contacted_people SET first_contacted_at = (SELECT MIN(stats.first_contacted_at) FROM contacted_people_account_stats stats JOIN accounts account ON account.id = stats.account_id WHERE stats.canonical_address = contacted_people.canonical_address AND json_extract(account.data, '$.enabled') = 1), last_contacted_at = (SELECT MAX(stats.last_contacted_at) FROM contacted_people_account_stats stats JOIN accounts account ON account.id = stats.account_id WHERE stats.canonical_address = contacted_people.canonical_address AND json_extract(account.data, '$.enabled') = 1), send_count = (SELECT SUM(stats.send_count) FROM contacted_people_account_stats stats JOIN accounts account ON account.id = stats.account_id WHERE stats.canonical_address = contacted_people.canonical_address AND json_extract(account.data, '$.enabled') = 1), display_name = (SELECT stats.display_name FROM contacted_people_account_stats stats JOIN accounts account ON account.id = stats.account_id WHERE stats.canonical_address = contacted_people.canonical_address AND json_extract(account.data, '$.enabled') = 1 ORDER BY stats.last_contacted_at DESC, stats.account_id ASC LIMIT 1), formatted_address = COALESCE((SELECT stats.formatted_address FROM contacted_people_account_stats stats JOIN accounts account ON account.id = stats.account_id WHERE stats.canonical_address = contacted_people.canonical_address AND json_extract(account.data, '$.enabled') = 1 ORDER BY stats.last_contacted_at DESC, stats.account_id ASC LIMIT 1), contacted_people.canonical_address) WHERE EXISTS (SELECT 1 FROM contacted_people_account_stats stats JOIN accounts account ON account.id = stats.account_id WHERE stats.canonical_address = contacted_people.canonical_address AND json_extract(account.data, '$.enabled') = 1)",
+    )
+    .execute(&mut **tx)
+    .await?;
+    let remaining_people: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT canonical_address, display_name FROM contacted_people")
+            .fetch_all(&mut **tx)
+            .await?;
+    for (address, display_name) in remaining_people {
+        update_contacted_people_normalized_search_in_tx(tx, &address, display_name.as_deref())
+            .await?;
+    }
+    sqlx::query(
+        "DELETE FROM contacted_people WHERE NOT EXISTS (SELECT 1 FROM contacted_people_account_stats stats WHERE stats.canonical_address = contacted_people.canonical_address)",
+    )
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn recompute_enabled_contacted_people_aggregate_for_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    canonical_address: &str,
+) -> Result<()> {
+    sqlx::query("UPDATE contacted_people SET first_contacted_at = (SELECT MIN(s.first_contacted_at) FROM contacted_people_account_stats s JOIN accounts a ON a.id = s.account_id WHERE s.canonical_address = contacted_people.canonical_address AND json_extract(a.data, '$.enabled') = 1), last_contacted_at = (SELECT MAX(s.last_contacted_at) FROM contacted_people_account_stats s JOIN accounts a ON a.id = s.account_id WHERE s.canonical_address = contacted_people.canonical_address AND json_extract(a.data, '$.enabled') = 1), send_count = (SELECT SUM(s.send_count) FROM contacted_people_account_stats s JOIN accounts a ON a.id = s.account_id WHERE s.canonical_address = contacted_people.canonical_address AND json_extract(a.data, '$.enabled') = 1), display_name = (SELECT s.display_name FROM contacted_people_account_stats s JOIN accounts a ON a.id = s.account_id WHERE s.canonical_address = contacted_people.canonical_address AND json_extract(a.data, '$.enabled') = 1 ORDER BY s.last_contacted_at DESC, s.account_id ASC LIMIT 1), formatted_address = COALESCE((SELECT s.formatted_address FROM contacted_people_account_stats s JOIN accounts a ON a.id = s.account_id WHERE s.canonical_address = contacted_people.canonical_address AND json_extract(a.data, '$.enabled') = 1 ORDER BY s.last_contacted_at DESC, s.account_id ASC LIMIT 1), formatted_address) WHERE canonical_address = ? AND EXISTS (SELECT 1 FROM contacted_people_account_stats s JOIN accounts a ON a.id = s.account_id WHERE s.canonical_address = contacted_people.canonical_address AND json_extract(a.data, '$.enabled') = 1)")
+    .bind(canonical_address)
+    .execute(&mut **tx)
+    .await?;
+    let display_name: Option<String> =
+        sqlx::query_scalar("SELECT display_name FROM contacted_people WHERE canonical_address = ?")
+            .bind(canonical_address)
+            .fetch_optional(&mut **tx)
+            .await?;
+    update_contacted_people_normalized_search_in_tx(tx, canonical_address, display_name.as_deref())
+        .await?;
+    Ok(())
+}
+
+async fn contacted_people_migration_complete_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    complete_key: &str,
+) -> Result<bool> {
+    let value: Option<String> = sqlx::query_scalar("SELECT value FROM app_meta WHERE key = ?")
+        .bind(complete_key)
+        .fetch_optional(&mut **tx)
+        .await?;
+    Ok(matches!(value.as_deref(), Some("1")))
+}
+
+async fn contacted_people_migration_cursor_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    cursor_key: &str,
+) -> Result<i64> {
+    let value: Option<String> = sqlx::query_scalar("SELECT value FROM app_meta WHERE key = ?")
+        .bind(cursor_key)
+        .fetch_optional(&mut **tx)
+        .await?;
+    // A damaged progress value must not make an upgrade skip unknown rows.
+    // Reprocessing is idempotent and the subsequent bounded batch repairs it.
+    Ok(value
+        .as_deref()
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value >= 0)
+        .unwrap_or(0))
+}
+
+async fn finish_contacted_people_migration_batch_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    cursor_key: &str,
+    complete_key: &str,
+    last_rowid: Option<i64>,
+    has_more: bool,
+) -> Result<()> {
+    if has_more {
+        let last_rowid = last_rowid
+            .ok_or_else(|| anyhow!("migration reported remaining rows without a cursor"))?;
+        sqlx::query("INSERT INTO app_meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+            .bind(cursor_key)
+            .bind(last_rowid.to_string())
+            .execute(&mut **tx)
+            .await?;
+    } else {
+        sqlx::query("DELETE FROM app_meta WHERE key = ?")
+            .bind(cursor_key)
+            .execute(&mut **tx)
+            .await?;
+        sqlx::query("INSERT INTO app_meta(key, value) VALUES (?, '1') ON CONFLICT(key) DO UPDATE SET value = '1'")
+            .bind(complete_key)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn record_contacted_people_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    account_id: &str,
+    recipients: &[ContactedPersonRecipient],
+    excluded_addresses: &[String],
+    contacted_at: DateTime<Utc>,
+    restore_hidden: bool,
+    accepted_sequence: Option<i64>,
+) -> Result<usize> {
+    let mut excluded: HashSet<String> = excluded_addresses
+        .iter()
+        .filter_map(|address| canonical_contacted_address(address))
+        .collect();
+    // Every configured account is an owner address, not a contacted person.
+    // Query this in the transaction instead of trusting every call site to
+    // supply a complete account list, including accounts added later.
+    let account_addresses: Vec<String> = sqlx::query_scalar("SELECT email FROM accounts")
+        .fetch_all(&mut **tx)
+        .await?;
+    for address in account_addresses {
+        if let Some(address) = canonical_contacted_address(&address) {
+            excluded.insert(address);
+        }
+    }
+
+    let mut unique = HashMap::<String, ContactedPersonRecipient>::new();
+    for recipient in recipients {
+        let Some(address) = canonical_contacted_address(&recipient.address) else {
+            continue;
+        };
+        if !excluded.contains(&address) {
+            unique.insert(address, recipient.clone());
+        }
+    }
+
+    for (address, recipient) in &unique {
+        let display_name = sanitized_display_name(recipient.display_name.as_deref());
+        let formatted_address = sanitized_formatted_address(
+            recipient.formatted_address.as_deref(),
+            display_name.as_deref(),
+            address,
+        );
+        sqlx::query("INSERT INTO contacted_people(canonical_address, display_name, formatted_address, first_contacted_at, last_contacted_at, send_count, hidden_at) VALUES (?, ?, ?, ?, ?, 1, NULL) ON CONFLICT(canonical_address) DO UPDATE SET display_name = CASE WHEN excluded.last_contacted_at >= contacted_people.last_contacted_at THEN excluded.display_name ELSE contacted_people.display_name END, formatted_address = CASE WHEN excluded.last_contacted_at >= contacted_people.last_contacted_at THEN excluded.formatted_address ELSE contacted_people.formatted_address END, first_contacted_at = CASE WHEN excluded.first_contacted_at < contacted_people.first_contacted_at THEN excluded.first_contacted_at ELSE contacted_people.first_contacted_at END, last_contacted_at = CASE WHEN excluded.last_contacted_at > contacted_people.last_contacted_at THEN excluded.last_contacted_at ELSE contacted_people.last_contacted_at END, send_count = contacted_people.send_count + 1, hidden_at = CASE WHEN ? AND (? IS NULL OR contacted_people.hidden_sequence < ?) AND (contacted_people.hidden_at IS NULL OR contacted_people.hidden_at < excluded.last_contacted_at) THEN NULL ELSE contacted_people.hidden_at END")
+            .bind(address)
+            .bind(&display_name)
+            .bind(&formatted_address)
+            .bind(contacted_at)
+            .bind(contacted_at)
+            .bind(restore_hidden)
+            .bind(accepted_sequence)
+            .bind(accepted_sequence)
+            .execute(&mut **tx)
+            .await?;
+        sqlx::query("INSERT INTO contacted_people_account_stats(canonical_address, account_id, first_contacted_at, last_contacted_at, send_count, display_name, formatted_address) VALUES (?, ?, ?, ?, 1, ?, ?) ON CONFLICT(canonical_address, account_id) DO UPDATE SET first_contacted_at = CASE WHEN excluded.first_contacted_at < contacted_people_account_stats.first_contacted_at THEN excluded.first_contacted_at ELSE contacted_people_account_stats.first_contacted_at END, last_contacted_at = CASE WHEN excluded.last_contacted_at > contacted_people_account_stats.last_contacted_at THEN excluded.last_contacted_at ELSE contacted_people_account_stats.last_contacted_at END, send_count = contacted_people_account_stats.send_count + 1, display_name = CASE WHEN excluded.last_contacted_at >= contacted_people_account_stats.last_contacted_at THEN excluded.display_name ELSE contacted_people_account_stats.display_name END, formatted_address = CASE WHEN excluded.last_contacted_at >= contacted_people_account_stats.last_contacted_at THEN excluded.formatted_address ELSE contacted_people_account_stats.formatted_address END")
+            .bind(address)
+            .bind(account_id)
+            .bind(contacted_at)
+            .bind(contacted_at)
+            .bind(display_name)
+            .bind(formatted_address)
+            .execute(&mut **tx)
+            .await?;
+        recompute_enabled_contacted_people_aggregate_for_in_tx(tx, address).await?;
+        let stored_display_name: Option<String> = sqlx::query_scalar(
+            "SELECT display_name FROM contacted_people WHERE canonical_address = ?",
+        )
+        .bind(address)
+        .fetch_one(&mut **tx)
+        .await?;
+        update_contacted_people_normalized_search_in_tx(
+            tx,
+            address,
+            stored_display_name.as_deref(),
+        )
+        .await?;
+    }
+    Ok(unique.len())
+}
+
+fn canonical_contacted_address(address: &str) -> Option<String> {
+    let address = address.trim();
+    if address.is_empty()
+        || address
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return None;
+    }
+    let (local, domain) = address.split_once('@')?;
+    if local.is_empty() || domain.is_empty() || domain.contains('@') {
+        return None;
+    }
+    Some(address.to_lowercase())
+}
+
+fn sanitized_display_name(name: Option<&str>) -> Option<String> {
+    name.map(str::trim)
+        .filter(|name| !name.is_empty() && !name.chars().any(char::is_control))
+        .map(ToOwned::to_owned)
+}
+
+fn sanitized_formatted_address(
+    formatted_address: Option<&str>,
+    display_name: Option<&str>,
+    address: &str,
+) -> String {
+    formatted_address
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.chars().any(char::is_control))
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format_contacted_address(display_name, address))
+}
+
+fn format_contacted_address(display_name: Option<&str>, address: &str) -> String {
+    let Some(display_name) = display_name else {
+        return address.to_owned();
+    };
+    if display_name
+        .chars()
+        .any(|character| matches!(character, ',' | ';' | '<' | '>' | '"' | '\\'))
+    {
+        return format!(
+            "\"{}\" <{address}>",
+            display_name.replace('\\', "\\\\").replace('"', "\\\"")
+        );
+    }
+    format!("{display_name} <{address}>")
+}
+
+fn parse_contacted_people_headers(headers: &[&str]) -> Vec<ContactedPersonRecipient> {
+    let mut recipients = Vec::new();
+    for value in headers {
+        let value = value.trim();
+        if value.is_empty() || value.bytes().any(|byte| matches!(byte, b'\r' | b'\n' | 0)) {
+            continue;
+        }
+        let raw = format!("To: {value}\r\n\r\n");
+        let Some(parsed) = MessageParser::default().parse_headers(raw.as_bytes()) else {
+            continue;
+        };
+        let Some(addresses) = parsed
+            .header(HeaderName::To)
+            .and_then(HeaderValue::as_address)
+        else {
+            continue;
+        };
+        match addresses {
+            ParsedAddress::List(addresses) => {
+                recipients.extend(addresses.iter().filter_map(|address| {
+                    address
+                        .address
+                        .as_ref()
+                        .map(|email| ContactedPersonRecipient {
+                            address: email.to_string(),
+                            display_name: address.name.as_ref().map(ToString::to_string),
+                            formatted_address: None,
+                        })
+                }))
+            }
+            ParsedAddress::Group(groups) => recipients.extend(
+                groups
+                    .iter()
+                    .flat_map(|group| group.addresses.iter())
+                    .filter_map(|address| {
+                        address
+                            .address
+                            .as_ref()
+                            .map(|email| ContactedPersonRecipient {
+                                address: email.to_string(),
+                                display_name: address.name.as_ref().map(ToString::to_string),
+                                formatted_address: None,
+                            })
+                    }),
+            ),
+        }
+    }
+    recipients
+}
+
+fn normalize_contacted_people_match(value: &str) -> String {
+    value
+        .trim()
+        .nfd()
+        .filter(|character| !is_combining_mark(*character))
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn normalize_contacted_people_tokens(value: &str) -> String {
+    let normalized = normalize_contacted_people_match(value);
+    let words = normalized
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    if words.is_empty() {
+        String::new()
+    } else {
+        format!(" {} ", words.join(" "))
+    }
+}
+
+async fn update_contacted_people_normalized_search_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    address: &str,
+    display_name: Option<&str>,
+) -> Result<()> {
+    sqlx::query("UPDATE contacted_people SET normalized_display_name = ?, normalized_address = ?, normalized_display_tokens = ?, normalized_address_tokens = ? WHERE canonical_address = ?")
+        .bind(display_name.map(normalize_contacted_people_match).unwrap_or_default())
+        .bind(normalize_contacted_people_match(address))
+        .bind(display_name.map(normalize_contacted_people_tokens).unwrap_or_default())
+        .bind(normalize_contacted_people_tokens(address))
+        .bind(address)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+#[derive(FromRow)]
 struct ThreadRow {
     id: String,
     thread_id: Option<String>,
@@ -4617,7 +8406,7 @@ async fn persist_message_with_flag_policy(
         FlagUpdatePolicy::CompareAndSwap(expected_flags) => (false, expected_flags),
     };
     let (expected_read, expected_flagged) = expected_flags.unwrap_or_default();
-    sqlx::query("INSERT INTO messages(id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, threading_scanned, recipient_headers_scanned, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, unsubscribe_scanned, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(account_id, mailbox, uid) DO UPDATE SET message_id=excluded.message_id, in_reply_to=excluded.in_reply_to, reference_ids=excluded.reference_ids, threading_scanned=1, recipient_headers_scanned=1, subject=excluded.subject, from_name=excluded.from_name, from_address=excluded.from_address, to_addresses=excluded.to_addresses, cc_addresses=excluded.cc_addresses, bcc_addresses=excluded.bcc_addresses, reply_to_addresses=excluded.reply_to_addresses, received_at=excluded.received_at, snippet=CASE WHEN excluded.content_state = 'complete' THEN excluded.snippet ELSE messages.snippet END, body_text=CASE WHEN excluded.content_state = 'complete' THEN excluded.body_text ELSE messages.body_text END, body_html=CASE WHEN excluded.content_state = 'complete' THEN excluded.body_html ELSE messages.body_html END, content_state=CASE WHEN messages.content_state = 'complete' THEN messages.content_state ELSE excluded.content_state END, unsubscribe_kind=CASE WHEN excluded.content_state = 'complete' THEN excluded.unsubscribe_kind ELSE messages.unsubscribe_kind END, unsubscribe_url=CASE WHEN excluded.content_state = 'complete' THEN excluded.unsubscribe_url ELSE messages.unsubscribe_url END, unsubscribe_scanned=CASE WHEN excluded.content_state = 'complete' THEN 1 ELSE messages.unsubscribe_scanned END, is_read=CASE WHEN ? OR (? AND messages.is_read = ? AND messages.is_flagged = ?) THEN excluded.is_read ELSE messages.is_read END, is_flagged=CASE WHEN ? OR (? AND messages.is_read = ? AND messages.is_flagged = ?) THEN excluded.is_flagged ELSE messages.is_flagged END, has_attachments=CASE WHEN excluded.content_state = 'complete' THEN excluded.has_attachments ELSE messages.has_attachments END, classification_confidence=CASE WHEN messages.classification_source = 'model' AND (messages.from_name IS NOT excluded.from_name OR messages.from_address != excluded.from_address OR messages.subject != excluded.subject OR messages.classification_signals != excluded.classification_signals OR (excluded.content_state = 'complete' AND (messages.snippet != excluded.snippet OR messages.body_text != excluded.body_text))) THEN NULL ELSE messages.classification_confidence END, classification_source=CASE WHEN messages.classification_source = 'model' AND (messages.from_name IS NOT excluded.from_name OR messages.from_address != excluded.from_address OR messages.subject != excluded.subject OR messages.classification_signals != excluded.classification_signals OR (excluded.content_state = 'complete' AND (messages.snippet != excluded.snippet OR messages.body_text != excluded.body_text))) THEN NULL ELSE messages.classification_source END, classification_signals=excluded.classification_signals")
+    sqlx::query("INSERT INTO messages(id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, threading_scanned, recipient_headers_scanned, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, unsubscribe_scanned, is_read, is_flagged, is_answered, is_draft, has_attachments, category, classification_confidence, classification_source, classification_signals) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(account_id, mailbox, uid) DO UPDATE SET message_id=excluded.message_id, in_reply_to=excluded.in_reply_to, reference_ids=excluded.reference_ids, threading_scanned=1, recipient_headers_scanned=1, subject=excluded.subject, from_name=excluded.from_name, from_address=excluded.from_address, to_addresses=excluded.to_addresses, cc_addresses=excluded.cc_addresses, bcc_addresses=excluded.bcc_addresses, reply_to_addresses=excluded.reply_to_addresses, received_at=excluded.received_at, snippet=CASE WHEN excluded.content_state = 'complete' THEN excluded.snippet ELSE messages.snippet END, body_text=CASE WHEN excluded.content_state = 'complete' THEN excluded.body_text ELSE messages.body_text END, body_html=CASE WHEN excluded.content_state = 'complete' THEN excluded.body_html ELSE messages.body_html END, content_state=CASE WHEN messages.content_state = 'complete' THEN messages.content_state ELSE excluded.content_state END, unsubscribe_kind=CASE WHEN excluded.content_state = 'complete' THEN excluded.unsubscribe_kind ELSE messages.unsubscribe_kind END, unsubscribe_url=CASE WHEN excluded.content_state = 'complete' THEN excluded.unsubscribe_url ELSE messages.unsubscribe_url END, unsubscribe_scanned=CASE WHEN excluded.content_state = 'complete' THEN 1 ELSE messages.unsubscribe_scanned END, is_read=CASE WHEN ? OR (? AND messages.is_read = ? AND messages.is_flagged = ?) THEN excluded.is_read ELSE messages.is_read END, is_flagged=CASE WHEN ? OR (? AND messages.is_read = ? AND messages.is_flagged = ?) THEN excluded.is_flagged ELSE messages.is_flagged END, is_answered=excluded.is_answered, is_draft=excluded.is_draft, has_attachments=CASE WHEN excluded.content_state = 'complete' THEN excluded.has_attachments ELSE messages.has_attachments END, classification_confidence=CASE WHEN messages.classification_source = 'model' AND (messages.from_name IS NOT excluded.from_name OR messages.from_address != excluded.from_address OR messages.subject != excluded.subject OR messages.classification_signals != excluded.classification_signals OR (excluded.content_state = 'complete' AND (messages.snippet != excluded.snippet OR messages.body_text != excluded.body_text))) THEN NULL ELSE messages.classification_confidence END, classification_source=CASE WHEN messages.classification_source = 'model' AND (messages.from_name IS NOT excluded.from_name OR messages.from_address != excluded.from_address OR messages.subject != excluded.subject OR messages.classification_signals != excluded.classification_signals OR (excluded.content_state = 'complete' AND (messages.snippet != excluded.snippet OR messages.body_text != excluded.body_text))) THEN NULL ELSE messages.classification_source END, classification_signals=excluded.classification_signals")
         .bind(&message.id).bind(&message.account_id).bind(&message.mailbox).bind(message.uid)
         .bind(&message.message_id).bind(&message.in_reply_to).bind(&message.reference_ids).bind(&message.thread_id)
         .bind(&message.subject).bind(&message.from_name)
@@ -4630,7 +8419,8 @@ async fn persist_message_with_flag_policy(
         .bind(&message.snippet).bind("").bind(Option::<String>::None).bind(&message.content_state)
         .bind(&message.unsubscribe_kind).bind(&message.unsubscribe_url)
         .bind(message.content_state == "complete").bind(message.is_read)
-        .bind(message.is_flagged).bind(message.has_attachments)
+        .bind(message.is_flagged).bind(message.is_answered).bind(message.is_draft)
+        .bind(message.has_attachments)
         .bind(&message.category).bind(message.classification_confidence)
         .bind(&message.classification_source).bind(&message.classification_signals)
         .bind(provider_authoritative)
@@ -4722,6 +8512,27 @@ async fn persist_message_with_flag_policy(
             .await?;
         sqlx::query("DELETE FROM starred_attachment_metadata WHERE message_id = ?")
             .bind(&message.id)
+            .execute(&mut **tx)
+            .await?;
+    }
+    // Provider catalogue fetches can supply BODYSTRUCTURE-derived filenames,
+    // MIME types, sizes, and dispositions without attachment bytes. Replace
+    // this message's durable search metadata in the same transaction as the
+    // header upsert, so a later authoritative refresh removes stale files.
+    // `AttachmentData::bytes` is intentionally never read or written here.
+    sqlx::query("DELETE FROM message_attachment_catalogue WHERE message_id = ?")
+        .bind(&message.id)
+        .execute(&mut **tx)
+        .await?;
+    for attachment in &message.attachments {
+        sqlx::query("INSERT OR REPLACE INTO message_attachment_catalogue(message_id, attachment_id, filename, mime_type, size_bytes, is_inline, presentation) VALUES (?, ?, ?, ?, ?, ?, ?)")
+            .bind(&message.id)
+            .bind(&attachment.attachment.id)
+            .bind(&attachment.attachment.filename)
+            .bind(&attachment.attachment.mime_type)
+            .bind(attachment.attachment.size_bytes)
+            .bind(attachment.attachment.is_inline)
+            .bind(attachment.attachment.presentation)
             .execute(&mut **tx)
             .await?;
     }
@@ -5124,12 +8935,122 @@ fn decrypt_secret(
     String::from_utf8(plaintext.to_vec()).context("stored credential is not valid UTF-8")
 }
 
-fn fts_query(input: &str) -> String {
-    input
+/// Returns every folder term under positive Boolean polarity. A system row is
+/// allowed only when one of these scopes matches its visible family or remote
+/// alias; a plain text OR branch can never opt it in.
+fn positive_folder_scopes(node: &SearchNode) -> Vec<FolderScope> {
+    let mut scopes = Vec::new();
+    collect_positive_folder_scopes(node, true, &mut scopes);
+    scopes
+}
+
+fn collect_positive_folder_scopes(
+    node: &SearchNode,
+    positive: bool,
+    scopes: &mut Vec<FolderScope>,
+) {
+    match node {
+        SearchNode::Term(SearchTerm::Folder(scope)) if positive => scopes.push(scope.clone()),
+        SearchNode::And(nodes) | SearchNode::Or(nodes) => {
+            for node in nodes {
+                collect_positive_folder_scopes(node, positive, scopes);
+            }
+        }
+        SearchNode::Not(node) => collect_positive_folder_scopes(node, !positive, scopes),
+        _ => {}
+    }
+}
+
+fn is_system_mailbox(mailbox: &str) -> bool {
+    matches!(mailbox_family(mailbox), family if family.eq_ignore_ascii_case("Spam") || family.eq_ignore_ascii_case("Trash"))
+}
+
+fn folder_scope_matches_system_mailbox(scope: &FolderScope, mailbox: &str) -> bool {
+    let (family, remote) = mailbox.split_once("::").unwrap_or((mailbox, mailbox));
+    match scope {
+        FolderScope::All => true,
+        FolderScope::Exact(folder) => {
+            let folder = normalize_search_text(folder);
+            !folder.contains("::")
+                && (folder == normalize_search_text(family)
+                    || folder == normalize_search_text(remote))
+        }
+        FolderScope::Descendants(folder) => {
+            let folder = normalize_search_text(folder);
+            let remote = normalize_search_text(remote);
+            !folder.contains("::")
+                && (remote == folder
+                    || remote
+                        .strip_prefix(&folder)
+                        .is_some_and(|suffix| suffix.starts_with('/')))
+        }
+    }
+}
+
+fn expression_contains_no_attachment(node: &SearchNode) -> bool {
+    match node {
+        SearchNode::MatchAll => false,
+        SearchNode::Term(SearchTerm::Attachment(AttachmentPredicate::HasNoAttachment)) => true,
+        SearchNode::Term(_) => false,
+        SearchNode::And(nodes) | SearchNode::Or(nodes) => {
+            nodes.iter().any(expression_contains_no_attachment)
+        }
+        SearchNode::Not(node) => expression_contains_no_attachment(node),
+    }
+}
+
+fn search_message_cursor(message: &MailSummary) -> MailCursor {
+    MailCursor {
+        received_at: message.received_at,
+        id: message.id.clone(),
+    }
+}
+
+fn search_match_evidence(matches: &[MailSummary]) -> SearchMatchEvidence {
+    let primary = matches.first();
+    SearchMatchEvidence {
+        primary_message_id: primary.map(|message| message.id.clone()),
+        matched_message_ids: matches.iter().map(|message| message.id.clone()).collect(),
+        match_count: u32::try_from(matches.len()).unwrap_or(u32::MAX),
+        excerpt: primary.and_then(safe_search_excerpt),
+    }
+}
+
+/// Keeps excerpts display-safe even when an untrusted text part contains
+/// terminal controls or unusually long whitespace runs. This deliberately
+/// receives the evaluated match row, not the conversation hydration row,
+/// whose body is intentionally blank for list performance.
+fn safe_search_excerpt(message: &MailSummary) -> Option<String> {
+    let source = [&message.body_text, &message.snippet, &message.subject]
+        .into_iter()
+        .find(|text| !text.trim().is_empty())?;
+    let normalized = source
+        .chars()
+        .filter_map(|character| {
+            if character.is_control() && !character.is_whitespace() {
+                None
+            } else if character.is_whitespace() {
+                Some(' ')
+            } else {
+                Some(character)
+            }
+        })
+        .collect::<String>()
         .split_whitespace()
-        .map(|token| format!("\"{}\"*", token.replace('"', "\"\"")))
         .collect::<Vec<_>>()
-        .join(" AND ")
+        .join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+    const MAX_EXCERPT_CHARS: usize = 240;
+    let mut excerpt = normalized
+        .chars()
+        .take(MAX_EXCERPT_CHARS)
+        .collect::<String>();
+    if normalized.chars().nth(MAX_EXCERPT_CHARS).is_some() {
+        excerpt.push('…');
+    }
+    Some(excerpt)
 }
 
 fn is_sqlite_busy(error: &anyhow::Error) -> bool {
@@ -5143,32 +9064,557 @@ fn is_sqlite_busy_message(message: &str) -> bool {
 }
 
 fn is_sqlite_migration_race(error: &anyhow::Error) -> bool {
-    error
-        .chain()
-        .any(|cause| cause.to_string().contains("duplicate column name"))
+    error.chain().any(|cause| {
+        let message = cause.to_string();
+        message.contains("duplicate column name") || message.contains("vtable constructor failed")
+    })
+}
+
+fn is_opaque_mailbox_storage_identity(value: &str) -> bool {
+    let special = value
+        .split_once("::")
+        .and_then(|(family, encoded)| {
+            special_mailbox_family(family).and_then(|_| {
+                encoded
+                    .strip_prefix("@dakia-special-v1:")
+                    .filter(|encoded| URL_SAFE_NO_PAD.decode(encoded).is_ok())
+            })
+        })
+        .is_some();
+    if special {
+        return true;
+    }
+    let Some(encoded) = value.strip_prefix("Mailbox::@dakia-mailbox-v1:") else {
+        return false;
+    };
+    let Some((remote, display)) = encoded.split_once(':') else {
+        return false;
+    };
+    URL_SAFE_NO_PAD.decode(remote).is_ok() && URL_SAFE_NO_PAD.decode(display).is_ok()
+}
+
+fn special_mailbox_family(value: &str) -> Option<&'static str> {
+    match value.to_ascii_lowercase().as_str() {
+        "inbox" => Some("INBOX"),
+        "sent" => Some("Sent"),
+        "drafts" => Some("Drafts"),
+        "archive" => Some("Archive"),
+        "spam" => Some("Spam"),
+        "trash" => Some("Trash"),
+        _ => None,
+    }
+}
+
+fn special_mailbox_family_from_use(value: Option<&str>) -> Option<&'static str> {
+    match value?.trim().to_ascii_lowercase().as_str() {
+        "\\inbox" => Some("INBOX"),
+        "\\sent" => Some("Sent"),
+        "\\drafts" => Some("Drafts"),
+        "\\archive" | "\\all" => Some("Archive"),
+        "\\junk" | "\\spam" => Some("Spam"),
+        "\\trash" => Some("Trash"),
+        _ => None,
+    }
+}
+
+fn default_special_mailbox_remote(account: &Account, family: &str) -> Option<String> {
+    match (account.provider_id.as_str(), family) {
+        (_, "INBOX") => Some("INBOX".into()),
+        ("gmail", "Sent") => Some("[Gmail]/Sent Mail".into()),
+        ("gmail", "Drafts") => Some("[Gmail]/Drafts".into()),
+        ("gmail", "Archive") => Some(account.archive_mailbox.clone()),
+        ("gmail", "Spam") => Some(account.spam_mailbox.clone()),
+        ("gmail", "Trash") => Some("[Gmail]/Trash".into()),
+        (_, "Sent") => Some("Sent".into()),
+        (_, "Drafts") => Some("Drafts".into()),
+        (_, "Archive") => Some(account.archive_mailbox.clone()),
+        (_, "Spam") => Some(account.spam_mailbox.clone()),
+        (_, "Trash") => Some("Trash".into()),
+        _ => None,
+    }
+}
+
+/// Maps exactly one historical mailbox locator using a current selectable
+/// mailbox row.  The tuple carries `(selectable_id, new_storage_locator)`.
+fn opaque_mailbox_migration_target(
+    account: &Account,
+    legacy_mailbox: &str,
+    catalogue_state: Option<(&str, i64)>,
+    candidate: &(
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+    ),
+) -> Option<(String, String)> {
+    let (id, _account_id, remote, _local, delimiter, special_use, uid_validity) = candidate;
+    if let Some((state_remote, state_uid_validity)) = catalogue_state {
+        if state_remote != remote {
+            return None;
+        }
+        if uid_validity.is_some_and(|value| value != state_uid_validity) {
+            return None;
+        }
+    }
+    if let Some(family) = special_mailbox_family_from_use(special_use.as_deref()) {
+        // Default special folders deliberately retain their established local
+        // namespace.  This keeps existing standard INBOX/Sent rows stable;
+        // only a resolved alias receives a role-qualified opaque key.
+        if legacy_mailbox == family
+            && default_special_mailbox_remote(account, family).as_deref() == Some(remote.as_str())
+        {
+            return Some((id.clone(), family.to_owned()));
+        }
+        if legacy_mailbox == format!("{family}::{remote}") {
+            return Some((id.clone(), special_mailbox_storage_identity(family, remote)));
+        }
+        return None;
+    }
+    if special_mailbox_family(legacy_mailbox).is_some_and(|family| {
+        default_special_mailbox_remote(account, family).as_deref() == Some(remote.as_str())
+    }) {
+        // Old profiles did not always persist IMAP special-use flags.  The
+        // configured default raw path still proves a standard local family,
+        // so retain its compact established key instead of turning INBOX or
+        // Sent into a generic opaque namespace.
+        return Some((id.clone(), legacy_mailbox.to_owned()));
+    }
+    // A normal mailbox is only mapped from its exact raw provider path.  A
+    // display/local path may differ by delimiter, whitespace, modified UTF-7,
+    // case, or diacritics and is therefore not identity evidence.
+    (legacy_mailbox == remote).then(|| {
+        (
+            id.clone(),
+            generic_mailbox_storage_identity(
+                remote,
+                &opaque_mailbox_display_path(remote, delimiter.as_deref()),
+            ),
+        )
+    })
+}
+
+fn opaque_mailbox_display_path(remote: &str, delimiter: Option<&str>) -> String {
+    delimiter
+        .filter(|delimiter| !delimiter.is_empty())
+        .map(|delimiter| {
+            remote
+                .split(delimiter)
+                .map(|component| {
+                    display_imap_mailbox_name(component)
+                        .replace('%', "%25")
+                        .replace('/', "%2F")
+                })
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .unwrap_or_else(|| {
+            display_imap_mailbox_name(remote)
+                .replace('%', "%25")
+                .replace('/', "%2F")
+        })
+}
+
+fn selectable_mailbox_storage_locator(mailbox: &SelectableMailbox) -> String {
+    let special_family = mailbox
+        .special_use
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .and_then(|special| match special.as_str() {
+            "\\inbox" => Some("INBOX"),
+            "\\sent" => Some("Sent"),
+            "\\drafts" => Some("Drafts"),
+            "\\archive" | "\\all" => Some("Archive"),
+            "\\junk" | "\\spam" => Some("Spam"),
+            "\\trash" => Some("Trash"),
+            _ => None,
+        });
+    special_family
+        .map(|family| special_mailbox_storage_identity(family, &mailbox.remote_path))
+        .unwrap_or_else(|| {
+            generic_mailbox_storage_identity(
+                &mailbox.remote_path,
+                &opaque_mailbox_display_path(
+                    &mailbox.remote_path,
+                    mailbox.hierarchy_delimiter.as_deref(),
+                ),
+            )
+        })
+}
+
+async fn note_unresolved_opaque_mailbox_locator_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    account_id: &str,
+    mailbox: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO opaque_mailbox_storage_identity_unresolved(account_id, mailbox, noted_at) VALUES (?, ?, ?) ON CONFLICT(account_id, mailbox) DO UPDATE SET noted_at = excluded.noted_at",
+    )
+    .bind(account_id)
+    .bind(mailbox)
+    .bind(Utc::now())
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn opaque_mailbox_target_is_safe_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    account_id: &str,
+    legacy_mailbox: &str,
+    target: &str,
+) -> Result<bool> {
+    let target_messages: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE account_id = ? AND mailbox = ?)",
+    )
+    .bind(account_id)
+    .bind(target)
+    .fetch_one(&mut **tx)
+    .await?;
+    let source_catalogue: Option<i64> = sqlx::query_scalar(
+        "SELECT uid_validity FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ?",
+    )
+    .bind(account_id)
+    .bind(legacy_mailbox)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let target_catalogue: Option<i64> = sqlx::query_scalar(
+        "SELECT uid_validity FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ?",
+    )
+    .bind(account_id)
+    .bind(target)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if source_catalogue
+        .zip(target_catalogue)
+        .is_some_and(|(left, right)| left != right)
+    {
+        return Ok(false);
+    }
+    // A provider may publish a new opaque row while this background upgrade
+    // is between batches.  Merging it is safe only when both namespaces have
+    // an authoritative, equal UIDVALIDITY. Without that proof, a reused UID
+    // could name unrelated mail and must wait for a clean recatalogue.
+    if target_messages
+        && (source_catalogue.is_none()
+            || target_catalogue.is_none()
+            || source_catalogue != target_catalogue)
+    {
+        return Ok(false);
+    }
+    let source_sync: Option<i64> = sqlx::query_scalar(
+        "SELECT uid_validity FROM mailbox_sync_state WHERE account_id = ? AND mailbox = ?",
+    )
+    .bind(account_id)
+    .bind(legacy_mailbox)
+    .fetch_optional(&mut **tx)
+    .await?
+    .flatten();
+    let target_sync: Option<i64> = sqlx::query_scalar(
+        "SELECT uid_validity FROM mailbox_sync_state WHERE account_id = ? AND mailbox = ?",
+    )
+    .bind(account_id)
+    .bind(target)
+    .fetch_optional(&mut **tx)
+    .await?
+    .flatten();
+    Ok(source_sync
+        .zip(target_sync)
+        .is_none_or(|(left, right)| left == right))
+}
+
+async fn migrate_mailbox_catalogue_state_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    account_id: &str,
+    legacy_mailbox: &str,
+    target: &str,
+) -> Result<()> {
+    // This deliberately copies rather than moves the source record. A
+    // mailbox can span several bounded transactions, and its legacy state is
+    // the UIDVALIDITY proof needed before the next transaction can safely
+    // merge an already-published opaque row. The caller deletes the source
+    // only after the final legacy message has moved.
+    let source: Option<(String, i64, i64, i64, String)> = sqlx::query_as(
+        "SELECT remote_name, uid_validity, remote_total, historical_complete, updated_at \
+         FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ?",
+    )
+    .bind(account_id)
+    .bind(legacy_mailbox)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((remote_name, uid_validity, remote_total, historical_complete, updated_at)) = source
+    else {
+        return Ok(());
+    };
+    sqlx::query(
+        "INSERT OR IGNORE INTO mailbox_catalog_state(\
+           account_id, mailbox, remote_name, uid_validity, remote_total, historical_complete, updated_at\
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(account_id)
+    .bind(target)
+    .bind(remote_name)
+    .bind(uid_validity)
+    .bind(remote_total)
+    .bind(historical_complete)
+    .bind(&updated_at)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "UPDATE mailbox_catalog_state SET \
+           remote_total = MAX(remote_total, ?), \
+           historical_complete = MAX(historical_complete, ?), \
+           updated_at = MAX(updated_at, ?) \
+         WHERE account_id = ? AND mailbox = ?",
+    )
+    .bind(remote_total)
+    .bind(historical_complete)
+    .bind(updated_at)
+    .bind(account_id)
+    .bind(target)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn migrate_mailbox_sync_state_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    account_id: &str,
+    legacy_mailbox: &str,
+    target: &str,
+) -> Result<()> {
+    // Keep the old sync record for the same reason as catalogue state above:
+    // it is authoritative identity evidence until the source mailbox is
+    // empty. It is finalized by the caller with the other source markers.
+    let source: Option<(String, Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT initialized_at, highest_uid, uid_validity \
+         FROM mailbox_sync_state WHERE account_id = ? AND mailbox = ?",
+    )
+    .bind(account_id)
+    .bind(legacy_mailbox)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((initialized_at, highest_uid, uid_validity)) = source else {
+        return Ok(());
+    };
+    sqlx::query(
+        "INSERT OR IGNORE INTO mailbox_sync_state(\
+           account_id, mailbox, initialized_at, highest_uid, uid_validity\
+         ) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(account_id)
+    .bind(target)
+    .bind(&initialized_at)
+    .bind(highest_uid)
+    .bind(uid_validity)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "UPDATE mailbox_sync_state SET \
+           highest_uid = COALESCE(MAX(highest_uid, ?), highest_uid, ?), \
+           initialized_at = MAX(initialized_at, ?) \
+         WHERE account_id = ? AND mailbox = ?",
+    )
+    .bind(highest_uid)
+    .bind(highest_uid)
+    .bind(initialized_at)
+    .bind(account_id)
+    .bind(target)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn rewrite_attachment_identity_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    old_message_id: &str,
+    new_message_id: &str,
+) -> Result<()> {
+    for table in ["attachments", "starred_attachment_metadata"] {
+        sqlx::query(&format!(
+            "UPDATE OR IGNORE {table} SET id = ? || substr(id, length(?) + 1) \
+             WHERE substr(id, 1, length(?) + 1) = ? || ':'"
+        ))
+        .bind(new_message_id)
+        .bind(old_message_id)
+        .bind(old_message_id)
+        .bind(old_message_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+    sqlx::query(
+        "UPDATE message_attachment_catalogue \
+         SET attachment_id = ? || substr(attachment_id, length(?) + 1) \
+         WHERE substr(attachment_id, 1, length(?) + 1) = ? || ':'",
+    )
+    .bind(new_message_id)
+    .bind(old_message_id)
+    .bind(old_message_id)
+    .bind(old_message_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn rewrite_cached_attachment_identity_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    new_message_id: &str,
+    old_message_id: &str,
+) -> Result<()> {
+    let cached: Option<(String, Option<String>, Option<String>, String)> = sqlx::query_as(
+        "SELECT body_text, body_html, unsubscribe_kind, attachments_json FROM message_content_cache WHERE message_id = ?",
+    )
+    .bind(new_message_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((body_text, body_html, unsubscribe_kind, attachments_json)) = cached else {
+        return Ok(());
+    };
+    let Ok(mut attachments) = serde_json::from_str::<Vec<Attachment>>(&attachments_json) else {
+        // Preserve the original bytes.  The reader already handles this
+        // legacy corruption by discarding the cache and fetching again.
+        return Ok(());
+    };
+    for attachment in &mut attachments {
+        attachment.message_id = new_message_id.to_owned();
+        if let Some(suffix) = attachment
+            .id
+            .strip_prefix(old_message_id)
+            .and_then(|value| value.strip_prefix(':'))
+        {
+            attachment.id = format!("{new_message_id}:{suffix}");
+        }
+    }
+    let rewritten = serde_json::to_string(&attachments)?;
+    let byte_size = cache_entry_byte_size(
+        &body_text,
+        body_html.as_deref(),
+        unsubscribe_kind.as_deref(),
+        &rewritten,
+    )?;
+    sqlx::query(
+        "UPDATE message_content_cache SET attachments_json = ?, byte_size = ? WHERE message_id = ?",
+    )
+    .bind(rewritten)
+    .bind(byte_size)
+    .bind(new_message_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Coalesces a legacy locator into a provider-published opaque row after the
+/// caller has proved account, raw mailbox and UIDVALIDITY equivalence. The
+/// published message remains authoritative for flags and header metadata;
+/// local complete bodies and attachment metadata move across only when the
+/// new row does not already have them.
+async fn merge_legacy_message_into_published_opaque_row_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    account_id: &str,
+    old_message_id: &str,
+    new_message_id: &str,
+) -> Result<()> {
+    rewrite_attachment_identity_in_tx(tx, old_message_id, new_message_id).await?;
+    for statement in [
+        "INSERT OR IGNORE INTO message_mailbox_memberships(message_id, mailbox_id, account_id) SELECT ?, mailbox_id, account_id FROM message_mailbox_memberships WHERE message_id = ?",
+        "INSERT OR IGNORE INTO message_content_cache(message_id, content_state, body_text, body_html, unsubscribe_kind, attachments_json, byte_size, last_accessed) SELECT ?, content_state, body_text, body_html, unsubscribe_kind, attachments_json, byte_size, last_accessed FROM message_content_cache WHERE message_id = ?",
+        "INSERT OR IGNORE INTO message_search_body_text(message_id, body_text, byte_size, last_indexed) SELECT ?, body_text, byte_size, last_indexed FROM message_search_body_text WHERE message_id = ?",
+        "INSERT OR IGNORE INTO starred_message_bodies(message_id, body_text, body_html, attachment_presentation_version, cached_at) SELECT ?, body_text, body_html, attachment_presentation_version, cached_at FROM starred_message_bodies WHERE message_id = ?",
+        "INSERT OR IGNORE INTO attachments(id, message_id, filename, mime_type, size_bytes, is_inline, presentation, is_potentially_unsafe, data) SELECT id, ?, filename, mime_type, size_bytes, is_inline, presentation, is_potentially_unsafe, data FROM attachments WHERE message_id = ?",
+        "INSERT OR IGNORE INTO starred_attachment_metadata(id, message_id, filename, mime_type, size_bytes, is_inline, presentation, is_potentially_unsafe) SELECT id, ?, filename, mime_type, size_bytes, is_inline, presentation, is_potentially_unsafe FROM starred_attachment_metadata WHERE message_id = ?",
+        "INSERT OR IGNORE INTO message_attachment_catalogue(message_id, attachment_id, filename, mime_type, size_bytes, is_inline, presentation) SELECT ?, attachment_id, filename, mime_type, size_bytes, is_inline, presentation FROM message_attachment_catalogue WHERE message_id = ?",
+    ] {
+        sqlx::query(statement)
+            .bind(new_message_id)
+            .bind(old_message_id)
+            .execute(&mut **tx)
+            .await?;
+    }
+    for table in [
+        "contacted_people_backfill_messages",
+        "contacted_people_legacy_unresolved_sources",
+    ] {
+        sqlx::query(&format!(
+            "INSERT OR IGNORE INTO {table}(account_id, message_id) SELECT account_id, ? FROM {table} WHERE account_id = ? AND message_id = ?"
+        ))
+        .bind(new_message_id)
+        .bind(account_id)
+        .bind(old_message_id)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query(&format!(
+            "DELETE FROM {table} WHERE account_id = ? AND message_id = ?"
+        ))
+        .bind(account_id)
+        .bind(old_message_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+    rewrite_cached_attachment_identity_in_tx(tx, new_message_id, old_message_id).await?;
+    // Cascades remove any source dependency that was not transferred above.
+    // This leaves the provider row's current flags/header metadata intact.
+    sqlx::query("DELETE FROM messages WHERE id = ? AND account_id = ?")
+        .bind(old_message_id)
+        .bind(account_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 async fn save_account_in_transaction(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     account: &Account,
-) -> Result<()> {
+) -> Result<bool> {
+    let account_id = account.id.to_string();
     let deleted: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM deleted_account_tombstones WHERE account_id = ?)",
     )
-    .bind(account.id.to_string())
+    .bind(&account_id)
     .fetch_one(&mut **tx)
     .await?;
     if deleted {
         return Err(anyhow!("account was removed"));
     }
+    let existing: Option<String> = sqlx::query_scalar("SELECT data FROM accounts WHERE id = ?")
+        .bind(&account_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    let active_membership_changed = existing
+        .as_deref()
+        .and_then(|data| deserialize_account(data).ok())
+        .is_some_and(|previous| previous.enabled != account.enabled);
     sqlx::query("INSERT INTO accounts(id, email, data, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET email=excluded.email, data=excluded.data")
-        .bind(account.id.to_string())
+        .bind(&account_id)
         .bind(&account.email)
         .bind(serde_json::to_string(account)?)
         .bind(account.created_at)
         .execute(&mut **tx)
         .await?;
-    Ok(())
+    if existing.is_some() {
+        sqlx::query("INSERT OR IGNORE INTO account_search_generations(account_id, generation) VALUES (?, 0)")
+            .bind(&account_id)
+            .execute(&mut **tx)
+            .await?;
+        sqlx::query("UPDATE account_search_generations SET generation = generation + 1 WHERE account_id = ?")
+            .bind(&account_id)
+            .execute(&mut **tx)
+            .await?;
+    } else {
+        sqlx::query("INSERT OR IGNORE INTO account_search_generations(account_id, generation) VALUES (?, 0)")
+            .bind(&account_id)
+            .execute(&mut **tx)
+            .await?;
+    }
+    if active_membership_changed {
+        sqlx::query("DELETE FROM app_meta WHERE key IN (?, ?)")
+            .bind(CONTACTED_PEOPLE_ENABLED_AGGREGATES_CURSOR_KEY)
+            .bind(CONTACTED_PEOPLE_ENABLED_AGGREGATES_VERSION_KEY)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(active_membership_changed)
 }
 
 async fn save_mail_rebuild_job_in_transaction(
@@ -5190,8 +9636,21 @@ async fn save_mail_rebuild_job_in_transaction(
 }
 
 pub fn stable_message_id(account_id: AccountId, mailbox: &str, uid: u32) -> String {
-    // UUID v4 is used for accounts; deriving a stable ID avoids duplicates during resync.
-    format!("{}:{}:{}", account_id, mailbox.replace(':', "_"), uid)
+    // UUID v4 is used for accounts; deriving a stable ID avoids duplicates
+    // during resync. The mailbox is opaque provider data, so delimiter
+    // replacement is not injective (`A:B` and `A_B` used to collide). Keep
+    // the established compact form for ordinary legacy paths and encode every
+    // path that could have collided with it. Existing rows keep their stored
+    // IDs through the `(account_id, mailbox, uid)` upsert key; new ambiguous
+    // paths receive the collision-free v2 form.
+    if mailbox.contains(':') {
+        format!(
+            "{account_id}:v2:{}:{uid}",
+            URL_SAFE_NO_PAD.encode(mailbox.as_bytes())
+        )
+    } else {
+        format!("{account_id}:{mailbox}:{uid}")
+    }
 }
 
 #[cfg(test)]
@@ -5331,6 +9790,917 @@ mod tests {
         assert!(parse_message_ids("prefix <id@example.test>").is_empty());
     }
 
+    #[test]
+    fn stable_message_ids_keep_distinct_opaque_mailbox_paths_distinct() {
+        let account_id = uuid::Uuid::new_v4();
+        assert_ne!(
+            stable_message_id(account_id, "Projects:2026", 7),
+            stable_message_id(account_id, "Projects_2026", 7),
+            "provider mailbox punctuation must not collapse into an ID collision"
+        );
+        assert_eq!(
+            stable_message_id(account_id, "INBOX", 7),
+            format!("{account_id}:INBOX:7"),
+            "ordinary legacy IDs remain stable"
+        );
+    }
+
+    #[tokio::test]
+    async fn opaque_mailbox_locator_migration_uses_catalogue_identity_and_preserves_dependents() {
+        let store = Store::in_memory().await.unwrap();
+        let account = AccountDraft {
+            email: "opaque-locator@example.test".into(),
+            display_name: "Opaque locator".into(),
+            provider_id: Some("fastmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("fastmail").unwrap());
+        store.save_account(&account).await.unwrap();
+        let account_key = account.id.to_string();
+
+        // A resolved Sent alias and an ordinary provider mailbox whose raw
+        // name starts with `Sent::` are both legal.  The catalogue state's
+        // raw remote path proves which interpretation each old locator used.
+        let sent_alias = "Sent::Sént Items";
+        let sent = store
+            .upsert_selectable_mailbox(
+                account.id,
+                &SelectableMailboxDraft {
+                    remote_path: "Sént Items".into(),
+                    local_path: Some(sent_alias.into()),
+                    hierarchy_delimiter: Some("/".into()),
+                    parent_id: None,
+                    parent_path: None,
+                    special_use: Some("\\Sent".into()),
+                    selectable: true,
+                    uid_validity: Some(17),
+                    catalogue_coverage: "complete".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let literal_name = "Sent::Literal";
+        store
+            .upsert_selectable_mailbox(
+                account.id,
+                &SelectableMailboxDraft {
+                    remote_path: "Literal".into(),
+                    local_path: Some(literal_name.into()),
+                    hierarchy_delimiter: None,
+                    parent_id: None,
+                    parent_path: None,
+                    special_use: Some("\\Sent".into()),
+                    selectable: true,
+                    uid_validity: Some(23),
+                    catalogue_coverage: "complete".into(),
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .upsert_selectable_mailbox(
+                account.id,
+                &SelectableMailboxDraft {
+                    remote_path: literal_name.into(),
+                    local_path: Some(literal_name.into()),
+                    hierarchy_delimiter: None,
+                    parent_id: None,
+                    parent_path: None,
+                    special_use: None,
+                    selectable: true,
+                    uid_validity: Some(23),
+                    catalogue_coverage: "complete".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let dotted_name = " Projects.Été/2026 ";
+        store
+            .upsert_selectable_mailbox(
+                account.id,
+                &SelectableMailboxDraft {
+                    remote_path: dotted_name.into(),
+                    local_path: Some(dotted_name.into()),
+                    hierarchy_delimiter: Some(".".into()),
+                    parent_id: None,
+                    parent_path: None,
+                    special_use: None,
+                    selectable: true,
+                    uid_validity: Some(31),
+                    catalogue_coverage: "complete".into(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let mut sent_message = message("Sent alias", "cached body");
+        sent_message.id = stable_message_id(account.id, sent_alias, 7);
+        sent_message.account_id = account_key.clone();
+        sent_message.thread_id = sent_message.id.clone();
+        sent_message.mailbox = sent_alias.into();
+        sent_message.uid = 7;
+        let mut literal_message = message("Literal", "body");
+        literal_message.id = stable_message_id(account.id, literal_name, 8);
+        literal_message.account_id = account_key.clone();
+        literal_message.thread_id = literal_message.id.clone();
+        literal_message.mailbox = literal_name.into();
+        literal_message.uid = 8;
+        let mut dotted_message = message("Dots", "body");
+        dotted_message.id = stable_message_id(account.id, dotted_name, 9);
+        dotted_message.account_id = account_key.clone();
+        dotted_message.thread_id = dotted_message.id.clone();
+        dotted_message.mailbox = dotted_name.into();
+        dotted_message.uid = 9;
+        store
+            .upsert_messages(&[
+                sent_message.clone(),
+                literal_message.clone(),
+                dotted_message.clone(),
+            ])
+            .await
+            .unwrap();
+        store
+            .set_message_mailbox_memberships(
+                account.id,
+                &sent_message.id,
+                std::slice::from_ref(&sent.id),
+            )
+            .await
+            .unwrap();
+        let old_attachment_id = format!("{}:mime-v1:1", sent_message.id);
+        store
+            .cache_message_content(
+                &sent_message.id,
+                false,
+                CachedMessageContent {
+                    body_text: "cached body".into(),
+                    body_html: None,
+                    unsubscribe_kind: None,
+                    attachments: vec![Attachment {
+                        id: old_attachment_id.clone(),
+                        message_id: sent_message.id.clone(),
+                        filename: "invoice.pdf".into(),
+                        mime_type: "application/pdf".into(),
+                        size_bytes: 3,
+                        is_inline: false,
+                        presentation: AttachmentPresentation::Downloadable,
+                        is_potentially_unsafe: false,
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .cache_search_body_text(&sent_message.id, "provider body")
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO attachments(id, message_id, filename, mime_type, size_bytes, is_inline, presentation, is_potentially_unsafe, data) VALUES (?, ?, 'invoice.pdf', 'application/pdf', 3, 0, 'downloadable', 0, X'00')")
+            .bind(&old_attachment_id)
+            .bind(&sent_message.id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        for (mailbox, remote_name, uid_validity) in [
+            (sent_alias, "Sént Items", 17_i64),
+            (literal_name, literal_name, 23_i64),
+            (dotted_name, dotted_name, 31_i64),
+        ] {
+            sqlx::query("INSERT INTO mailbox_catalog_state(account_id, mailbox, remote_name, uid_validity, remote_total, historical_complete, updated_at) VALUES (?, ?, ?, ?, 9, 1, ?)")
+                .bind(&account_key)
+                .bind(mailbox)
+                .bind(remote_name)
+                .bind(uid_validity)
+                .bind(Utc::now())
+                .execute(&store.pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO mailbox_sync_state(account_id, mailbox, initialized_at, highest_uid, uid_validity) VALUES (?, ?, ?, 9, ?)")
+                .bind(&account_key)
+                .bind(mailbox)
+                .bind(Utc::now())
+                .bind(uid_validity)
+                .execute(&store.pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO mailbox_action_tombstones(account_id, mailbox, uid, created_at) VALUES (?, ?, 7, ?)")
+            .bind(&account_key)
+            .bind(sent_alias)
+            .bind(Utc::now())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO contacted_people_backfill_messages(account_id, message_id) VALUES (?, ?)",
+        )
+        .bind(&account_key)
+        .bind(&sent_message.id)
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO contacted_people_backfill_sources(account_id, mailbox, uid_validity, uid) VALUES (?, ?, 17, 7)")
+            .bind(&account_key)
+            .bind(sent_alias)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM opaque_mailbox_storage_identity_progress")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        store
+            .migrate_opaque_mailbox_storage_identities()
+            .await
+            .unwrap();
+
+        let sent_target = special_mailbox_storage_identity("Sent", "Sént Items");
+        let literal_target = generic_mailbox_storage_identity("Sent::Literal", "Sent::Literal");
+        let dotted_target = generic_mailbox_storage_identity(dotted_name, " Projects/Été%2F2026 ");
+        let sent_new_id = stable_message_id(account.id, &sent_target, 7);
+        assert!(store.message(&sent_message.id).await.unwrap().is_none());
+        assert_eq!(
+            store.message(&sent_new_id).await.unwrap().unwrap().mailbox,
+            sent_target
+        );
+        assert!(store.message(&literal_message.id).await.unwrap().is_none());
+        assert!(
+            store.message(&dotted_message.id).await.unwrap().is_none(),
+            "dotted legacy row: {:?}",
+            store.message(&dotted_message.id).await.unwrap()
+        );
+        assert_eq!(
+            store
+                .message(&stable_message_id(account.id, &literal_target, 8))
+                .await
+                .unwrap()
+                .unwrap()
+                .mailbox,
+            literal_target,
+            "a literal Sent:: name must not be reclassified as a Sent alias"
+        );
+        assert_eq!(
+            store
+                .message(&stable_message_id(account.id, &dotted_target, 9))
+                .await
+                .unwrap()
+                .unwrap()
+                .mailbox,
+            dotted_target,
+            "raw spaces, Unicode, dot hierarchy and literal slash stay distinct"
+        );
+        let cached = store
+            .cached_message_content(&sent_new_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cached.attachments[0].message_id, sent_new_id);
+        assert_eq!(cached.attachments[0].id, format!("{sent_new_id}:mime-v1:1"));
+        assert_eq!(
+            store
+                .cached_search_body_text(&sent_new_id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("provider body")
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT id FROM attachments")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap(),
+            format!("{sent_new_id}:mime-v1:1")
+        );
+        assert_eq!(
+            store
+                .list_message_mailbox_memberships(account.id, &sent_new_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        for table in [
+            "mailbox_catalog_state",
+            "mailbox_sync_state",
+            "mailbox_action_tombstones",
+            "contacted_people_backfill_sources",
+        ] {
+            let moved: i64 = sqlx::query_scalar(&format!(
+                "SELECT COUNT(*) FROM {table} WHERE account_id = ? AND mailbox = ?"
+            ))
+            .bind(&account_key)
+            .bind(&sent_target)
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+            assert_eq!(moved, 1, "{table}");
+        }
+        let cursor: (String, String, bool) = sqlx::query_as("SELECT last_account_id, last_mailbox, complete FROM opaque_mailbox_storage_identity_progress WHERE singleton = 1")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert!(
+            !cursor.2,
+            "the first bounded batch leaves continuation work"
+        );
+    }
+
+    #[tokio::test]
+    async fn opaque_mailbox_locator_migration_is_idempotent_after_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("opaque-locator.db");
+        let store = Store::open(&database).await.unwrap();
+        let account = AccountDraft {
+            email: "opaque-restart@example.test".into(),
+            display_name: "Opaque restart".into(),
+            provider_id: Some("fastmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("fastmail").unwrap());
+        store.save_account(&account).await.unwrap();
+        let old_mailbox = "Sent::Archive Copy";
+        store
+            .upsert_selectable_mailbox(
+                account.id,
+                &SelectableMailboxDraft {
+                    remote_path: "Archive Copy".into(),
+                    local_path: Some(old_mailbox.into()),
+                    hierarchy_delimiter: None,
+                    parent_id: None,
+                    parent_path: None,
+                    special_use: Some("\\Sent".into()),
+                    selectable: true,
+                    uid_validity: Some(44),
+                    catalogue_coverage: "complete".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let mut row = message("restart", "body");
+        row.id = stable_message_id(account.id, old_mailbox, 44);
+        row.account_id = account.id.to_string();
+        row.thread_id = row.id.clone();
+        row.mailbox = old_mailbox.into();
+        row.uid = 44;
+        store.upsert_messages(&[row]).await.unwrap();
+        sqlx::query("INSERT INTO mailbox_catalog_state(account_id, mailbox, remote_name, uid_validity, remote_total, historical_complete, updated_at) VALUES (?, ?, 'Archive Copy', 44, 1, 1, ?)")
+            .bind(account.id.to_string())
+            .bind(old_mailbox)
+            .bind(Utc::now())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM opaque_mailbox_storage_identity_progress")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        drop(store);
+
+        let restarted = Store::open(&database).await.unwrap();
+        let target = special_mailbox_storage_identity("Sent", "Archive Copy");
+        let new_id = stable_message_id(account.id, &target, 44);
+        assert!(restarted.message(&new_id).await.unwrap().is_some());
+        drop(restarted);
+        let restarted_again = Store::open(&database).await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages")
+            .fetch_one(&restarted_again.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "a completed migration is safe to resume");
+        assert!(restarted_again.message(&new_id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn opaque_locator_migration_restarts_a_large_single_mailbox_without_losing_identity_proof(
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("opaque-single-mailbox-batch.db");
+        let store = Store::open(&database).await.unwrap();
+        let account = AccountDraft {
+            email: "opaque-single-batch@example.test".into(),
+            display_name: "Opaque single batch".into(),
+            provider_id: Some("fastmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("fastmail").unwrap());
+        store.save_account(&account).await.unwrap();
+        let account_key = account.id.to_string();
+        let legacy_mailbox = "Sent::Bulk";
+        let remote_path = "Bulk";
+        let uid_validity = 88_i64;
+        store
+            .upsert_selectable_mailbox(
+                account.id,
+                &SelectableMailboxDraft {
+                    remote_path: remote_path.into(),
+                    local_path: Some(legacy_mailbox.into()),
+                    hierarchy_delimiter: None,
+                    parent_id: None,
+                    parent_path: None,
+                    special_use: Some("\\Sent".into()),
+                    selectable: true,
+                    uid_validity: Some(uid_validity),
+                    catalogue_coverage: "complete".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let mut rows = Vec::new();
+        for uid in
+            1..=u32::try_from(OPAQUE_MAILBOX_STORAGE_IDENTITIES_MIGRATION_BATCH_SIZE + 1).unwrap()
+        {
+            let mut row = message("single mailbox batch", "body");
+            row.id = stable_message_id(account.id, legacy_mailbox, uid);
+            row.account_id = account_key.clone();
+            row.thread_id = row.id.clone();
+            row.mailbox = legacy_mailbox.into();
+            row.uid = i64::from(uid);
+            rows.push(row);
+        }
+        let last_old_id = rows.last().unwrap().id.clone();
+        store.upsert_messages(&rows).await.unwrap();
+        store
+            .cache_search_body_text(&last_old_id, "last-row cached body")
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO mailbox_catalog_state(account_id, mailbox, remote_name, uid_validity, remote_total, historical_complete, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?)")
+            .bind(&account_key)
+            .bind(legacy_mailbox)
+            .bind(remote_path)
+            .bind(uid_validity)
+            .bind(OPAQUE_MAILBOX_STORAGE_IDENTITIES_MIGRATION_BATCH_SIZE + 1)
+            .bind(Utc::now())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO mailbox_sync_state(account_id, mailbox, initialized_at, highest_uid, uid_validity) VALUES (?, ?, ?, ?, ?)")
+            .bind(&account_key)
+            .bind(legacy_mailbox)
+            .bind(Utc::now())
+            .bind(OPAQUE_MAILBOX_STORAGE_IDENTITIES_MIGRATION_BATCH_SIZE + 1)
+            .bind(uid_validity)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO contacted_people_backfill_messages(account_id, message_id) VALUES (?, ?)",
+        )
+        .bind(&account_key)
+        .bind(&last_old_id)
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        sqlx::query("DELETE FROM opaque_mailbox_storage_identity_progress")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        drop(store);
+
+        // Simulate interruption directly after the first durable batch.
+        let first = Store::open(&database).await.unwrap();
+        let target = special_mailbox_storage_identity("Sent", remote_path);
+        let legacy_remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages WHERE account_id = ? AND mailbox = ?",
+        )
+        .bind(&account_key)
+        .bind(legacy_mailbox)
+        .fetch_one(&first.pool)
+        .await
+        .unwrap();
+        assert_eq!(legacy_remaining, 1);
+        for table in ["mailbox_catalog_state", "mailbox_sync_state"] {
+            let source_count: i64 = sqlx::query_scalar(&format!(
+                "SELECT COUNT(*) FROM {table} WHERE account_id = ? AND mailbox = ?"
+            ))
+            .bind(&account_key)
+            .bind(legacy_mailbox)
+            .fetch_one(&first.pool)
+            .await
+            .unwrap();
+            let target_count: i64 = sqlx::query_scalar(&format!(
+                "SELECT COUNT(*) FROM {table} WHERE account_id = ? AND mailbox = ?"
+            ))
+            .bind(&account_key)
+            .bind(&target)
+            .fetch_one(&first.pool)
+            .await
+            .unwrap();
+            assert_eq!(source_count, 1, "{table} retains restart proof");
+            assert_eq!(target_count, 1, "{table} is available to new work");
+        }
+        drop(first);
+
+        // A new process can continue the same source mailbox. It is not
+        // rejected because the source UIDVALIDITY record remains until this
+        // final message has committed.
+        let resumed = Store::open(&database).await.unwrap();
+        let new_last_id = stable_message_id(
+            account.id,
+            &target,
+            u32::try_from(OPAQUE_MAILBOX_STORAGE_IDENTITIES_MIGRATION_BATCH_SIZE + 1).unwrap(),
+        );
+        let legacy_remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages WHERE account_id = ? AND mailbox = ?",
+        )
+        .bind(&account_key)
+        .bind(legacy_mailbox)
+        .fetch_one(&resumed.pool)
+        .await
+        .unwrap();
+        assert_eq!(legacy_remaining, 0);
+        let target_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages WHERE account_id = ? AND mailbox = ?",
+        )
+        .bind(&account_key)
+        .bind(&target)
+        .fetch_one(&resumed.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            target_count,
+            OPAQUE_MAILBOX_STORAGE_IDENTITIES_MIGRATION_BATCH_SIZE + 1
+        );
+        for table in ["mailbox_catalog_state", "mailbox_sync_state"] {
+            let source_count: i64 = sqlx::query_scalar(&format!(
+                "SELECT COUNT(*) FROM {table} WHERE account_id = ? AND mailbox = ?"
+            ))
+            .bind(&account_key)
+            .bind(legacy_mailbox)
+            .fetch_one(&resumed.pool)
+            .await
+            .unwrap();
+            assert_eq!(source_count, 0, "{table} is finalized only at exhaustion");
+        }
+        assert_eq!(
+            resumed
+                .cached_search_body_text(&new_last_id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("last-row cached body")
+        );
+        let backfill_marker: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM contacted_people_backfill_messages WHERE account_id = ? AND message_id = ?",
+        )
+        .bind(&account_key)
+        .bind(&new_last_id)
+        .fetch_one(&resumed.pool)
+        .await
+        .unwrap();
+        assert_eq!(backfill_marker, 1);
+
+        // Opaque target rows are skipped on a later keyset pass, then the
+        // durable cursor reaches completion without revisiting old rows.
+        for _ in 0..3 {
+            resumed
+                .migrate_opaque_mailbox_storage_identities()
+                .await
+                .unwrap();
+        }
+        let complete: bool = sqlx::query_scalar(
+            "SELECT complete FROM opaque_mailbox_storage_identity_progress WHERE singleton = 1",
+        )
+        .fetch_one(&resumed.pool)
+        .await
+        .unwrap();
+        assert!(complete);
+    }
+
+    #[tokio::test]
+    async fn opaque_locator_migration_keeps_unflagged_standard_inbox_legacy() {
+        let store = Store::in_memory().await.unwrap();
+        let account = AccountDraft {
+            email: "legacy-inbox@example.test".into(),
+            display_name: "Legacy inbox".into(),
+            provider_id: Some("fastmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("fastmail").unwrap());
+        store.save_account(&account).await.unwrap();
+        let mut inbox = message("legacy inbox", "body");
+        inbox.id = stable_message_id(account.id, "INBOX", 1);
+        inbox.account_id = account.id.to_string();
+        inbox.thread_id = inbox.id.clone();
+        inbox.mailbox = "INBOX".into();
+        store.upsert_messages(&[inbox.clone()]).await.unwrap();
+        sqlx::query("INSERT INTO mailbox_catalog_state(account_id, mailbox, remote_name, uid_validity, remote_total, historical_complete, updated_at) VALUES (?, 'INBOX', 'INBOX', 9, 1, 1, ?)")
+            .bind(account.id.to_string())
+            .bind(Utc::now())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        // This is exactly the pre-discovery profile shape. The seed has no
+        // special-use flag, so preserving INBOX must not depend on one.
+        store.migrate_selectable_mailboxes().await.unwrap();
+        sqlx::query("DELETE FROM opaque_mailbox_storage_identity_progress")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store
+            .migrate_opaque_mailbox_storage_identities()
+            .await
+            .unwrap();
+        assert_eq!(
+            store.message(&inbox.id).await.unwrap().unwrap().mailbox,
+            "INBOX"
+        );
+    }
+
+    #[tokio::test]
+    async fn opaque_locator_migration_defers_ambiguous_rows_until_catalogue_discovery() {
+        let store = Store::in_memory().await.unwrap();
+        let account = AccountDraft {
+            email: "ambiguous-locator@example.test".into(),
+            display_name: "Ambiguous locator".into(),
+            provider_id: Some("fastmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("fastmail").unwrap());
+        store.save_account(&account).await.unwrap();
+        let old_mailbox = "Sent::Foo";
+        let mut row = message("ambiguous", "body");
+        row.id = stable_message_id(account.id, old_mailbox, 3);
+        row.account_id = account.id.to_string();
+        row.thread_id = row.id.clone();
+        row.mailbox = old_mailbox.into();
+        row.uid = 3;
+        store.upsert_messages(&[row.clone()]).await.unwrap();
+        sqlx::query("INSERT INTO mailbox_catalog_state(account_id, mailbox, remote_name, uid_validity, remote_total, historical_complete, updated_at) VALUES (?, ?, 'Foo', 4, 1, 1, ?)")
+            .bind(account.id.to_string())
+            .bind(old_mailbox)
+            .bind(Utc::now())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM opaque_mailbox_storage_identity_progress")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store
+            .migrate_opaque_mailbox_storage_identities()
+            .await
+            .unwrap();
+        assert!(store.message(&row.id).await.unwrap().is_some());
+        let unresolved: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM opaque_mailbox_storage_identity_unresolved")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(unresolved, 1);
+        // The cursor reaches the end on the next maintenance turn rather
+        // than repeatedly retrying the same unproven row.
+        store
+            .migrate_opaque_mailbox_storage_identities()
+            .await
+            .unwrap();
+        let complete: bool = sqlx::query_scalar(
+            "SELECT complete FROM opaque_mailbox_storage_identity_progress WHERE singleton = 1",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert!(complete);
+        store
+            .upsert_selectable_mailbox(
+                account.id,
+                &SelectableMailboxDraft {
+                    remote_path: "Foo".into(),
+                    local_path: Some(old_mailbox.into()),
+                    hierarchy_delimiter: None,
+                    parent_id: None,
+                    parent_path: None,
+                    special_use: Some("\\Sent".into()),
+                    selectable: true,
+                    uid_validity: Some(4),
+                    catalogue_coverage: "complete".into(),
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .migrate_opaque_mailbox_storage_identities()
+            .await
+            .unwrap();
+        let target = special_mailbox_storage_identity("Sent", "Foo");
+        assert!(store
+            .message(&stable_message_id(account.id, &target, 3))
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn opaque_locator_backfill_stays_bounded_and_keeps_background_maintenance_alive() {
+        let store = Store::in_memory().await.unwrap();
+        let account = AccountDraft {
+            email: "opaque-batch@example.test".into(),
+            display_name: "Opaque batch".into(),
+            provider_id: Some("fastmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("fastmail").unwrap());
+        store.save_account(&account).await.unwrap();
+        let mut rows = Vec::new();
+        let mut tx = store.pool.begin().await.unwrap();
+        for index in 0..=OPAQUE_MAILBOX_STORAGE_IDENTITIES_MIGRATION_BATCH_SIZE {
+            let mailbox = format!("Projects-{index:04}");
+            sqlx::query("INSERT INTO selectable_mailboxes(id, account_id, remote_path, local_path, hierarchy_delimiter, parent_id, parent_path, special_use, selectable, uid_validity, catalogue_coverage, updated_at) VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL, 1, 9, 'complete', ?)")
+                .bind(format!("opaque-batch-mailbox-{index}"))
+                .bind(account.id.to_string())
+                .bind(&mailbox)
+                .bind(&mailbox)
+                .bind(Utc::now())
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            let mut row = message("batch", "body");
+            row.id = stable_message_id(account.id, &mailbox, 1);
+            row.account_id = account.id.to_string();
+            row.thread_id = row.id.clone();
+            row.mailbox = mailbox;
+            rows.push(row);
+        }
+        tx.commit().await.unwrap();
+        store.upsert_messages(&rows).await.unwrap();
+        sqlx::query("DELETE FROM opaque_mailbox_storage_identity_progress")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        let first = store.advance_search_catalogue_v2_backfill().await.unwrap();
+        assert!(
+            !first.complete,
+            "the UI worker must continue after 500 moves"
+        );
+        let legacy_after_first: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages WHERE mailbox NOT LIKE 'Mailbox::@dakia-mailbox-v1:%'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(legacy_after_first, 1);
+        assert!(
+            !store
+                .advance_search_catalogue_v2_backfill()
+                .await
+                .unwrap()
+                .complete
+        );
+        assert!(
+            store
+                .advance_search_catalogue_v2_backfill()
+                .await
+                .unwrap()
+                .complete
+        );
+        let legacy_after_complete: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages WHERE mailbox NOT LIKE 'Mailbox::@dakia-mailbox-v1:%'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(legacy_after_complete, 0);
+    }
+
+    #[tokio::test]
+    async fn opaque_locator_migration_merges_a_verified_provider_published_duplicate() {
+        let store = Store::in_memory().await.unwrap();
+        let account = AccountDraft {
+            email: "opaque-collision@example.test".into(),
+            display_name: "Opaque collision".into(),
+            provider_id: Some("fastmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("fastmail").unwrap());
+        store.save_account(&account).await.unwrap();
+        let old_mailbox = "Sent::Foo";
+        let target = special_mailbox_storage_identity("Sent", "Foo");
+        store
+            .upsert_selectable_mailbox(
+                account.id,
+                &SelectableMailboxDraft {
+                    remote_path: "Foo".into(),
+                    local_path: Some(old_mailbox.into()),
+                    hierarchy_delimiter: None,
+                    parent_id: None,
+                    parent_path: None,
+                    special_use: Some("\\Sent".into()),
+                    selectable: true,
+                    uid_validity: Some(77),
+                    catalogue_coverage: "complete".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let mut old = message("old", "body");
+        old.id = stable_message_id(account.id, old_mailbox, 5);
+        old.account_id = account.id.to_string();
+        old.thread_id = old.id.clone();
+        old.mailbox = old_mailbox.into();
+        old.uid = 5;
+        let mut published = old.clone();
+        published.id = stable_message_id(account.id, &target, 5);
+        published.thread_id = published.id.clone();
+        published.mailbox = target.clone();
+        published.is_read = true;
+        store
+            .upsert_messages(&[old.clone(), published.clone()])
+            .await
+            .unwrap();
+        store
+            .cache_search_body_text(&old.id, "preserved cached body")
+            .await
+            .unwrap();
+        for mailbox in [old_mailbox, target.as_str()] {
+            sqlx::query("INSERT INTO mailbox_catalog_state(account_id, mailbox, remote_name, uid_validity, remote_total, historical_complete, updated_at) VALUES (?, ?, 'Foo', 77, 1, 1, ?)")
+                .bind(account.id.to_string())
+                .bind(mailbox)
+                .bind(Utc::now())
+                .execute(&store.pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("DELETE FROM opaque_mailbox_storage_identity_progress")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store
+            .migrate_opaque_mailbox_storage_identities()
+            .await
+            .unwrap();
+        assert!(store.message(&old.id).await.unwrap().is_none());
+        assert!(store.message(&published.id).await.unwrap().unwrap().is_read);
+        assert_eq!(
+            store
+                .cached_search_body_text(&published.id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("preserved cached body")
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
     #[tokio::test]
     async fn mail_rebuild_job_survives_until_explicitly_completed() {
         let store = Store::in_memory().await.unwrap();
@@ -5399,6 +10769,8 @@ mod tests {
             unsubscribe_url: None,
             is_read: false,
             is_flagged: false,
+            is_answered: false,
+            is_draft: false,
             has_attachments: false,
             category: None,
             classification_confidence: None,
@@ -5960,6 +11332,2365 @@ mod tests {
             .save_account(&account_with_id(id, &format!("{id}@example.test")))
             .await
             .unwrap();
+    }
+
+    fn contacted_recipient(address: &str, display_name: Option<&str>) -> ContactedPersonRecipient {
+        ContactedPersonRecipient {
+            address: address.into(),
+            display_name: display_name.map(str::to_owned),
+            formatted_address: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn contacted_people_legacy_migrations_are_bounded_restart_safe_and_stable_at_fifty_thousand_rows(
+    ) {
+        let _large_dataset = crate::large_dataset_test_guard().await;
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("dakia.db");
+        let store = Store::open(&database).await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let account_id = account_id.to_string();
+
+        // Seed the shape left by builds from before normalized autocomplete
+        // fields and provider-safe Sent source identities. A temporary sequence
+        // keeps this realistic 50,000-row fixture to a handful of bulk SQL
+        // statements instead of 150,000 individual test queries.
+        let mut tx = store.pool.begin().await.unwrap();
+        sqlx::query("CREATE TEMP TABLE contacted_people_migration_seed(n INTEGER PRIMARY KEY)")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query(
+            "WITH RECURSIVE seed(n) AS (VALUES(1) UNION ALL SELECT n + 1 FROM seed WHERE n < 50000) INSERT INTO contacted_people_migration_seed(n) SELECT n FROM seed",
+        )
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO contacted_people(canonical_address, display_name, formatted_address, first_contacted_at, last_contacted_at, send_count, hidden_at) SELECT printf('person%05d@example.test', n), CASE WHEN n = 25001 THEN 'José Legacy' ELSE printf('Legacy Person %d', n) END, CASE WHEN n = 25001 THEN 'José Legacy <person25001@example.test>' ELSE printf('Legacy Person %d <person%05d@example.test>', n, n) END, '2024-01-01T00:00:00Z', '2026-01-01T00:00:00Z', (n % 7) + 1, NULL FROM contacted_people_migration_seed",
+        )
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO contacted_people_account_stats(canonical_address, account_id, first_contacted_at, last_contacted_at, send_count, display_name, formatted_address) SELECT printf('person%05d@example.test', n), ?, '2024-01-01T00:00:00Z', '2026-01-01T00:00:00Z', (n % 7) + 1, CASE WHEN n = 25001 THEN 'José Legacy' ELSE printf('Legacy Person %d', n) END, CASE WHEN n = 25001 THEN 'José Legacy <person25001@example.test>' ELSE printf('Legacy Person %d <person%05d@example.test>', n, n) END FROM contacted_people_migration_seed",
+        )
+        .bind(&account_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO messages(id, account_id, mailbox, uid, message_id, thread_id, subject, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text) SELECT printf('legacy-message-%05d', n), ?, 'Sent', n, printf('<legacy-%05d@example.test>', n), printf('legacy-thread-%05d', n), printf('Legacy sent message %d', n), 'owner@example.test', printf('person%05d@example.test', n), '', '', '', '2026-01-01T00:00:00Z', '', '' FROM contacted_people_migration_seed",
+        )
+        .bind(&account_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO mailbox_catalog_state(account_id, mailbox, remote_name, uid_validity, remote_total, historical_complete, updated_at) VALUES (?, 'Sent', 'Sent', 4242, 50000, 1, '2026-01-01T00:00:00Z')",
+        )
+        .bind(&account_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO contacted_people_backfill_messages(account_id, message_id) SELECT ?, printf('legacy-message-%05d', n) FROM contacted_people_migration_seed",
+        )
+        .bind(&account_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        for key in [
+            CONTACTED_PEOPLE_NORMALIZED_MIGRATION_CURSOR_KEY,
+            CONTACTED_PEOPLE_NORMALIZED_MIGRATION_COMPLETE_KEY,
+            CONTACTED_PEOPLE_SOURCE_MIGRATION_CURSOR_KEY,
+            CONTACTED_PEOPLE_SOURCE_MIGRATION_COMPLETE_KEY,
+        ] {
+            sqlx::query("DELETE FROM app_meta WHERE key = ?")
+                .bind(key)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+        }
+        tx.commit().await.unwrap();
+
+        let stable_person_before: (i64, String, String, i64, String, String) = sqlx::query_as(
+            "SELECT person.rowid, person.canonical_address, person.formatted_address, stats.send_count, stats.first_contacted_at, stats.last_contacted_at FROM contacted_people person JOIN contacted_people_account_stats stats ON stats.canonical_address = person.canonical_address WHERE person.canonical_address = 'person25001@example.test' AND stats.account_id = ?",
+        )
+        .bind(&account_id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        store.pool.close().await;
+        drop(store);
+
+        let store = Store::open(&database).await.unwrap();
+        let first_normalized: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM contacted_people WHERE normalized_address <> ''",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        let first_sources: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM contacted_people_backfill_sources")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(first_normalized, CONTACTED_PEOPLE_MIGRATION_BATCH_SIZE);
+        assert_eq!(first_sources, CONTACTED_PEOPLE_MIGRATION_BATCH_SIZE);
+        let first_cursors: (String, String) = sqlx::query_as(
+            "SELECT (SELECT value FROM app_meta WHERE key = ?), (SELECT value FROM app_meta WHERE key = ?)",
+        )
+        .bind(CONTACTED_PEOPLE_NORMALIZED_MIGRATION_CURSOR_KEY)
+        .bind(CONTACTED_PEOPLE_SOURCE_MIGRATION_CURSOR_KEY)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            first_cursors.0,
+            CONTACTED_PEOPLE_MIGRATION_BATCH_SIZE.to_string()
+        );
+        assert_eq!(
+            first_cursors.1,
+            CONTACTED_PEOPLE_MIGRATION_BATCH_SIZE.to_string()
+        );
+        store.pool.close().await;
+        drop(store);
+
+        let store = Store::open(&database).await.unwrap();
+        let second_normalized: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM contacted_people WHERE normalized_address <> ''",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        let second_sources: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM contacted_people_backfill_sources")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            second_normalized,
+            CONTACTED_PEOPLE_MIGRATION_BATCH_SIZE * 2,
+            "reopen must resume from the durable normalized-person cursor"
+        );
+        assert_eq!(
+            second_sources,
+            CONTACTED_PEOPLE_MIGRATION_BATCH_SIZE * 2,
+            "reopen must resume from the durable legacy-source cursor"
+        );
+
+        let mut progress = ContactedPeopleMigrationProgress {
+            normalized_people: 0,
+            source_markers: 0,
+            changed_people: 0,
+            complete: false,
+        };
+        while !progress.complete {
+            progress = store
+                .continue_contacted_people_migrations(CONTACTED_PEOPLE_MIGRATION_BATCH_SIZE as u32)
+                .await
+                .unwrap();
+            assert!(progress.normalized_people <= CONTACTED_PEOPLE_MIGRATION_BATCH_SIZE as usize);
+            assert!(progress.source_markers <= CONTACTED_PEOPLE_MIGRATION_BATCH_SIZE as usize);
+        }
+
+        let final_counts: (i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM contacted_people WHERE normalized_address <> ''), (SELECT COUNT(*) FROM contacted_people_backfill_sources), (SELECT COUNT(*) FROM contacted_people_backfill_rfc_messages), (SELECT COUNT(*) FROM contacted_people_backfill_messages)",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(final_counts, (50_000, 50_000, 50_000, 50_000));
+        let stable_person_after: (i64, String, String, i64, String, String) = sqlx::query_as(
+            "SELECT person.rowid, person.canonical_address, person.formatted_address, stats.send_count, stats.first_contacted_at, stats.last_contacted_at FROM contacted_people person JOIN contacted_people_account_stats stats ON stats.canonical_address = person.canonical_address WHERE person.canonical_address = 'person25001@example.test' AND stats.account_id = ?",
+        )
+        .bind(&account_id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(stable_person_after, stable_person_before);
+        let migrated_name: (String, String) = sqlx::query_as(
+            "SELECT normalized_display_name, normalized_display_tokens FROM contacted_people WHERE canonical_address = 'person25001@example.test'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            migrated_name.0,
+            normalize_contacted_people_match("José Legacy")
+        );
+        assert_eq!(
+            migrated_name.1,
+            normalize_contacted_people_tokens("José Legacy")
+        );
+
+        store.pool.close().await;
+        drop(store);
+        let store = Store::open(&database).await.unwrap();
+        let completed = store
+            .continue_contacted_people_migrations(CONTACTED_PEOPLE_MIGRATION_BATCH_SIZE as u32)
+            .await
+            .unwrap();
+        assert!(completed.complete);
+        assert_eq!(completed.normalized_people, 0);
+        assert_eq!(completed.source_markers, 0);
+    }
+
+    #[tokio::test]
+    async fn enabled_contacted_people_aggregate_migration_is_bounded_restart_safe_and_skips_unchanged_saves(
+    ) {
+        let _large_dataset = crate::large_dataset_test_guard().await;
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory
+            .path()
+            .join("enabled-contacted-people-aggregates.db");
+        let store = Store::open(&database).await.unwrap();
+        let disabled = uuid::Uuid::new_v4();
+        let active = uuid::Uuid::new_v4();
+        save_test_account(&store, disabled).await;
+        save_test_account(&store, active).await;
+        let disabled_key = disabled.to_string();
+        let active_key = active.to_string();
+        let mut tx = store.pool.begin().await.unwrap();
+        for index in 0..50_000_i64 {
+            let address = format!("aggregate{index:05}@example.test");
+            sqlx::query("INSERT INTO contacted_people(canonical_address, display_name, formatted_address, first_contacted_at, last_contacted_at, send_count, hidden_at) VALUES (?, 'Alice Disabled', ?, '2026-01-01T00:00:00Z', '2026-02-01T00:00:00Z', 6, NULL)")
+                .bind(&address)
+                .bind(format!("Alice Disabled <{address}>"))
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            for (account_id, display_name, count) in [
+                (&disabled_key, "Alice Disabled", 5_i64),
+                (&active_key, "Bob Active", 1_i64),
+            ] {
+                sqlx::query("INSERT INTO contacted_people_account_stats(canonical_address, account_id, first_contacted_at, last_contacted_at, send_count, display_name, formatted_address) VALUES (?, ?, '2026-01-01T00:00:00Z', '2026-02-01T00:00:00Z', ?, ?, ?)")
+                    .bind(&address)
+                    .bind(account_id)
+                    .bind(count)
+                    .bind(display_name)
+                    .bind(format!("{display_name} <{address}>"))
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+            }
+        }
+        tx.commit().await.unwrap();
+
+        let mut disabled_account = store.account(disabled).await.unwrap().unwrap();
+        disabled_account.enabled = false;
+        store.save_account(&disabled_account).await.unwrap();
+        let cursor: Option<String> = sqlx::query_scalar("SELECT value FROM app_meta WHERE key = ?")
+            .bind(CONTACTED_PEOPLE_ENABLED_AGGREGATES_CURSOR_KEY)
+            .fetch_optional(&store.pool)
+            .await
+            .unwrap();
+        assert!(
+            cursor.is_some(),
+            "the first save only commits one 500-person batch"
+        );
+        drop(store);
+
+        let reopened = Store::open(&database).await.unwrap();
+        for _ in 0..200 {
+            let complete: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM app_meta WHERE key = ? AND value = '1')",
+            )
+            .bind(CONTACTED_PEOPLE_ENABLED_AGGREGATES_VERSION_KEY)
+            .fetch_one(&reopened.pool)
+            .await
+            .unwrap();
+            if complete {
+                break;
+            }
+            reopened
+                .continue_contacted_people_migrations(CONTACTED_PEOPLE_MIGRATION_BATCH_SIZE as u32)
+                .await
+                .unwrap();
+        }
+        let complete: Option<String> =
+            sqlx::query_scalar("SELECT value FROM app_meta WHERE key = ?")
+                .bind(CONTACTED_PEOPLE_ENABLED_AGGREGATES_VERSION_KEY)
+                .fetch_optional(&reopened.pool)
+                .await
+                .unwrap();
+        assert_eq!(complete.as_deref(), Some("1"));
+        let sample: (i64, String) = sqlx::query_as("SELECT send_count, display_name FROM contacted_people WHERE canonical_address = 'aggregate49999@example.test'")
+            .fetch_one(&reopened.pool).await.unwrap();
+        assert_eq!(sample, (1, "Bob Active".into()));
+
+        let unchanged = reopened.account(active).await.unwrap().unwrap();
+        reopened.save_account(&unchanged).await.unwrap();
+        let after_unchanged: Option<String> =
+            sqlx::query_scalar("SELECT value FROM app_meta WHERE key = ?")
+                .bind(CONTACTED_PEOPLE_ENABLED_AGGREGATES_VERSION_KEY)
+                .fetch_optional(&reopened.pool)
+                .await
+                .unwrap();
+        assert_eq!(after_unchanged.as_deref(), Some("1"));
+        let cursor: Option<String> = sqlx::query_scalar("SELECT value FROM app_meta WHERE key = ?")
+            .bind(CONTACTED_PEOPLE_ENABLED_AGGREGATES_CURSOR_KEY)
+            .fetch_optional(&reopened.pool)
+            .await
+            .unwrap();
+        assert!(
+            cursor.is_none(),
+            "an unchanged active account save is a no-op"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_outgoing_recipients_are_deduplicated_exclude_owners_and_restore_hidden() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let own_address = format!("{account_id}@example.test");
+        let other_account = "other-account@example.test".to_owned();
+        let recipients = vec![
+            contacted_recipient("JANE+VIP@example.test", Some("Doe, Jane")),
+            contacted_recipient("jane+vip@example.test", Some("Newer Jane")),
+            contacted_recipient(&own_address, Some("Self")),
+            contacted_recipient(&other_account, Some("Other self")),
+            contacted_recipient("not an address", Some("Invalid")),
+        ];
+        assert_eq!(
+            store
+                .record_successful_outgoing_recipients(
+                    account_id,
+                    &recipients,
+                    std::slice::from_ref(&other_account),
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        let people = store
+            .suggest_contacted_people("jane+", Some(account_id))
+            .await
+            .unwrap();
+        assert_eq!(people.len(), 1);
+        assert_eq!(people[0].address, "jane+vip@example.test");
+        assert_eq!(people[0].send_count, 1);
+        assert_eq!(people[0].display_name.as_deref(), Some("Newer Jane"));
+
+        store
+            .hide_contacted_person("JANE+VIP@example.test")
+            .await
+            .unwrap();
+        assert!(store
+            .suggest_contacted_people("jane", Some(account_id))
+            .await
+            .unwrap()
+            .is_empty());
+        store
+            .record_successful_outgoing_recipients(
+                account_id,
+                &[contacted_recipient(
+                    "jane+vip@example.test",
+                    Some("Doe, Jane"),
+                )],
+                &[],
+            )
+            .await
+            .unwrap();
+        let restored = store
+            .suggest_contacted_people("jane", Some(account_id))
+            .await
+            .unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].send_count, 2);
+        assert_eq!(
+            restored[0].formatted_address,
+            "\"Doe, Jane\" <jane+vip@example.test>"
+        );
+    }
+
+    #[tokio::test]
+    async fn contacted_people_ranking_prefers_the_selected_sending_account() {
+        let store = Store::in_memory().await.unwrap();
+        let first_account = uuid::Uuid::new_v4();
+        let second_account = uuid::Uuid::new_v4();
+        save_test_account(&store, first_account).await;
+        save_test_account(&store, second_account).await;
+        store
+            .record_successful_outgoing_recipients(
+                first_account,
+                &[contacted_recipient("alex@example.test", Some("Alex"))],
+                &[],
+            )
+            .await
+            .unwrap();
+        for _ in 0..3 {
+            store
+                .record_successful_outgoing_recipients(
+                    second_account,
+                    &[contacted_recipient("alice@example.test", Some("Alice"))],
+                    &[],
+                )
+                .await
+                .unwrap();
+        }
+        let preferred = store
+            .suggest_contacted_people("al", Some(first_account))
+            .await
+            .unwrap();
+        assert_eq!(
+            preferred
+                .iter()
+                .map(|person| person.address.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alex@example.test", "alice@example.test"]
+        );
+        let global = store.suggest_contacted_people("al", None).await.unwrap();
+        assert_eq!(global[0].address, "alice@example.test");
+        assert_eq!(global[0].account_send_count, 0);
+    }
+
+    #[tokio::test]
+    async fn contacted_people_ranking_uses_selected_account_recency_before_frequency() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        for address in ["rank-old@example.test", "rank-new@example.test"] {
+            store
+                .record_successful_outgoing_recipients(
+                    account_id,
+                    &[contacted_recipient(address, Some("Ranked"))],
+                    &[],
+                )
+                .await
+                .unwrap();
+        }
+        for (address, send_count, last_contacted_at) in [
+            ("rank-old@example.test", 100_i64, "2026-01-01T00:00:00Z"),
+            ("rank-new@example.test", 1_i64, "2026-02-01T00:00:00Z"),
+        ] {
+            let last_contacted_at: DateTime<Utc> = last_contacted_at.parse().unwrap();
+            sqlx::query("UPDATE contacted_people_account_stats SET send_count = ?, last_contacted_at = ? WHERE canonical_address = ? AND account_id = ?")
+                .bind(send_count)
+                .bind(last_contacted_at)
+                .bind(address)
+                .bind(account_id.to_string())
+                .execute(&store.pool)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE contacted_people SET send_count = ?, last_contacted_at = ? WHERE canonical_address = ?")
+                .bind(send_count)
+                .bind(last_contacted_at)
+                .bind(address)
+                .execute(&store.pool)
+                .await
+                .unwrap();
+        }
+        for query in ["", "rank"] {
+            assert_eq!(
+                store
+                    .suggest_contacted_people(query, Some(account_id))
+                    .await
+                    .unwrap()
+                    .iter()
+                    .map(|person| person.address.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["rank-new@example.test", "rank-old@example.test"],
+                "query {query:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn contacted_people_empty_focus_uses_recency_before_global_frequency() {
+        let store = Store::in_memory().await.unwrap();
+        let first_account = uuid::Uuid::new_v4();
+        let second_account = uuid::Uuid::new_v4();
+        save_test_account(&store, first_account).await;
+        save_test_account(&store, second_account).await;
+        store
+            .record_successful_outgoing_recipients(
+                first_account,
+                &[contacted_recipient(
+                    "old-frequent@example.test",
+                    Some("Old"),
+                )],
+                &[],
+            )
+            .await
+            .unwrap();
+        store
+            .record_successful_outgoing_recipients(
+                second_account,
+                &[contacted_recipient("recent@example.test", Some("Recent"))],
+                &[],
+            )
+            .await
+            .unwrap();
+        let old_at: DateTime<Utc> = "2026-01-01T00:00:00Z".parse().unwrap();
+        let recent_at: DateTime<Utc> = "2026-02-01T00:00:00Z".parse().unwrap();
+        sqlx::query("UPDATE contacted_people SET send_count = ?, last_contacted_at = ? WHERE canonical_address = ?")
+            .bind(100_i64)
+            .bind(old_at)
+            .bind("old-frequent@example.test")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE contacted_people SET last_contacted_at = ? WHERE canonical_address = ?",
+        )
+        .bind(recent_at)
+        .bind("recent@example.test")
+        .execute(&store.pool)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            store
+                .suggest_contacted_people("", None)
+                .await
+                .unwrap()
+                .iter()
+                .map(|person| person.address.as_str())
+                .collect::<Vec<_>>(),
+            vec!["recent@example.test", "old-frequent@example.test"]
+        );
+    }
+
+    #[tokio::test]
+    async fn contacted_people_matching_casefolds_unicode_and_ignores_common_latin_diacritics() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        store
+            .record_successful_outgoing_recipients(
+                account_id,
+                &[contacted_recipient(
+                    "josé@example.test",
+                    Some("José Álvaro"),
+                )],
+                &[],
+            )
+            .await
+            .unwrap();
+
+        for query in ["JOSE", "alva", "lvar", "josé@example"] {
+            assert_eq!(
+                store
+                    .suggest_contacted_people(query, Some(account_id))
+                    .await
+                    .unwrap()
+                    .iter()
+                    .map(|person| person.address.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["josé@example.test"],
+                "query {query:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn contacted_people_selective_prefix_suggestions_stay_under_one_hundred_ms_at_fifty_thousand_rows(
+    ) {
+        let _large_dataset = crate::large_dataset_test_guard().await;
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let timestamp: DateTime<Utc> = "2026-09-06T10:00:00Z".parse().unwrap();
+        let account_key = account_id.to_string();
+        let mut tx = store.pool.begin().await.unwrap();
+        for index in 0..50_000_i64 {
+            let (address, send_count) = if index < 10 {
+                (format!("needle{index}@example.test"), index + 1)
+            } else {
+                (format!("person{index:05}@example.test"), 1)
+            };
+            let formatted_address = format!("Person <{address}>");
+            sqlx::query("INSERT INTO contacted_people(canonical_address, display_name, formatted_address, first_contacted_at, last_contacted_at, send_count, hidden_at) VALUES (?, 'Person', ?, ?, ?, ?, NULL)")
+                .bind(&address)
+                .bind(&formatted_address)
+                .bind(timestamp)
+                .bind(timestamp)
+                .bind(send_count)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO contacted_people_account_stats(canonical_address, account_id, first_contacted_at, last_contacted_at, send_count) VALUES (?, ?, ?, ?, ?)")
+                .bind(&address)
+                .bind(&account_key)
+                .bind(timestamp)
+                .bind(timestamp)
+                .bind(send_count)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+        }
+        tx.commit().await.unwrap();
+
+        let started = Instant::now();
+        let suggestions = store
+            .suggest_contacted_people("needle", Some(account_id))
+            .await
+            .unwrap();
+        let elapsed = started.elapsed();
+
+        assert!(elapsed < Duration::from_millis(100), "took {elapsed:?}");
+        assert_eq!(suggestions.len(), 8);
+        assert_eq!(
+            suggestions
+                .iter()
+                .map(|person| person.address.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "needle9@example.test",
+                "needle8@example.test",
+                "needle7@example.test",
+                "needle6@example.test",
+                "needle5@example.test",
+                "needle4@example.test",
+                "needle3@example.test",
+                "needle2@example.test",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn contacted_people_display_prefix_and_substring_suggestions_stay_under_one_hundred_ms_at_fifty_thousand_rows(
+    ) {
+        let _large_dataset = crate::large_dataset_test_guard().await;
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let timestamp: DateTime<Utc> = "2026-09-06T10:00:00Z".parse().unwrap();
+        let account_key = account_id.to_string();
+        let mut tx = store.pool.begin().await.unwrap();
+        for index in 0..50_000_i64 {
+            let address = format!("person{index:05}@example.test");
+            let display_name = if index < 10 {
+                format!("Needle Person {index}")
+            } else if index < 20 {
+                format!("Darlington Person {index}")
+            } else {
+                format!("Ordinary Person {index}")
+            };
+            sqlx::query("INSERT INTO contacted_people(canonical_address, display_name, formatted_address, first_contacted_at, last_contacted_at, send_count, hidden_at, normalized_display_name, normalized_address, normalized_display_tokens, normalized_address_tokens) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)")
+                .bind(&address)
+                .bind(&display_name)
+                .bind(format!("{display_name} <{address}>"))
+                .bind(timestamp)
+                .bind(timestamp)
+                .bind(index + 1)
+                .bind(normalize_contacted_people_match(&display_name))
+                .bind(normalize_contacted_people_match(&address))
+                .bind(normalize_contacted_people_tokens(&display_name))
+                .bind(normalize_contacted_people_tokens(&address))
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO contacted_people_account_stats(canonical_address, account_id, first_contacted_at, last_contacted_at, send_count) VALUES (?, ?, ?, ?, ?)")
+                .bind(&address)
+                .bind(&account_key)
+                .bind(timestamp)
+                .bind(timestamp)
+                .bind(index + 1)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+        }
+        tx.commit().await.unwrap();
+
+        for (query, expected_first) in [
+            ("needle", "person00009@example.test"),
+            ("arlin", "person00019@example.test"),
+        ] {
+            let started = Instant::now();
+            let suggestions = store
+                .suggest_contacted_people(query, Some(account_id))
+                .await
+                .unwrap();
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < Duration::from_millis(100),
+                "{query} took {elapsed:?}"
+            );
+            assert_eq!(suggestions.len(), 8);
+            assert_eq!(suggestions[0].address, expected_first);
+        }
+    }
+
+    #[tokio::test]
+    async fn contacted_people_empty_focus_suggestions_stay_under_one_hundred_ms_at_fifty_thousand_rows(
+    ) {
+        let _large_dataset = crate::large_dataset_test_guard().await;
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let timestamp: DateTime<Utc> = "2026-09-06T10:00:00Z".parse().unwrap();
+        let account_key = account_id.to_string();
+        let mut tx = store.pool.begin().await.unwrap();
+        for index in 0..50_000_i64 {
+            let address = format!("recent{index:05}@example.test");
+            let observed_at = timestamp + chrono::Duration::seconds(index);
+            sqlx::query("INSERT INTO contacted_people(canonical_address, display_name, formatted_address, first_contacted_at, last_contacted_at, send_count, hidden_at) VALUES (?, 'Recent', ?, ?, ?, 1, NULL)")
+                .bind(&address)
+                .bind(format!("Recent <{address}>"))
+                .bind(observed_at)
+                .bind(observed_at)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO contacted_people_account_stats(canonical_address, account_id, first_contacted_at, last_contacted_at, send_count) VALUES (?, ?, ?, ?, 1)")
+                .bind(&address)
+                .bind(&account_key)
+                .bind(observed_at)
+                .bind(observed_at)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+        }
+        tx.commit().await.unwrap();
+
+        let started = Instant::now();
+        let suggestions = store
+            .suggest_contacted_people("", Some(account_id))
+            .await
+            .unwrap();
+        let elapsed = started.elapsed();
+
+        assert!(elapsed < Duration::from_millis(100), "took {elapsed:?}");
+        assert_eq!(suggestions.len(), 8);
+        assert_eq!(
+            suggestions
+                .iter()
+                .map(|person| person.address.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "recent49999@example.test",
+                "recent49998@example.test",
+                "recent49997@example.test",
+                "recent49996@example.test",
+                "recent49995@example.test",
+                "recent49994@example.test",
+                "recent49993@example.test",
+                "recent49992@example.test",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn sent_backfill_parses_real_recipient_headers_and_marks_messages_idempotently() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let mut sent = message("Sent recipients", "preview");
+        sent.account_id = account_id.to_string();
+        sent.id = stable_message_id(account_id, "Sent", 1);
+        sent.thread_id = sent.id.clone();
+        sent.mailbox = "Sent".into();
+        sent.uid = 1;
+        sent.to_addresses = "\"Doe, Jane\" <jane+vip@example.test>, Bob <bob@example.test>".into();
+        sent.cc_addresses = "Carol <carol@example.test>".into();
+        sent.bcc_addresses = "Blind <blind@example.test>".into();
+        sent.received_at = "2026-09-01T10:00:00Z".parse().unwrap();
+        let mut empty_sent = message("No recipients", "preview");
+        empty_sent.account_id = account_id.to_string();
+        empty_sent.id = stable_message_id(account_id, "Sent", 2);
+        empty_sent.thread_id = empty_sent.id.clone();
+        empty_sent.mailbox = "Sent::Archive/Sent".into();
+        empty_sent.uid = 2;
+        empty_sent.to_addresses.clear();
+        empty_sent.cc_addresses.clear();
+        empty_sent.bcc_addresses.clear();
+        empty_sent.received_at = "2026-09-02T10:00:00Z".parse().unwrap();
+        let mut inbound = message("Inbound only", "preview");
+        inbound.account_id = account_id.to_string();
+        inbound.id = stable_message_id(account_id, "INBOX", 3);
+        inbound.thread_id = inbound.id.clone();
+        inbound.uid = 3;
+        inbound.to_addresses = "Inbound <inbound@example.test>".into();
+        store
+            .upsert_messages(&[sent, empty_sent, inbound])
+            .await
+            .unwrap();
+
+        let first = store
+            .backfill_contacted_people_from_sent(account_id, &[], 1)
+            .await
+            .unwrap();
+        assert_eq!(first.processed_messages, 1);
+        assert!(!first.complete);
+        let second = store
+            .backfill_contacted_people_from_sent(account_id, &[], 1)
+            .await
+            .unwrap();
+        assert_eq!(second.processed_messages, 1);
+        assert!(second.complete);
+        let people = store
+            .suggest_contacted_people("", Some(account_id))
+            .await
+            .unwrap();
+        assert_eq!(people.len(), 4);
+        let jane = people
+            .iter()
+            .find(|person| person.address == "jane+vip@example.test")
+            .unwrap();
+        assert_eq!(jane.display_name.as_deref(), Some("Doe, Jane"));
+        assert_eq!(
+            jane.formatted_address,
+            "\"Doe, Jane\" <jane+vip@example.test>"
+        );
+        assert!(people
+            .iter()
+            .all(|person| person.address != "inbound@example.test"));
+        assert_eq!(
+            store
+                .backfill_contacted_people_from_sent(account_id, &[], 10)
+                .await
+                .unwrap(),
+            ContactedPeopleBackfillProgress {
+                processed_messages: 0,
+                changed_people: 0,
+                complete: true,
+            }
+        );
+        let mut late_historical = message("Late historical Sent", "preview");
+        late_historical.account_id = account_id.to_string();
+        late_historical.id = stable_message_id(account_id, "Sent", 4);
+        late_historical.thread_id = late_historical.id.clone();
+        late_historical.mailbox = "Sent".into();
+        late_historical.uid = 4;
+        late_historical.to_addresses = "Late <late@example.test>".into();
+        late_historical.cc_addresses.clear();
+        late_historical.bcc_addresses.clear();
+        late_historical.received_at = "2025-01-01T10:00:00Z".parse().unwrap();
+        store.upsert_messages(&[late_historical]).await.unwrap();
+        assert_eq!(
+            store
+                .backfill_contacted_people_from_sent(account_id, &[], 10)
+                .await
+                .unwrap(),
+            ContactedPeopleBackfillProgress {
+                processed_messages: 1,
+                changed_people: 1,
+                complete: true,
+            }
+        );
+        let after_late = store
+            .suggest_contacted_people("", Some(account_id))
+            .await
+            .unwrap();
+        assert!(after_late
+            .iter()
+            .any(|person| person.address == "late@example.test"));
+        assert_eq!(
+            after_late
+                .iter()
+                .find(|person| person.address == "jane+vip@example.test")
+                .unwrap()
+                .send_count,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn sent_backfill_marks_drafts_without_learning_their_recipients() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let mut draft = message("Unsent draft", "preview");
+        draft.account_id = account_id.to_string();
+        draft.id = stable_message_id(account_id, "Sent", 1);
+        draft.thread_id = draft.id.clone();
+        draft.mailbox = "Sent".into();
+        draft.uid = 1;
+        draft.is_draft = true;
+        draft.to_addresses = "Never sent <draft-only@example.test>".into();
+        draft.cc_addresses.clear();
+        draft.bcc_addresses.clear();
+        store.upsert_messages(&[draft.clone()]).await.unwrap();
+
+        assert_eq!(
+            store
+                .backfill_contacted_people_from_sent(account_id, &[], 10)
+                .await
+                .unwrap(),
+            ContactedPeopleBackfillProgress {
+                processed_messages: 1,
+                changed_people: 0,
+                complete: true,
+            }
+        );
+        assert!(store
+            .suggest_contacted_people("", Some(account_id))
+            .await
+            .unwrap()
+            .is_empty());
+        let markers: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM contacted_people_backfill_sources WHERE account_id = ? AND mailbox = 'Sent' AND uid = 1",
+        )
+        .bind(account_id.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(markers, 1, "drafts are marked so backfill does not loop");
+        assert_eq!(
+            store
+                .backfill_contacted_people_from_sent(account_id, &[], 10)
+                .await
+                .unwrap(),
+            ContactedPeopleBackfillProgress {
+                processed_messages: 0,
+                changed_people: 0,
+                complete: true,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn sent_backfill_waits_for_recipient_headers_then_learns_final_recipients() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let mut sent = message("Header-only Sent", "preview");
+        sent.account_id = account_id.to_string();
+        sent.id = stable_message_id(account_id, "Sent", 17);
+        sent.thread_id = sent.id.clone();
+        sent.mailbox = "Sent".into();
+        sent.uid = 17;
+        sent.to_addresses = "To <to@example.test>".into();
+        sent.cc_addresses.clear();
+        sent.bcc_addresses.clear();
+        store.upsert_messages(&[sent]).await.unwrap();
+        sqlx::query("UPDATE messages SET recipient_headers_scanned = 0 WHERE account_id = ? AND mailbox = 'Sent' AND uid = 17")
+            .bind(account_id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .backfill_contacted_people_from_sent(account_id, &[], 10)
+                .await
+                .unwrap()
+                .processed_messages,
+            0,
+            "a header-only row must not gain a durable completed marker"
+        );
+        let markers: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM contacted_people_backfill_sources")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(markers, 0);
+
+        store
+            .save_recipient_headers(account_id, "Sent", 17, "", "Blind <blind@example.test>", "")
+            .await
+            .unwrap();
+        let learned = store
+            .backfill_contacted_people_from_sent(account_id, &[], 10)
+            .await
+            .unwrap();
+        assert_eq!(learned.processed_messages, 1);
+        let addresses = store
+            .suggest_contacted_people("", Some(account_id))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|person| person.address)
+            .collect::<Vec<_>>();
+        assert!(addresses.contains(&"to@example.test".to_owned()));
+        assert!(addresses.contains(&"blind@example.test".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn sent_backfill_does_not_double_count_unmigrated_legacy_markers() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let account_key = account_id.to_string();
+        let mut tx = store.pool.begin().await.unwrap();
+        for uid in 1..=501_i64 {
+            let id = format!("legacy-race-{uid}");
+            sqlx::query("INSERT INTO messages(id, account_id, mailbox, uid, message_id, thread_id, subject, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text) VALUES (?, ?, 'Sent', ?, NULL, ?, 'Sent', 'owner@example.test', 'Already learned <already@example.test>', '', '', '', '2026-09-01T00:00:00Z', '', '')")
+                .bind(&id)
+                .bind(&account_key)
+                .bind(uid)
+                .bind(&id)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO contacted_people_backfill_messages(account_id, message_id) VALUES (?, ?)")
+                .bind(&account_key)
+                .bind(&id)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO contacted_people(canonical_address, display_name, formatted_address, first_contacted_at, last_contacted_at, send_count, hidden_at) VALUES ('already@example.test', 'Already learned', 'Already learned <already@example.test>', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z', 1, NULL)")
+            .execute(&mut *tx).await.unwrap();
+        sqlx::query("INSERT INTO contacted_people_account_stats(canonical_address, account_id, first_contacted_at, last_contacted_at, send_count, display_name, formatted_address) VALUES ('already@example.test', ?, '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z', 1, 'Already learned', 'Already learned <already@example.test>')")
+            .bind(&account_key).execute(&mut *tx).await.unwrap();
+        // Model a profile with more legacy markers than its first 500-row
+        // startup upgrade batch. The concurrent Sent worker must recognize
+        // those old markers until the source migration publishes completion.
+        sqlx::query("DELETE FROM app_meta WHERE key = ?")
+            .bind(CONTACTED_PEOPLE_SOURCE_MIGRATION_COMPLETE_KEY)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let first = store
+            .backfill_contacted_people_from_sent(account_id, &[], 500)
+            .await
+            .unwrap();
+        let second = store
+            .backfill_contacted_people_from_sent(account_id, &[], 500)
+            .await
+            .unwrap();
+        assert_eq!((first.changed_people, second.changed_people), (0, 0));
+        let count: i64 = sqlx::query_scalar("SELECT send_count FROM contacted_people WHERE canonical_address = 'already@example.test'")
+            .fetch_one(&store.pool).await.unwrap();
+        assert_eq!(
+            count, 1,
+            "legacy source migration and backfill may interleave without replaying stats"
+        );
+        let sources: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM contacted_people_backfill_sources")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(sources, 501);
+    }
+
+    #[tokio::test]
+    async fn unknown_uidvalidity_source_is_promoted_without_relearning_message_idless_sent_row() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let mut sent = message("No message id", "preview");
+        sent.account_id = account_id.to_string();
+        sent.id = stable_message_id(account_id, "Sent", 31);
+        sent.thread_id = sent.id.clone();
+        sent.mailbox = "Sent".into();
+        sent.uid = 31;
+        sent.message_id = None;
+        sent.to_addresses = "No ID <no-id@example.test>".into();
+        store.upsert_messages(&[sent]).await.unwrap();
+        assert_eq!(
+            store
+                .backfill_contacted_people_from_sent(account_id, &[], 10)
+                .await
+                .unwrap()
+                .changed_people,
+            1
+        );
+        store
+            .save_mailbox_catalog_state(account_id, "Sent", "Sent", 9001, 31, true)
+            .await
+            .unwrap();
+        let after_identity = store
+            .backfill_contacted_people_from_sent(account_id, &[], 10)
+            .await
+            .unwrap();
+        assert_eq!(after_identity.changed_people, 0);
+        let count: i64 = sqlx::query_scalar("SELECT send_count FROM contacted_people WHERE canonical_address = 'no-id@example.test'")
+            .fetch_one(&store.pool).await.unwrap();
+        assert_eq!(count, 1);
+        let promoted: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM contacted_people_backfill_sources WHERE account_id = ? AND mailbox = 'Sent' AND uid_validity = 9001 AND uid = 31")
+            .bind(account_id.to_string()).fetch_one(&store.pool).await.unwrap();
+        assert_eq!(promoted, 1);
+    }
+
+    #[tokio::test]
+    async fn unresolved_legacy_marker_promotes_once_when_its_catalogue_row_returns() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let account_key = account_id.to_string();
+        sqlx::query("INSERT INTO contacted_people_backfill_messages(account_id, message_id) VALUES (?, 'restored-legacy')")
+            .bind(&account_key).execute(&store.pool).await.unwrap();
+        sqlx::query("INSERT INTO contacted_people(canonical_address, display_name, formatted_address, first_contacted_at, last_contacted_at, send_count, hidden_at) VALUES ('legacy-restored@example.test', 'Legacy', 'Legacy <legacy-restored@example.test>', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 1, NULL)")
+            .execute(&store.pool).await.unwrap();
+        sqlx::query("INSERT INTO contacted_people_account_stats(canonical_address, account_id, first_contacted_at, last_contacted_at, send_count) VALUES ('legacy-restored@example.test', ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 1)")
+            .bind(&account_key).execute(&store.pool).await.unwrap();
+        sqlx::query("DELETE FROM app_meta WHERE key = ?")
+            .bind(CONTACTED_PEOPLE_SOURCE_MIGRATION_COMPLETE_KEY)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store
+            .continue_contacted_people_migrations(10)
+            .await
+            .unwrap();
+        let mut restored = message("Restored", "preview");
+        restored.id = "restored-legacy".into();
+        restored.account_id = account_key.clone();
+        restored.mailbox = "Sent".into();
+        restored.uid = 9;
+        restored.to_addresses = "Legacy <legacy-restored@example.test>".into();
+        store.upsert_messages(&[restored]).await.unwrap();
+        store
+            .save_mailbox_catalog_state(account_id, "Sent", "Sent", 5, 9, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .backfill_contacted_people_from_sent(account_id, &[], 10)
+                .await
+                .unwrap()
+                .changed_people,
+            0
+        );
+        let count: i64 = sqlx::query_scalar("SELECT send_count FROM contacted_people WHERE canonical_address = 'legacy-restored@example.test'")
+            .fetch_one(&store.pool).await.unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn evicted_message_idless_legacy_marker_promotes_to_an_opaque_sent_source() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let account_key = account_id.to_string();
+        save_test_account(&store, account_id).await;
+        let legacy_mailbox = "Sent::Archive Copy";
+        let uid = 41_u32;
+        store
+            .upsert_selectable_mailbox(
+                account_id,
+                &SelectableMailboxDraft {
+                    remote_path: "Archive Copy".into(),
+                    local_path: Some(legacy_mailbox.into()),
+                    hierarchy_delimiter: None,
+                    parent_id: None,
+                    parent_path: None,
+                    special_use: Some("\\Sent".into()),
+                    selectable: true,
+                    uid_validity: Some(71),
+                    catalogue_coverage: "complete".into(),
+                },
+            )
+            .await
+            .unwrap();
+        // This is the real pre-v2 format. Its colon-to-underscore rewrite is
+        // intentionally lossy, so recovery must rely on selectable metadata.
+        let legacy_id = format!("{account_id}:{}:{uid}", legacy_mailbox.replace(':', "_"));
+        sqlx::query(
+            "INSERT INTO contacted_people_backfill_messages(account_id, message_id) VALUES (?, ?)",
+        )
+        .bind(&account_key)
+        .bind(&legacy_id)
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO contacted_people(canonical_address, display_name, formatted_address, first_contacted_at, last_contacted_at, send_count, hidden_at) VALUES ('evicted@example.test', 'Evicted', 'Evicted <evicted@example.test>', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 1, NULL)")
+            .execute(&store.pool).await.unwrap();
+        sqlx::query("INSERT INTO contacted_people_account_stats(canonical_address, account_id, first_contacted_at, last_contacted_at, send_count) VALUES ('evicted@example.test', ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 1)")
+            .bind(&account_key).execute(&store.pool).await.unwrap();
+        sqlx::query("DELETE FROM app_meta WHERE key = ?")
+            .bind(CONTACTED_PEOPLE_SOURCE_MIGRATION_COMPLETE_KEY)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store
+            .continue_contacted_people_migrations(10)
+            .await
+            .unwrap();
+
+        let target = special_mailbox_storage_identity("Sent", "Archive Copy");
+        let marker: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM contacted_people_backfill_sources WHERE account_id = ? AND mailbox = ? AND uid_validity = 71 AND uid = 41")
+            .bind(&account_key).bind(&target).fetch_one(&store.pool).await.unwrap();
+        assert_eq!(marker, 1);
+        let mut rediscovered = message("Rediscovered", "preview");
+        rediscovered.id = stable_message_id(account_id, &target, uid);
+        rediscovered.account_id = account_key.clone();
+        rediscovered.thread_id = rediscovered.id.clone();
+        rediscovered.mailbox = target.clone();
+        rediscovered.uid = i64::from(uid);
+        rediscovered.message_id = None;
+        rediscovered.to_addresses = "Evicted <evicted@example.test>".into();
+        store.upsert_messages(&[rediscovered]).await.unwrap();
+        store
+            .save_mailbox_catalog_state(account_id, &target, "Archive Copy", 71, 41, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .backfill_contacted_people_from_sent(account_id, &[], 10)
+                .await
+                .unwrap()
+                .changed_people,
+            0
+        );
+        let count: i64 = sqlx::query_scalar("SELECT send_count FROM contacted_people WHERE canonical_address = 'evicted@example.test'")
+            .fetch_one(&store.pool).await.unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn evicted_v2_markers_continue_after_selectable_path_becomes_opaque() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let account_key = account_id.to_string();
+        save_test_account(&store, account_id).await;
+        let legacy_mailbox = "Sent::Archive Copy";
+        let target = special_mailbox_storage_identity("Sent", "Archive Copy");
+        store
+            .upsert_selectable_mailbox(
+                account_id,
+                &SelectableMailboxDraft {
+                    remote_path: "Archive Copy".into(),
+                    local_path: Some(legacy_mailbox.into()),
+                    hierarchy_delimiter: None,
+                    parent_id: None,
+                    parent_path: None,
+                    special_use: Some("\\Sent".into()),
+                    selectable: true,
+                    uid_validity: Some(72),
+                    catalogue_coverage: "complete".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let mut tx = store.pool.begin().await.unwrap();
+        for uid in 1..=CONTACTED_PEOPLE_MIGRATION_BATCH_SIZE + 1 {
+            sqlx::query("INSERT INTO contacted_people_backfill_messages(account_id, message_id) VALUES (?, ?)")
+                .bind(&account_key)
+                .bind(stable_message_id(account_id, legacy_mailbox, uid as u32))
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+        }
+        sqlx::query("DELETE FROM app_meta WHERE key IN (?, ?)")
+            .bind(CONTACTED_PEOPLE_SOURCE_MIGRATION_CURSOR_KEY)
+            .bind(CONTACTED_PEOPLE_SOURCE_MIGRATION_COMPLETE_KEY)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let first = store
+            .continue_contacted_people_migrations(500)
+            .await
+            .unwrap();
+        assert!(!first.complete);
+        let moved: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM contacted_people_backfill_sources WHERE account_id = ? AND mailbox = ?")
+            .bind(&account_key).bind(&target).fetch_one(&store.pool).await.unwrap();
+        assert_eq!(moved, 500);
+        // This is the state after opaque mailbox migration has updated the
+        // selectable local path between marker batches.
+        sqlx::query("UPDATE selectable_mailboxes SET local_path = ? WHERE account_id = ? AND remote_path = 'Archive Copy'")
+            .bind(&target).bind(&account_key).execute(&store.pool).await.unwrap();
+
+        let second = store
+            .continue_contacted_people_migrations(500)
+            .await
+            .unwrap();
+        assert!(second.complete);
+        let moved: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM contacted_people_backfill_sources WHERE account_id = ? AND mailbox = ? AND uid_validity = 72")
+            .bind(&account_key).bind(&target).fetch_one(&store.pool).await.unwrap();
+        assert_eq!(moved, CONTACTED_PEOPLE_MIGRATION_BATCH_SIZE + 1);
+    }
+
+    #[tokio::test]
+    async fn disabled_autocomplete_backfill_makes_no_people_or_marker_progress_and_fails_closed() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let mut first = message("First Sent", "preview");
+        first.account_id = account_id.to_string();
+        first.id = stable_message_id(account_id, "Sent", 1);
+        first.thread_id = first.id.clone();
+        first.mailbox = "Sent".into();
+        first.uid = 1;
+        first.to_addresses = "First <first@example.test>".into();
+        first.cc_addresses.clear();
+        first.bcc_addresses.clear();
+        first.received_at = "2026-09-01T10:00:00Z".parse().unwrap();
+        let mut second = first.clone();
+        second.id = stable_message_id(account_id, "Sent", 2);
+        second.thread_id = second.id.clone();
+        second.uid = 2;
+        second.to_addresses = "Second <second@example.test>".into();
+        second.received_at = "2026-09-02T10:00:00Z".parse().unwrap();
+        store.upsert_messages(&[first, second]).await.unwrap();
+
+        assert_eq!(
+            store
+                .backfill_contacted_people_from_sent(account_id, &[], 1)
+                .await
+                .unwrap()
+                .processed_messages,
+            1
+        );
+        let markers_before_disable: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM contacted_people_backfill_messages WHERE account_id = ?",
+        )
+        .bind(account_id.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        store
+            .set_autocomplete_suggestions_enabled(false)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .backfill_contacted_people_from_sent(account_id, &[], 1)
+                .await
+                .unwrap(),
+            ContactedPeopleBackfillProgress {
+                processed_messages: 0,
+                changed_people: 0,
+                complete: false,
+            }
+        );
+        let markers_while_disabled: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM contacted_people_backfill_messages WHERE account_id = ?",
+        )
+        .bind(account_id.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(markers_while_disabled, markers_before_disable);
+        assert_eq!(
+            store
+                .suggest_contacted_people("", Some(account_id))
+                .await
+                .unwrap()
+                .iter()
+                .map(|person| person.address.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first@example.test"]
+        );
+
+        store
+            .set_autocomplete_suggestions_enabled(true)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .backfill_contacted_people_from_sent(account_id, &[], 1)
+                .await
+                .unwrap(),
+            ContactedPeopleBackfillProgress {
+                processed_messages: 1,
+                changed_people: 0,
+                complete: true,
+            }
+        );
+        assert_eq!(
+            store
+                .suggest_contacted_people("", Some(account_id))
+                .await
+                .unwrap()
+                .iter()
+                .map(|person| person.address.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first@example.test"]
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_collection_never_learns_sent_or_smtp_recipients_from_that_interval() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        store
+            .record_successful_outgoing_recipients(
+                account_id,
+                &[contacted_recipient(
+                    "before-disable@example.test",
+                    Some("Before"),
+                )],
+                &[],
+            )
+            .await
+            .unwrap();
+        store
+            .set_autocomplete_suggestions_enabled(false)
+            .await
+            .unwrap();
+
+        let mut sent_while_disabled = message("Sent while disabled", "preview");
+        sent_while_disabled.account_id = account_id.to_string();
+        sent_while_disabled.id = stable_message_id(account_id, "Sent", 1);
+        sent_while_disabled.thread_id = sent_while_disabled.id.clone();
+        sent_while_disabled.mailbox = "Sent".into();
+        sent_while_disabled.uid = 1;
+        sent_while_disabled.to_addresses = "Disabled <disabled@example.test>".into();
+        sent_while_disabled.cc_addresses.clear();
+        sent_while_disabled.bcc_addresses.clear();
+        assert_eq!(
+            store
+                .record_successful_outgoing_recipients_with_message_id(
+                    account_id,
+                    "<disabled-smtp@example.test>",
+                    &[contacted_recipient(
+                        "disabled-smtp@example.test",
+                        Some("Disabled SMTP")
+                    )],
+                    &[],
+                )
+                .await
+                .unwrap(),
+            0
+        );
+        let outgoing_markers: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM contacted_people_outgoing_messages WHERE account_id = ?",
+        )
+        .bind(account_id.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            outgoing_markers, 1,
+            "accepted Message-IDs stay suppressed while collection is disabled"
+        );
+
+        store
+            .set_autocomplete_suggestions_enabled(true)
+            .await
+            .unwrap();
+        // Simulate the next Sent SELECT after re-enabling. UID 1 existed on
+        // the server during the disabled interval but is first imported only
+        // now, so it must remain suppressed.
+        store
+            .save_mailbox_catalog_state(account_id, "Sent", "Sent", 10, 1, true)
+            .await
+            .unwrap();
+        store
+            .capture_contacted_people_sent_provider_cutoff(account_id, "Sent", 10, 1)
+            .await
+            .unwrap();
+        store.upsert_messages(&[sent_while_disabled]).await.unwrap();
+        assert_eq!(
+            store
+                .backfill_contacted_people_from_sent(account_id, &[], 10)
+                .await
+                .unwrap()
+                .processed_messages,
+            1
+        );
+        let after_reenable = store
+            .suggest_contacted_people("", Some(account_id))
+            .await
+            .unwrap();
+        assert_eq!(
+            after_reenable
+                .iter()
+                .map(|person| person.address.as_str())
+                .collect::<Vec<_>>(),
+            vec!["before-disable@example.test"]
+        );
+
+        let mut sent_after_reenable = message("Sent after re-enable", "preview");
+        sent_after_reenable.account_id = account_id.to_string();
+        sent_after_reenable.id = stable_message_id(account_id, "Sent", 2);
+        sent_after_reenable.thread_id = sent_after_reenable.id.clone();
+        sent_after_reenable.mailbox = "Sent".into();
+        sent_after_reenable.uid = 2;
+        sent_after_reenable.to_addresses = "After <after-enable@example.test>".into();
+        sent_after_reenable.cc_addresses.clear();
+        sent_after_reenable.bcc_addresses.clear();
+        store.upsert_messages(&[sent_after_reenable]).await.unwrap();
+        store
+            .backfill_contacted_people_from_sent(account_id, &[], 10)
+            .await
+            .unwrap();
+        assert!(store
+            .suggest_contacted_people("", Some(account_id))
+            .await
+            .unwrap()
+            .iter()
+            .any(|person| person.address == "after-enable@example.test"));
+    }
+
+    #[tokio::test]
+    async fn smtp_message_id_marker_survives_restart_clear_and_prevents_sent_double_counting() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("contacted-people.sqlite");
+        let account_id = uuid::Uuid::new_v4();
+        {
+            let store = Store::open(&database).await.unwrap();
+            save_test_account(&store, account_id).await;
+            assert_eq!(
+                store
+                    .record_successful_outgoing_recipients_with_message_id(
+                        account_id,
+                        "<smtp-accepted@example.test>",
+                        &[contacted_recipient(
+                            "recipient@example.test",
+                            Some("Recipient")
+                        )],
+                        &[],
+                    )
+                    .await
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                store
+                    .record_successful_outgoing_recipients_with_message_id(
+                        account_id,
+                        "<smtp-accepted@example.test>",
+                        &[contacted_recipient(
+                            "recipient@example.test",
+                            Some("Recipient")
+                        )],
+                        &[],
+                    )
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+
+        let store = Store::open(&database).await.unwrap();
+        let mut sent_copy = message("Provider Sent copy", "preview");
+        sent_copy.account_id = account_id.to_string();
+        sent_copy.id = stable_message_id(account_id, "Sent", 1);
+        sent_copy.thread_id = sent_copy.id.clone();
+        sent_copy.mailbox = "Sent".into();
+        sent_copy.uid = 1;
+        sent_copy.message_id = Some("<smtp-accepted@example.test>".into());
+        sent_copy.to_addresses = "Recipient <recipient@example.test>".into();
+        sent_copy.cc_addresses.clear();
+        sent_copy.bcc_addresses.clear();
+        store.upsert_messages(&[sent_copy]).await.unwrap();
+        assert_eq!(
+            store
+                .backfill_contacted_people_from_sent(account_id, &[], 10)
+                .await
+                .unwrap()
+                .processed_messages,
+            1
+        );
+        let learned = store
+            .suggest_contacted_people("recipient", Some(account_id))
+            .await
+            .unwrap();
+        assert_eq!(learned.len(), 1);
+        assert_eq!(learned[0].send_count, 1);
+
+        store.clear_contacted_people().await.unwrap();
+        let outgoing_markers_after_clear: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM contacted_people_outgoing_messages WHERE account_id = ?",
+        )
+        .bind(account_id.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(outgoing_markers_after_clear, 1);
+        assert!(store
+            .suggest_contacted_people("", Some(account_id))
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .record_successful_outgoing_recipients_with_message_id(
+                    account_id,
+                    "<after-clear@example.test>",
+                    &[contacted_recipient(
+                        "after-clear@example.test",
+                        Some("After clear")
+                    )],
+                    &[],
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        store.delete_account(account_id).await.unwrap();
+        let outgoing_markers_after_removal: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM contacted_people_outgoing_messages WHERE account_id = ?",
+        )
+        .bind(account_id.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(outgoing_markers_after_removal, 0);
+    }
+
+    #[tokio::test]
+    async fn sent_backfill_uidvalidity_rollover_allows_reused_uid_but_deduplicates_rfc_message_id()
+    {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        store
+            .save_mailbox_catalog_state(account_id, "Sent", "Sent", 1, 1, true)
+            .await
+            .unwrap();
+        let mut original = message("Original Sent", "preview");
+        original.account_id = account_id.to_string();
+        original.id = stable_message_id(account_id, "Sent", 42);
+        original.thread_id = original.id.clone();
+        original.mailbox = "Sent".into();
+        original.uid = 42;
+        original.message_id = Some("<original@example.test>".into());
+        original.to_addresses = "Original <original@example.test>".into();
+        original.cc_addresses.clear();
+        original.bcc_addresses.clear();
+        store.upsert_messages(&[original]).await.unwrap();
+        store
+            .backfill_contacted_people_from_sent(account_id, &[], 10)
+            .await
+            .unwrap();
+
+        store
+            .reset_mailbox_catalog(account_id, "Sent")
+            .await
+            .unwrap();
+        store
+            .save_mailbox_catalog_state(account_id, "Sent", "Sent", 2, 1, true)
+            .await
+            .unwrap();
+        let mut replacement = message("Replacement Sent", "preview");
+        replacement.account_id = account_id.to_string();
+        replacement.id = stable_message_id(account_id, "Sent", 42);
+        replacement.thread_id = replacement.id.clone();
+        replacement.mailbox = "Sent".into();
+        replacement.uid = 42;
+        replacement.message_id = Some("<replacement@example.test>".into());
+        replacement.to_addresses = "Replacement <replacement@example.test>".into();
+        replacement.cc_addresses.clear();
+        replacement.bcc_addresses.clear();
+        store.upsert_messages(&[replacement.clone()]).await.unwrap();
+        store
+            .backfill_contacted_people_from_sent(account_id, &[], 10)
+            .await
+            .unwrap();
+        assert!(store
+            .suggest_contacted_people("replacement", Some(account_id))
+            .await
+            .unwrap()
+            .iter()
+            .any(|person| person.address == "replacement@example.test"));
+
+        store
+            .reset_mailbox_catalog(account_id, "Sent")
+            .await
+            .unwrap();
+        store
+            .save_mailbox_catalog_state(account_id, "Sent", "Sent", 3, 1, true)
+            .await
+            .unwrap();
+        store.upsert_messages(&[replacement]).await.unwrap();
+        let repeat = store
+            .backfill_contacted_people_from_sent(account_id, &[], 10)
+            .await
+            .unwrap();
+        assert_eq!(repeat.changed_people, 0);
+        assert_eq!(
+            store
+                .suggest_contacted_people("replacement", Some(account_id))
+                .await
+                .unwrap()[0]
+                .send_count,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn account_removal_keeps_other_people_contributions_and_clear_removes_history() {
+        let store = Store::in_memory().await.unwrap();
+        let first_account = uuid::Uuid::new_v4();
+        let second_account = uuid::Uuid::new_v4();
+        save_test_account(&store, first_account).await;
+        save_test_account(&store, second_account).await;
+        for (account_id, display_name) in [
+            (first_account, "Work contact"),
+            (second_account, "Personal contact"),
+        ] {
+            store
+                .record_successful_outgoing_recipients(
+                    account_id,
+                    &[contacted_recipient(
+                        "shared@example.test",
+                        Some(display_name),
+                    )],
+                    &[],
+                )
+                .await
+                .unwrap();
+        }
+        store
+            .record_successful_outgoing_recipients(
+                first_account,
+                &[contacted_recipient(
+                    "only-first@example.test",
+                    Some("Only first"),
+                )],
+                &[],
+            )
+            .await
+            .unwrap();
+        store.delete_account(first_account).await.unwrap();
+        let retained = store
+            .suggest_contacted_people("", Some(second_account))
+            .await
+            .unwrap();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].address, "shared@example.test");
+        assert_eq!(retained[0].send_count, 1);
+        assert_eq!(retained[0].account_send_count, 1);
+        assert_eq!(
+            retained[0].display_name.as_deref(),
+            Some("Personal contact")
+        );
+        assert_eq!(
+            retained[0].formatted_address,
+            "Personal contact <shared@example.test>"
+        );
+        store.clear_contacted_people().await.unwrap();
+        assert!(store
+            .suggest_contacted_people("", Some(second_account))
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn adding_an_account_hides_its_existing_address_from_contact_suggestions() {
+        let store = Store::in_memory().await.unwrap();
+        let sender = uuid::Uuid::new_v4();
+        save_test_account(&store, sender).await;
+        store
+            .record_successful_outgoing_recipients(
+                sender,
+                &[contacted_recipient(
+                    "later-owner@example.test",
+                    Some("Later owner"),
+                )],
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(store
+            .suggest_contacted_people("later-owner", Some(sender))
+            .await
+            .unwrap()
+            .iter()
+            .any(|person| person.address == "later-owner@example.test"));
+
+        let second = uuid::Uuid::new_v4();
+        store
+            .save_account(&account_with_id(second, "later-owner@example.test"))
+            .await
+            .unwrap();
+        assert!(!store
+            .suggest_contacted_people("later-owner", Some(sender))
+            .await
+            .unwrap()
+            .iter()
+            .any(|person| person.address == "later-owner@example.test"));
+    }
+
+    #[tokio::test]
+    async fn unicode_owner_address_added_after_learning_is_excluded_from_suggestions() {
+        let store = Store::in_memory().await.unwrap();
+        let sender = uuid::Uuid::new_v4();
+        save_test_account(&store, sender).await;
+        store
+            .record_successful_outgoing_recipients(
+                sender,
+                &[contacted_recipient("münich@example.test", Some("Münich"))],
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .suggest_contacted_people("münich", Some(sender))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        store
+            .save_account(&account_with_id(
+                uuid::Uuid::new_v4(),
+                "MÜNICH@example.test",
+            ))
+            .await
+            .unwrap();
+        assert!(store
+            .suggest_contacted_people("münich", Some(sender))
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn account_removal_recomputes_contacted_people_from_enabled_accounts_only() {
+        let store = Store::in_memory().await.unwrap();
+        let removed = uuid::Uuid::new_v4();
+        let enabled = uuid::Uuid::new_v4();
+        let disabled = uuid::Uuid::new_v4();
+        save_test_account(&store, removed).await;
+        save_test_account(&store, enabled).await;
+        save_test_account(&store, disabled).await;
+        let recipient = contacted_recipient("aggregate@example.test", Some("Enabled"));
+        store
+            .record_successful_outgoing_recipients(removed, std::slice::from_ref(&recipient), &[])
+            .await
+            .unwrap();
+        store
+            .record_successful_outgoing_recipients(enabled, std::slice::from_ref(&recipient), &[])
+            .await
+            .unwrap();
+        for _ in 0..3 {
+            store
+                .record_successful_outgoing_recipients(
+                    disabled,
+                    &[contacted_recipient(
+                        "aggregate@example.test",
+                        Some("Disabled"),
+                    )],
+                    &[],
+                )
+                .await
+                .unwrap();
+        }
+        let mut disabled_account = store.account(disabled).await.unwrap().unwrap();
+        disabled_account.enabled = false;
+        store.save_account(&disabled_account).await.unwrap();
+
+        store.delete_account(removed).await.unwrap();
+        let suggestion = store
+            .suggest_contacted_people("aggregate", Some(enabled))
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(suggestion.send_count, 1);
+        assert_eq!(suggestion.display_name.as_deref(), Some("Enabled"));
+        let enabled_id = enabled.to_string();
+        assert_eq!(suggestion.account_id.as_deref(), Some(enabled_id.as_str()));
+        assert_eq!(
+            store
+                .suggest_contacted_people("aggregate", None)
+                .await
+                .unwrap()
+                .remove(0)
+                .account_id,
+            None,
+            "a global fallback has no preferred-account contribution"
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_account_contributions_are_hidden_and_reappear_when_reenabled() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        store
+            .record_successful_outgoing_recipients(
+                account_id,
+                &[contacted_recipient(
+                    "paused-account@example.test",
+                    Some("Paused"),
+                )],
+                &[],
+            )
+            .await
+            .unwrap();
+        let mut account = store.account(account_id).await.unwrap().unwrap();
+        account.enabled = false;
+        store.save_account(&account).await.unwrap();
+        assert!(store
+            .suggest_contacted_people("paused-account", None)
+            .await
+            .unwrap()
+            .is_empty());
+        account.enabled = true;
+        store.save_account(&account).await.unwrap();
+        assert_eq!(
+            store
+                .suggest_contacted_people("paused-account", Some(account_id))
+                .await
+                .unwrap()[0]
+                .send_count,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn suggestions_rank_and_report_only_enabled_account_contributions() {
+        let store = Store::in_memory().await.unwrap();
+        let active = uuid::Uuid::new_v4();
+        let disabled = uuid::Uuid::new_v4();
+        save_test_account(&store, active).await;
+        save_test_account(&store, disabled).await;
+        let person = contacted_recipient("mixed-history@example.test", Some("Mixed history"));
+        store
+            .record_successful_outgoing_recipients(active, std::slice::from_ref(&person), &[])
+            .await
+            .unwrap();
+        for _ in 0..3 {
+            store
+                .record_successful_outgoing_recipients(disabled, std::slice::from_ref(&person), &[])
+                .await
+                .unwrap();
+        }
+        let mut disabled_account = store.account(disabled).await.unwrap().unwrap();
+        disabled_account.enabled = false;
+        store.save_account(&disabled_account).await.unwrap();
+
+        let suggestion = store
+            .suggest_contacted_people("mixed-history", Some(active))
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(suggestion.send_count, 1);
+        assert_eq!(suggestion.account_send_count, 1);
+
+        disabled_account.enabled = true;
+        store.save_account(&disabled_account).await.unwrap();
+        assert_eq!(
+            store
+                .suggest_contacted_people("mixed-history", Some(active))
+                .await
+                .unwrap()[0]
+                .send_count,
+            4,
+            "disabled contributions remain local and return only after re-enable"
+        );
+    }
+
+    #[tokio::test]
+    async fn disabling_an_account_rebuilds_active_display_name_match_tokens() {
+        let store = Store::in_memory().await.unwrap();
+        let alice_account = uuid::Uuid::new_v4();
+        let bob_account = uuid::Uuid::new_v4();
+        save_test_account(&store, alice_account).await;
+        save_test_account(&store, bob_account).await;
+        let recipient = "shared-name@example.test";
+        store
+            .record_successful_outgoing_recipients(
+                bob_account,
+                &[contacted_recipient(recipient, Some("Bob Active"))],
+                &[],
+            )
+            .await
+            .unwrap();
+        store
+            .record_successful_outgoing_recipients(
+                alice_account,
+                &[contacted_recipient(recipient, Some("Alice Disabled"))],
+                &[],
+            )
+            .await
+            .unwrap();
+        let mut alice = store.account(alice_account).await.unwrap().unwrap();
+        alice.enabled = false;
+        store.save_account(&alice).await.unwrap();
+
+        assert!(store
+            .suggest_contacted_people("alice", Some(bob_account))
+            .await
+            .unwrap()
+            .is_empty());
+        let active = store
+            .suggest_contacted_people("bob", Some(bob_account))
+            .await
+            .unwrap();
+        assert_eq!(active[0].address, recipient);
+        assert_eq!(active[0].display_name.as_deref(), Some("Bob Active"));
+        assert_eq!(active[0].send_count, 1);
+    }
+
+    #[tokio::test]
+    async fn later_hide_and_clear_win_over_an_earlier_accepted_send() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let recipient = contacted_recipient("ordered@example.test", Some("Ordered"));
+        store
+            .record_successful_outgoing_recipients(
+                account_id,
+                std::slice::from_ref(&recipient),
+                &[],
+            )
+            .await
+            .unwrap();
+        let accepted_before_hide = store
+            .reserve_contacted_people_action_sequence()
+            .await
+            .unwrap();
+        store
+            .hide_contacted_person("ordered@example.test")
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .record_successful_outgoing_recipients_at_sequence(
+                    account_id,
+                    std::slice::from_ref(&recipient),
+                    &[],
+                    accepted_before_hide,
+                )
+                .await
+                .unwrap(),
+            1,
+            "the send may be counted, but a later hide remains visible state"
+        );
+        assert!(store
+            .suggest_contacted_people("ordered", Some(account_id))
+            .await
+            .unwrap()
+            .is_empty());
+
+        let accepted_after_hide = store
+            .reserve_contacted_people_action_sequence()
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .record_successful_outgoing_recipients_at_sequence(
+                    account_id,
+                    std::slice::from_ref(&recipient),
+                    &[],
+                    accepted_after_hide,
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(store
+            .suggest_contacted_people("ordered", Some(account_id))
+            .await
+            .unwrap()
+            .iter()
+            .any(|person| person.address == "ordered@example.test"));
+
+        let accepted_before_clear = store
+            .reserve_contacted_people_action_sequence()
+            .await
+            .unwrap();
+        store.clear_contacted_people().await.unwrap();
+        assert_eq!(
+            store
+                .record_successful_outgoing_recipients_at_sequence(
+                    account_id,
+                    std::slice::from_ref(&recipient),
+                    &[],
+                    accepted_before_clear,
+                )
+                .await
+                .unwrap(),
+            0,
+            "a send accepted before Clear cannot repopulate history"
+        );
+        let accepted_after_clear = store
+            .reserve_contacted_people_action_sequence()
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .record_successful_outgoing_recipients_at_sequence(
+                    account_id,
+                    std::slice::from_ref(&recipient),
+                    &[],
+                    accepted_after_clear,
+                )
+                .await
+                .unwrap(),
+            1,
+            "a later accepted send starts a new local history"
+        );
+        assert!(store
+            .suggest_contacted_people("ordered", Some(account_id))
+            .await
+            .unwrap()
+            .iter()
+            .any(|person| person.address == "ordered@example.test"));
+    }
+
+    #[tokio::test]
+    async fn contacted_people_action_sequences_make_clear_and_hide_causal() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let recipient = contacted_recipient("sequenced@example.test", Some("Sequenced"));
+        let accepted_before_clear = store
+            .reserve_contacted_people_action_sequence()
+            .await
+            .unwrap();
+        store.clear_contacted_people().await.unwrap();
+        assert_eq!(
+            store
+                .record_successful_outgoing_recipients_at_sequence(
+                    account_id,
+                    std::slice::from_ref(&recipient),
+                    &[],
+                    accepted_before_clear
+                )
+                .await
+                .unwrap(),
+            0
+        );
+        let accepted_after_clear = store
+            .reserve_contacted_people_action_sequence()
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .record_successful_outgoing_recipients_at_sequence(
+                    account_id,
+                    std::slice::from_ref(&recipient),
+                    &[],
+                    accepted_after_clear
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        store
+            .hide_contacted_person("sequenced@example.test")
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .record_successful_outgoing_recipients_at_sequence(
+                    account_id,
+                    std::slice::from_ref(&recipient),
+                    &[],
+                    accepted_after_clear
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(store
+            .suggest_contacted_people("sequenced", Some(account_id))
+            .await
+            .unwrap()
+            .is_empty());
+        let accepted_after_hide = store
+            .reserve_contacted_people_action_sequence()
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .record_successful_outgoing_recipients_at_sequence(
+                    account_id,
+                    std::slice::from_ref(&recipient),
+                    &[],
+                    accepted_after_hide
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(store
+            .suggest_contacted_people("sequenced", Some(account_id))
+            .await
+            .unwrap()
+            .iter()
+            .any(|person| person.address == "sequenced@example.test"));
+    }
+
+    #[tokio::test]
+    async fn autocomplete_suggestions_setting_defaults_to_enabled_and_persists() {
+        let store = Store::in_memory().await.unwrap();
+        assert!(store.autocomplete_suggestions_enabled().await.unwrap());
+        store
+            .set_autocomplete_suggestions_enabled(false)
+            .await
+            .unwrap();
+        assert!(!store.autocomplete_suggestions_enabled().await.unwrap());
+        store
+            .set_autocomplete_suggestions_enabled(true)
+            .await
+            .unwrap();
+        assert!(store.autocomplete_suggestions_enabled().await.unwrap());
+    }
+
+    #[test]
+    fn contacted_person_suggestion_uses_the_tauri_snake_case_payload_contract() {
+        let suggestion = ContactedPersonSuggestion {
+            address: "recipient@example.test".into(),
+            display_name: Some("Recipient".into()),
+            formatted_address: "Recipient <recipient@example.test>".into(),
+            first_contacted_at: "2026-09-01T10:00:00Z".parse().unwrap(),
+            last_contacted_at: "2026-09-02T10:00:00Z".parse().unwrap(),
+            send_count: 3,
+            account_send_count: 2,
+            account_last_contacted_at: Some("2026-09-02T10:00:00Z".parse().unwrap()),
+            account_id: Some("account-1".into()),
+            hidden: false,
+        };
+        let value = serde_json::to_value(suggestion).unwrap();
+        let mut keys = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "account_id",
+                "account_last_contacted_at",
+                "account_send_count",
+                "address",
+                "display_name",
+                "first_contacted_at",
+                "formatted_address",
+                "hidden",
+                "last_contacted_at",
+                "send_count",
+            ]
+        );
+        assert!(value.get("formattedAddress").is_none());
+    }
+
+    #[tokio::test]
+    async fn clear_history_uses_provider_cutoff_across_restart_and_allows_new_sent_mail() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("contacted-people.sqlite");
+        let account_id = uuid::Uuid::new_v4();
+        {
+            let store = Store::open(&database).await.unwrap();
+            save_test_account(&store, account_id).await;
+            let mut previously_backfilled = message("Previously backfilled", "preview");
+            previously_backfilled.account_id = account_id.to_string();
+            previously_backfilled.id = stable_message_id(account_id, "Sent", 1);
+            previously_backfilled.thread_id = previously_backfilled.id.clone();
+            previously_backfilled.mailbox = "Sent".into();
+            previously_backfilled.uid = 1;
+            previously_backfilled.to_addresses = "Known <known@example.test>".into();
+            previously_backfilled.cc_addresses.clear();
+            previously_backfilled.bcc_addresses.clear();
+            previously_backfilled.received_at = "2020-01-01T10:00:00Z".parse().unwrap();
+            let mut future_dated_before_clear = message("Future-dated before clear", "preview");
+            future_dated_before_clear.account_id = account_id.to_string();
+            future_dated_before_clear.id = stable_message_id(account_id, "Sent", 3);
+            future_dated_before_clear.thread_id = future_dated_before_clear.id.clone();
+            future_dated_before_clear.mailbox = "Sent".into();
+            future_dated_before_clear.uid = 3;
+            future_dated_before_clear.to_addresses = "Future <future@example.test>".into();
+            future_dated_before_clear.cc_addresses.clear();
+            future_dated_before_clear.bcc_addresses.clear();
+            future_dated_before_clear.received_at = "2999-01-01T00:00:00Z".parse().unwrap();
+            store
+                .upsert_messages(&[previously_backfilled, future_dated_before_clear])
+                .await
+                .unwrap();
+            assert_eq!(
+                store
+                    .backfill_contacted_people_from_sent(account_id, &[], 1)
+                    .await
+                    .unwrap()
+                    .processed_messages,
+                1
+            );
+            store.clear_contacted_people().await.unwrap();
+            assert!(store
+                .suggest_contacted_people("", Some(account_id))
+                .await
+                .unwrap()
+                .is_empty());
+        }
+
+        let store = Store::open(&database).await.unwrap();
+        store
+            .save_mailbox_catalog_state(account_id, "Sent", "Sent", 10, 3, true)
+            .await
+            .unwrap();
+        store
+            .capture_contacted_people_sent_provider_cutoff(account_id, "Sent", 10, 3)
+            .await
+            .unwrap();
+        // This old server UID was not locally catalogued until after Clear.
+        // A trusted server cutoff, not the Date header or discovery time,
+        // keeps it private when it is eventually imported.
+        let mut old_server_message = message("Old server Sent", "preview");
+        old_server_message.account_id = account_id.to_string();
+        old_server_message.id = stable_message_id(account_id, "Sent", 2);
+        old_server_message.thread_id = old_server_message.id.clone();
+        old_server_message.mailbox = "Sent".into();
+        old_server_message.uid = 2;
+        old_server_message.to_addresses = "Old <old@example.test>".into();
+        old_server_message.cc_addresses.clear();
+        old_server_message.bcc_addresses.clear();
+        old_server_message.received_at = "2020-01-02T10:00:00Z".parse().unwrap();
+        store.upsert_messages(&[old_server_message]).await.unwrap();
+        // UID 1 was processed before this mailbox had a trusted UIDVALIDITY.
+        // Scan it once more to attach the provider identity marker, while the
+        // RFC Message-ID marker prevents its recipient from being relearned.
+        assert_eq!(
+            store
+                .backfill_contacted_people_from_sent(account_id, &[], 10)
+                .await
+                .unwrap()
+                .processed_messages,
+            2
+        );
+        assert!(store
+            .suggest_contacted_people("", Some(account_id))
+            .await
+            .unwrap()
+            .is_empty());
+
+        // A Sent message discovered after Clear is eligible even if a remote
+        // client supplied an old Date. The local catalogue timestamp, rather
+        // than that provider-controlled Date, is the privacy boundary.
+        let mut newly_catalogued_after_clear = message("Newly discovered Sent", "preview");
+        newly_catalogued_after_clear.account_id = account_id.to_string();
+        newly_catalogued_after_clear.id = stable_message_id(account_id, "Sent", 4);
+        newly_catalogued_after_clear.thread_id = newly_catalogued_after_clear.id.clone();
+        newly_catalogued_after_clear.mailbox = "Sent".into();
+        newly_catalogued_after_clear.uid = 4;
+        newly_catalogued_after_clear.to_addresses = "New client <new-client@example.test>".into();
+        newly_catalogued_after_clear.cc_addresses.clear();
+        newly_catalogued_after_clear.bcc_addresses.clear();
+        newly_catalogued_after_clear.received_at = "2000-01-01T00:00:00Z".parse().unwrap();
+        store
+            .upsert_messages(&[newly_catalogued_after_clear])
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .backfill_contacted_people_from_sent(account_id, &[], 10)
+                .await
+                .unwrap()
+                .processed_messages,
+            1
+        );
+        assert_eq!(
+            store
+                .suggest_contacted_people("", Some(account_id))
+                .await
+                .unwrap()
+                .iter()
+                .map(|person| person.address.as_str())
+                .collect::<Vec<_>>(),
+            vec!["new-client@example.test"]
+        );
+        store
+            .record_successful_outgoing_recipients(
+                account_id,
+                &[contacted_recipient("manual@example.test", Some("Manual"))],
+                &[],
+            )
+            .await
+            .unwrap();
+        let after_send = store
+            .suggest_contacted_people("", Some(account_id))
+            .await
+            .unwrap();
+        assert_eq!(
+            after_send
+                .iter()
+                .map(|person| person.address.as_str())
+                .collect::<Vec<_>>(),
+            vec!["manual@example.test", "new-client@example.test"]
+        );
     }
 
     fn fixed_seed_order(len: usize, mut seed: u64) -> Vec<usize> {
@@ -7353,6 +15084,165 @@ mod tests {
         assert_eq!(results.len(), 1);
     }
 
+    #[tokio::test]
+    async fn local_search_evaluates_parser_terms_before_conversation_paging() {
+        let store = Store::in_memory().await.unwrap();
+        let mut matching = message("Quarterly invoice", "Body preview");
+        matching.id = "search-matching".into();
+        matching.mailbox = "Projects/2026".into();
+        matching.cc_addresses = "Helen Example <helen@example.com>".into();
+        matching.received_at = "2026-09-05T12:00:00Z".parse().unwrap();
+        matching.is_read = true;
+        matching.is_flagged = true;
+        matching.is_answered = true;
+        matching.is_draft = true;
+        matching.has_attachments = true;
+        let mut non_matching = matching.clone();
+        non_matching.id = "search-non-matching".into();
+        non_matching.uid = 2;
+        non_matching.subject = "Quarterly update".into();
+        store
+            .upsert_messages(&[matching.clone(), non_matching])
+            .await
+            .unwrap();
+        let reloaded = store.message(&matching.id).await.unwrap().unwrap();
+        assert!(reloaded.is_answered);
+        assert!(reloaded.is_draft);
+        sqlx::query("INSERT INTO message_attachment_catalogue(message_id, filename, mime_type, size_bytes, is_inline, presentation) VALUES (?, 'invoice.pdf', 'application/pdf', 1, 0, 'downloadable')")
+            .bind(&matching.id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        let query = SearchQuery {
+            text: "subject:\"quarterly invoice\" in:Projects/* cc:helen after:2026-09-01 has:attachment filename:invoice* filetype:pdf is:read is:flagged is:answered is:draft".into(),
+            ..Default::default()
+        };
+        assert_eq!(store.search(&query).await.unwrap()[0].id, matching.id);
+        assert_eq!(
+            store.search_conversations(&query).await.unwrap()[0]
+                .latest
+                .id,
+            matching.id
+        );
+
+        let boolean = SearchQuery {
+            text: "subject:missing OR (subject:invoice AND NOT cc:absent)".into(),
+            ..Default::default()
+        };
+        assert_eq!(store.search(&boolean).await.unwrap().len(), 1);
+        // `has:noattachment` is only a partial SQLite candidate while MIME
+        // metadata is being catalogued. Its negation and the surrounding OR
+        // must therefore broaden to canonical evaluation instead of dropping
+        // the second row, which has only the durable attachment presence bit.
+        let fallback = SearchQuery {
+            text: "NOT has:noattachment OR subject:missing".into(),
+            ..Default::default()
+        };
+        assert_eq!(store.search(&fallback).await.unwrap().len(), 2);
+        let malformed = SearchQuery {
+            text: "subject:\"unterminated".into(),
+            ..Default::default()
+        };
+        assert!(store
+            .search(&malformed)
+            .await
+            .unwrap_err()
+            .is::<crate::search::SearchParseError>());
+    }
+
+    #[tokio::test]
+    async fn conversation_search_evidence_uses_actual_older_body_and_attachment_matches() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let now = Utc::now();
+        let mut older = message("Original", "");
+        older.id = "evidence-older".into();
+        older.account_id = account_id.to_string();
+        older.message_id = Some("<evidence-older@example.test>".into());
+        older.received_at = now - chrono::Duration::minutes(2);
+        older.content_state = "headers_only".into();
+
+        let mut attachment_match = message("Re: Original", "No matching body");
+        attachment_match.id = "evidence-attachment".into();
+        attachment_match.account_id = account_id.to_string();
+        attachment_match.uid = 2;
+        attachment_match.message_id = Some("<evidence-attachment@example.test>".into());
+        attachment_match.in_reply_to = older.message_id.clone();
+        attachment_match.received_at = now - chrono::Duration::minutes(1);
+        attachment_match.attachments.push(AttachmentData {
+            attachment: Attachment {
+                id: "evidence-attachment:0".into(),
+                message_id: attachment_match.id.clone(),
+                filename: "report.pdf".into(),
+                mime_type: "application/pdf".into(),
+                size_bytes: 7,
+                is_inline: false,
+                presentation: AttachmentPresentation::Downloadable,
+                is_potentially_unsafe: false,
+            },
+            bytes: Vec::new(),
+        });
+
+        let mut newest = message("Re: Original", "Newest non-match");
+        newest.id = "evidence-newest".into();
+        newest.account_id = account_id.to_string();
+        newest.uid = 3;
+        newest.message_id = Some("<evidence-newest@example.test>".into());
+        newest.in_reply_to = attachment_match.message_id.clone();
+        newest.received_at = now;
+        store
+            .upsert_messages(&[older.clone(), attachment_match.clone(), newest.clone()])
+            .await
+            .unwrap();
+        store
+            .cache_search_body_text(&older.id, "Secret older body phrase")
+            .await
+            .unwrap();
+
+        let body_page = store
+            .search_conversation_page(&SearchQuery {
+                text: "body:\"older body phrase\"".into(),
+                account_ids: vec![account_id],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(body_page.conversations.len(), 1);
+        assert_eq!(body_page.conversations[0].latest.id, newest.id);
+        let body_evidence = body_page
+            .match_evidence
+            .get(&body_page.conversations[0].id)
+            .unwrap();
+        assert_eq!(
+            body_evidence.primary_message_id.as_deref(),
+            Some(older.id.as_str())
+        );
+        assert_eq!(body_evidence.matched_message_ids, vec![older.id.clone()]);
+        assert_eq!(body_evidence.match_count, 1);
+        assert_eq!(
+            body_evidence.excerpt.as_deref(),
+            Some("Secret older body phrase")
+        );
+
+        for query in ["filename:report*", "filetype:pdf"] {
+            let page = store
+                .search_conversation_page(&SearchQuery {
+                    text: query.into(),
+                    account_ids: vec![account_id],
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            let evidence = page.match_evidence.get(&page.conversations[0].id).unwrap();
+            assert_eq!(
+                evidence.primary_message_id.as_deref(),
+                Some(attachment_match.id.as_str()),
+                "{query} evidence must identify the actual matching member"
+            );
+        }
+    }
+
     #[test]
     fn search_query_defaults_unflagged_filter_for_existing_ipc_callers() {
         let query: SearchQuery = serde_json::from_value(serde_json::json!({
@@ -7980,26 +15870,66 @@ mod tests {
         assert_eq!(zero.conversations.len(), 1);
         assert!(zero.next_cursor.is_some());
 
-        let full = store
-            .search_conversation_page(&SearchQuery {
-                account_ids: vec![account_id],
-                limit: Some(500),
-                ..Default::default()
-            })
+        let query = SearchQuery {
+            account_ids: vec![account_id],
+            limit: Some(500),
+            ..Default::default()
+        };
+        // A 500-row page no longer turns a broad local search into a 501-row
+        // canonical evaluation. The first turn stops at the fixed candidate
+        // budget and returns its opaque V2 continuation state instead.
+        let first = store
+            .search_conversation_page_from_candidate(&query, None, &[])
             .await
             .unwrap();
-        assert_eq!(full.conversations.len(), 500);
-        assert!(full.next_cursor.is_some());
+        assert_eq!(first.conversations.len(), SEARCH_CANDIDATE_SCAN_BUDGET);
+        assert!(first.next_cursor.is_none());
+        assert!(first.candidate_cursor.is_some());
+        assert!(!first.candidate_exhausted);
+
+        let emitted = first
+            .conversations
+            .iter()
+            .map(|conversation| conversation.id.clone())
+            .collect::<Vec<_>>();
+        let remainder = store
+            .search_conversation_page_from_candidate(
+                &query,
+                first.candidate_cursor.as_ref(),
+                &emitted,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            remainder.conversations.len(),
+            501 - SEARCH_CANDIDATE_SCAN_BUDGET
+        );
+        assert!(remainder.candidate_cursor.is_none());
+        assert!(remainder.candidate_exhausted);
+        let all_ids = first
+            .conversations
+            .iter()
+            .chain(remainder.conversations.iter())
+            .map(|conversation| conversation.id.as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            all_ids.len(),
+            501,
+            "continuation must not skip or repeat a thread"
+        );
     }
 
     #[test]
     fn conversation_page_serializes_the_tauri_continuation_as_next_cursor() {
         let page = MailConversationPage {
             conversations: Vec::new(),
+            match_evidence: BTreeMap::new(),
             next_cursor: Some(MailCursor {
                 received_at: "2026-07-27T12:00:00Z".parse().unwrap(),
                 id: "message-id".into(),
             }),
+            candidate_cursor: None,
+            candidate_exhausted: true,
         };
         let value = serde_json::to_value(page).unwrap();
         assert_eq!(value["nextCursor"]["id"], "message-id");
@@ -8078,6 +16008,17 @@ mod tests {
             .unwrap();
         assert_eq!(search.len(), 1);
         assert_eq!(search[0].message_count, 2);
+        assert_eq!(
+            search[0].latest.id, sent.id,
+            "the newest conversation display message remains intact when an older member matches"
+        );
+        assert!(
+            search[0]
+                .source_messages
+                .iter()
+                .any(|message| message.id == "inbox-root"),
+            "the matching source message remains part of the hydrated conversation"
+        );
 
         let mut follow_up = message("Re: Project update", "Incoming follow-up");
         follow_up.id = "incoming-follow-up".into();
@@ -8539,7 +16480,7 @@ mod tests {
         let mut spam = message("Re: Linked", "Spam copy");
         spam.id = "spam".into();
         spam.account_id = account_id.to_string();
-        spam.mailbox = "Spam".into();
+        spam.mailbox = "Spam::Bulk".into();
         spam.uid = 2;
         spam.message_id = Some("<spam@example.com>".into());
         spam.in_reply_to = Some("<normal@example.com>".into());
@@ -8569,7 +16510,470 @@ mod tests {
             .unwrap();
         assert_eq!(spam_view.len(), 1);
         assert_eq!(spam_view[0].messages.len(), 1);
-        assert_eq!(spam_view[0].messages[0].mailbox, "Spam");
+        assert_eq!(spam_view[0].messages[0].mailbox, "Spam::Bulk");
+    }
+
+    #[tokio::test]
+    async fn explicit_folder_search_keeps_spam_and_trash_in_flat_and_conversation_results() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let mut inbox = message("Inbox", "ordinary");
+        inbox.id = "folder-inbox".into();
+        inbox.account_id = account_id.to_string();
+        inbox.thread_id = inbox.id.clone();
+        let mut spam = message("Spam", "selected explicitly");
+        spam.id = "folder-spam".into();
+        spam.account_id = account_id.to_string();
+        spam.thread_id = spam.id.clone();
+        spam.mailbox = "Spam::Bulk".into();
+        spam.uid = 2;
+        let mut trash = message("Trash", "selected explicitly");
+        trash.id = "folder-trash".into();
+        trash.account_id = account_id.to_string();
+        trash.thread_id = trash.id.clone();
+        trash.mailbox = "Trash".into();
+        trash.uid = 3;
+        store
+            .upsert_messages(&[inbox, spam.clone(), trash.clone()])
+            .await
+            .unwrap();
+
+        for (text, expected) in [
+            ("in:Spam", vec![spam.id.clone()]),
+            ("in:spam", vec![spam.id.clone()]),
+            ("in:\"Bulk\"", vec![spam.id.clone()]),
+            ("in:Trash", vec![trash.id.clone()]),
+            ("in:TRASH", vec![trash.id.clone()]),
+            (
+                "in:*",
+                vec!["folder-inbox".into(), spam.id.clone(), trash.id.clone()],
+            ),
+            ("NOT in:Sent", vec!["folder-inbox".into()]),
+            (
+                "in:Inbox OR subject:explicitly",
+                vec!["folder-inbox".into()],
+            ),
+            ("NOT NOT in:Spam", vec![spam.id.clone()]),
+            ("", vec!["folder-inbox".into()]),
+        ] {
+            let query = SearchQuery {
+                text: text.into(),
+                account_ids: vec![account_id],
+                ..Default::default()
+            };
+            let mut flat = store
+                .search(&query)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|message| message.id)
+                .collect::<Vec<_>>();
+            let mut conversations = store
+                .search_conversation_page(&query)
+                .await
+                .unwrap()
+                .conversations
+                .into_iter()
+                .map(|conversation| conversation.latest.id)
+                .collect::<Vec<_>>();
+            flat.sort();
+            conversations.sort();
+            let mut expected = expected;
+            expected.sort();
+            assert_eq!(flat, expected, "flat {text:?}");
+            assert_eq!(conversations, expected, "conversation {text:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn alias_descendant_folder_search_is_case_and_diacritic_insensitive() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let mut spam = message("Spam child", "");
+        spam.id = "spam-alias-child".into();
+        spam.account_id = account_id.to_string();
+        spam.thread_id = spam.id.clone();
+        spam.mailbox = "Spam::Bülk/Child".into();
+        let mut trash = message("Trash child", "");
+        trash.id = "trash-alias-child".into();
+        trash.account_id = account_id.to_string();
+        trash.thread_id = trash.id.clone();
+        trash.uid = 2;
+        trash.mailbox = "Trash::Bîn/Child".into();
+        store
+            .upsert_messages(&[spam.clone(), trash.clone()])
+            .await
+            .unwrap();
+
+        for (text, expected) in [
+            ("in:bulk/*", spam.id.clone()),
+            ("in:BIN/*", trash.id.clone()),
+        ] {
+            let query = SearchQuery {
+                text: text.into(),
+                account_ids: vec![account_id],
+                ..Default::default()
+            };
+            assert_eq!(
+                store.search(&query).await.unwrap()[0].id,
+                expected,
+                "flat {text}"
+            );
+            assert_eq!(
+                store
+                    .search_conversation_page(&query)
+                    .await
+                    .unwrap()
+                    .conversations[0]
+                    .latest
+                    .id,
+                expected,
+                "conversation {text}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn selectable_mailboxes_keep_opaque_identity_and_memberships_account_scoped() {
+        let store = Store::in_memory().await.unwrap();
+        let account = AccountDraft {
+            email: "mailbox-catalogue@dakia.dev".into(),
+            display_name: "Mailbox catalogue".into(),
+            provider_id: Some("fastmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("fastmail").unwrap());
+        store.save_account(&account).await.unwrap();
+        let parent = store
+            .upsert_selectable_mailbox(
+                account.id,
+                &SelectableMailboxDraft {
+                    remote_path: "Projects".into(),
+                    local_path: Some("Projects".into()),
+                    hierarchy_delimiter: Some("/".into()),
+                    parent_id: None,
+                    parent_path: None,
+                    special_use: None,
+                    selectable: false,
+                    uid_validity: Some(7),
+                    catalogue_coverage: "partial".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let child_draft = SelectableMailboxDraft {
+            remote_path: "Projects/2026".into(),
+            local_path: Some("Projects/2026".into()),
+            hierarchy_delimiter: Some("/".into()),
+            parent_id: Some(parent.id.clone()),
+            parent_path: Some("Projects".into()),
+            special_use: Some("archive".into()),
+            selectable: true,
+            uid_validity: Some(9),
+            catalogue_coverage: "complete".into(),
+        };
+        let child = store
+            .upsert_selectable_mailbox(account.id, &child_draft)
+            .await
+            .unwrap();
+        let refreshed = store
+            .upsert_selectable_mailbox(account.id, &child_draft)
+            .await
+            .unwrap();
+        assert_eq!(child.id, refreshed.id, "upsert must retain the local ID");
+        assert_eq!(
+            store
+                .selectable_mailbox_catalogue(account.id)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+
+        let mut row = message("Membership", "body");
+        row.id = "membership-message".into();
+        row.account_id = account.id.to_string();
+        store.upsert_messages(&[row.clone()]).await.unwrap();
+        store
+            .set_message_mailbox_memberships(
+                account.id,
+                &row.id,
+                &[parent.id.clone(), child.id.clone(), child.id.clone()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .list_message_mailbox_memberships(account.id, &row.id)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(store
+            .delete_selectable_mailbox(account.id, &child.id)
+            .await
+            .unwrap());
+        assert_eq!(
+            store
+                .list_message_mailbox_memberships(account.id, &row.id)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "deleting a mailbox cascades only that membership"
+        );
+        store.delete_account(account.id).await.unwrap();
+        assert!(store
+            .selectable_mailbox_catalogue(account.id)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .list_message_mailbox_memberships(account.id, &row.id)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn authoritative_list_retirement_removes_omitted_mailbox_cache_state_and_memberships() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        store
+            .upsert_selectable_mailbox(
+                account_id,
+                &SelectableMailboxDraft {
+                    remote_path: "INBOX".into(),
+                    local_path: Some("INBOX".into()),
+                    hierarchy_delimiter: Some("/".into()),
+                    parent_id: None,
+                    parent_path: None,
+                    special_use: Some("\\Inbox".into()),
+                    selectable: true,
+                    uid_validity: Some(1),
+                    catalogue_coverage: "complete".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let retired = store
+            .upsert_selectable_mailbox(
+                account_id,
+                &SelectableMailboxDraft {
+                    remote_path: "Projects/2026".into(),
+                    local_path: Some("Projects/2026".into()),
+                    hierarchy_delimiter: Some("/".into()),
+                    parent_id: None,
+                    parent_path: Some("Projects".into()),
+                    special_use: None,
+                    selectable: true,
+                    uid_validity: Some(9),
+                    catalogue_coverage: "complete".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let storage = generic_mailbox_storage_identity("Projects/2026", "Projects/2026");
+        let mut row = message("Retired project", "must disappear");
+        row.id = "retired-project-message".into();
+        row.account_id = account_id.to_string();
+        row.mailbox = storage.clone();
+        store.upsert_messages(&[row.clone()]).await.unwrap();
+        store
+            .set_message_mailbox_memberships(account_id, &row.id, std::slice::from_ref(&retired.id))
+            .await
+            .unwrap();
+        store
+            .save_mailbox_catalog_state(account_id, &storage, "Projects/2026", 9, 1, true)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .retire_selectable_mailboxes_absent_from_authoritative_list(
+                    account_id,
+                    &HashSet::from(["INBOX".to_owned()]),
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .list_selectable_mailboxes(account_id)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|mailbox| mailbox.remote_path)
+                .collect::<Vec<_>>(),
+            vec!["INBOX"]
+        );
+        assert!(store.message(&row.id).await.unwrap().is_none());
+        assert!(store
+            .mailbox_catalog_state(account_id, &storage)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .list_message_mailbox_memberships(account_id, &row.id)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn folder_search_uses_logical_memberships_across_rfc_message_id_aliases() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let clients = store
+            .upsert_selectable_mailbox(
+                account_id,
+                &SelectableMailboxDraft {
+                    remote_path: "Clients".into(),
+                    local_path: Some("Clients".into()),
+                    hierarchy_delimiter: Some("/".into()),
+                    parent_id: None,
+                    parent_path: None,
+                    special_use: None,
+                    selectable: true,
+                    uid_validity: Some(1),
+                    catalogue_coverage: "complete".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let invoices = store
+            .upsert_selectable_mailbox(
+                account_id,
+                &SelectableMailboxDraft {
+                    remote_path: "Invoices".into(),
+                    local_path: Some("Invoices".into()),
+                    hierarchy_delimiter: Some("/".into()),
+                    parent_id: None,
+                    parent_path: None,
+                    special_use: None,
+                    selectable: true,
+                    uid_validity: Some(2),
+                    catalogue_coverage: "complete".into(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let mut inbox_copy = message("Shared invoice", "body");
+        inbox_copy.id = "logical-inbox-copy".into();
+        inbox_copy.account_id = account_id.to_string();
+        inbox_copy.mailbox = "Spam::Bulk".into();
+        inbox_copy.message_id = Some(" <shared@example.test> ".into());
+        inbox_copy.thread_id = inbox_copy.id.clone();
+        let mut archive_copy = inbox_copy.clone();
+        archive_copy.id = "logical-archive-copy".into();
+        archive_copy.mailbox = "Archive".into();
+        archive_copy.uid = 2;
+        archive_copy.message_id = Some("<SHARED@example.test>".into());
+        archive_copy.thread_id = archive_copy.id.clone();
+        store
+            .upsert_messages(&[inbox_copy.clone(), archive_copy.clone()])
+            .await
+            .unwrap();
+        store
+            .set_message_mailbox_memberships(
+                account_id,
+                &inbox_copy.id,
+                std::slice::from_ref(&clients.id),
+            )
+            .await
+            .unwrap();
+        store
+            .set_message_mailbox_memberships(
+                account_id,
+                &archive_copy.id,
+                std::slice::from_ref(&invoices.id),
+            )
+            .await
+            .unwrap();
+        let provider_paths = store
+            .logical_mailbox_paths_by_message_ids(std::slice::from_ref(&inbox_copy.id))
+            .await
+            .unwrap();
+        assert_eq!(
+            provider_paths.get(&inbox_copy.id),
+            Some(&vec!["Clients".into(), "Invoices".into()]),
+            "provider filtering receives memberships persisted by an earlier physical alias"
+        );
+
+        async fn matching_ids(store: &Store, account_id: AccountId, text: &str) -> HashSet<String> {
+            store
+                .search(&SearchQuery {
+                    text: text.into(),
+                    account_ids: vec![account_id],
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|message| message.id)
+                .collect::<HashSet<_>>()
+        }
+        let expected = HashSet::from([inbox_copy.id.clone(), archive_copy.id.clone()]);
+        assert_eq!(
+            matching_ids(&store, account_id, "in:Clients in:Invoices").await,
+            expected
+        );
+        let conversations = store
+            .search_conversations(&SearchQuery {
+                text: "in:Clients in:Invoices".into(),
+                account_ids: vec![account_id],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            conversations.iter().any(|conversation| {
+                conversation
+                    .source_messages
+                    .iter()
+                    .any(|message| message.id == inbox_copy.id)
+            }),
+            "a logical label must retain a matching physical Spam alias in conversation results"
+        );
+        assert_eq!(
+            matching_ids(&store, account_id, "in:\"Clients\" AND (in:Invoices)").await,
+            expected,
+            "quoted and nested folder scopes retain logical AND semantics"
+        );
+
+        // Replacing one physical row's provider result must not remove a
+        // membership reported for its RFC Message-ID sibling.
+        store
+            .set_message_mailbox_memberships(account_id, &inbox_copy.id, &[clients.id])
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .list_message_mailbox_memberships(account_id, &archive_copy.id)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|membership| membership.mailbox_id)
+                .collect::<Vec<_>>(),
+            vec![invoices.id]
+        );
+        assert_eq!(
+            matching_ids(&store, account_id, "in:Clients in:Invoices").await,
+            expected
+        );
     }
 
     #[tokio::test]
@@ -9394,17 +17798,435 @@ mod tests {
             },
             bytes: b"pdf".to_vec(),
         });
-        store.upsert_messages(&[message.clone()]).await.unwrap();
+        store
+            .upsert_messages(std::slice::from_ref(&message))
+            .await
+            .unwrap();
+        let catalogue: Vec<(String, String, i64, String)> = sqlx::query_as(
+            "SELECT filename, mime_type, size_bytes, presentation FROM message_attachment_catalogue WHERE message_id = ?",
+        )
+        .bind(&message.id)
+        .fetch_all(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            catalogue,
+            vec![(
+                "invoice.pdf".into(),
+                "application/pdf".into(),
+                3,
+                "downloadable".into(),
+            )]
+        );
+        let matches = store
+            .search(&SearchQuery {
+                text: "has:attachment filename:invoice* filetype:pdf".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            matches.iter().map(|row| &row.id).collect::<Vec<_>>(),
+            vec![&message.id]
+        );
         let listed = store.attachments(&message.id).await.unwrap();
         assert!(listed.is_empty());
         let stored = store
-            .messages_by_ids(&[message.id])
+            .messages_by_ids(&[message.id.clone()])
             .await
             .unwrap()
             .pop()
             .unwrap();
         assert!(stored.body_text.is_empty());
         assert!(stored.body_html.is_none());
+
+        message.has_attachments = false;
+        message.attachments.clear();
+        store
+            .upsert_messages(std::slice::from_ref(&message))
+            .await
+            .unwrap();
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_attachment_catalogue WHERE message_id = ?",
+        )
+        .bind(&message.id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            remaining, 0,
+            "an authoritative refresh replaces stale metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn attachment_catalogue_keeps_distinct_parts_with_identical_visible_metadata() {
+        let store = Store::in_memory().await.unwrap();
+        let mut message = message("Duplicate-looking MIME parts", "preview");
+        message.has_attachments = true;
+        for (id, presentation) in [
+            ("part-embedded", AttachmentPresentation::Embedded),
+            ("part-download", AttachmentPresentation::Downloadable),
+        ] {
+            message.attachments.push(AttachmentData {
+                attachment: Attachment {
+                    id: id.into(),
+                    message_id: message.id.clone(),
+                    filename: "logo.png".into(),
+                    mime_type: "image/png".into(),
+                    size_bytes: 42,
+                    is_inline: false,
+                    presentation,
+                    is_potentially_unsafe: false,
+                },
+                bytes: Vec::new(),
+            });
+        }
+        store
+            .upsert_messages(std::slice::from_ref(&message))
+            .await
+            .unwrap();
+        let catalogue: Vec<(String, String)> = sqlx::query_as(
+            "SELECT attachment_id, presentation FROM message_attachment_catalogue WHERE message_id = ? ORDER BY attachment_id",
+        )
+        .bind(&message.id)
+        .fetch_all(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            catalogue,
+            vec![
+                ("part-download".into(), "downloadable".into()),
+                ("part-embedded".into(), "embedded".into()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn search_body_text_cache_is_searchable_without_completing_the_reader() {
+        let store = Store::in_memory().await.unwrap();
+        let mut message = message("Remote result", "");
+        message.content_state = "headers_only".into();
+        message.body_html = None;
+        message.has_attachments = true;
+        message.attachments.push(AttachmentData {
+            attachment: Attachment {
+                id: format!("{}:0", message.id),
+                message_id: message.id.clone(),
+                filename: "contract.pdf".into(),
+                mime_type: "application/pdf".into(),
+                size_bytes: 7,
+                is_inline: false,
+                presentation: AttachmentPresentation::Downloadable,
+                is_potentially_unsafe: false,
+            },
+            bytes: b"ignored".to_vec(),
+        });
+        store
+            .upsert_messages(std::slice::from_ref(&message))
+            .await
+            .unwrap();
+
+        assert!(store
+            .cache_search_body_text(&message.id, "Confidential search-only phrase")
+            .await
+            .unwrap());
+        assert_eq!(
+            store.cached_search_body_text(&message.id).await.unwrap(),
+            Some("Confidential search-only phrase".into())
+        );
+        assert_eq!(
+            store
+                .search(&SearchQuery {
+                    text: "body:\"search-only phrase\"".into(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .iter()
+                .map(|row| &row.id)
+                .collect::<Vec<_>>(),
+            vec![&message.id]
+        );
+
+        let reader_message = store.message(&message.id).await.unwrap().unwrap();
+        assert_eq!(reader_message.content_state, "headers_only");
+        assert!(reader_message.body_text.is_empty());
+        assert!(reader_message.body_html.is_none());
+        assert!(store
+            .cached_message_content(&message.id)
+            .await
+            .unwrap()
+            .is_none());
+        let reader_cache_rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM message_content_cache WHERE message_id = ?")
+                .bind(&message.id)
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(reader_cache_rows, 0);
+        let search_cache_columns: (String, i64) = sqlx::query_as(
+            "SELECT body_text, byte_size FROM message_search_body_text WHERE message_id = ?",
+        )
+        .bind(&message.id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(search_cache_columns.0, "Confidential search-only phrase");
+        assert_eq!(
+            search_cache_columns.1,
+            i64::try_from("Confidential search-only phrase".len()).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn local_body_coverage_stays_partial_for_headers_only_messages_after_v2_completion() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let mut headers_only = message("Headers only", "");
+        headers_only.account_id = account_id.to_string();
+        headers_only.id = "coverage-headers".into();
+        headers_only.content_state = "headers_only".into();
+        let mut search_body = headers_only.clone();
+        search_body.id = "coverage-search".into();
+        search_body.uid = 2;
+        let mut reader_body = headers_only.clone();
+        reader_body.id = "coverage-reader".into();
+        reader_body.uid = 3;
+        let mut starred_body = headers_only.clone();
+        starred_body.id = "coverage-starred".into();
+        starred_body.uid = 4;
+        starred_body.is_flagged = true;
+        store
+            .upsert_messages(&[
+                headers_only.clone(),
+                search_body.clone(),
+                reader_body.clone(),
+                starred_body.clone(),
+            ])
+            .await
+            .unwrap();
+        store
+            .cache_search_body_text(&search_body.id, "search body")
+            .await
+            .unwrap();
+        store
+            .cache_message_content(&reader_body.id, false, cached_content("reader body"))
+            .await
+            .unwrap();
+        store
+            .cache_starred_message_content(&starred_body.id, cached_content("starred body"))
+            .await
+            .unwrap();
+
+        assert!(store.search_catalogue_v2_complete().await.unwrap());
+        assert_eq!(
+            store.local_body_index_coverage(account_id).await.unwrap(),
+            LocalBodyIndexCoverage {
+                account_id: account_id.to_string(),
+                catalogue_messages: 4,
+                searchable_bodies: 3,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn attachment_catalogue_presentation_column_migrates_old_rows_as_unknown() {
+        let store = Store::in_memory().await.unwrap();
+        let message = message("Old catalogue", "Metadata before presentation");
+        store
+            .upsert_messages(std::slice::from_ref(&message))
+            .await
+            .unwrap();
+
+        sqlx::query("DROP TABLE message_attachment_catalogue")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE message_attachment_catalogue (message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, filename TEXT NOT NULL, mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, is_inline INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(message_id, filename, mime_type, size_bytes, is_inline))")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO message_attachment_catalogue(message_id, filename, mime_type, size_bytes, is_inline) VALUES (?, 'legacy.pdf', 'application/pdf', 3, 0)")
+            .bind(&message.id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        store
+            .migrate_attachment_presentation_metadata()
+            .await
+            .unwrap();
+        let presentation: String = sqlx::query_scalar(
+            "SELECT presentation FROM message_attachment_catalogue WHERE message_id = ?",
+        )
+        .bind(&message.id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(presentation, "unknown");
+    }
+
+    #[tokio::test]
+    async fn inline_attachment_catalogue_rows_are_not_searchable_attachments() {
+        let store = Store::in_memory().await.unwrap();
+        let mut message = message("Signed message", "Inline signature image only");
+        // Keep this true to cover older provider data while the provider
+        // worker corrects its paperclip flag. Search must trust the catalogue
+        // distinction rather than treating every named inline CID part as a
+        // user-facing attachment.
+        message.has_attachments = true;
+        message.attachments.push(AttachmentData {
+            attachment: Attachment {
+                id: format!("{}:0", message.id),
+                message_id: message.id.clone(),
+                filename: "signature.png".into(),
+                mime_type: "image/png".into(),
+                size_bytes: 42,
+                is_inline: true,
+                presentation: AttachmentPresentation::Embedded,
+                is_potentially_unsafe: false,
+            },
+            bytes: Vec::new(),
+        });
+        store
+            .upsert_messages(std::slice::from_ref(&message))
+            .await
+            .unwrap();
+
+        for query in ["has:attachment", "filename:signature*", "filetype:image"] {
+            assert!(
+                store
+                    .search(&SearchQuery {
+                        text: query.into(),
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "{query} must ignore inline-only catalogue metadata"
+            );
+        }
+
+        let no_attachment = store
+            .search(&SearchQuery {
+                text: "has:noattachment".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            no_attachment
+                .iter()
+                .map(|message| &message.id)
+                .collect::<Vec<_>>(),
+            vec![&message.id],
+            "an inline-only catalogue row is not a user-facing attachment"
+        );
+    }
+
+    #[tokio::test]
+    async fn cid_attachments_marked_both_remain_searchable_files() {
+        let store = Store::in_memory().await.unwrap();
+        let mut message = message("Shared logo", "The CID image is also downloadable");
+        message.has_attachments = true;
+        message.attachments.push(AttachmentData {
+            attachment: Attachment {
+                id: format!("{}:0", message.id),
+                message_id: message.id.clone(),
+                filename: "brand-logo.png".into(),
+                mime_type: "image/png".into(),
+                size_bytes: 42,
+                is_inline: true,
+                presentation: AttachmentPresentation::Both,
+                is_potentially_unsafe: false,
+            },
+            bytes: Vec::new(),
+        });
+        store
+            .upsert_messages(std::slice::from_ref(&message))
+            .await
+            .unwrap();
+
+        let presentation: String = sqlx::query_scalar(
+            "SELECT presentation FROM message_attachment_catalogue WHERE message_id = ?",
+        )
+        .bind(&message.id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(presentation, "both");
+
+        for query in ["has:attachment", "filename:brand-logo*", "filetype:image"] {
+            assert_eq!(
+                store
+                    .search(&SearchQuery {
+                        text: query.into(),
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap()
+                    .iter()
+                    .map(|row| &row.id)
+                    .collect::<Vec<_>>(),
+                vec![&message.id],
+                "{query} must retain a CID file explicitly offered for download"
+            );
+        }
+        assert!(store
+            .search(&SearchQuery {
+                text: "has:noattachment".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn legacy_unknown_attachment_metadata_only_establishes_attachment_presence() {
+        let store = Store::in_memory().await.unwrap();
+        let mut message = message("Legacy attachment", "Old metadata");
+        message.has_attachments = true;
+        store
+            .upsert_messages(std::slice::from_ref(&message))
+            .await
+            .unwrap();
+        // Simulate a pre-presentation catalogue row. Its name/type came from
+        // a transport disposition, so only the existing non-inline state is
+        // safe to use until an authoritative MIME fetch classifies it.
+        sqlx::query("INSERT INTO message_attachment_catalogue(message_id, filename, mime_type, size_bytes, is_inline) VALUES (?, 'possibly-a-logo.png', 'image/png', 42, 0)")
+            .bind(&message.id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .search(&SearchQuery {
+                    text: "has:attachment".into(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .iter()
+                .map(|row| &row.id)
+                .collect::<Vec<_>>(),
+            vec![&message.id]
+        );
+        for query in ["filename:possibly-a-logo*", "filetype:image"] {
+            assert!(
+                store
+                    .search(&SearchQuery {
+                        text: query.into(),
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "{query} must not trust a legacy unknown filename or MIME type"
+            );
+        }
     }
 
     #[tokio::test]
@@ -9767,6 +18589,181 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generation_guard_rejects_provider_publication_after_the_last_precheck() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let generation = store.account_search_generation(account_id).await.unwrap();
+
+        // Model the narrow race: a provider worker has captured the current
+        // generation, then a foreground mutation becomes authoritative just
+        // before it attempts its catalogue/cache transaction.
+        store
+            .advance_account_search_generation(account_id)
+            .await
+            .unwrap();
+        let mut stale = message("stale provider subject", "stale provider body");
+        stale.id = "stale-provider-publication".into();
+        stale.account_id = account_id.to_string();
+        assert!(!store
+            .upsert_catalog_messages_if_account_generation(
+                account_id,
+                generation,
+                std::slice::from_ref(&stale),
+            )
+            .await
+            .unwrap());
+        assert!(store.message(&stale.id).await.unwrap().is_none());
+
+        let mailbox_draft = SelectableMailboxDraft {
+            remote_path: "INBOX".into(),
+            local_path: Some("INBOX".into()),
+            hierarchy_delimiter: Some("/".into()),
+            parent_id: None,
+            parent_path: None,
+            special_use: Some("inbox".into()),
+            selectable: true,
+            uid_validity: Some(77),
+            catalogue_coverage: "partial".into(),
+        };
+        assert!(
+            store
+                .upsert_selectable_mailbox_if_account_generation(
+                    account_id,
+                    generation,
+                    &mailbox_draft,
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(store
+            .selectable_mailbox_catalogue(account_id)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(!store
+            .save_mailbox_catalog_state_if_account_generation(
+                account_id, generation, "INBOX", "INBOX", 77, 1, false,
+            )
+            .await
+            .unwrap());
+        assert!(store
+            .mailbox_catalog_state(account_id, "INBOX")
+            .await
+            .unwrap()
+            .is_none());
+
+        store
+            .upsert_catalog_messages(&[stale.clone()])
+            .await
+            .unwrap();
+        let live_mailbox = store
+            .upsert_selectable_mailbox(account_id, &mailbox_draft)
+            .await
+            .unwrap();
+        assert!(!store
+            .set_message_mailbox_memberships_if_account_generation(
+                account_id,
+                generation,
+                &stale.id,
+                std::slice::from_ref(&live_mailbox.id),
+            )
+            .await
+            .unwrap());
+        assert!(store
+            .list_message_mailbox_memberships(account_id, &stale.id)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(!store
+            .cache_search_body_text_if_account_generation(
+                account_id,
+                generation,
+                &stale.id,
+                "stale cache body",
+            )
+            .await
+            .unwrap());
+        assert!(store
+            .cached_search_body_text(&stale.id)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn account_generation_advances_with_authoritative_account_reset_and_flag_changes() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let mut account = account_with_id(account_id, "generation@example.test");
+        store.save_account(&account).await.unwrap();
+        assert_eq!(
+            store.account_search_generation(account_id).await.unwrap(),
+            0
+        );
+
+        account.display_name = "Updated generation test".into();
+        store.save_account(&account).await.unwrap();
+        assert_eq!(
+            store.account_search_generation(account_id).await.unwrap(),
+            1
+        );
+
+        let mut row = message("generation flags", "body");
+        row.id = "generation-flag-row".into();
+        row.account_id = account_id.to_string();
+        store.upsert_catalog_messages(&[row.clone()]).await.unwrap();
+        store.set_message_read(&row.id, true).await.unwrap();
+        assert_eq!(
+            store.account_search_generation(account_id).await.unwrap(),
+            2
+        );
+        store.set_message_flagged(&row.id, true).await.unwrap();
+        assert_eq!(
+            store.account_search_generation(account_id).await.unwrap(),
+            3
+        );
+        store.reset_account_mail_index(account_id).await.unwrap();
+        assert_eq!(
+            store.account_search_generation(account_id).await.unwrap(),
+            4
+        );
+    }
+
+    #[tokio::test]
+    async fn local_flag_repairs_allow_legacy_orphans_but_respect_deleted_account_fences() {
+        let store = Store::in_memory().await.unwrap();
+        let orphan_account = uuid::Uuid::new_v4();
+        let mut row = message("legacy orphan", "body");
+        row.id = "legacy-orphan-flag-row".into();
+        row.account_id = orphan_account.to_string();
+        store.upsert_catalog_messages(&[row.clone()]).await.unwrap();
+
+        // Profiles upgraded from older releases can have catalogue rows whose
+        // account data was already cleaned up. Local maintenance remains safe
+        // and must not invent a generation/provider identity for that row.
+        store.set_message_read(&row.id, true).await.unwrap();
+        assert!(store.message(&row.id).await.unwrap().unwrap().is_read);
+        assert!(!sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM account_search_generations WHERE account_id = ?)"
+        )
+        .bind(orphan_account.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap());
+
+        sqlx::query("INSERT INTO deleted_account_tombstones(account_id, deleted_at) VALUES (?, ?)")
+            .bind(orphan_account.to_string())
+            .bind(Utc::now())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        assert!(store.set_message_flagged(&row.id, true).await.is_err());
+        assert!(!store.message(&row.id).await.unwrap().unwrap().is_flagged);
+    }
+
+    #[tokio::test]
     async fn catalogue_state_reconciles_deletions_flags_and_uidvalidity() {
         let store = Store::in_memory().await.unwrap();
         let account_id = uuid::Uuid::new_v4();
@@ -9813,6 +18810,7 @@ mod tests {
 
     #[tokio::test]
     async fn catalogue_handles_fifty_thousand_metadata_only_messages() {
+        let _large_dataset = crate::large_dataset_test_guard().await;
         let store = Store::in_memory().await.unwrap();
         let account_id = uuid::Uuid::new_v4();
         let mut base = message("Catalogue row", "preview only");
@@ -9837,15 +18835,317 @@ mod tests {
                 .unwrap();
         assert_eq!(count, 50_000);
         assert_eq!(body_bytes, 0);
+        // Time only the hot query path, not the deliberately large fixture
+        // transaction above. The SQL compiler should narrow the indexed
+        // subject candidate before canonical evaluation and pagination.
+        let search_started = Instant::now();
         let matches = store
             .search(&SearchQuery {
                 text: "needle".into(),
                 account_ids: vec![account_id],
+                limit: Some(25),
                 ..SearchQuery::default()
             })
             .await
             .unwrap();
+        assert!(
+            search_started.elapsed() < Duration::from_millis(250),
+            "first local search page exceeded the 250 ms target"
+        );
         assert_eq!(matches.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn broad_local_conversation_searches_stop_after_a_bounded_candidate_page() {
+        let _large_dataset = crate::large_dataset_test_guard().await;
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let mut base = message("Plain catalogue row", "preview only");
+        base.account_id = account_id.to_string();
+        base.mailbox = "Projects/2026".into();
+        let mut tx = store.pool.begin().await.unwrap();
+        for uid in 1..=50_000_i64 {
+            let mut row = base.clone();
+            row.id = format!("broad-local-{uid:05}");
+            row.thread_id = row.id.clone();
+            row.uid = uid;
+            row.received_at = Utc::now() + chrono::Duration::seconds(uid);
+            persist_message(&mut tx, &row).await.unwrap();
+        }
+        tx.commit().await.unwrap();
+
+        for text in [
+            // A partial NOT/OR candidate must remain canonical, but the
+            // first page still needs only its 26 representatives.
+            "NOT has:noattachment OR subject:plain",
+            "has:noattachment",
+            "in:Projects/*",
+        ] {
+            let started = Instant::now();
+            let page = store
+                .search_conversation_page(&SearchQuery {
+                    text: text.into(),
+                    account_ids: vec![account_id],
+                    limit: Some(25),
+                    ..SearchQuery::default()
+                })
+                .await
+                .unwrap();
+            assert!(
+                started.elapsed() < Duration::from_millis(250),
+                "{text} first page exceeded the 250 ms target: {:?}",
+                started.elapsed()
+            );
+            assert_eq!(page.conversations.len(), 25, "{text}");
+            assert!(page.next_cursor.is_some(), "{text}");
+            assert!(page.candidate_cursor.is_some(), "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn sparse_broad_search_returns_a_continuation_without_scanning_the_catalogue() {
+        let _large_dataset = crate::large_dataset_test_guard().await;
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let mut base = message("ordinary", "preview only");
+        base.account_id = account_id.to_string();
+        base.mailbox = "Projects/2026".into();
+        let mut tx = store.pool.begin().await.unwrap();
+        for uid in 1..=50_000_i64 {
+            let mut row = base.clone();
+            row.id = format!("sparse-local-{uid:05}");
+            row.thread_id = row.id.clone();
+            row.uid = uid;
+            row.received_at = Utc::now() + chrono::Duration::seconds(uid);
+            if uid == 49_300 {
+                row.subject = "rare needle".into();
+            }
+            persist_message(&mut tx, &row).await.unwrap();
+        }
+        tx.commit().await.unwrap();
+        // `has:noattachment` must broaden to canonical evaluation. The NOT
+        // branch leaves only the rare subject match, which is outside the
+        // first candidate slice.
+        let query = SearchQuery {
+            text: "NOT has:noattachment OR subject:rare".into(),
+            account_ids: vec![account_id],
+            limit: Some(25),
+            ..SearchQuery::default()
+        };
+        let started = Instant::now();
+        let first = store.search_conversation_page(&query).await.unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "sparse broad first page exceeded the 250 ms target: {:?}",
+            started.elapsed()
+        );
+        assert!(first.conversations.is_empty());
+        assert!(first.next_cursor.is_none());
+        assert!(first.candidate_cursor.is_some());
+        assert!(!first.candidate_exhausted);
+
+        // Candidate continuation resumes exactly after the bounded first
+        // slice. It eventually reaches the rare row without skipping it.
+        let second = store
+            .search_conversation_page_from_candidate(&query, first.candidate_cursor.as_ref(), &[])
+            .await
+            .unwrap();
+        assert!(second.conversations.is_empty());
+        assert!(second.candidate_cursor.is_some());
+        let third = store
+            .search_conversation_page_from_candidate(&query, second.candidate_cursor.as_ref(), &[])
+            .await
+            .unwrap();
+        assert_eq!(third.conversations.len(), 1);
+        assert_eq!(third.conversations[0].latest.subject, "rare needle");
+    }
+
+    #[tokio::test]
+    async fn candidate_cursor_keeps_older_thread_matches_from_reappearing() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let mut rows = Vec::new();
+        for (thread, seconds) in [("one", 3_i64), ("two", 2_i64), ("three", 1_i64)] {
+            for ordinal in 0..2_i64 {
+                let mut row = message("needle", "body");
+                row.id = format!("{thread}-{ordinal}");
+                row.thread_id = thread.into();
+                row.account_id = account_id.to_string();
+                row.mailbox = "Projects/2026".into();
+                row.uid = rows.len() as i64 + 1;
+                row.received_at = Utc::now() + chrono::Duration::seconds(seconds * 10 + ordinal);
+                rows.push(row);
+            }
+        }
+        store.upsert_messages(&rows).await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM messages")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap(),
+            6
+        );
+        let query = SearchQuery {
+            text: "in:Projects/* needle".into(),
+            account_ids: vec![account_id],
+            limit: Some(1),
+            ..SearchQuery::default()
+        };
+        let first = store
+            .search_conversation_page_from_candidate(&query, None, &[])
+            .await
+            .unwrap();
+        let first_id = first.conversations[0].id.clone();
+        let second = store
+            .search_conversation_page_from_candidate(
+                &query,
+                first.candidate_cursor.as_ref(),
+                std::slice::from_ref(&first_id),
+            )
+            .await
+            .unwrap();
+        assert_ne!(second.conversations[0].id, first_id);
+        let mut all_matches_query = query.clone();
+        all_matches_query.limit = Some(100);
+        assert_eq!(store.search(&all_matches_query).await.unwrap().len(), 6);
+        assert_eq!(second.match_evidence.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn search_v2_migration_restarts_in_bounded_batches_for_a_large_legacy_catalogue() {
+        let _large_dataset = crate::large_dataset_test_guard().await;
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("dakia.db");
+        let store = Store::open(&database).await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let mut base = message("Legacy catalogue row", "preview");
+        base.account_id = account_id.to_string();
+        let mut tx = store.pool.begin().await.unwrap();
+        for uid in 1..=50_000_i64 {
+            let mut row = base.clone();
+            row.id = format!("legacy-v2-{uid}");
+            row.thread_id = row.id.clone();
+            row.uid = uid;
+            persist_message(&mut tx, &row).await.unwrap();
+        }
+        tx.commit().await.unwrap();
+        for statement in [
+            "DROP TRIGGER IF EXISTS messages_fts_v2_ai",
+            "DROP TRIGGER IF EXISTS messages_fts_v2_ad",
+            "DROP TRIGGER IF EXISTS messages_fts_v2_au",
+            "DROP TABLE IF EXISTS messages_fts_v2",
+            "DELETE FROM search_catalogue_v2_progress",
+            "DELETE FROM app_meta WHERE key = 'search_catalogue_v2'",
+        ] {
+            sqlx::query(statement).execute(&store.pool).await.unwrap();
+        }
+        assert!(sqlx::query_scalar::<_, Option<String>>(
+            "SELECT value FROM app_meta WHERE key = 'search_catalogue_v2'",
+        )
+        .fetch_optional(&store.pool)
+        .await
+        .unwrap()
+        .flatten()
+        .is_none());
+        store.pool.close().await;
+        drop(store);
+
+        let first_open = Instant::now();
+        let store = Store::open(&database).await.unwrap();
+        assert!(
+            first_open.elapsed() < Duration::from_secs(2),
+            "a restart-safe migration open must not rebuild all 50,000 rows"
+        );
+        let reopened_messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(reopened_messages, 50_000);
+        let first_progress: (i64, i64, bool) = sqlx::query_as(
+            "SELECT last_rowid, target_rowid, complete FROM search_catalogue_v2_progress WHERE stage = 'headers'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            first_progress.0, SEARCH_CATALOGUE_V2_MIGRATION_BATCH_SIZE,
+            "unexpected first progress: {first_progress:?}"
+        );
+        assert_eq!(first_progress.1, 50_000);
+        assert!(!first_progress.2);
+        assert!(!store.search_catalogue_v2_complete().await.unwrap());
+        // Exercise live writes on both sides of the first resumable batch.
+        // `legacy-v2-400` has an FTS row already; `legacy-v2-501` does not.
+        // The old external-content trigger failed the latter update/delete or
+        // made the later backfill insert collide with it.
+        sqlx::query("UPDATE messages SET subject = 'updated during resumable migration' WHERE id = 'legacy-v2-400'")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE messages SET subject = 'also updated before its batch' WHERE id = 'legacy-v2-501'")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM messages WHERE id IN ('legacy-v2-500', 'legacy-v2-502')")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store.pool.close().await;
+        drop(store);
+
+        let restart = Instant::now();
+        let store = Store::open(&database).await.unwrap();
+        assert!(restart.elapsed() < Duration::from_secs(2));
+        let second_last_rowid: i64 = sqlx::query_scalar(
+            "SELECT last_rowid FROM search_catalogue_v2_progress WHERE stage = 'headers'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            second_last_rowid,
+            SEARCH_CATALOGUE_V2_MIGRATION_BATCH_SIZE * 2 + 1,
+            "the deleted row is skipped while the next live row still fills the bounded batch"
+        );
+        let mut progress = store.search_catalogue_v2_backfill_progress().await.unwrap();
+        while !progress.complete {
+            progress = store.advance_search_catalogue_v2_backfill().await.unwrap();
+        }
+        // Progress is a durable rowid high-water mark captured before the
+        // concurrent deletes. The index itself must reflect the live row set.
+        assert_eq!(progress.indexed_messages, 50_000);
+        assert_eq!(progress.total_messages, 50_000);
+        let indexed_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages_fts_v2")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            indexed_rows, 49_998,
+            "each live row has exactly one FTS document"
+        );
+        let updated_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages_fts_v2 WHERE messages_fts_v2 MATCH 'updated'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            updated_rows, 2,
+            "both pre- and post-batch live updates survive"
+        );
+        store.pool.close().await;
+        drop(store);
+
+        let store = Store::open(&database).await.unwrap();
+        assert!(
+            store
+                .search_catalogue_v2_backfill_progress()
+                .await
+                .unwrap()
+                .complete,
+            "completed progress survives restart"
+        );
     }
 
     #[tokio::test]

@@ -15,7 +15,8 @@ import { AI_FEATURES_VISIBLE } from "../features";
 import { api } from "../api";
 import type { ComposeSeed } from "../composeWindow";
 import type { Account, ComposeAttachment } from "../types";
-import { splitAddressValues } from "../recipients";
+import { recipientAddressIdentity, splitAddressValues } from "../recipients";
+import { RecipientCombobox } from "./RecipientCombobox";
 import { RichTextEditor } from "./RichTextEditor";
 import {
   isRichTextEmpty,
@@ -65,37 +66,121 @@ export function Composer({
       : sanitizedHtml;
   });
   const [showCopies, setShowCopies] = useState(Boolean(seed?.cc || seed?.bcc));
+  const [recipientErrors, setRecipientErrors] = useState<{
+    to?: string;
+    cc?: string;
+    bcc?: string;
+  }>({});
   const [aiLoading, setAiLoading] = useState(false);
   const [attachments, setAttachments] = useState<ComposeAttachment[]>(
     seed?.attachments ?? [],
   );
   const [attachmentError, setAttachmentError] = useState<string>();
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
+  const [sendSubmissionPending, setSendSubmissionPending] = useState(false);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const attachmentsRef = useRef<ComposeAttachment[]>(seed?.attachments ?? []);
   const browserDropHandledRef = useRef(false);
+  const sendSubmissionPendingRef = useRef(false);
+  const previousSendStateRef = useRef(sendState);
+  const enabledAccounts = useMemo(
+    () => accounts.filter((account) => account.enabled),
+    [accounts],
+  );
 
   useEffect(() => {
-    if (!accountId && accounts[0]) setAccountId(accounts[0].id);
-  }, [accountId, accounts]);
+    if (enabledAccounts.some((account) => account.id === accountId)) return;
+    setAccountId(enabledAccounts[0]?.id);
+  }, [accountId, enabledAccounts]);
 
   useEffect(() => {
     attachmentsRef.current = attachments;
   }, [attachments]);
 
   const selectedAccount = useMemo(
-    () => accounts.find((account) => account.id === accountId),
-    [accountId, accounts],
+    () => enabledAccounts.find((account) => account.id === accountId),
+    [accountId, enabledAccounts],
   );
+  const recipientExclusions = useMemo(() => {
+    const identities = (values: string[]) =>
+      new Set(
+        values
+          .map(recipientAddressIdentity)
+          .filter((value): value is string => Boolean(value)),
+      );
+    return {
+      to: identities([...splitAddressValues(cc), ...splitAddressValues(bcc)]),
+      cc: identities([...splitAddressValues(to), ...splitAddressValues(bcc)]),
+      bcc: identities([...splitAddressValues(to), ...splitAddressValues(cc)]),
+    };
+  }, [bcc, cc, to]);
   const sending = sendState !== "idle";
-  const canSend = Boolean(accountId && to.trim() && !sending);
-  const send = () => {
-    if (!accountId || !to.trim()) return;
-    onSend({
-      account_id: accountId,
+  const busy = sending || sendSubmissionPending;
+  const canSend = Boolean(accountId && to.trim() && !busy);
+
+  useEffect(() => {
+    const wasSending = previousSendStateRef.current === "sending";
+    if (
+      sendState === "idle" &&
+      wasSending &&
+      sendSubmissionPendingRef.current
+    ) {
+      sendSubmissionPendingRef.current = false;
+      setSendSubmissionPending(false);
+    }
+    previousSendStateRef.current = sendState;
+  }, [sendState]);
+
+  const send = async () => {
+    if (
+      !accountId ||
+      !to.trim() ||
+      sending ||
+      sendSubmissionPendingRef.current
+    ) {
+      return;
+    }
+    // React state does not update until after this event finishes. Keep a ref in
+    // sync so a rapid click or Cmd/Ctrl+Enter cannot start another validation.
+    sendSubmissionPendingRef.current = true;
+    setSendSubmissionPending(true);
+    const rawRecipients = {
       to: splitAddresses(to),
       cc: splitAddresses(cc),
       bcc: splitAddresses(bcc),
+    };
+    // RecipientCombobox protects interactive commits, but the controlled
+    // fields also publish unfinished drafts. Normalize the final envelope
+    // here so a duplicate cannot slip through by clicking Send before a draft
+    // is committed. Invalid values deliberately remain untouched and are
+    // still reported by the Rust validator below.
+    const recipients = deduplicateComposeRecipients(rawRecipients);
+    const nextTo = recipients.to.join(", ");
+    const nextCc = recipients.cc.join(", ");
+    const nextBcc = recipients.bcc.join(", ");
+    if (nextTo !== to) setTo(nextTo);
+    if (nextCc !== cc) setCc(nextCc);
+    if (nextBcc !== bcc) setBcc(nextBcc);
+    let validation;
+    try {
+      validation = await api.validateComposeRecipients(recipients);
+    } catch {
+      setRecipientErrors({ to: t("composer.recipientValidationUnavailable") });
+      sendSubmissionPendingRef.current = false;
+      setSendSubmissionPending(false);
+      return;
+    }
+    const errors = recipientValidationErrors(validation, t);
+    if (errors.to || errors.cc || errors.bcc) {
+      setRecipientErrors(errors);
+      sendSubmissionPendingRef.current = false;
+      setSendSubmissionPending(false);
+      return;
+    }
+    setRecipientErrors({});
+    onSend({
+      account_id: accountId,
+      ...recipients,
       subject,
       body_text: plainTextFromRichText(bodyHtml),
       body_html: isRichTextEmpty(bodyHtml) ? null : bodyHtml,
@@ -198,7 +283,7 @@ export function Composer({
       });
     void webview
       .listen<string>("dakia://dropped-file-receipt", (event) => {
-        if (sending) return;
+        if (busy) return;
         window.setTimeout(() => {
           if (browserDropHandledRef.current) {
             browserDropHandledRef.current = false;
@@ -231,12 +316,12 @@ export function Composer({
       unlistenReceipts?.();
       unlistenErrors?.();
     };
-  }, [receiveNativeDrop, sending, t]);
+  }, [busy, receiveNativeDrop, t]);
 
   const onBrowserDrop = (event: DragEvent<HTMLElement>) => {
     event.preventDefault();
     setIsDraggingFiles(false);
-    if (!sending && event.dataTransfer.files.length) {
+    if (!busy && event.dataTransfer.files.length) {
       browserDropHandledRef.current = true;
       window.setTimeout(() => {
         browserDropHandledRef.current = false;
@@ -268,7 +353,7 @@ export function Composer({
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
         event.preventDefault();
-        if (canSend) send();
+        if (canSend) void send();
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -299,21 +384,26 @@ export function Composer({
       <section className="compose-envelope" aria-label={t("composer.title")}>
         <div className="compose-field compose-recipient-field">
           <label htmlFor="compose-to">{t("composer.to")}</label>
-          <input
+          <RecipientCombobox
             id="compose-to"
             value={to}
-            onChange={(event) => setTo(event.currentTarget.value)}
+            label={t("composer.to")}
+            onChange={(value) => {
+              setTo(value);
+              setRecipientErrors((errors) => ({ ...errors, to: undefined }));
+            }}
+            accountId={accountId}
+            excludedAddresses={recipientExclusions.to}
+            error={recipientErrors.to}
             autoFocus
-            autoComplete="off"
-            spellCheck={false}
-            disabled={sending}
+            disabled={busy}
           />
           <button
             className="compose-copy-toggle"
             type="button"
             aria-expanded={showCopies}
             onClick={() => setShowCopies((value) => !value)}
-            disabled={sending}
+            disabled={busy}
           >
             {t("composer.cc")} · {t("composer.bcc")}
           </button>
@@ -322,24 +412,40 @@ export function Composer({
           <>
             <div className="compose-field">
               <label htmlFor="compose-cc">{t("composer.cc")}</label>
-              <input
+              <RecipientCombobox
                 id="compose-cc"
                 value={cc}
-                onChange={(event) => setCc(event.currentTarget.value)}
-                autoComplete="off"
-                spellCheck={false}
-                disabled={sending}
+                label={t("composer.cc")}
+                onChange={(value) => {
+                  setCc(value);
+                  setRecipientErrors((errors) => ({
+                    ...errors,
+                    cc: undefined,
+                  }));
+                }}
+                accountId={accountId}
+                excludedAddresses={recipientExclusions.cc}
+                error={recipientErrors.cc}
+                disabled={busy}
               />
             </div>
             <div className="compose-field">
               <label htmlFor="compose-bcc">{t("composer.bcc")}</label>
-              <input
+              <RecipientCombobox
                 id="compose-bcc"
                 value={bcc}
-                onChange={(event) => setBcc(event.currentTarget.value)}
-                autoComplete="off"
-                spellCheck={false}
-                disabled={sending}
+                label={t("composer.bcc")}
+                onChange={(value) => {
+                  setBcc(value);
+                  setRecipientErrors((errors) => ({
+                    ...errors,
+                    bcc: undefined,
+                  }));
+                }}
+                accountId={accountId}
+                excludedAddresses={recipientExclusions.bcc}
+                error={recipientErrors.bcc}
+                disabled={busy}
               />
             </div>
           </>
@@ -352,9 +458,9 @@ export function Composer({
               value={accountId ?? ""}
               onChange={(event) => setAccountId(event.currentTarget.value)}
               aria-label={t("composer.from")}
-              disabled={sending}
+              disabled={busy}
             >
-              {accounts.map((account) => (
+              {enabledAccounts.map((account) => (
                 <option key={account.id} value={account.id}>
                   {account.display_name
                     ? `${account.display_name} <${account.email}>`
@@ -381,16 +487,12 @@ export function Composer({
             id="compose-subject"
             value={subject}
             onChange={(event) => setSubject(event.currentTarget.value)}
-            disabled={sending}
+            disabled={busy}
           />
         </div>
       </section>
 
-      <RichTextEditor
-        value={bodyHtml}
-        onChange={setBodyHtml}
-        disabled={sending}
-      />
+      <RichTextEditor value={bodyHtml} onChange={setBodyHtml} disabled={busy} />
 
       {isDraggingFiles ? (
         <section
@@ -431,7 +533,7 @@ export function Composer({
                   filename: attachment.filename,
                 })}
                 onClick={() => removeAttachment(index)}
-                disabled={sending}
+                disabled={busy}
               >
                 <IconX size={14} stroke={2} />
               </button>
@@ -467,7 +569,7 @@ export function Composer({
             className="compose-ai-button"
             type="button"
             onClick={aiDraft}
-            disabled={aiLoading || sending}
+            disabled={aiLoading || busy}
           >
             <IconSparkles size={17} stroke={1.8} />
             {aiLoading ? t("ai.working") : t("actions.draftWithAi")}
@@ -488,7 +590,7 @@ export function Composer({
           className="compose-attachment-button"
           type="button"
           onClick={() => attachmentInputRef.current?.click()}
-          disabled={sending}
+          disabled={busy}
         >
           <IconPaperclip size={17} stroke={1.8} />
           {t("composer.attach")}
@@ -500,6 +602,48 @@ export function Composer({
 }
 
 const splitAddresses = (value: string) => splitAddressValues(value);
+
+function deduplicateComposeRecipients(fields: {
+  to: string[];
+  cc: string[];
+  bcc: string[];
+}) {
+  const seen = new Set<string>();
+  const deduplicate = (values: string[]) =>
+    values.filter((value) => {
+      const identity = recipientAddressIdentity(value);
+      // Leave malformed text in place. The Rust parser owns validation and
+      // must show the user exactly what needs fixing.
+      if (!identity) return true;
+      if (seen.has(identity)) return false;
+      seen.add(identity);
+      return true;
+    });
+  return {
+    to: deduplicate(fields.to),
+    cc: deduplicate(fields.cc),
+    bcc: deduplicate(fields.bcc),
+  };
+}
+
+function recipientValidationErrors(
+  validation: Awaited<ReturnType<typeof api.validateComposeRecipients>>,
+  t: ReturnType<typeof useTranslation>["t"],
+) {
+  const errorFor = (field: (typeof validation)["to"]) =>
+    field.invalid.length
+      ? t("composer.recipientRejected", {
+          recipients: field.invalid.join(", "),
+        })
+      : field.valid
+        ? undefined
+        : t("composer.recipientInvalid");
+  return {
+    to: errorFor(validation.to),
+    cc: errorFor(validation.cc),
+    bcc: errorFor(validation.bcc),
+  };
+}
 
 async function fileToAttachment(file: File): Promise<ComposeAttachment> {
   const bytes = new Uint8Array(await file.arrayBuffer());

@@ -3,8 +3,9 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use clap::{Args, Parser, Subcommand};
 use dakia_core::{
     ai::{AiConfig, AiProvider, AiService},
-    mailbox_action_destination, ComposeMessage, EmailClassificationInput, LocalEmailClassifier,
-    MailService, MailboxAction, ModelClassificationUpdate, SearchQuery, Store,
+    mailbox_action_destination, parse_search_query, ComposeMessage, EmailClassificationInput,
+    LocalEmailClassifier, MailService, MailboxAction, ModelClassificationUpdate, SearchErrorV2,
+    SearchParseError, SearchQuery, Store,
 };
 use directories::ProjectDirs;
 use secrecy::SecretString;
@@ -189,12 +190,30 @@ struct AiMessagesArgs {
     message_id: Vec<String>,
 }
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
+    let cli = Cli::parse();
+    let json = cli.json;
+    if let Err(error) = execute(cli).await {
+        if json {
+            if let Some(error) = error.downcast_ref::<CliSearchError>() {
+                // Keep successful `--json search` output as its established
+                // array shape. Only an invalid query is an error envelope.
+                println!("{}", serde_json::json!({"error": error.error}));
+            } else {
+                eprintln!("Error: {error:#}");
+            }
+        } else {
+            eprintln!("Error: {error:#}");
+        }
+        std::process::exit(1);
+    }
+}
+
+async fn execute(cli: Cli) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_writer(io::stderr)
         .init();
-    let cli = Cli::parse();
     let data_dir = cli.data_dir.unwrap_or_else(default_data_dir);
     let store = Store::open(data_dir.join("dakia.db")).await?;
     match cli.command {
@@ -258,21 +277,18 @@ async fn main() -> Result<()> {
             }
         }
         Command::Search(args) => {
-            let query = SearchQuery {
-                text: args.query,
-                account_ids: args.account,
-                mailbox: args.mailbox,
-                from: args.from,
-                unread_only: args.unread,
-                read_only: false,
-                flagged_only: false,
-                unflagged_only: false,
-                category: None,
-                limit: Some(args.limit),
-                cursor: None,
-            };
-            let results = if args.remote {
-                search_local_and_remote(&store, &query).await?
+            let remote = args.remote;
+            let mut query = compile_cli_search_query(args)?;
+            let has_active_scope =
+                restrict_cli_search_to_active_accounts(&store, &mut query).await?;
+            let results = if !has_active_scope {
+                // `SearchQuery.account_ids = []` means "all accounts" to
+                // storage, so never pass an empty intersection through. An
+                // explicitly disabled or deleted account scope is empty, not
+                // an invitation to search another account.
+                Vec::new()
+            } else if remote {
+                search_local_and_remote(&store, &query, cli.json).await?
             } else {
                 store.search(&query).await?
             };
@@ -427,6 +443,130 @@ async fn run_owned_classification(store: &Store, args: ClassifyArgs, owner: &str
     Ok(classified)
 }
 
+#[derive(Debug)]
+struct CliSearchError {
+    error: SearchErrorV2,
+}
+
+impl std::fmt::Display for CliSearchError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.error.message)
+    }
+}
+
+impl std::error::Error for CliSearchError {}
+
+fn validate_search_query(raw_query: &str) -> Result<()> {
+    parse_search_query(raw_query)
+        .map(|_| ())
+        .map_err(search_cli_error)
+}
+
+/// Converts the CLI's pre-search flags into the shared query language before
+/// either local or provider candidate selection begins.  Keeping these flags
+/// as `SearchQuery` post-filters used to let a provider spend `--limit` on a
+/// newer non-matching result, then discard it after the fact.
+///
+/// Account IDs remain a separate transport scope: they cannot be represented
+/// by the user-facing search language and are applied before either catalogue
+/// or provider work begins.
+fn compile_cli_search_query(args: SearchArgs) -> Result<SearchQuery> {
+    // Validate the user text first so an error location still refers to the
+    // command-line query, rather than to our parentheses or appended flags.
+    validate_search_query(&args.query)?;
+
+    let SearchArgs {
+        query,
+        account,
+        mailbox,
+        from,
+        unread,
+        limit,
+        remote: _,
+    } = args;
+
+    let mut legacy_clauses = Vec::new();
+    if let Some(mailbox) = mailbox {
+        legacy_clauses.push(format!("in:{}", quote_search_literal(&mailbox)));
+    }
+    if let Some(from) = from {
+        legacy_clauses.push(format!("from:{}", quote_search_literal(&from)));
+    }
+    if unread {
+        legacy_clauses.push("is:unread".to_owned());
+    }
+
+    // Parenthesizing the original expression preserves `OR` and `NOT`
+    // precedence when a legacy narrowing flag is appended as an implicit AND.
+    let text = if legacy_clauses.is_empty() {
+        query
+    } else if query.trim().is_empty() {
+        legacy_clauses.join(" ")
+    } else {
+        format!("({query}) {}", legacy_clauses.join(" "))
+    };
+    // This validates flag values too, including control characters and the
+    // overall shared-language complexity limit.
+    validate_search_query(&text)?;
+
+    Ok(SearchQuery {
+        text,
+        account_ids: account,
+        // The legacy criteria now live in `text`. Leaving these unset is
+        // important: remote search receives exactly the same expression.
+        mailbox: None,
+        from: None,
+        unread_only: false,
+        read_only: false,
+        flagged_only: false,
+        unflagged_only: false,
+        category: None,
+        limit: Some(limit),
+        cursor: None,
+    })
+}
+
+fn quote_search_literal(value: &str) -> String {
+    // Keep a simple ASCII token unquoted. Besides avoiding unnecessary syntax
+    // noise, that lets the shared conservative IMAP compiler use FROM/TO
+    // candidate keys for a flag such as `--from alice`. Everything else is
+    // quoted so punctuation remains literal rather than becoming query syntax.
+    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return value.to_owned();
+    }
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('\"', "\\\""))
+}
+
+/// Resolves the CLI's optional account scope to active account IDs for both
+/// local and remote search.  Storage deliberately treats an empty ID list as
+/// an all-account query, so callers must use the boolean result to distinguish
+/// an empty active intersection from the ordinary all-active-accounts case.
+async fn restrict_cli_search_to_active_accounts(
+    store: &Store,
+    query: &mut SearchQuery,
+) -> Result<bool> {
+    let requested = std::mem::take(&mut query.account_ids);
+    let active = store
+        .accounts()
+        .await?
+        .into_iter()
+        .filter(|account| {
+            account.enabled && (requested.is_empty() || requested.contains(&account.id))
+        })
+        .map(|account| account.id)
+        .collect::<Vec<_>>();
+    let has_active_scope = !active.is_empty();
+    query.account_ids = active;
+    Ok(has_active_scope)
+}
+
+fn search_cli_error(error: SearchParseError) -> anyhow::Error {
+    let message = error.to_string();
+    let mut structured = SearchErrorV2::from(error);
+    structured.message = message;
+    anyhow::Error::new(CliSearchError { error: structured })
+}
+
 async fn classify_batch(
     store: &Store,
     classifier: &mut LocalEmailClassifier,
@@ -513,49 +653,128 @@ fn default_data_dir() -> PathBuf {
         .to_owned()
 }
 
-async fn search_remote(store: &Store, query: &SearchQuery) -> Result<Vec<dakia_core::MailSummary>> {
+struct RemoteSearchOutcome {
+    account_id: Uuid,
+    account_email: String,
+    result: Result<Vec<dakia_core::MailSummary>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemoteSearchFailure {
+    account_id: Uuid,
+    account_email: String,
+    message: String,
+}
+
+async fn search_remote(
+    store: &Store,
+    query: &SearchQuery,
+    json_diagnostics: bool,
+) -> Result<Vec<dakia_core::MailSummary>> {
     if query.text.trim().is_empty() {
         bail!("remote search requires a non-empty query");
     }
+    // CLI parsing and provider compilation intentionally share the exact
+    // same AST. In particular, do not give a provider the raw query text:
+    // `from:alice OR subject:invoice` has Dakia semantics, not Gmail's.
+    let expression = parse_search_query(&query.text).map_err(search_cli_error)?;
     let accounts = store.accounts().await?;
     let accounts = accounts
         .into_iter()
-        .filter(|account| query.account_ids.is_empty() || query.account_ids.contains(&account.id))
+        .filter(|account| {
+            account.enabled
+                && (query.account_ids.is_empty() || query.account_ids.contains(&account.id))
+        })
         .collect::<Vec<_>>();
-    let mut results = Vec::new();
     let per_account_limit = query.limit.unwrap_or(100).min(500) as usize;
     let search_store = store.clone();
-    let text = query.text.clone();
+    let expression = expression.clone();
     let mailbox = query.mailbox.clone();
     let searches = run_bounded_ordered(accounts, REMOTE_SEARCH_CONCURRENCY, move |account| {
         let store = search_store.clone();
-        let text = text.clone();
+        let expression = expression.clone();
         let mailbox = mailbox.clone();
         async move {
-            MailService::new(store)
-                .search_remote(&account, &text, mailbox.as_deref(), per_account_limit)
+            let account_id = account.id;
+            let account_email = account.email.clone();
+            let result = MailService::new(store)
+                .search_remote_expression(
+                    &account,
+                    &expression,
+                    mailbox.as_deref(),
+                    per_account_limit,
+                )
                 .await
-                .with_context(|| format!("remote search failed for {}", account.email))
+                .with_context(|| format!("remote search failed for {account_email}"));
+            Ok::<_, anyhow::Error>(RemoteSearchOutcome {
+                account_id,
+                account_email,
+                result,
+            })
         }
     })
     .await;
-    // Results are restored to Store::accounts order before filtering and the
-    // existing stable timestamp sort. If several accounts fail, report the
-    // first failure in that same deterministic order.
-    for hits in searches {
-        let hits = hits?;
-        results.extend(hits.into_iter().filter(|message| {
-            (!query.unread_only || !message.is_read)
-                && query
-                    .from
-                    .as_deref()
-                    .map(|from| message.from_address.contains(from))
-                    .unwrap_or(true)
-        }));
+    let outcomes = searches
+        .into_iter()
+        .collect::<Result<Vec<_>, anyhow::Error>>()?;
+    let (results, failures) = aggregate_remote_search_outcomes(outcomes, query, per_account_limit);
+    report_remote_search_failures(&failures, json_diagnostics);
+    Ok(results)
+}
+
+fn aggregate_remote_search_outcomes(
+    outcomes: Vec<RemoteSearchOutcome>,
+    query: &SearchQuery,
+    per_account_limit: usize,
+) -> (Vec<dakia_core::MailSummary>, Vec<RemoteSearchFailure>) {
+    let mut results = Vec::new();
+    let mut failures = Vec::new();
+    // `run_bounded_ordered` keeps these outcomes in Store::accounts order.
+    // Preserve all successful providers even if a later account is offline.
+    for outcome in outcomes {
+        match outcome.result {
+            Ok(hits) => results.extend(hits.into_iter().filter(|message| {
+                (!query.unread_only || !message.is_read)
+                    && query
+                        .from
+                        .as_deref()
+                        .map(|from| message.from_address.contains(from))
+                        .unwrap_or(true)
+            })),
+            Err(error) => failures.push(RemoteSearchFailure {
+                account_id: outcome.account_id,
+                account_email: outcome.account_email,
+                message: format!("{error:#}"),
+            }),
+        }
     }
     results.sort_by_key(|result| std::cmp::Reverse(result.received_at));
     results.truncate(per_account_limit);
-    Ok(results)
+    (results, failures)
+}
+
+fn report_remote_search_failures(failures: &[RemoteSearchFailure], json_diagnostics: bool) {
+    for failure in failures {
+        if json_diagnostics {
+            // stdout stays the established array shape for scripts. stderr is
+            // a JSON Lines coverage diagnostic that callers may opt into.
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "type": "remote_search_coverage",
+                    "account_id": failure.account_id,
+                    "account_email": failure.account_email,
+                    "state": "unavailable",
+                    "detail": failure.message,
+                })
+            );
+        } else {
+            eprintln!(
+                "Warning: remote search unavailable for {}: {}",
+                failure.account_email, failure.message
+            );
+        }
+    }
 }
 
 async fn run_bounded_ordered<T, U, E, F, Fut>(
@@ -597,13 +816,14 @@ where
 async fn search_local_and_remote(
     store: &Store,
     query: &SearchQuery,
+    json_diagnostics: bool,
 ) -> Result<Vec<dakia_core::MailSummary>> {
     let mut results = store.search(query).await?;
     let mut known = results
         .iter()
         .map(|message| message.id.clone())
         .collect::<HashSet<_>>();
-    for message in search_remote(store, query).await? {
+    for message in search_remote(store, query, json_diagnostics).await? {
         if known.insert(message.id.clone()) {
             results.push(message);
         }
@@ -945,6 +1165,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn remote_search_compiles_legacy_narrowing_before_provider_pagination() {
+        let query = compile_cli_search_query(SearchArgs {
+            query: "invoice OR receipt".into(),
+            account: vec![Uuid::from_u128(7)],
+            mailbox: Some("INBOX".into()),
+            from: Some("alice".into()),
+            unread: true,
+            limit: 1,
+            remote: true,
+        })
+        .expect("legacy flags compile into the shared expression");
+
+        // The old implementation kept these fields separate and only applied
+        // them after each provider had already returned its one newest hit.
+        // They must now be visible to both the canonical evaluator and the
+        // generic IMAP candidate compiler before that limit is spent.
+        assert_eq!(
+            query.text,
+            "(invoice OR receipt) in:INBOX from:alice is:unread"
+        );
+        assert!(query.mailbox.is_none());
+        assert!(query.from.is_none());
+        assert!(!query.unread_only);
+
+        let expression = parse_search_query(&query.text).expect("combined expression parses");
+        let candidate =
+            dakia_core::compile_generic_imap(&expression, chrono::Utc::now().date_naive())
+                .expect("combined expression compiles for a provider");
+        assert!(candidate.criteria.contains("FROM \"alice\""));
+        assert!(candidate.criteria.contains("UNSEEN"));
+    }
+
+    #[test]
+    fn legacy_search_flags_preserve_or_precedence_and_escape_literals() {
+        let query = compile_cli_search_query(SearchArgs {
+            query: "from:one OR from:two".into(),
+            account: Vec::new(),
+            mailbox: Some("Projects 2026".into()),
+            from: Some("a\\b\"c".into()),
+            unread: false,
+            limit: 50,
+            remote: false,
+        })
+        .expect("legacy values are safely encoded");
+
+        assert_eq!(
+            query.text,
+            "(from:one OR from:two) in:\"Projects 2026\" from:\"a\\\\b\\\"c\""
+        );
+        parse_search_query(&query.text).expect("escaped combined expression parses");
+    }
+
     #[tokio::test]
     async fn bounded_work_caps_concurrency_and_restores_input_order() {
         let active = Arc::new(AtomicUsize::new(0));
@@ -1021,5 +1294,72 @@ mod tests {
             Some(1),
             "the first account-order failure is the deterministic CLI error"
         );
+    }
+
+    #[test]
+    fn remote_search_keeps_successes_when_another_account_fails() {
+        let successful_account = Uuid::from_u128(1);
+        let failed_account = Uuid::from_u128(2);
+        let matching_message = dakia_core::MailSummary {
+            id: "successful-message".into(),
+            account_id: successful_account.to_string(),
+            mailbox: "INBOX".into(),
+            uid: 1,
+            message_id: None,
+            in_reply_to: None,
+            reference_ids: None,
+            thread_id: "successful-thread".into(),
+            subject: "Needle".into(),
+            from_name: None,
+            from_address: "sender@example.test".into(),
+            to_addresses: "recipient@example.test".into(),
+            cc_addresses: String::new(),
+            bcc_addresses: String::new(),
+            reply_to_addresses: String::new(),
+            received_at: chrono::Utc::now(),
+            snippet: "needle".into(),
+            body_text: "needle".into(),
+            body_html: None,
+            content_state: "complete".into(),
+            unsubscribe_kind: None,
+            unsubscribe_url: None,
+            is_read: false,
+            is_flagged: false,
+            is_answered: false,
+            is_draft: false,
+            has_attachments: false,
+            category: None,
+            classification_confidence: None,
+            classification_source: None,
+            classification_signals: String::new(),
+            attachments: Vec::new(),
+        };
+        let query = SearchQuery {
+            text: "needle".into(),
+            limit: Some(50),
+            ..Default::default()
+        };
+        let (results, failures) = aggregate_remote_search_outcomes(
+            vec![
+                RemoteSearchOutcome {
+                    account_id: successful_account,
+                    account_email: "success@example.test".into(),
+                    result: Ok(vec![matching_message]),
+                },
+                RemoteSearchOutcome {
+                    account_id: failed_account,
+                    account_email: "offline@example.test".into(),
+                    result: Err(anyhow::anyhow!("connection refused")),
+                },
+            ],
+            &query,
+            50,
+        );
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].account_id, successful_account.to_string());
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].account_id, failed_account);
+        assert!(failures[0].message.contains("connection refused"));
     }
 }

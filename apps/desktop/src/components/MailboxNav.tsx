@@ -8,14 +8,16 @@ import {
   IconMailbox,
   IconMessageCircle,
   IconSend,
+  IconSearch,
   IconShieldX,
   IconSparkles,
   IconStar,
   IconTrash,
+  IconX,
 } from "@tabler/icons-react";
 import { useTranslation } from "react-i18next";
 import { useState } from "react";
-import type { Account } from "../types";
+import type { Account, SavedSearch } from "../types";
 
 type Props = {
   accounts: Account[];
@@ -29,6 +31,9 @@ type Props = {
   feedbackDisabled?: boolean;
   outboxCount?: number;
   starredCount?: number;
+  savedSearches?: SavedSearch[];
+  onSelectSavedSearch?: (search: SavedSearch) => void;
+  onRemoveSavedSearch?: (id: string) => void;
 };
 
 export function MailboxNav({
@@ -43,6 +48,9 @@ export function MailboxNav({
   feedbackDisabled = false,
   outboxCount = 0,
   starredCount = 0,
+  savedSearches = [],
+  onSelectSavedSearch,
+  onRemoveSavedSearch,
 }: Props) {
   const { t } = useTranslation();
   const [accountsExpanded, setAccountsExpanded] = useState(true);
@@ -104,13 +112,18 @@ export function MailboxNav({
                   key={account.id}
                   className="account-row"
                   data-active={active}
+                  disabled={!account.enabled}
                   onClick={() => onSelectAccount(account.id)}
                   onContextMenu={(event) => {
                     event.preventDefault();
                     onAccountContextMenu(account);
                   }}
                   aria-current={active ? "page" : undefined}
-                  title={account.email}
+                  title={
+                    account.enabled
+                      ? account.email
+                      : t("search.accountUnavailable")
+                  }
                 >
                   <span
                     className={`account-marker account-marker-${index % 5}`}
@@ -155,6 +168,42 @@ export function MailboxNav({
             ) : null}
           </button>
         ))}
+        {savedSearches.length ? (
+          <section className="saved-searches" aria-label={t("search.saved")}>
+            <div className="saved-search-title">{t("search.saved")}</div>
+            {savedSearches.map((search) => {
+              const unavailable = !search.account_ids.some((id) =>
+                accounts.some(
+                  (account) => account.id === id && account.enabled,
+                ),
+              );
+              return (
+                <div className="saved-search-row" key={search.id}>
+                  <button
+                    className="nav-link"
+                    disabled={unavailable}
+                    title={
+                      unavailable
+                        ? t("search.savedUnavailable")
+                        : search.raw_query
+                    }
+                    onClick={() => onSelectSavedSearch?.(search)}
+                  >
+                    <IconSearch size={17} stroke={1.7} />
+                    <span>{search.name}</span>
+                  </button>
+                  <button
+                    className="saved-search-delete"
+                    aria-label={t("search.removeSaved", { name: search.name })}
+                    onClick={() => onRemoveSavedSearch?.(search.id)}
+                  >
+                    <IconX size={15} />
+                  </button>
+                </div>
+              );
+            })}
+          </section>
+        ) : null}
       </div>
       <div className="mailbox-nav-footer">
         <button

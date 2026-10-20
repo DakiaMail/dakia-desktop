@@ -94,6 +94,13 @@ describe("Settings offline translation models", () => {
       },
     ]);
     vi.spyOn(api, "removeTranslationModel").mockResolvedValue();
+    vi.spyOn(api, "contactedPeopleSettings").mockResolvedValue({
+      enabled: true,
+    });
+    vi.spyOn(api, "setContactedPeopleSettings").mockResolvedValue({
+      enabled: true,
+    });
+    vi.spyOn(api, "clearContactedPeople").mockResolvedValue();
   });
 
   it("does not expose AI or plugin settings in the current product surface", () => {
@@ -262,5 +269,69 @@ describe("Settings offline translation models", () => {
     expect(
       screen.getByRole("button", { name: "Remove Estonian pack" }),
     ).toBeVisible();
+  });
+});
+
+describe("Settings contacted people privacy", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    translationSettingsMocks.confirm.mockResolvedValue(true);
+    vi.spyOn(api, "contactedPeopleSettings").mockResolvedValue({
+      enabled: true,
+    });
+    vi.spyOn(api, "setContactedPeopleSettings").mockResolvedValue({
+      enabled: false,
+    });
+    vi.spyOn(api, "clearContactedPeople").mockResolvedValue();
+  });
+
+  it("lets people disable local suggestions and clear their local history", async () => {
+    render(
+      <MantineProvider>
+        <Settings {...props} />
+      </MantineProvider>,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Privacy" }));
+
+    const toggle = await screen.findByRole("switch", {
+      name: "Suggest previously contacted people",
+    });
+    fireEvent.click(toggle);
+    await waitFor(() =>
+      expect(api.setContactedPeopleSettings).toHaveBeenCalledWith(false),
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Clear contacted people" }),
+    );
+    await waitFor(() =>
+      expect(translationSettingsMocks.confirm).toHaveBeenCalledWith(
+        "Clear contacted people",
+        expect.stringContaining("cannot be undone"),
+        "Clear contacted people",
+      ),
+    );
+    expect(api.clearContactedPeople).toHaveBeenCalledOnce();
+  });
+
+  it("restores the privacy toggle if the local settings update fails", async () => {
+    vi.mocked(api.setContactedPeopleSettings).mockRejectedValueOnce(
+      new Error("Store unavailable"),
+    );
+    render(
+      <MantineProvider>
+        <Settings {...props} />
+      </MantineProvider>,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Privacy" }));
+    const toggle = await screen.findByRole("switch", {
+      name: "Suggest previously contacted people",
+    });
+    fireEvent.click(toggle);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Could not update contacted people settings",
+    );
+    expect(toggle).toBeChecked();
   });
 });

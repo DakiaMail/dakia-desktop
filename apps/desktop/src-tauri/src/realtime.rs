@@ -1120,6 +1120,8 @@ mod tests {
             unsubscribe_url: None,
             is_read: false,
             is_flagged: false,
+            is_answered: false,
+            is_draft: false,
             has_attachments: false,
             category: None,
             classification_confidence: None,

@@ -1010,6 +1010,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+ "unicode-normalization",
  "url",
  "uuid",
  "webpki-roots 1.0.8",

@@ -33,6 +33,7 @@ export function ComposeApp() {
     readJson("dakia.ai", defaultAi),
   );
   const [aiConnected, setAiConnected] = useState(false);
+  const enabledAccounts = accounts.filter((account) => account.enabled);
 
   useEffect(() => {
     document.title = t("composer.title");
@@ -140,7 +141,7 @@ export function ComposeApp() {
       </main>
     );
 
-  if (!accounts.length)
+  if (!enabledAccounts.length)
     return (
       <main className="compose-window compose-window-loading">
         <span>{t("composer.noAccount")}</span>
@@ -149,7 +150,7 @@ export function ComposeApp() {
 
   return (
     <Composer
-      accounts={accounts}
+      accounts={enabledAccounts}
       seed={seed}
       sendState={sendState}
       aiConnected={aiConnected}
