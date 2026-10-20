@@ -1,0 +1,286 @@
+{
+  "schemaVersion": 1,
+  "measuredAt": "2026-09-12T20:15:06.588Z",
+  "environment": {
+    "platform": "darwin",
+    "release": "25.6.0",
+    "arch": "arm64",
+    "rustc": "rustc 1.89.0 (29483883e 2025-08-04)",
+    "cargo": "cargo 1.89.0 (c24e10642 2025-06-23)",
+    "gitCommit": "8af5c397d81cc9aa60ddaca9b5eb15ecac9f6255"
+  },
+  "results": [
+    {
+      "id": "initial-inbox-window",
+      "test": "mail::tests::initial_inbox_publishes_a_batched_uid_associated_window_before_inventory",
+      "fixture": {
+        "messages": 5,
+        "uidShape": "sparse and out of response order",
+        "transport": "in-process duplex",
+        "injectedNetworkDelayMs": 0,
+        "preexistingCatalog": false
+      },
+      "proves": [
+        "initial Inbox uses EXAMINE and one recent sequence window",
+        "headers are associated and persisted by UID rather than response order",
+        "initial publication does not issue UID inventory or preview commands"
+      ],
+      "doesNotProve": [
+        "authentication-to-first-commit under injected latency",
+        "React visibility or Tauri event delivery",
+        "historical work continues after the initial method returns"
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dakia-core",
+        "mail::tests::initial_inbox_publishes_a_batched_uid_associated_window_before_inventory",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "status": "passed",
+      "failureKind": null,
+      "exitCode": 0,
+      "durationMs": 4338.81,
+      "metrics": [],
+      "stdout": "\nrunning 1 test\ntest mail::tests::initial_inbox_publishes_a_batched_uid_associated_window_before_inventory ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 427 filtered out; finished in 0.31s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s\n\n",
+      "stderr": "   Compiling dakia-core v0.4.4 (/Users/arsalan/code/codex-worktrees/9f88/dakia-desktop/crates/dakia-core)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.95s\n     Running unittests src/lib.rs (target/debug/deps/dakia_core-d19004e5de9ac196)\n     Running tests/mail_boundary_properties.rs (target/debug/deps/mail_boundary_properties-11bcdff939ed294e)\n"
+    },
+    {
+      "id": "snapshot-30000",
+      "test": "mail::tests::scripted_thirty_thousand_message_snapshot_uses_sixty_bounded_pages",
+      "fixture": {
+        "messages": 30000,
+        "uidShape": "dense",
+        "transport": "in-process duplex",
+        "injectedNetworkDelayMs": 0,
+        "preexistingCatalog": true
+      },
+      "proves": [
+        "complete UID membership is fetched in 60 bounded 500-message pages",
+        "the production sync path avoids UID SEARCH ALL and an unbounded 1:* FETCH"
+      ],
+      "doesNotProve": [
+        "first-message latency",
+        "header download cost for a fresh 30,000-message catalogue",
+        "peak parser or process memory"
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dakia-core",
+        "mail::tests::scripted_thirty_thousand_message_snapshot_uses_sixty_bounded_pages",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "status": "passed",
+      "failureKind": null,
+      "exitCode": 0,
+      "durationMs": 14347.35,
+      "metrics": [],
+      "stdout": "\nrunning 1 test\ntest mail::tests::scripted_thirty_thousand_message_snapshot_uses_sixty_bounded_pages ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 427 filtered out; finished in 13.99s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s\n\n",
+      "stderr": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.27s\n     Running unittests src/lib.rs (target/debug/deps/dakia_core-d19004e5de9ac196)\n     Running tests/mail_boundary_properties.rs (target/debug/deps/mail_boundary_properties-11bcdff939ed294e)\n"
+    },
+    {
+      "id": "snapshot-100000",
+      "test": "mail::tests::scripted_one_hundred_thousand_message_snapshot_uses_bounded_pages",
+      "fixture": {
+        "messages": 100000,
+        "uidShape": "dense",
+        "transport": "in-process duplex",
+        "injectedNetworkDelayMs": 0,
+        "preexistingCatalog": true
+      },
+      "proves": [
+        "complete UID membership is fetched in bounded 500-message pages",
+        "the production sync path avoids UID SEARCH ALL and an unbounded 1:* FETCH"
+      ],
+      "doesNotProve": [
+        "bounded peak memory",
+        "fresh-catalogue header publication",
+        "behavior with sparse UIDs or provider latency"
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dakia-core",
+        "mail::tests::scripted_one_hundred_thousand_message_snapshot_uses_bounded_pages",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "status": "passed",
+      "failureKind": null,
+      "exitCode": 0,
+      "durationMs": 46631.7,
+      "metrics": [],
+      "stdout": "\nrunning 1 test\ntest mail::tests::scripted_one_hundred_thousand_message_snapshot_uses_bounded_pages ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 427 filtered out; finished in 46.29s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s\n\n",
+      "stderr": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s\n     Running unittests src/lib.rs (target/debug/deps/dakia_core-d19004e5de9ac196)\n     Running tests/mail_boundary_properties.rs (target/debug/deps/mail_boundary_properties-11bcdff939ed294e)\n"
+    },
+    {
+      "id": "fresh-catalogue-batching",
+      "test": "mail::tests::scripted_fresh_catalogue_batches_headers_and_snippets_by_uid_set",
+      "fixture": {
+        "messages": 3,
+        "uidShape": "dense",
+        "transport": "in-process duplex",
+        "injectedNetworkDelayMs": 0,
+        "preexistingCatalog": false
+      },
+      "proves": [
+        "fresh metadata uses one UID-set FETCH instead of one FETCH per message",
+        "snippet previews use one UID-set FETCH for the fixture batch",
+        "responses are persisted by UID through the production sync path"
+      ],
+      "doesNotProve": [
+        "Inbox publication before historical inventory",
+        "visibility before the sync future finishes",
+        "preview scheduling independence"
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dakia-core",
+        "mail::tests::scripted_fresh_catalogue_batches_headers_and_snippets_by_uid_set",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "status": "passed",
+      "failureKind": null,
+      "exitCode": 0,
+      "durationMs": 640.15,
+      "metrics": [],
+      "stdout": "\nrunning 1 test\ntest mail::tests::scripted_fresh_catalogue_batches_headers_and_snippets_by_uid_set ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 427 filtered out; finished in 0.29s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s\n\n",
+      "stderr": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.26s\n     Running unittests src/lib.rs (target/debug/deps/dakia_core-d19004e5de9ac196)\n     Running tests/mail_boundary_properties.rs (target/debug/deps/mail_boundary_properties-11bcdff939ed294e)\n"
+    },
+    {
+      "id": "incomplete-snapshot-safety",
+      "test": "mail::tests::scripted_incomplete_snapshot_preserves_preexisting_mailbox_rows",
+      "fixture": {
+        "messages": 2,
+        "uidShape": "dense",
+        "transport": "in-process duplex",
+        "injectedNetworkDelayMs": 0,
+        "preexistingCatalog": true
+      },
+      "proves": [
+        "an incomplete membership snapshot does not delete committed rows"
+      ],
+      "doesNotProve": [
+        "reconciliation is fenced to the captured upper UID boundary",
+        "a newer local mutation survives finalization"
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dakia-core",
+        "mail::tests::scripted_incomplete_snapshot_preserves_preexisting_mailbox_rows",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "status": "passed",
+      "failureKind": null,
+      "exitCode": 0,
+      "durationMs": 582.69,
+      "metrics": [],
+      "stdout": "\nrunning 1 test\ntest mail::tests::scripted_incomplete_snapshot_preserves_preexisting_mailbox_rows ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 427 filtered out; finished in 0.24s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s\n\n",
+      "stderr": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s\n     Running unittests src/lib.rs (target/debug/deps/dakia_core-d19004e5de9ac196)\n     Running tests/mail_boundary_properties.rs (target/debug/deps/mail_boundary_properties-11bcdff939ed294e)\n"
+    },
+    {
+      "id": "account-isolation-and-incremental-sync",
+      "test": "mail::tests::scripted_mail_service_inbox_sync_persists_incremental_uid_and_isolates_accounts",
+      "fixture": {
+        "messages": 2,
+        "uidShape": "dense",
+        "transport": "loopback TCP",
+        "injectedNetworkDelayMs": 0,
+        "preexistingCatalog": false
+      },
+      "proves": [
+        "the production MailService persists an incremental UID",
+        "the same mailbox UID remains isolated across accounts"
+      ],
+      "doesNotProve": [
+        "concurrent account sync",
+        "account removal while a late worker publishes"
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dakia-core",
+        "mail::tests::scripted_mail_service_inbox_sync_persists_incremental_uid_and_isolates_accounts",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "status": "passed",
+      "failureKind": null,
+      "exitCode": 0,
+      "durationMs": 677.78,
+      "metrics": [],
+      "stdout": "\nrunning 1 test\ntest mail::tests::scripted_mail_service_inbox_sync_persists_incremental_uid_and_isolates_accounts ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 427 filtered out; finished in 0.33s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s\n\n",
+      "stderr": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.26s\n     Running unittests src/lib.rs (target/debug/deps/dakia_core-d19004e5de9ac196)\n     Running tests/mail_boundary_properties.rs (target/debug/deps/mail_boundary_properties-11bcdff939ed294e)\n"
+    },
+    {
+      "id": "smtp-uncertain-delivery",
+      "test": "mail::tests::scripted_smtp_starttls_eof_after_data_reports_uncertain_delivery",
+      "fixture": {
+        "messages": 1,
+        "uidShape": "not applicable",
+        "transport": "loopback TCP with test TLS",
+        "injectedNetworkDelayMs": 0,
+        "preexistingCatalog": false
+      },
+      "proves": [
+        "an EOF after DATA is reported as uncertain rather than safe to retry"
+      ],
+      "doesNotProve": [
+        "SMTP progresses while historical IMAP is stalled",
+        "submission state survives restart",
+        "SMTP acceptance and Sent-copy failure are persisted separately"
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "dakia-core",
+        "mail::tests::scripted_smtp_starttls_eof_after_data_reports_uncertain_delivery",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "status": "passed",
+      "failureKind": null,
+      "exitCode": 0,
+      "durationMs": 350.11,
+      "metrics": [],
+      "stdout": "\nrunning 1 test\ntest mail::tests::scripted_smtp_starttls_eof_after_data_reports_uncertain_delivery ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 427 filtered out; finished in 0.01s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s\n\n",
+      "stderr": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s\n     Running unittests src/lib.rs (target/debug/deps/dakia_core-d19004e5de9ac196)\n     Running tests/mail_boundary_properties.rs (target/debug/deps/mail_boundary_properties-11bcdff939ed294e)\n"
+    }
+  ],
+  "allPassed": true
+}

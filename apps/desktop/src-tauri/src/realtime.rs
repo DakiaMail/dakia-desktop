@@ -1,3 +1,5 @@
+use dakia_core::connection_budget::{imap_work, ImapPriority};
+use dakia_core::storage::MessageRemoteIdentity;
 use dakia_core::{Account, CachedMessageContent, MailService, MailSummary, RealtimeMode, Store};
 use serde::Serialize;
 use std::{
@@ -19,6 +21,10 @@ const BODY_CACHE_WARM_BATCH_LIMIT: u32 = 100;
 const BODY_CACHE_WARM_CANDIDATE_PAGES_PER_CYCLE: u32 = 3;
 const BODY_CACHE_WARM_LOOKBACK_DAYS: i64 = 30;
 const BODY_CACHE_FAILURE_COOLDOWN: Duration = Duration::from_secs(60 * 60);
+const HYDRATION_COMMAND_DEADLINE: Duration = Duration::from_secs(30);
+const ARRIVAL_BATCHES_BEFORE_MAINTENANCE: usize = 4;
+const AUTOMATIC_CONTENT_LITERAL_BYTES: usize = 2 * 1024 * 1024;
+const AUTOMATIC_CONTENT_CYCLE_BYTES: usize = 32 * 1024 * 1024;
 
 type HydrationCompleteHook = Arc<dyn Fn() + Send + Sync>;
 type HydrationCompleteHookStore = Arc<StdRwLock<Option<HydrationCompleteHook>>>;
@@ -254,9 +260,11 @@ async fn run_watcher(
         }
         publish_status(&app, &statuses, account.id, "connecting", None, None).await;
         let service = MailService::new(store.clone());
-        match service
-            .realtime_inbox_cycle(&account, REALTIME_BATCH_LIMIT, &mut cancel)
-            .await
+        match imap_work(
+            ImapPriority::Realtime,
+            service.realtime_inbox_cycle(&account, REALTIME_BATCH_LIMIT, &mut cancel),
+        )
+        .await
         {
             Ok(cycle) if cycle.cancelled => break,
             Ok(cycle) => {
@@ -471,25 +479,9 @@ fn hydration_plan(
 }
 
 fn hydration_dedupe_key(message: &MailSummary) -> String {
-    // MailService parses Message-ID values into their canonical form before
-    // persistence. Lower-casing follows the storage/threading identity rules
-    // and also handles rows that predate canonical storage. A blank or
-    // malformed value is not an identity, so use the durable local id instead.
-    match message
-        .message_id
-        .as_deref()
-        .and_then(canonical_hydration_message_id)
-    {
-        Some(message_id) => format!("message-id:{message_id}"),
-        _ => format!("id:{}", message.id),
-    }
-}
-
-fn canonical_hydration_message_id(value: &str) -> Option<String> {
-    let value = value.trim();
-    let start = value.find('<')?;
-    let end = value[start..].find('>')? + start;
-    (end > start + 1).then(|| value[start..=end].to_ascii_lowercase())
+    // A sender can reuse RFC Message-ID for different content. Only a durable
+    // account-scoped identity proves these are the same fetch/cache target.
+    format!("{}:{}", message.account_id, message.id)
 }
 
 fn body_cache_warm_due(last_warm: Option<Instant>, now: Instant) -> bool {
@@ -594,16 +586,30 @@ async fn run_prioritized_hydration_batches<T, F, Fut>(
 {
     let mut arrivals_closed = false;
     let mut maintenance_closed = false;
+    let mut arrival_batches = 0;
     loop {
         if arrivals_closed && maintenance_closed {
             break;
+        }
+        if *cancel.borrow() {
+            break;
+        }
+        if arrival_batches >= ARRIVAL_BATCHES_BEFORE_MAINTENANCE {
+            arrival_batches = 0;
+            if let Ok(item) = maintenance_receiver.try_recv() {
+                operation(item, cancel.clone()).await;
+                continue;
+            }
         }
         let item = tokio::select! {
             biased;
             _ = wait_for_cancellation(&mut cancel) => break,
             item = arrival_receiver.recv(), if !arrivals_closed => {
                 match item {
-                    Some(item) => Some(item),
+                    Some(item) => {
+                        arrival_batches += 1;
+                        Some(item)
+                    },
                     None => {
                         arrivals_closed = true;
                         None
@@ -612,7 +618,10 @@ async fn run_prioritized_hydration_batches<T, F, Fut>(
             },
             item = maintenance_receiver.recv(), if !maintenance_closed => {
                 match item {
-                    Some(item) => Some(item),
+                    Some(item) => {
+                        arrival_batches = 0;
+                        Some(item)
+                    },
                     None => {
                         maintenance_closed = true;
                         None
@@ -638,10 +647,13 @@ async fn hydrate_after_sync(
     let recent_cutoff = chrono::Utc::now() - chrono::Duration::days(BODY_CACHE_WARM_LOOKBACK_DAYS);
     let recent = if batch.warm_recent {
         let refresh_cancel = cancel.clone();
-        let refresh = context.service.refresh_recent_main_mailboxes(
-            &context.account,
-            recent_cutoff,
-            BODY_CACHE_WARM_BATCH_LIMIT * 3,
+        let refresh = imap_work(
+            ImapPriority::Realtime,
+            context.service.refresh_recent_main_mailboxes(
+                &context.account,
+                recent_cutoff,
+                BODY_CACHE_WARM_BATCH_LIMIT * 3,
+            ),
         );
         let Some(refresh_result) = run_cancellable(refresh, refresh_cancel).await else {
             return;
@@ -685,9 +697,12 @@ async fn hydrate_after_sync(
         }
     };
     // New arrivals take precedence, followed by recent primary-folder bodies,
-    // then the durable starred backlog. `hydration_plan` deduplicates their
-    // provider identity so a Gmail label duplicate is fetched once.
-    let plan = hydration_plan(batch.pending, recent, starred);
+    // then the durable starred backlog. Repeated durable targets are fetched
+    // once, without assuming a sender's Message-ID identifies unique content.
+    let plan = budgeted_hydration_plan(
+        hydration_plan(batch.pending, recent, starred),
+        recent_cutoff,
+    );
     let hydration_account = context.account.clone();
     let hydration_context = context.clone();
     let results = run_bounded_cancellable_ordered(
@@ -699,7 +714,8 @@ async fn hydrate_after_sync(
             let store = hydration_context.store.clone();
             let service = hydration_context.service.clone();
             let account = hydration_account.clone();
-            async move { hydrate_target(store, service, account, target, cancel).await }
+            let app = hydration_context.app.clone();
+            async move { hydrate_target(app, store, service, account, target, cancel).await }
         },
     )
     .await;
@@ -825,6 +841,7 @@ fn notify_hydration_complete(hydration_complete: &HydrationCompleteHookStore) {
 }
 
 async fn hydrate_target(
+    app: tauri::AppHandle,
     store: Store,
     service: MailService,
     account: Account,
@@ -842,7 +859,7 @@ async fn hydrate_target(
     }
 
     let claim = match store
-        .acquire_message_content_fetch(&target.message.id)
+        .acquire_background_message_content_fetch(&target.message.id)
         .await
     {
         Ok(Some(claim)) => claim,
@@ -866,8 +883,22 @@ async fn hydrate_target(
         }
     };
 
+    let _ = app.emit(
+        "mail-content-activity",
+        serde_json::json!({ "accountId": account.id }),
+    );
     let (result, cancelled) = {
-        let fetch_and_cache = fetch_and_cache_target(&store, &service, &account, &target);
+        let fetch_and_cache = async {
+            tokio::time::timeout(
+                HYDRATION_COMMAND_DEADLINE,
+                imap_work(
+                    ImapPriority::Preview,
+                    fetch_and_cache_target(&store, &service, &account, &target),
+                ),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("Background content request timed out"))?
+        };
         tokio::pin!(fetch_and_cache);
         tokio::select! {
             result = &mut fetch_and_cache => (result, false),
@@ -881,6 +912,10 @@ async fn hydrate_target(
             "could not release background body-cache fetch claim"
         );
     }
+    let _ = app.emit(
+        "mail-content-activity",
+        serde_json::json!({ "accountId": account.id }),
+    );
     HydrationResult {
         target,
         started,
@@ -895,23 +930,60 @@ async fn fetch_and_cache_target(
     account: &Account,
     target: &HydrationTarget,
 ) -> anyhow::Result<Option<MailSummary>> {
+    let Some(identity) = store
+        .capture_message_remote_identity(&target.message.id)
+        .await?
+    else {
+        return Ok(None);
+    };
     let message = service
-        .fetch_message(account, &target.message.mailbox, target.message.uid as u32)
+        .fetch_message_for_identity(account, &identity, AUTOMATIC_CONTENT_LITERAL_BYTES)
         .await?;
-    cache_hydrated_message(store, message).await
+    cache_hydrated_message_inner(store, message, Some(&identity)).await
 }
 
+fn budgeted_hydration_plan(
+    plan: Vec<HydrationTarget>,
+    cutoff: chrono::DateTime<chrono::Utc>,
+) -> Vec<HydrationTarget> {
+    // Reserve the maximum possible literal bytes before launching concurrent
+    // fetches. Actual response sizes cannot make this cycle exceed its budget.
+    // Protocol framing has independent parser limits in the core client.
+    plan.into_iter()
+        .filter(|target| target.message.received_at >= cutoff)
+        .take(AUTOMATIC_CONTENT_CYCLE_BYTES / AUTOMATIC_CONTENT_LITERAL_BYTES)
+        .collect()
+}
+
+#[cfg(test)]
 async fn cache_hydrated_message(
     store: &Store,
     message: MailSummary,
 ) -> anyhow::Result<Option<MailSummary>> {
-    if persist_display_cache(store, &message).await? {
+    cache_hydrated_message_inner(store, message, None).await
+}
+
+async fn cache_hydrated_message_inner(
+    store: &Store,
+    message: MailSummary,
+    identity: Option<&MessageRemoteIdentity>,
+) -> anyhow::Result<Option<MailSummary>> {
+    if persist_display_cache_inner(store, &message, identity).await? {
         // Cache readiness is local state. Do not upsert the provider snapshot
         // here: a star/read operation may have finished while this body fetch
         // was in flight, and stale FLAGS must not undo that user action.
-        store
-            .set_message_content_state(&message.id, "complete")
-            .await?;
+        if let Some(identity) = identity {
+            if !store
+                .set_message_content_state_if_current(identity, "complete")
+                .await?
+            {
+                return Ok(None);
+            }
+        } else {
+            store
+                .set_message_content_state(&message.id, "complete")
+                .await?;
+        }
         // Account removal can complete after the cache write but before event
         // publication. Re-read the durable row so a late worker neither
         // revives storage nor reports a hydration for a removed account.
@@ -921,35 +993,69 @@ async fn cache_hydrated_message(
     }
 }
 
+#[cfg(test)]
 async fn persist_display_cache(store: &Store, message: &MailSummary) -> anyhow::Result<bool> {
-    if !store
-        .update_message_attachment_state(&message.id, message.has_attachments)
-        .await?
-    {
+    persist_display_cache_inner(store, message, None).await
+}
+
+async fn persist_display_cache_inner(
+    store: &Store,
+    message: &MailSummary,
+    identity: Option<&MessageRemoteIdentity>,
+) -> anyhow::Result<bool> {
+    let updated = if let Some(identity) = identity {
+        store
+            .update_message_attachment_state_if_current(identity, message.has_attachments)
+            .await?
+    } else {
+        store
+            .update_message_attachment_state(&message.id, message.has_attachments)
+            .await?
+    };
+    if !updated {
         return Ok(false);
     }
     let content = display_cache_content(message);
 
-    if content_cache_destination(message) == ContentCacheDestination::Starred
-        && store
-            .cache_starred_message_content(&message.id, content.clone())
-            .await?
-    {
-        return Ok(true);
+    if content_cache_destination(message) == ContentCacheDestination::Starred {
+        let cached = if let Some(identity) = identity {
+            store
+                .cache_starred_message_content_if_current(identity, content.clone())
+                .await?
+        } else {
+            store
+                .cache_starred_message_content(&message.id, content.clone())
+                .await?
+        };
+        if cached {
+            return Ok(true);
+        }
     }
 
     // A concurrent unstar makes the regular cache authoritative. Conversely,
     // if a message was starred while this selective fetch was in flight, the
     // regular-cache write declines and the final starred attempt owns it.
-    store
-        .cache_message_content(&message.id, false, content.clone())
-        .await?;
+    if let Some(identity) = identity {
+        store
+            .cache_message_content_if_current(identity, false, content.clone())
+            .await?;
+    } else {
+        store
+            .cache_message_content(&message.id, false, content.clone())
+            .await?;
+    }
     if store.cached_message_content(&message.id).await?.is_some() {
         return Ok(true);
     }
-    store
-        .cache_starred_message_content(&message.id, content)
-        .await
+    if let Some(identity) = identity {
+        store
+            .cache_starred_message_content_if_current(identity, content)
+            .await
+    } else {
+        store
+            .cache_starred_message_content(&message.id, content)
+            .await
+    }
 }
 
 async fn run_cancellable<F, T>(future: F, mut cancel: watch::Receiver<bool>) -> Option<T>
@@ -1182,7 +1288,7 @@ mod tests {
     }
 
     #[test]
-    fn hydration_plan_prioritizes_pending_recent_and_starred_by_canonical_identity() {
+    fn hydration_plan_keeps_distinct_messages_with_reused_rfc_message_ids() {
         let mut pending_duplicate = message("pending-duplicate");
         pending_duplicate.message_id = Some("<SAME@example.test>".into());
         let mut recent_duplicate = message("recent-duplicate");
@@ -1201,10 +1307,27 @@ mod tests {
             vec![
                 ("pending-1", HydrationKind::Pending),
                 ("pending-duplicate", HydrationKind::Pending),
+                ("recent-duplicate", HydrationKind::Recent),
                 ("recent-1", HydrationKind::Recent),
                 ("starred-1", HydrationKind::Starred),
             ]
         );
+    }
+
+    #[test]
+    fn automatic_content_plan_bounds_age_and_reserved_download_bytes() {
+        let cutoff = Utc::now() - chrono::Duration::days(30);
+        let mut old = message("old");
+        old.received_at = cutoff - chrono::Duration::seconds(1);
+        let mut messages = vec![old];
+        messages.extend((0..100).map(|index| message(&format!("recent-{index}"))));
+        let plan = budgeted_hydration_plan(hydration_plan(messages, vec![], vec![]), cutoff);
+        assert_eq!(
+            plan.len() * AUTOMATIC_CONTENT_LITERAL_BYTES,
+            AUTOMATIC_CONTENT_CYCLE_BYTES
+        );
+        assert!(plan.iter().all(|target| target.message.id != "old"));
+        assert_eq!(plan[0].message.id, "recent-0");
     }
 
     #[test]
@@ -1362,6 +1485,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn old_namespace_hydration_cannot_publish_body_or_attachment_state() {
+        let store = Store::in_memory().await.unwrap();
+        let account = dakia_core::AccountDraft {
+            email: "namespace@example.test".into(),
+            display_name: "Namespace".into(),
+            provider_id: Some("fastmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(dakia_core::provider::by_id("fastmail").unwrap());
+        store.save_account(&account).await.unwrap();
+        let mut local = message("namespace-body");
+        local.account_id = account.id.to_string();
+        store
+            .upsert_messages(std::slice::from_ref(&local))
+            .await
+            .unwrap();
+        store
+            .save_mailbox_catalog_state(account.id, "INBOX", "INBOX", 77, 1, true)
+            .await
+            .unwrap();
+        let identity = store
+            .capture_message_remote_identity(&local.id)
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .save_mailbox_catalog_state(account.id, "INBOX", "INBOX", 78, 1, true)
+            .await
+            .unwrap();
+        let mut fetched = local.clone();
+        fetched.body_text = "old namespace body".into();
+        fetched.has_attachments = true;
+        assert!(
+            cache_hydrated_message_inner(&store, fetched, Some(&identity))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(store
+            .cached_message_content(&local.id)
+            .await
+            .unwrap()
+            .is_none());
+        let current = store.message(&local.id).await.unwrap().unwrap();
+        assert_eq!(current.content_state, "headers_only");
+        assert!(!current.has_attachments);
+        assert!(current.body_text.is_empty());
+    }
+
+    #[tokio::test]
     async fn late_pending_hydration_after_account_removal_caches_nothing_and_emits_nothing() {
         let store = Store::in_memory().await.unwrap();
         let account = dakia_core::AccountDraft {
@@ -1437,6 +1618,41 @@ mod tests {
 
         notify_hydration_complete(&hooks);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn continuously_queued_arrivals_give_maintenance_a_bounded_turn() {
+        let (arrivals, arrival_receiver) = mpsc::unbounded_channel();
+        let (maintenance, maintenance_receiver) = mpsc::channel(1);
+        let (_cancel, cancel_receiver) = watch::channel(false);
+        for i in 0..12 {
+            arrivals.send(i).unwrap();
+        }
+        maintenance.send(99).await.unwrap();
+        drop(arrivals);
+        drop(maintenance);
+        let processed = Arc::new(Mutex::new(Vec::new()));
+        run_prioritized_hydration_batches(
+            arrival_receiver,
+            maintenance_receiver,
+            cancel_receiver,
+            {
+                let processed = processed.clone();
+                move |item, _| {
+                    let processed = processed.clone();
+                    async move {
+                        processed.lock().await.push(item);
+                    }
+                }
+            },
+        )
+        .await;
+        let processed = processed.lock().await;
+        assert_eq!(
+            processed.iter().position(|item| *item == 99),
+            Some(ARRIVAL_BATCHES_BEFORE_MAINTENANCE)
+        );
+        assert_eq!(processed.len(), 13);
     }
 
     #[tokio::test]

@@ -25,10 +25,20 @@ export function ComposeApp() {
   const { t } = useTranslation();
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [loading, setLoading] = useState(true);
-  const [sendState, setSendState] = useState<"idle" | "sending" | "sent">(
-    "idle",
-  );
-  const [seed, setSeed] = useState(readComposeSeed);
+  // A seed token is single-use. Keep its first read for both the editor and
+  // recovery state rather than consuming it once for each state initializer.
+  const [initialSeed] = useState(readComposeSeed);
+  const [seed, setSeed] = useState(initialSeed);
+  const [sendState, setSendState] = useState<
+    | "idle"
+    | "sending"
+    | "sent"
+    | "queued"
+    | "sent_copy_pending"
+    | "sent_persistence_pending"
+    | "uncertain"
+    | "sent_copy_uncertain"
+  >(() => recoverySendState(initialSeed.recoveryOutcome));
   const [aiSettings] = useState<AiSettings>(() =>
     readJson("dakia.ai", defaultAi),
   );
@@ -39,7 +49,10 @@ export function ComposeApp() {
     readDatabaseComposeSeed()
       .then((databaseSeed) => {
         const nextSeed = databaseSeed ?? seed;
-        if (databaseSeed) setSeed(databaseSeed);
+        if (databaseSeed) {
+          setSeed(databaseSeed);
+          setSendState(recoverySendState(databaseSeed.recoveryOutcome));
+        }
         return Promise.all([
           api.accounts(),
           nextSeed.forwardMessageId
@@ -107,22 +120,33 @@ export function ComposeApp() {
       },
     });
     try {
-      await api.send(draft);
+      const outcome = await api.sendOutcome(draft);
+      await notifyOutbox({ phase: "finished", id: outboxId });
+      if (outcome.status === "uncertain") {
+        setSendState("uncertain");
+        return;
+      }
+      setSendState(
+        outcome.status === "queued"
+          ? "queued"
+          : outcome.status === "sent_copy_pending"
+            ? "sent_copy_pending"
+            : outcome.persistenceWarning
+              ? "sent_persistence_pending"
+              : "sent",
+      );
+      const reducedMotion = window.matchMedia(
+        "(prefers-reduced-motion: reduce)",
+      ).matches;
+      await new Promise<void>((resolve) =>
+        window.setTimeout(resolve, reducedMotion ? 0 : 320),
+      );
+      await closeComposeWindow(outcome);
     } catch (error) {
       await notifyOutbox({ phase: "finished", id: outboxId });
       showError(error, t("composer.sendError"));
       setSendState("idle");
-      return;
     }
-    await notifyOutbox({ phase: "finished", id: outboxId });
-    setSendState("sent");
-    const reducedMotion = window.matchMedia(
-      "(prefers-reduced-motion: reduce)",
-    ).matches;
-    await new Promise<void>((resolve) =>
-      window.setTimeout(resolve, reducedMotion ? 0 : 320),
-    );
-    await closeComposeWindow(true);
   };
 
   const showError = (error: unknown, title = t("errors.generic")) => {
@@ -159,6 +183,17 @@ export function ComposeApp() {
       }
     />
   );
+}
+
+function recoverySendState(
+  recoveryOutcome?:
+    "smtp_delivery_uncertain" | "smtp_accepted_sent_copy_uncertain",
+) {
+  return recoveryOutcome === "smtp_accepted_sent_copy_uncertain"
+    ? "sent_copy_uncertain"
+    : recoveryOutcome === "smtp_delivery_uncertain"
+      ? "uncertain"
+      : "idle";
 }
 
 function readJson<T>(key: string, fallback: T): T {

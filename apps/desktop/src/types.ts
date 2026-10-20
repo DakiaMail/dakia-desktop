@@ -104,7 +104,8 @@ export type NotificationAction = {
   threadId?: string;
   count: number;
 };
-export type SmartSectionId = "starred" | MailCategory | "seen";
+/** Smart Inbox keeps newly indexed, uncategorized headers visible. */
+export type SmartSectionId = "starred" | "unsorted" | MailCategory | "seen";
 export type SmartSection = {
   id: SmartSectionId;
   threads: MailThread[];
@@ -146,6 +147,15 @@ export type ComposeAttachment = {
   mime_type: string;
   content_base64: string;
   size_bytes: number;
+};
+export type SendSubmissionStatus =
+  "accepted" | "queued" | "sent_copy_pending" | "uncertain";
+export type SendSubmission = {
+  operationId: string;
+  status: SendSubmissionStatus;
+  response?: string | null;
+  /** SMTP accepted; a local durable completion still needs reconciliation. */
+  persistenceWarning?: boolean;
 };
 export type MailCategory =
   "people" | "transactions" | "notifications" | "newsletters" | "other";
@@ -199,6 +209,63 @@ export type RealtimeSyncStatus = {
   state: "connecting" | "idle" | "polling" | "retrying" | "paused";
   retryAt?: string | null;
   errorKind?: "connection" | "authentication" | null;
+};
+/** Durable account readiness queried after window startup or reconnect. */
+export type MailSyncStatus = {
+  runId: string;
+  accountId: string;
+  stage: string;
+  inboxReady: boolean;
+  primaryComplete: boolean;
+  secondaryComplete: boolean;
+  deferredComplete: boolean;
+  contentLoading: boolean;
+  retryCount: number;
+  outcome: string;
+  revision: number;
+  nextRetryAt?: string | null;
+  error?: string | null;
+};
+
+/** A post-commit catalogue event, ordered per account by revision. */
+export type MailCatalogueUpdated = {
+  accountId: string;
+  mailbox?: string | null;
+  revision: number;
+};
+export type MailOperationUpdated = {
+  operationId: string;
+  accountId: string;
+  messageId?: string | null;
+  kind: "message_read" | "message_star" | "mailbox_action";
+  status: "completed" | "retry" | "permanent_failed" | "uncertain";
+  error?: string | null;
+};
+/** A durable operation still needing user-visible recovery after restart. */
+export type UnresolvedMailOperation = {
+  operationId: string;
+  accountId: string;
+  messageId?: string | null;
+  kind: string;
+  status: "uncertain" | "permanent_failed" | "rejected";
+  outcome?: string | null;
+  /** True only when SMTP already accepted this submission. */
+  deliveryAccepted: boolean;
+  error?: string | null;
+  createdAt: string;
+};
+/** Stored only for a non-resend view of an uncertain SMTP submission. */
+export type OutgoingOperationDraft = {
+  accountId: string;
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  subject: string;
+  bodyText: string;
+  bodyHtml?: string | null;
+  inReplyTo?: string | null;
+  references?: string | null;
+  attachments: ComposeAttachment[];
 };
 export type AiSettings = {
   provider: "ollama" | "openai" | "local";

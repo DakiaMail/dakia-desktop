@@ -1,7 +1,7 @@
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
-import type { ComposeAttachment, MailSummary } from "./types";
+import type { ComposeAttachment, MailSummary, SendSubmission } from "./types";
 
 export type ComposeSeed = {
   accountId?: string;
@@ -16,6 +16,8 @@ export type ComposeSeed = {
   contextMessageIds?: string[];
   forwardMessageId?: string;
   attachments?: ComposeAttachment[];
+  recoveryOutcome?:
+    "smtp_delivery_uncertain" | "smtp_accepted_sent_copy_uncertain";
 };
 
 const isTauri = () => "__TAURI_INTERNALS__" in window;
@@ -157,9 +159,13 @@ function openComposeSeedDatabase() {
   });
 }
 
-export function onComposeSent(handler: () => void): Promise<UnlistenFn> {
+export function onComposeSent(
+  handler: (outcome?: SendSubmission) => void,
+): Promise<UnlistenFn> {
   if (!isTauri()) return Promise.resolve(() => undefined);
-  return listen("compose-sent", handler);
+  return listen<SendSubmission | undefined>("compose-sent", (event) =>
+    handler(event.payload),
+  );
 }
 
 export type OutboxEvent =
@@ -185,11 +191,11 @@ export async function notifyOutbox(event: OutboxEvent) {
   }
 }
 
-export async function closeComposeWindow(sent = false) {
+export async function closeComposeWindow(outcome?: SendSubmission) {
   if (!isTauri()) {
     window.close();
     return;
   }
-  if (sent) await emitTo("main", "compose-sent");
+  if (outcome) await emitTo("main", "compose-sent", outcome);
   await getCurrentWindow().close();
 }

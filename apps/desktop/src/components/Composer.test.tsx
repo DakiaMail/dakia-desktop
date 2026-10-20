@@ -156,6 +156,36 @@ describe("Composer send feedback", () => {
     ).toHaveAttribute("data-send-state", "sent");
   });
 
+  it("distinguishes SMTP acceptance with a pending Sent copy from uncertain delivery", () => {
+    const { rerender } = render(
+      <Composer {...props} sendState="sent_copy_pending" />,
+    );
+    expect(
+      screen.getByRole("button", { name: /Sent, saving copy/ }),
+    ).toBeDisabled();
+
+    rerender(<Composer {...props} sendState="uncertain" />);
+    expect(
+      screen.getByRole("button", { name: /Delivery status uncertain/ }),
+    ).toBeDisabled();
+    expect(screen.getByLabelText("Write your message…")).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+
+    rerender(<Composer {...props} sendState="sent_copy_uncertain" />);
+    expect(
+      screen.getByRole("button", {
+        name: /Sent copy is still being checked/,
+      }),
+    ).toBeDisabled();
+
+    rerender(<Composer {...props} sendState="queued" />);
+    expect(
+      screen.getByRole("button", { name: /Queued to send/ }),
+    ).toBeDisabled();
+  });
+
   it("preserves the draft when sending returns to idle after a failure", () => {
     const { rerender } = render(<Composer {...props} sendState="idle" />);
     const editor = screen.getByLabelText("Write your message…");

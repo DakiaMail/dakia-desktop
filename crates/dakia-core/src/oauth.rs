@@ -1,7 +1,99 @@
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, OnceLock, Weak},
+};
 use url::Url;
+
+use crate::{account::Account, storage::Store};
+
+type RefreshLock = tokio::sync::Mutex<Option<String>>;
+
+fn refresh_lock(secret_name: &str) -> Arc<RefreshLock> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, Weak<RefreshLock>>>> = OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(Mutex::default)
+        .lock()
+        .expect("OAuth refresh locks poisoned");
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(secret_name).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(None));
+    locks.insert(secret_name.to_owned(), Arc::downgrade(&lock));
+    lock
+}
+
+/// Independent IMAP and SMTP services share refresh work. Read the durable
+/// token *after* obtaining the lock so a waiter uses the winner's rotated token.
+/// A failed refresh is also shared by its current waiters, avoiding a burst of
+/// identical refresh requests during a provider outage.
+pub(crate) async fn current_access_token(
+    store: &Store,
+    account: &Account,
+    secret_name: &str,
+) -> Result<String> {
+    let lock = refresh_lock(secret_name);
+    let mut failure = lock.lock().await;
+    if let Some(error) = failure.as_ref() {
+        bail!("{error}");
+    }
+    let mut stored = store
+        .secret_for_account(account, secret_name)
+        .await?
+        .context("credentials are not stored for this account")
+        .context("OAuth authentication failed")?;
+    let mut tokens: OAuthTokens = serde_json::from_str(&stored)
+        .context("stored OAuth credentials are invalid")
+        .context("OAuth authentication failed")?;
+    if tokens.should_refresh() {
+        let waiting_since = std::time::Instant::now();
+        let lease = loop {
+            if let Some(lease) = store
+                .acquire_oauth_refresh_lease(account, secret_name)
+                .await?
+            {
+                break lease;
+            }
+            store
+                .secret_for_account(account, secret_name)
+                .await?
+                .context("OAuth credentials are no longer available")?;
+            if waiting_since.elapsed() > std::time::Duration::from_secs(125) {
+                bail!("OAuth refresh is still in progress; try again");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        };
+        // Another process may have completed rotation while we waited.
+        stored = store
+            .secret_for_account(account, secret_name)
+            .await?
+            .context("OAuth credentials are no longer available")?;
+        tokens = serde_json::from_str(&stored).context("stored OAuth credentials are invalid")?;
+        if !tokens.should_refresh() {
+            return Ok(tokens.access_token);
+        }
+        if let Err(error) = tokens.refresh().await {
+            *failure = Some(error.to_string());
+            return Err(error);
+        }
+        if !store
+            .replace_oauth_secret_for_account(
+                account,
+                secret_name,
+                &stored,
+                &serde_json::to_string(&tokens)?,
+                &lease,
+            )
+            .await?
+        {
+            bail!("Account credentials changed during refresh; try again");
+        }
+    }
+    Ok(tokens.access_token)
+}
 
 const OAUTH_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const OAUTH_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -87,7 +179,7 @@ async fn oauth_response(response: reqwest::Response) -> Result<TokenResponse> {
         if refresh_failure_kind(status, provider_error.as_deref())
             == RefreshFailureKind::Authentication
         {
-            bail!("OAuth authentication failed ({status}): {body}");
+            bail!("OAuth authentication failed ({status})");
         }
         // Do not include provider-controlled text in the retryable error.
         // Realtime sync still recognizes legacy authentication rejections by
@@ -144,6 +236,225 @@ mod tests {
             client_secret: None,
             token_url,
         }
+    }
+
+    #[tokio::test]
+    async fn durable_refresh_lease_waits_for_another_store_and_reuses_its_rotation() {
+        use crate::{
+            account::{AccountAuth, AccountDraft},
+            provider,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("oauth.db");
+        let store = Store::open(&path).await.unwrap();
+        let mut account = serde_json::from_value::<AccountDraft>(serde_json::json!({
+            "email": "lease@example.test", "display_name": "Lease", "provider_id": "fastmail"
+        }))
+        .unwrap()
+        .into_account(provider::by_id("fastmail").unwrap());
+        account.auth = AccountAuth::OAuth2 {
+            username: account.email.clone(),
+            provider: "gmail".into(),
+            access_token_expires_at: None,
+        };
+        store.save_account(&account).await.unwrap();
+        let name = format!("dev.dakia.mail:{}:{}", account.id, account.email);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut tokens = expired_tokens(
+            Url::parse(&format!("http://{}/token", listener.local_addr().unwrap())).unwrap(),
+        );
+        tokens.expires_at = Some(Utc::now() - chrono::Duration::minutes(1));
+        let original = serde_json::to_string(&tokens).unwrap();
+        store.set_secret(&name, &original).await.unwrap();
+        let other_process_store = Store::open(&path).await.unwrap();
+        let lease = other_process_store
+            .acquire_oauth_refresh_lease(&account, &name)
+            .await
+            .unwrap()
+            .unwrap();
+        let waiting = tokio::spawn({
+            let (store, account, name) = (store.clone(), account.clone(), name.clone());
+            async move { current_access_token(&store, &account, &name).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!waiting.is_finished(), "another store owns token rotation");
+        tokens.access_token = "other-process-access".into();
+        tokens.refresh_token = Some("other-process-rotated-refresh".into());
+        tokens.expires_at = Some(Utc::now() + chrono::Duration::hours(1));
+        assert!(other_process_store
+            .replace_oauth_secret_for_account(
+                &account,
+                &name,
+                &original,
+                &serde_json::to_string(&tokens).unwrap(),
+                &lease
+            )
+            .await
+            .unwrap());
+        drop(lease);
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), waiting)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            "other-process-access"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), listener.accept())
+                .await
+                .is_err(),
+            "the waiting process must not rotate the old token again"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_services_share_one_refresh_and_persist_rotated_tokens() {
+        use crate::{
+            account::{AccountAuth, AccountDraft},
+            provider,
+        };
+        let store = Store::in_memory().await.unwrap();
+        let mut account = AccountDraft {
+            email: "reader@example.test".into(),
+            display_name: "Reader".into(),
+            provider_id: Some("fastmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("fastmail").unwrap());
+        account.auth = AccountAuth::OAuth2 {
+            username: account.email.clone(),
+            provider: "gmail".into(),
+            access_token_expires_at: None,
+        };
+        store.save_account(&account).await.unwrap();
+        let name = format!("dev.dakia.mail:{}:{}", account.id, account.email);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut tokens = expired_tokens(
+            Url::parse(&format!("http://{}/token", listener.local_addr().unwrap())).unwrap(),
+        );
+        tokens.expires_at = Some(Utc::now() - chrono::Duration::minutes(1));
+        store
+            .set_secret(&name, &serde_json::to_string(&tokens).unwrap())
+            .await
+            .unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            // Hold the first response while all eight independent clients queue.
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            let body = r#"{"access_token":"new-access","refresh_token":"rotated-refresh","expires_in":3600}"#;
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err(),
+                "only one refresh request is allowed"
+            );
+        });
+        let mut clients = Vec::new();
+        for _ in 0..8 {
+            let (store, account, name) = (store.clone(), account.clone(), name.clone());
+            clients.push(tokio::spawn(async move {
+                current_access_token(&store, &account, &name).await.unwrap()
+            }));
+        }
+        for client in clients {
+            assert_eq!(client.await.unwrap(), "new-access");
+        }
+        server.await.unwrap();
+        let saved: OAuthTokens =
+            serde_json::from_str(&store.secret(&name).await.unwrap().unwrap()).unwrap();
+        assert_eq!(saved.refresh_token.as_deref(), Some("rotated-refresh"));
+    }
+
+    #[tokio::test]
+    async fn refresh_cannot_restore_credentials_after_account_removal() {
+        use crate::{
+            account::{AccountAuth, AccountDraft},
+            provider,
+        };
+        let store = Store::in_memory().await.unwrap();
+        let mut account = AccountDraft {
+            email: "removed@example.test".into(),
+            display_name: "Removed".into(),
+            provider_id: Some("fastmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("fastmail").unwrap());
+        account.auth = AccountAuth::OAuth2 {
+            username: account.email.clone(),
+            provider: "gmail".into(),
+            access_token_expires_at: None,
+        };
+        store.save_account(&account).await.unwrap();
+        let name = format!("dev.dakia.mail:{}:{}", account.id, account.email);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut tokens = expired_tokens(
+            Url::parse(&format!("http://{}/token", listener.local_addr().unwrap())).unwrap(),
+        );
+        tokens.expires_at = Some(Utc::now() - chrono::Duration::minutes(1));
+        store
+            .set_secret(&name, &serde_json::to_string(&tokens).unwrap())
+            .await
+            .unwrap();
+        let (started, requested) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            started.send(()).unwrap();
+            released.await.unwrap();
+            let body = r#"{"access_token":"late-access","expires_in":3600}"#;
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let client = tokio::spawn({
+            let (store, account, name) = (store.clone(), account.clone(), name.clone());
+            async move { current_access_token(&store, &account, &name).await }
+        });
+        requested.await.unwrap();
+        store.delete_account(account.id).await.unwrap();
+        store.delete_secret(&name).await.unwrap();
+        release.send(()).unwrap();
+        assert!(client.await.unwrap().is_err());
+        server.await.unwrap();
+        assert!(store.secret(&name).await.unwrap().is_none());
     }
 
     #[tokio::test]

@@ -141,12 +141,11 @@ describe("Tauri payload contracts", () => {
       commands.setMessageRead.arguments.messageId,
       commands.setMessageRead.arguments.read,
     );
-    await api.action(
-      commands.applyMailboxAction.arguments.accountId,
-      commands.applyMailboxAction.arguments.mailbox,
-      commands.applyMailboxAction.arguments.uid,
-      commands.applyMailboxAction.arguments.action as "archive",
-    );
+    const immutableAction = {
+      messageId: "message-1",
+      action: "archive" as const,
+    };
+    await api.action(immutableAction.messageId, immutableAction.action);
     await api.sync(commands.syncAccount.arguments.accountId, progress);
 
     expect(apiMocks.invoke.mock.calls).toEqual([
@@ -160,10 +159,7 @@ describe("Tauri payload contracts", () => {
         commands.setMessageStarred.arguments,
       ],
       [commands.setMessageRead.command, commands.setMessageRead.arguments],
-      [
-        commands.applyMailboxAction.command,
-        commands.applyMailboxAction.arguments,
-      ],
+      [commands.applyMailboxAction.command, immutableAction],
       [
         commands.syncAccount.command,
         {
@@ -180,16 +176,14 @@ describe("Tauri payload contracts", () => {
     });
   });
 
-  it("uses the mailbox action command with the exact permanent-delete locator", async () => {
+  it("uses the mailbox action command with its immutable local message ID", async () => {
     apiMocks.invoke.mockResolvedValue(undefined);
     const { api } = await import("./api");
 
-    await api.action("account-1", "Archive::All Mail", 42, "delete");
+    await api.action("message-42", "delete");
 
     expect(apiMocks.invoke).toHaveBeenCalledWith("apply_mailbox_action", {
-      accountId: "account-1",
-      mailbox: "Archive::All Mail",
-      uid: 42,
+      messageId: "message-42",
       action: "delete",
     });
   });
@@ -204,6 +198,51 @@ describe("Tauri payload contracts", () => {
     expect(apiMocks.invoke).toHaveBeenCalledWith("trash_messages_from_sender", {
       accountId: "account-1",
       senderAddress: "sender@example.test",
+    });
+  });
+
+  it("queries durable synchronization coverage through its dedicated command", async () => {
+    apiMocks.invoke.mockResolvedValue([]);
+    const { api } = await import("./api");
+
+    await expect(api.mailSyncStatus()).resolves.toEqual([]);
+    expect(apiMocks.invoke).toHaveBeenCalledWith("mail_sync_status");
+  });
+
+  it("reads restart-recovery operations and a saved SMTP draft through dedicated commands", async () => {
+    apiMocks.invoke.mockResolvedValue([]);
+    const { api } = await import("./api");
+
+    await api.mailUnresolvedOperations(["account-1"]);
+    await api.outgoingOperationDraft("operation-1");
+
+    expect(apiMocks.invoke).toHaveBeenNthCalledWith(
+      1,
+      "mail_unresolved_operations",
+      { accountIds: ["account-1"] },
+    );
+    expect(apiMocks.invoke).toHaveBeenNthCalledWith(
+      2,
+      "outgoing_operation_draft",
+      { operationId: "operation-1" },
+    );
+  });
+
+  it("uses the durable outcome command for SMTP acceptance state", async () => {
+    apiMocks.invoke.mockResolvedValue({
+      operationId: "operation-1",
+      status: "sent_copy_pending",
+      response: "250 queued",
+    });
+    const { api } = await import("./api");
+    const draft = { account_id: "account-1", to: ["recipient@example.test"] };
+
+    await expect(api.sendOutcome(draft)).resolves.toMatchObject({
+      operationId: "operation-1",
+      status: "sent_copy_pending",
+    });
+    expect(apiMocks.invoke).toHaveBeenCalledWith("send_message_outcome", {
+      draft,
     });
   });
 
@@ -264,6 +303,68 @@ describe("Tauri payload contracts", () => {
       "errorKind",
       null,
     );
+  });
+
+  it("delivers committed catalogue revisions without changing the payload", async () => {
+    const handlers = new Map<string, ListenHandler>();
+    eventMocks.listen.mockImplementation(
+      async (event: string, handler: ListenHandler) => {
+        handlers.set(event, handler);
+        return vi.fn();
+      },
+    );
+    const { onMailCatalogueUpdated } = await import("./nativeWindows");
+    const updated = vi.fn();
+    const event = { accountId: "account-1", mailbox: "INBOX", revision: 42 };
+
+    await onMailCatalogueUpdated(updated);
+    handlers.get("mail-catalogue-updated")?.({ payload: decoded(event) });
+
+    expect(updated).toHaveBeenCalledWith(event);
+  });
+
+  it("delivers content-activity wakeups by account without a mail query payload", async () => {
+    const handlers = new Map<string, ListenHandler>();
+    eventMocks.listen.mockImplementation(
+      async (event: string, handler: ListenHandler) => {
+        handlers.set(event, handler);
+        return vi.fn();
+      },
+    );
+    const { onMailContentActivity } = await import("./nativeWindows");
+    const activity = vi.fn();
+
+    await onMailContentActivity(activity);
+    handlers.get("mail-content-activity")?.({
+      payload: { accountId: "account-1" },
+    });
+
+    expect(activity).toHaveBeenCalledWith("account-1");
+  });
+
+  it("delivers durable mutation outcomes with the immutable message identity", async () => {
+    const handlers = new Map<string, ListenHandler>();
+    eventMocks.listen.mockImplementation(
+      async (event: string, handler: ListenHandler) => {
+        handlers.set(event, handler);
+        return vi.fn();
+      },
+    );
+    const { onMailOperationUpdated } = await import("./nativeWindows");
+    const updated = vi.fn();
+    const event = {
+      operationId: "operation-1",
+      accountId: "account-1",
+      messageId: "message-1",
+      kind: "message_read" as const,
+      status: "permanent_failed" as const,
+      error: "provider rejected the flag update",
+    };
+
+    await onMailOperationUpdated(updated);
+    handlers.get("mail-operation-updated")?.({ payload: decoded(event) });
+
+    expect(updated).toHaveBeenCalledWith(event);
   });
 
   it("never broadcasts an AI API key across native windows", async () => {

@@ -1,0 +1,316 @@
+{
+  "schemaVersion": 1,
+  "measuredAt": "2026-09-12T20:38:13.556Z",
+  "conditions": {
+    "host": "darwin-arm64",
+    "fixture": "implicit TLS loopback, dense 2,000-message and deterministic sparse larger fictional UIDs",
+    "freshWindowRows": 50,
+    "historicalBatchRows": 50,
+    "headerFetchCountComparison": "recorded against ceil(messages / 50)",
+    "compilationExcludedFromCoreMetrics": true,
+    "executableSha256": "7696aed680f8bfa9b5116006623042fde2f5a4a31c713b094d524f3f9301ace9"
+  },
+  "results": [
+    {
+      "mode": "fresh-window",
+      "messages": 2000,
+      "sparseUids": false,
+      "responseDelayMs": 0,
+      "historyDelayMs": 0,
+      "core": {
+        "exitCode": 0,
+        "stdout": "DAKIA_LIVE_METRIC {\"backfillCallsIncludingEmptyCompletion\":40,\"catalogueRows\":2000,\"firstCommitMs\":63.064207999999994,\"fullBackfillMs\":3018.733917,\"headerCommitTransactions\":40,\"historicalCommittedRows\":1950,\"initialCommittedRows\":50,\"mailMetrics\":{\"publicationTransactions\":{\"count\":45,\"maxMs\":30.2305,\"meanMs\":18.48423888888889,\"totalMs\":831.79075},\"submissionQueue\":{\"count\":0,\"maxMs\":null,\"meanMs\":null,\"totalMs\":0.0}},\"scenario\":\"fresh_window\"}\n",
+        "stderr": "DAKIA_METRIC {\"configuredPageSize\":1000,\"kind\":\"uid_search\",\"mailbox\":\"INBOX\",\"maxRetainedUidBytes\":4000,\"maxRetainedUids\":1000,\"pageCount\":2,\"remoteMailbox\":\"INBOX\",\"uidCount\":2000}\n",
+        "metrics": [
+          {
+            "backfillCallsIncludingEmptyCompletion": 40,
+            "catalogueRows": 2000,
+            "firstCommitMs": 63.064207999999994,
+            "fullBackfillMs": 3018.733917,
+            "headerCommitTransactions": 40,
+            "historicalCommittedRows": 1950,
+            "initialCommittedRows": 50,
+            "mailMetrics": {
+              "publicationTransactions": {
+                "count": 45,
+                "maxMs": 30.2305,
+                "meanMs": 18.48423888888889,
+                "totalMs": 831.79075
+              },
+              "submissionQueue": {
+                "count": 0,
+                "maxMs": null,
+                "meanMs": null,
+                "totalMs": 0
+              }
+            },
+            "scenario": "fresh_window"
+          }
+        ],
+        "parserMetrics": [
+          {
+            "configuredPageSize": 1000,
+            "kind": "uid_search",
+            "mailbox": "INBOX",
+            "maxRetainedUidBytes": 4000,
+            "maxRetainedUids": 1000,
+            "pageCount": 2,
+            "remoteMailbox": "INBOX",
+            "uidCount": 2000
+          }
+        ]
+      },
+      "transport": {
+        "imap": {
+          "commands": 243,
+          "responses": 284,
+          "responseBytes": 734967,
+          "maxResponseBytes": 32418
+        },
+        "smtp": {
+          "commands": 0,
+          "responses": 0,
+          "responseBytes": 0,
+          "maxResponseBytes": 0
+        }
+      },
+      "acceptedSmtpMessages": 0,
+      "headerFetchCommands": 79,
+      "allFetchCommands": 79,
+      "countOnlyHeaderFetchFloor": 40,
+      "headerFetchCommandsAboveCountOnlyFloor": 39,
+      "metricErrors": [],
+      "acceptancePassed": true
+    },
+    {
+      "mode": "fresh-window",
+      "messages": 30000,
+      "sparseUids": true,
+      "responseDelayMs": 0,
+      "historyDelayMs": 0,
+      "core": {
+        "exitCode": 0,
+        "stdout": "DAKIA_LIVE_METRIC {\"backfillCallsIncludingEmptyCompletion\":600,\"catalogueRows\":30000,\"firstCommitMs\":60.737166,\"fullBackfillMs\":95664.126125,\"headerCommitTransactions\":600,\"historicalCommittedRows\":29950,\"initialCommittedRows\":50,\"mailMetrics\":{\"publicationTransactions\":{\"count\":633,\"maxMs\":129.953375,\"meanMs\":22.444507184834123,\"totalMs\":14207.373048},\"submissionQueue\":{\"count\":0,\"maxMs\":null,\"meanMs\":null,\"totalMs\":0.0}},\"scenario\":\"fresh_window\"}\n",
+        "stderr": "DAKIA_METRIC {\"configuredPageSize\":1000,\"kind\":\"uid_search\",\"mailbox\":\"INBOX\",\"maxRetainedUidBytes\":4000,\"maxRetainedUids\":1000,\"pageCount\":30,\"remoteMailbox\":\"INBOX\",\"uidCount\":30000}\n",
+        "metrics": [
+          {
+            "backfillCallsIncludingEmptyCompletion": 600,
+            "catalogueRows": 30000,
+            "firstCommitMs": 60.737166,
+            "fullBackfillMs": 95664.126125,
+            "headerCommitTransactions": 600,
+            "historicalCommittedRows": 29950,
+            "initialCommittedRows": 50,
+            "mailMetrics": {
+              "publicationTransactions": {
+                "count": 633,
+                "maxMs": 129.953375,
+                "meanMs": 22.444507184834123,
+                "totalMs": 14207.373048
+              },
+              "submissionQueue": {
+                "count": 0,
+                "maxMs": null,
+                "meanMs": null,
+                "totalMs": 0
+              }
+            },
+            "scenario": "fresh_window"
+          }
+        ],
+        "parserMetrics": [
+          {
+            "configuredPageSize": 1000,
+            "kind": "uid_search",
+            "mailbox": "INBOX",
+            "maxRetainedUidBytes": 4000,
+            "maxRetainedUids": 1000,
+            "pageCount": 30,
+            "remoteMailbox": "INBOX",
+            "uidCount": 30000
+          }
+        ]
+      },
+      "transport": {
+        "imap": {
+          "commands": 3603,
+          "responses": 4204,
+          "responseBytes": 11108762,
+          "maxResponseBytes": 176327
+        },
+        "smtp": {
+          "commands": 0,
+          "responses": 0,
+          "responseBytes": 0,
+          "maxResponseBytes": 0
+        }
+      },
+      "acceptedSmtpMessages": 0,
+      "headerFetchCommands": 1199,
+      "allFetchCommands": 1199,
+      "countOnlyHeaderFetchFloor": 600,
+      "headerFetchCommandsAboveCountOnlyFloor": 599,
+      "metricErrors": [],
+      "acceptancePassed": true
+    },
+    {
+      "mode": "fresh-window",
+      "messages": 100000,
+      "sparseUids": true,
+      "responseDelayMs": 0,
+      "historyDelayMs": 0,
+      "core": {
+        "exitCode": 0,
+        "stdout": "DAKIA_LIVE_METRIC {\"backfillCallsIncludingEmptyCompletion\":2000,\"catalogueRows\":100000,\"firstCommitMs\":60.074833,\"fullBackfillMs\":703783.165375,\"headerCommitTransactions\":2000,\"historicalCommittedRows\":99950,\"initialCommittedRows\":50,\"mailMetrics\":{\"publicationTransactions\":{\"count\":2103,\"maxMs\":210.625541,\"meanMs\":22.671469661911555,\"totalMs\":47678.100699},\"submissionQueue\":{\"count\":0,\"maxMs\":null,\"meanMs\":null,\"totalMs\":0.0}},\"scenario\":\"fresh_window\"}\n",
+        "stderr": "DAKIA_METRIC {\"configuredPageSize\":1000,\"kind\":\"uid_search\",\"mailbox\":\"INBOX\",\"maxRetainedUidBytes\":4000,\"maxRetainedUids\":1000,\"pageCount\":100,\"remoteMailbox\":\"INBOX\",\"uidCount\":100000}\n",
+        "metrics": [
+          {
+            "backfillCallsIncludingEmptyCompletion": 2000,
+            "catalogueRows": 100000,
+            "firstCommitMs": 60.074833,
+            "fullBackfillMs": 703783.165375,
+            "headerCommitTransactions": 2000,
+            "historicalCommittedRows": 99950,
+            "initialCommittedRows": 50,
+            "mailMetrics": {
+              "publicationTransactions": {
+                "count": 2103,
+                "maxMs": 210.625541,
+                "meanMs": 22.671469661911555,
+                "totalMs": 47678.100699
+              },
+              "submissionQueue": {
+                "count": 0,
+                "maxMs": null,
+                "meanMs": null,
+                "totalMs": 0
+              }
+            },
+            "scenario": "fresh_window"
+          }
+        ],
+        "parserMetrics": [
+          {
+            "configuredPageSize": 1000,
+            "kind": "uid_search",
+            "mailbox": "INBOX",
+            "maxRetainedUidBytes": 4000,
+            "maxRetainedUids": 1000,
+            "pageCount": 100,
+            "remoteMailbox": "INBOX",
+            "uidCount": 100000
+          }
+        ]
+      },
+      "transport": {
+        "imap": {
+          "commands": 12003,
+          "responses": 14004,
+          "responseBytes": 37479769,
+          "maxResponseBytes": 662994
+        },
+        "smtp": {
+          "commands": 0,
+          "responses": 0,
+          "responseBytes": 0,
+          "maxResponseBytes": 0
+        }
+      },
+      "acceptedSmtpMessages": 0,
+      "headerFetchCommands": 3999,
+      "allFetchCommands": 3999,
+      "countOnlyHeaderFetchFloor": 2000,
+      "headerFetchCommandsAboveCountOnlyFloor": 1999,
+      "metricErrors": [],
+      "acceptancePassed": true
+    },
+    {
+      "mode": "smtp-while-history-stalled",
+      "messages": 2000,
+      "sparseUids": true,
+      "responseDelayMs": 0,
+      "historyDelayMs": 5000,
+      "core": {
+        "exitCode": 0,
+        "stdout": "DAKIA_METRIC {\"durationMs\":104.48,\"mailMetrics\":{\"publicationTransactions\":{\"count\":0,\"maxMs\":null,\"meanMs\":null,\"totalMs\":0.0},\"submissionQueue\":{\"count\":1,\"maxMs\":104.48,\"meanMs\":104.48,\"totalMs\":104.48}},\"name\":\"submission-queue-wait\"}\nDAKIA_LIVE_METRIC {\"historyCommittedRows\":50,\"historyMs\":5163.371125000001,\"historyWasStillRunningAtSmtpAcceptance\":true,\"mailMetrics\":{\"publicationTransactions\":{\"count\":4,\"maxMs\":40.74825,\"meanMs\":24.78461475,\"totalMs\":99.138459},\"submissionQueue\":{\"count\":1,\"maxMs\":104.48,\"meanMs\":104.48,\"totalMs\":104.48}},\"scenario\":\"smtp_while_history_stalled\",\"smtpAccepted\":true,\"smtpMs\":4.034041}\n",
+        "stderr": "DAKIA_METRIC {\"configuredPageSize\":1000,\"kind\":\"uid_search\",\"mailbox\":\"INBOX\",\"maxRetainedUidBytes\":4000,\"maxRetainedUids\":1000,\"pageCount\":2,\"remoteMailbox\":\"INBOX\",\"uidCount\":2000}\n",
+        "metrics": [
+          {
+            "historyCommittedRows": 50,
+            "historyMs": 5163.371125000001,
+            "historyWasStillRunningAtSmtpAcceptance": true,
+            "mailMetrics": {
+              "publicationTransactions": {
+                "count": 4,
+                "maxMs": 40.74825,
+                "meanMs": 24.78461475,
+                "totalMs": 99.138459
+              },
+              "submissionQueue": {
+                "count": 1,
+                "maxMs": 104.48,
+                "meanMs": 104.48,
+                "totalMs": 104.48
+              }
+            },
+            "scenario": "smtp_while_history_stalled",
+            "smtpAccepted": true,
+            "smtpMs": 4.034041
+          }
+        ],
+        "parserMetrics": [
+          {
+            "durationMs": 104.48,
+            "mailMetrics": {
+              "publicationTransactions": {
+                "count": 0,
+                "maxMs": null,
+                "meanMs": null,
+                "totalMs": 0
+              },
+              "submissionQueue": {
+                "count": 1,
+                "maxMs": 104.48,
+                "meanMs": 104.48,
+                "totalMs": 104.48
+              }
+            },
+            "name": "submission-queue-wait"
+          },
+          {
+            "configuredPageSize": 1000,
+            "kind": "uid_search",
+            "mailbox": "INBOX",
+            "maxRetainedUidBytes": 4000,
+            "maxRetainedUids": 1000,
+            "pageCount": 2,
+            "remoteMailbox": "INBOX",
+            "uidCount": 2000
+          }
+        ]
+      },
+      "transport": {
+        "imap": {
+          "commands": 7,
+          "responses": 8,
+          "responseBytes": 27601,
+          "maxResponseBytes": 9660
+        },
+        "smtp": {
+          "commands": 5,
+          "responses": 7,
+          "responseBytes": 234,
+          "maxResponseBytes": 51
+        }
+      },
+      "acceptedSmtpMessages": 1,
+      "headerFetchCommands": 2,
+      "allFetchCommands": 2,
+      "countOnlyHeaderFetchFloor": 40,
+      "headerFetchCommandsAboveCountOnlyFloor": -38,
+      "metricErrors": [],
+      "acceptancePassed": true
+    }
+  ],
+  "allPassed": true
+}
