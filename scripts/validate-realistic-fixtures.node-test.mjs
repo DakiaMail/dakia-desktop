@@ -57,10 +57,81 @@ function manifestAt(root) {
 
 test("validates the checked-in realistic mail fixture corpus", () => {
   const result = validateFixtureCorpus(repositoryRoot);
-  assert.equal(result.fixtureCount, 17);
+  assert.equal(result.fixtureCount, 18);
   assert.equal(result.files.filter((path) => path.endsWith(".eml")).length, 13);
-  assert.equal(result.files.filter((path) => path.endsWith(".html")).length, 4);
+  assert.equal(result.files.filter((path) => path.endsWith(".html")).length, 5);
 });
+
+test("distinguishes retina image URL paths from email addresses without hiding live domains", () =>
+  withCorpus((root) => {
+    const [manifestPath, manifest] = manifestAt(root);
+    const fixture = manifest.fixtures.find(
+      (entry) => entry.id === "html.stripe-receipt-layout",
+    );
+    const path = join(root, fixture.path);
+    const original = readFileSync(path, "utf8");
+    const replace = (contents) => {
+      writeFileSync(path, contents);
+      fixture.sha256 = createHash("sha256").update(contents).digest("hex");
+      writeFileSync(manifestPath, JSON.stringify(manifest));
+    };
+
+    // The actual provider fixture contains a public icon@2x.png asset URL.
+    assert.doesNotThrow(() => validateFixtureCorpus(root));
+    replace(original + '<img src="https://gmail.com/icon@2x.png">');
+    assert.throws(
+      () => validateFixtureCorpus(root),
+      /prohibited live domain: gmail.com/,
+    );
+    replace(
+      original +
+        '<a href="https://merchant.example.test/private@gmail.com">Receipt</a>',
+    );
+    assert.throws(
+      () => validateFixtureCorpus(root),
+      /prohibited live domain: gmail.com/,
+    );
+    replace(
+      original + '<img src="https://merchant.example.test/private@2x.png">',
+    );
+    assert.throws(
+      () => validateFixtureCorpus(root),
+      /undeclared address or endpoint domain: 2x.png/,
+    );
+    replace(original + "<p>Contact: support@2x.png</p>");
+    assert.throws(
+      () => validateFixtureCorpus(root),
+      /undeclared address or endpoint domain: 2x.png/,
+    );
+  }));
+
+test("rejects unsafe or unreviewed exact asset URL exceptions", () =>
+  withCorpus((root) => {
+    const [manifestPath, manifest] = manifestAt(root);
+    const fixture = manifest.fixtures.find(
+      (entry) => entry.id === "html.stripe-receipt-layout",
+    );
+    for (const url of [
+      "http://stripe-images.s3.amazonaws.com/icon@2x.png",
+      "https://gmail.com/icon@2x.png",
+      "https://stripe-images.s3.amazonaws.com/icon@2x.png?email=private@example.test",
+      "https://user:fictional@stripe-images.s3.amazonaws.com/icon@2x.png",
+      "https://stripe-images.s3.amazonaws.com/private@example.test",
+    ]) {
+      fixture.redaction.permittedAssetUrls = [url];
+      writeFileSync(manifestPath, JSON.stringify(manifest));
+      assert.throws(
+        () => validateFixtureCorpus(root),
+        /invalid permitted asset URL/,
+      );
+    }
+    fixture.redaction.permittedAssetUrls = "not-an-array";
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    assert.throws(
+      () => validateFixtureCorpus(root),
+      /permittedAssetUrls must be an array/,
+    );
+  }));
 
 test("rejects checksum drift and unmanifested fixtures", () =>
   withCorpus((root) => {
@@ -197,7 +268,7 @@ test("rejects a raw fixture import referenced only through void", () =>
     );
     const source = readFileSync(sourcePath, "utf8").replace(
       "html={freshdeskReplySection}",
-      "html={\"<p>replacement</p>\"}\n        {void freshdeskReplySection}",
+      'html={"<p>replacement</p>"}\n        {void freshdeskReplySection}',
     );
     writeFileSync(sourcePath, source);
 

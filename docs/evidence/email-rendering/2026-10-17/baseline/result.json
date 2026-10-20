@@ -1,0 +1,43 @@
+{
+  "dark": {
+    "amounts": [
+      {
+        "height": 192,
+        "text": "US$12.34",
+        "width": 11.171875
+      },
+      {
+        "height": 192,
+        "text": "US$12.34",
+        "width": 11.171875
+      }
+    ],
+    "background": "rgb(246, 249, 252)",
+    "darkClass": false,
+    "spacer": false
+  },
+  "executable": "<checkout>/output/playwright/receipt-native/verify-webkit",
+  "expectedBroken": true,
+  "kind": "result",
+  "light": {
+    "amounts": [
+      {
+        "height": 192,
+        "text": "US$12.34",
+        "width": 11.171875
+      },
+      {
+        "height": 192,
+        "text": "US$12.34",
+        "width": 11.171875
+      }
+    ],
+    "background": "rgb(246, 249, 252)",
+    "darkClass": false,
+    "spacer": false
+  },
+  "macOS": "Version 26.6.2 (Build 25G83)",
+  "nativeWebviewURL": "http://127.0.0.1:1420/native-receipt-verify.html?baseline=1",
+  "pass": true,
+  "url": "http://127.0.0.1:1420/native-receipt-verify.html?baseline=1"
+}

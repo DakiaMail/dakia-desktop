@@ -1,0 +1,288 @@
+{
+  "cycles": [
+    {
+      "collapsed": 971,
+      "expanded": 1073
+    },
+    {
+      "collapsed": 971,
+      "expanded": 1073
+    }
+  ],
+  "devicePixelRatio": 2,
+  "executable": "<checkout>/output/playwright/receipt-native/verify-webkit",
+  "kind": "result",
+  "macOS": "Version 26.6.2 (Build 25G83)",
+  "metrics": [
+    {
+      "amounts": [
+        {
+          "height": 24,
+          "ink": "rgb(82, 95, 127)",
+          "lines": 1,
+          "text": "US$12.34",
+          "width": 72.0625
+        },
+        {
+          "height": 24,
+          "ink": "rgb(82, 95, 127)",
+          "lines": 1,
+          "text": "US$12.34",
+          "width": 72.0625
+        }
+      ],
+      "artwork": [
+        {
+          "height": 156,
+          "loaded": true,
+          "width": 252
+        },
+        {
+          "height": 156,
+          "loaded": true,
+          "width": 96
+        },
+        {
+          "height": 156,
+          "loaded": true,
+          "width": 252
+        }
+      ],
+      "background": "rgb(246, 249, 252)",
+      "dark": false,
+      "footerBottom": 834,
+      "headerBackground": "rgb(0, 0, 0)",
+      "hostHeight": 919,
+      "name": "01-light-wide",
+      "spacerHeight": 24,
+      "width": 1000,
+      "wrapperWidth": 600
+    },
+    {
+      "amounts": [
+        {
+          "height": 24,
+          "ink": "rgb(217, 222, 219)",
+          "lines": 1,
+          "text": "US$12.34",
+          "width": 72.0625
+        },
+        {
+          "height": 24,
+          "ink": "rgb(217, 222, 219)",
+          "lines": 1,
+          "text": "US$12.34",
+          "width": 72.0625
+        }
+      ],
+      "artwork": [
+        {
+          "height": 156,
+          "loaded": true,
+          "width": 252
+        },
+        {
+          "height": 156,
+          "loaded": true,
+          "width": 96
+        },
+        {
+          "height": 156,
+          "loaded": true,
+          "width": 252
+        }
+      ],
+      "background": "rgb(25, 26, 25)",
+      "dark": true,
+      "footerBottom": 834,
+      "headerBackground": "rgb(0, 0, 0)",
+      "hostHeight": 919,
+      "name": "02-dark-wide",
+      "spacerHeight": 24,
+      "width": 1000,
+      "wrapperWidth": 600
+    },
+    {
+      "amounts": [
+        {
+          "height": 24,
+          "ink": "rgb(82, 95, 127)",
+          "lines": 1,
+          "text": "US$12.34",
+          "width": 72.0625
+        },
+        {
+          "height": 24,
+          "ink": "rgb(82, 95, 127)",
+          "lines": 1,
+          "text": "US$12.34",
+          "width": 72.0625
+        }
+      ],
+      "artwork": [
+        {
+          "height": 156,
+          "loaded": true,
+          "width": 252
+        },
+        {
+          "height": 156,
+          "loaded": true,
+          "width": 96
+        },
+        {
+          "height": 156,
+          "loaded": true,
+          "width": 252
+        }
+      ],
+      "background": "rgb(246, 249, 252)",
+      "dark": false,
+      "footerBottom": 834,
+      "headerBackground": "rgb(0, 0, 0)",
+      "hostHeight": 919,
+      "name": "03-light-again",
+      "spacerHeight": 24,
+      "width": 1000,
+      "wrapperWidth": 600
+    },
+    {
+      "amounts": [
+        {
+          "height": 24,
+          "ink": "rgb(217, 222, 219)",
+          "lines": 1,
+          "text": "US$12.34",
+          "width": 72.0625
+        },
+        {
+          "height": 24,
+          "ink": "rgb(217, 222, 219)",
+          "lines": 1,
+          "text": "US$12.34",
+          "width": 72.0625
+        }
+      ],
+      "artwork": [
+        {
+          "height": 156,
+          "loaded": true,
+          "width": 252
+        },
+        {
+          "height": 156,
+          "loaded": true,
+          "width": 96
+        },
+        {
+          "height": 156,
+          "loaded": true,
+          "width": 252
+        }
+      ],
+      "background": "rgb(25, 26, 25)",
+      "dark": true,
+      "footerBottom": 834,
+      "headerBackground": "rgb(0, 0, 0)",
+      "hostHeight": 919,
+      "name": "04-dark-again",
+      "spacerHeight": 24,
+      "width": 1000,
+      "wrapperWidth": 600
+    },
+    {
+      "amounts": [
+        {
+          "height": 24,
+          "ink": "rgb(217, 222, 219)",
+          "lines": 1,
+          "text": "US$12.34",
+          "width": 72.0625
+        },
+        {
+          "height": 24,
+          "ink": "rgb(217, 222, 219)",
+          "lines": 1,
+          "text": "US$12.34",
+          "width": 72.0625
+        }
+      ],
+      "artwork": [
+        {
+          "height": 156,
+          "loaded": true,
+          "width": 252
+        },
+        {
+          "height": 156,
+          "loaded": true,
+          "width": 96
+        },
+        {
+          "height": 156,
+          "loaded": true,
+          "width": 252
+        }
+      ],
+      "background": "rgb(25, 26, 25)",
+      "dark": true,
+      "footerBottom": 834,
+      "headerBackground": "rgb(0, 0, 0)",
+      "hostHeight": 919,
+      "name": "05-dark-640",
+      "spacerHeight": 24,
+      "width": 640,
+      "wrapperWidth": 600
+    },
+    {
+      "amounts": [
+        {
+          "height": 24,
+          "ink": "rgb(82, 95, 127)",
+          "lines": 1,
+          "text": "US$12.34",
+          "width": 72.0625
+        },
+        {
+          "height": 24,
+          "ink": "rgb(82, 95, 127)",
+          "lines": 1,
+          "text": "US$12.34",
+          "width": 72.0625
+        }
+      ],
+      "artwork": [
+        {
+          "height": 156,
+          "loaded": true,
+          "width": 252
+        },
+        {
+          "height": 156,
+          "loaded": true,
+          "width": 96
+        },
+        {
+          "height": 156,
+          "loaded": true,
+          "width": 252
+        }
+      ],
+      "background": "rgb(246, 249, 252)",
+      "dark": false,
+      "footerBottom": 834,
+      "headerBackground": "rgb(0, 0, 0)",
+      "hostHeight": 919,
+      "name": "06-light-640",
+      "spacerHeight": 24,
+      "width": 640,
+      "wrapperWidth": 600
+    }
+  ],
+  "nativeWebviewURL": "http://127.0.0.1:1420/native-receipt-verify.html",
+  "pass": true,
+  "syntheticRedactedLogo": true,
+  "trustedClicks": 11,
+  "url": "http://127.0.0.1:1420/native-receipt-verify.html",
+  "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)"
+}
