@@ -1,8 +1,15 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import appleMailReplySection from "../test/fixtures/apple-mail-reply-section.html?raw";
 import freshdeskReplySection from "../test/fixtures/freshdesk-reply-section.html?raw";
 import outlookWordReplySection from "../test/fixtures/outlook-word-reply-section.html?raw";
+import stripeReceiptLayout from "../test/fixtures/stripe-receipt-layout.html?raw";
 import swedbankSignatureLayout from "../test/fixtures/swedbank-signature-layout.html?raw";
 import { buildEmailDocument, HtmlMessage } from "./HtmlMessage";
 
@@ -52,7 +59,7 @@ describe("HTML email appearance", () => {
     expect(stylesheet.source).toContain("background-color:#191a19");
   });
 
-  it("collapses the fixture's empty spacer rows without changing signature structure", () => {
+  it("preserves spacer rows that form part of a designed signature", () => {
     const document = parse(
       buildEmailDocument(swedbankSignatureLayout, true).source,
     );
@@ -61,9 +68,9 @@ describe("HTML email appearance", () => {
     );
 
     expect(message).not.toBeNull();
-    expect(message?.querySelectorAll(":scope > tbody > tr")).toHaveLength(5);
-    expect(message?.querySelector(".email-spacer")).toBeNull();
-    expect(message?.querySelector('[height="42"]')).toBeNull();
+    expect(message?.querySelectorAll(":scope > tbody > tr")).toHaveLength(7);
+    expect(message?.querySelectorAll(".email-spacer")).toHaveLength(2);
+    expect(message?.querySelector('[height="42"]')).not.toBeNull();
     expect(message?.querySelector('img[alt="Swedbank"]')).not.toBeNull();
     expect(message?.textContent).toContain("K. Näide");
   });
@@ -84,6 +91,61 @@ describe("HTML email appearance", () => {
     expect(imageBacked.source).toContain("color:#000000");
   });
 
+  it("does not recolor text over artwork just because unrelated CSS declares white", () => {
+    const email = buildEmailDocument(
+      [
+        "<style>.unused-card { background-color:#ffffff; color:#000000 }</style>",
+        '<div style="background-image:url(https://assets.example.test/hero.jpg); color:#000000">Newsletter over artwork</div>',
+      ].join(""),
+      true,
+    );
+
+    expect(email.dark).toBe(false);
+    expect(email.source).toContain("color:#000000");
+    expect(email.source).toContain("background-color:#ffffff");
+  });
+
+  it("preserves a CSS-authored dark body with a white QR card", () => {
+    const email = buildEmailDocument(
+      [
+        "<style>body{background:#111;color:#fff}.qr{background:#fff}</style>",
+        '<div class="qr"><img src="https://assets.example.test/transparent-black-qr.png" alt="QR code"></div>',
+      ].join(""),
+      true,
+    );
+
+    expect(email.dark).toBe(false);
+    expect(email.source).toContain("body{background:#111;color:#fff}");
+    expect(email.source).toContain(".qr{background:#fff}");
+    expect(email.source).toContain("transparent-black-qr.png");
+  });
+
+  it("keeps image-only white QR cards light without mistaking a decorative header for the body", () => {
+    const variants = [
+      [
+        '<body style="background:#ffffff;color:#000000">',
+        "<p>Payment confirmation</p>",
+        '<div style="background:#000000"><img src="https://assets.example.test/header-art.png" alt=""></div>',
+        '<div style="background:#ffffff"><img src="https://assets.example.test/transparent-black-qr.png" alt="QR code"></div>',
+        "</body>",
+      ].join(""),
+      [
+        "<style>body{background:#fff;color:#000}.dark-header{background:#000}.qr{background:#fff}</style>",
+        "<p>Payment confirmation</p>",
+        '<div class="dark-header"><img src="https://assets.example.test/header-art.png" alt=""></div>',
+        '<div class="qr"><img src="https://assets.example.test/transparent-black-qr.png" alt="QR code"></div>',
+      ].join(""),
+    ];
+
+    for (const html of variants) {
+      const email = buildEmailDocument(html, true);
+      expect(email.dark).toBe(false);
+      expect(email.source).toContain("transparent-black-qr.png");
+      expect(email.source).toContain("background:#fff");
+    }
+    expect(buildEmailDocument(stripeReceiptLayout, true).dark).toBe(true);
+  });
+
   it("skips dark adaptation when a foreground or background palette is ambiguous", () => {
     for (const html of [
       '<div style="background:hsl(0, 0%, 100%); color:#000000">HSL</div>',
@@ -97,11 +159,10 @@ describe("HTML email appearance", () => {
     }
   });
 
-  it("normalizes only pathological type and removes only structurally empty spacers", () => {
+  it("normalizes pathological type and empty spacers in plain reader content", () => {
     const email = buildEmailDocument(
       [
         '<body style="font-size: 96px"><h1 style="font-size:64px">Meaningful heading</h1>',
-        '<table><tr data-testid="empty-row"><td height="80">&nbsp;</td></tr><tr class="email-spacer"><td height="80">&nbsp;</td></tr><tr><td height="80">Visible cell</td></tr><tr><td height="100"></td><td>Hero copy</td></tr></table>',
         '<div style="height:48px">&nbsp;</div>',
         '<p data-testid="bare-empty-paragraph">&nbsp;</p>',
         '<div class="spacer" style="height:48px; border-top:1px solid #ccc">&nbsp;</div>',
@@ -114,16 +175,207 @@ describe("HTML email appearance", () => {
 
     expect(email.source).toContain("font-size: 32px");
     expect(email.source).toContain("font-size:64px");
-    expect(document.querySelector('[data-testid="empty-row"]')).toBeNull();
     expect(
       document.querySelector('[data-testid="bare-empty-paragraph"]'),
     ).toBeNull();
-    expect(document.body.textContent).toContain("Visible cell");
     expect(document.querySelectorAll(".spacer")).toHaveLength(1);
     expect(document.querySelector(".brand-rule")).not.toBeNull();
-    expect(document.querySelector("td")?.getAttribute("height")).toBe("80");
+    expect(document.body.classList).toContain("dakia-reader-content");
+  });
+
+  it("preserves authored type and every layout cell in designed table mail", () => {
+    const email = buildEmailDocument(
+      [
+        '<body style="font-size: 96px"><h1 style="font-size:64px">Meaningful heading</h1>',
+        '<table><tr data-testid="empty-row"><td height="80">&nbsp;</td></tr><tr class="email-spacer"><td height="80">&nbsp;</td></tr><tr><td height="80">Visible cell</td></tr><tr><td height="100"></td><td>Hero copy</td></tr></table>',
+        '<p data-testid="bare-empty-paragraph">&nbsp;</p>',
+        "</body>",
+      ].join(""),
+      false,
+    );
+    const document = parse(email.source);
+
+    expect(email.source).toContain("font-size: 32px");
+    expect(email.source).toContain("font-size:64px");
+    expect(document.querySelector('[data-testid="empty-row"]')).not.toBeNull();
+    expect(document.querySelector(".email-spacer")).not.toBeNull();
+    expect(
+      document.querySelector('[data-testid="bare-empty-paragraph"]'),
+    ).not.toBeNull();
     expect(document.querySelector('td[height="100"]')).not.toBeNull();
+    expect(document.body.textContent).toContain("Visible cell");
     expect(document.body.textContent).toContain("Hero copy");
+    expect(document.body.classList).not.toContain("dakia-reader-content");
+  });
+
+  it("preserves the receipt table contract while adapting neutral surfaces for dark mode", () => {
+    const email = buildEmailDocument(stripeReceiptLayout, true);
+    const document = parse(email.source);
+    const wrapper =
+      document.querySelector<HTMLTableElement>("table.st-Wrapper");
+    const summaryAmounts = [
+      ...document.querySelectorAll<HTMLElement>("td.Table-amount"),
+    ].map((cell) => cell.textContent?.replace(/\s+/g, " ").trim());
+
+    expect(email.dark).toBe(true);
+    expect(wrapper).not.toBeNull();
+    expect(wrapper?.getAttribute("width")).toBe("600");
+    expect(wrapper?.getAttribute("style")).toContain("min-width: 600px");
+    expect(
+      document.querySelector('td.st-Spacer--stacked[colspan="3"][height="24"]'),
+    ).not.toBeNull();
+    expect(
+      document.querySelector('td.Table-divider[colspan="3"][height="6"]'),
+    ).not.toBeNull();
+    expect(summaryAmounts).toEqual(["US$12.34", "US$12.34"]);
+
+    expect(document.body.getAttribute("bgcolor")).toBe("#191a19");
+    expect(wrapper?.getAttribute("bgcolor")).toBe("#191a19");
+    expect(
+      document
+        .querySelector<HTMLElement>("td.Header-left")
+        ?.getAttribute("style"),
+    ).toContain("background-color: #000000");
+    expect(email.source).toContain("color: #d9dedb");
+    expect(email.source).toContain(
+      "https://stripe-images.s3.amazonaws.com/html_emails/2017-08-21/header/Header-background.png",
+    );
+  });
+
+  it("uses reader wrapping only for plain content, not designed receipt tables", () => {
+    const designed = parse(
+      buildEmailDocument(stripeReceiptLayout, true).source,
+    );
+    const plain = parse(
+      buildEmailDocument(`<p>${"unbroken".repeat(100)}</p>`, false).source,
+    );
+    const designedCompatibilityStyle =
+      designed.head.lastElementChild?.textContent;
+    const plainCompatibilityStyle = plain.head.lastElementChild?.textContent;
+
+    expect(designedCompatibilityStyle).toContain(
+      "html { color-scheme: dark; }",
+    );
+    expect(designedCompatibilityStyle).toContain("overflow-wrap: normal");
+    expect(designedCompatibilityStyle).not.toContain(
+      "table { max-width: 100%; }",
+    );
+    expect(designed.body.classList).not.toContain("dakia-reader-content");
+    expect(plain.body.classList).toContain("dakia-reader-content");
+    expect(plainCompatibilityStyle).toContain(
+      "body.dakia-reader-content { padding: 20px; overflow-wrap: anywhere; }",
+    );
+  });
+
+  it("keeps the complete receipt mounted through dark-light-dark theme changes", async () => {
+    const appRoot = document.documentElement;
+    const previousScheme = appRoot.dataset.mantineColorScheme;
+    appRoot.dataset.mantineColorScheme = "dark";
+
+    const rendered = render(
+      <HtmlMessage
+        html={stripeReceiptLayout}
+        title="Example receipt"
+        showHistoryLabel="Show history"
+        hideHistoryLabel="Hide history"
+      />,
+    );
+    const message = screen.getByRole("document", { name: "Example receipt" });
+    const receipt = () => renderedEmailRoot(message);
+    const assertReceiptStructure = () => {
+      expect(receipt()?.querySelector("table.st-Wrapper")).not.toBeNull();
+      expect(receipt()?.querySelector("td.Header-left img")).not.toBeNull();
+      expect(
+        receipt()?.querySelector(
+          'td.st-Spacer--stacked[colspan="3"][height="24"]',
+        ),
+      ).not.toBeNull();
+      expect(
+        [...(receipt()?.querySelectorAll("td.Table-amount") ?? [])].map(
+          (cell) => cell.textContent?.replace(/\s+/g, " ").trim(),
+        ),
+      ).toEqual(["US$12.34", "US$12.34"]);
+      expect(receipt()?.textContent?.match(/US\$12\.34/g)).toHaveLength(4);
+    };
+
+    try {
+      await waitFor(() => expect(message).toHaveClass("html-message--dark"));
+      expect(receipt()?.querySelector("body")?.getAttribute("bgcolor")).toBe(
+        "#191a19",
+      );
+      assertReceiptStructure();
+
+      await act(async () => {
+        appRoot.dataset.mantineColorScheme = "light";
+      });
+      await waitFor(() =>
+        expect(message).not.toHaveClass("html-message--dark"),
+      );
+      expect(receipt()?.querySelector("body")?.getAttribute("bgcolor")).toBe(
+        "#f6f9fc",
+      );
+      assertReceiptStructure();
+
+      await act(async () => {
+        appRoot.dataset.mantineColorScheme = "dark";
+      });
+      await waitFor(() => expect(message).toHaveClass("html-message--dark"));
+      expect(receipt()?.querySelector("body")?.getAttribute("bgcolor")).toBe(
+        "#191a19",
+      );
+      assertReceiptStructure();
+    } finally {
+      rendered.unmount();
+      if (previousScheme === undefined) {
+        delete appRoot.dataset.mantineColorScheme;
+      } else {
+        appRoot.dataset.mantineColorScheme = previousScheme;
+      }
+    }
+  });
+
+  it("wraps a plain reply separately from quoted table history and a tracking pixel", () => {
+    const longReply = "current-unbroken-token".repeat(80);
+    render(
+      <HtmlMessage
+        html={[
+          `<p>${longReply}</p>`,
+          '<img src="https://images.example.test/tracking.gif" width="1" height="1" alt="">',
+          '<div class="gmail_quote"><table><tr><td class="quoted-spacer" colspan="3" height="24">&nbsp;</td></tr><tr><td>Quoted table message</td></tr></table></div>',
+        ].join("")}
+        title="Reply with table history"
+        showHistoryLabel="Show history"
+        hideHistoryLabel="Hide history"
+      />,
+    );
+
+    const message = screen.getByRole("document", {
+      name: "Reply with table history",
+    });
+    const current = renderedEmailRoot(message);
+    const currentBody = current?.querySelector("body");
+    const currentCompatibilityStyle = current?.querySelector(
+      "head style:last-child",
+    )?.textContent;
+
+    expect(currentBody).toHaveClass("dakia-reader-content");
+    expect(currentBody?.textContent).toContain(longReply);
+    expect(currentBody?.textContent).not.toContain("Quoted table message");
+    expect(currentBody?.querySelector("table")).toBeNull();
+    expect(
+      currentBody?.querySelector('img[width="1"][height="1"]'),
+    ).not.toBeNull();
+    expect(currentCompatibilityStyle).toContain("overflow-wrap: anywhere");
+
+    fireEvent.click(screen.getByRole("button", { name: "Show history" }));
+    const history = renderedEmailRoot(message, "history");
+    expect(history?.querySelector("body")).not.toHaveClass(
+      "dakia-reader-content",
+    );
+    expect(
+      history?.querySelector(".quoted-spacer")?.getAttribute("height"),
+    ).toBe("24");
+    expect(history?.textContent).toContain("Quoted table message");
   });
 
   it("does not constrain complex wrappers that contain a table or artwork", () => {

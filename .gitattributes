@@ -3,3 +3,5 @@
 /apps/desktop/src-tauri/resources/email-classifier-v2/tokenizer_config.json -text
 /apps/desktop/src-tauri/resources/email-classifier-v2/special_tokens_map.json -text
 /apps/desktop/src-tauri/resources/email-classifier-v2/export_metadata.json -text
+# Preserve the real provider's whitespace in the rendering regression fixture.
+/apps/desktop/src/test/fixtures/stripe-receipt-layout.html whitespace=-blank-at-eol

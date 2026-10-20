@@ -134,11 +134,24 @@ function fixtureRootForPath(path) {
   );
 }
 
-function extractFixtureDomains(contents) {
+function extractFixtureDomains(contents, permittedAssetUrls = []) {
   const domains = new Set();
   for (const match of contents.matchAll(
     /[A-Za-z0-9._%+-]+@([A-Za-z0-9.-]+\.[A-Za-z]{2,})/g,
   )) {
+    // Only an explicitly reviewed asset URL may contain a retina filename
+    // that resembles an address. Do not exempt arbitrary URL paths.
+    if (
+      /^[1-9]\d*x\.(?:png|gif|jpe?g|webp|svg)$/i.test(match[1]) &&
+      permittedAssetUrls.some((url) => {
+        const start = contents.lastIndexOf(url, match.index);
+        return (
+          start >= 0 && start + url.length === match.index + match[0].length
+        );
+      })
+    ) {
+      continue;
+    }
     domains.add(match[1].toLowerCase());
   }
   // Scan every absolute endpoint, including RFC headers such as
@@ -395,10 +408,7 @@ function validateExercise(errors, root, fixture, exercise) {
     .split("/")
     .at(-1);
   const testBody = declaredTestBody(source, exercise.id);
-  if (
-    !testBody ||
-    !testBodyExercisesFixture(source, testBody, fixtureName)
-  ) {
+  if (!testBody || !testBodyExercisesFixture(source, testBody, fixtureName)) {
     addError(
       errors,
       `Fixture ${fixture.id} is not exercised by declared ${exercise.domain}/${exercise.id}.`,
@@ -602,8 +612,44 @@ export function validateFixtureCorpus(root = repositoryRoot) {
       const contents = readFileSync(absoluteFixture, "utf8");
       const inspectionSurfaces = decodedInspectionSurfaces(contents);
       const permittedDomains = redaction?.permittedDomains ?? [];
+      const permittedAssetUrls = redaction?.permittedAssetUrls ?? [];
+      const validatedAssetUrls = [];
+      if (!Array.isArray(permittedAssetUrls)) {
+        addError(
+          errors,
+          `Fixture ${fixture.id} permittedAssetUrls must be an array.`,
+        );
+      } else {
+        for (const value of permittedAssetUrls) {
+          try {
+            if (typeof value !== "string") throw new Error("not a URL");
+            const url = new URL(value);
+            if (
+              url.protocol !== "https:" ||
+              url.username ||
+              url.password ||
+              url.search ||
+              url.hash ||
+              !/@[1-9]\d*x\.(?:png|gif|jpe?g|webp|svg)$/i.test(url.pathname) ||
+              !permittedDomains.some((domain) =>
+                domainIsWithin(url.hostname, domain),
+              )
+            )
+              throw new Error("unreviewed asset host or path");
+            validatedAssetUrls.push(value);
+          } catch {
+            addError(
+              errors,
+              `Fixture ${fixture.id} has an invalid permitted asset URL.`,
+            );
+          }
+        }
+      }
       for (const surface of inspectionSurfaces) {
-        for (const domain of extractFixtureDomains(surface)) {
+        for (const domain of extractFixtureDomains(
+          surface,
+          validatedAssetUrls,
+        )) {
           if (
             prohibitedDomains.some((prohibited) =>
               domainIsWithin(domain, prohibited),
