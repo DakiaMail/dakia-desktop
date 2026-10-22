@@ -21,6 +21,8 @@ The branch starts from `796c297`. At publication, `main` also contains `e1da334`
 
 Receipts: [three source cycles](mail-safety-results/gmail-schema3-typed-reader-three-run-source-2026-10-22.json), [deep lane](mail-safety-results/deep-681d-gmail-schema3-2026-10-22.json), [dependency audit](mail-safety-results/dependency-audit-681d-gmail-schema3-terminal-confirmed-2026-10-22.json), [shutdown evidence](mail-safety-results/paused-mail-safety-evidence-2026-10-22.json).
 
+At draft-branch push time, GitHub separately reported 31 vulnerability alerts on the repository's default branch: ten high, fifteen moderate and six low. Those alerts have not been triaged here. The scoped local audit above does not establish that the default branch or every repository package has zero alerts; reconcile the different sources and dependency scopes before merge.
+
 The MIME fixes and thirteen-fixture production MailService → SQLite reopen → Tauri command → React Reader artifact pipeline passed at the source boundary. Native WebKit acceptance of that expanded current-source corpus remains unrun. Its React artifact stage consumes real Rust output through a test API adapter, not live WebView IPC.
 
 ## Failures and incomplete runs
