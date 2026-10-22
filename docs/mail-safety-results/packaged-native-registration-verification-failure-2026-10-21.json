@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "status": "failed-before-launch",
+  "source": {
+    "status": "passed",
+    "baseline": {
+      "algorithm": "sha256-path-and-content-manifest",
+      "digest": "4e75af1f1febac3f261f7002d85565dafdd2860fe714cf99d9fbdaa970c6e4eb",
+      "fileCount": 937
+    },
+    "current": {
+      "algorithm": "sha256-path-and-content-manifest",
+      "digest": "4e75af1f1febac3f261f7002d85565dafdd2860fe714cf99d9fbdaa970c6e4eb",
+      "fileCount": 937
+    }
+  },
+  "runRoot": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.cFqowP",
+  "stage": "launch-services-registration-verification",
+  "reason": "Generic registration guard rejected; exact cause under investigation. No app was launched.",
+  "candidateDesktopSha256": "4aea062f8c2f4a0c1200a99722a3aa78be5d45d71cdf803c699c93e96a362465",
+  "candidateCliSha256": "e78e5d0fca1ec2bc9434654a38362a9b534bbf1e933551a913eb1ffd5350592f",
+  "restoration": {
+    "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.cFqowP/approved-identity-swap-832934c4-43a2-4a18-95da-a07747d79659-restored.json",
+    "sha256": "8375c813a2af1047d24c03787cc7c4e38532e205f9174f2e390317d7b1e7b9ed",
+    "stage": "restored",
+    "originalInventoryDigest": "55483dc79e6d0abaead46550a11703b1bda95a67c73e0a4189130b1a7651ce8e"
+  },
+  "limitations": [
+    "No ACL receipt, live webview, or new native acceptance.",
+    "This native harness failure does not invalidate the unchanged-source three-run pass."
+  ],
+  "diagnostics": {
+    "scope": "After restoration only; no candidate launch or mailbox access.",
+    "execution": "Escalated commands outside sandbox.",
+    "exactApprovedAppRegistrarExitCode": 0,
+    "exactApprovedAppNativeRegisterStatus": 0,
+    "exactApprovedAppLookup": {
+      "domain": "NSOSStatusErrorDomain",
+      "code": -10814,
+      "name": "kLSApplicationNotFoundErr"
+    },
+    "systemAppControl": "Same Swift/CoreServices context resolved com.apple.TextEdit to /System/Applications/TextEdit.app.",
+    "rootCause": "Unresolved. Registrar success did not establish discoverability. No attribution to sandboxing is made."
+  }
+}

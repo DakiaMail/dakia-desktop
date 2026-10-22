@@ -42,6 +42,7 @@ jobs:
       mail_boundary: ${{ steps.classify.outputs.mail_boundary }}
       tauri_boundary: ${{ steps.classify.outputs.tauri_boundary }}
       release_only: ${{ steps.classify.outputs.release_only }}
+      dependency_audit: ${{ steps.classify.outputs.dependency_audit }}
       requires_lfs: ${{ steps.classify.outputs.requires_lfs }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -76,18 +77,18 @@ jobs:
         if: needs.classify.outputs.docs_only == 'true'
         run: git diff --check ${{ github.event.pull_request.base.sha }}...HEAD
       - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4
-        if: needs.classify.outputs.frontend == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.tauri_boundary == 'true' || needs.classify.outputs.release_only == 'true'
+        if: needs.classify.outputs.frontend == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.tauri_boundary == 'true' || needs.classify.outputs.release_only == 'true' || needs.classify.outputs.dependency_audit == 'true'
         with:
           node-version: 20.19.0
       - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
-        if: needs.classify.outputs.frontend == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.release_only == 'true'
+        if: needs.classify.outputs.frontend == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.tauri_boundary == 'true' || needs.classify.outputs.release_only == 'true' || needs.classify.outputs.dependency_audit == 'true'
         with:
           path: ~/.npm
           key: npm-${{ runner.os }}-${{ runner.arch }}-node-20.19.0-${{ hashFiles('package-lock.json') }}
           restore-keys: |
             npm-${{ runner.os }}-${{ runner.arch }}-node-20.19.0-
       - name: Install JavaScript dependencies without lifecycle preparation
-        if: needs.classify.outputs.frontend == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.release_only == 'true'
+        if: needs.classify.outputs.frontend == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.tauri_boundary == 'true' || needs.classify.outputs.release_only == 'true' || needs.classify.outputs.dependency_audit == 'true'
         run: npm ci --ignore-scripts
       - id: frontend
         name: Validate frontend scope
@@ -99,19 +100,25 @@ jobs:
           node --test scripts/tauri-contract-inventory.node-test.mjs
           node scripts/tauri-contract-inventory.mjs
       - name: Install pinned Rust toolchain
-        if: needs.classify.outputs.rust_core == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.tauri_boundary == 'true'
+        if: needs.classify.outputs.rust_core == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.tauri_boundary == 'true' || needs.classify.outputs.dependency_audit == 'true'
         run: |
           rustup toolchain install 1.89.0 --profile minimal --component rustfmt --component clippy
           echo 'RUSTUP_TOOLCHAIN=1.89.0' >> "$GITHUB_ENV"
       - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
-        if: needs.classify.outputs.rust_core == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.tauri_boundary == 'true'
+        if: needs.classify.outputs.rust_core == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.tauri_boundary == 'true' || needs.classify.outputs.dependency_audit == 'true'
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-deps-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-${{ hashFiles('Cargo.lock') }}
+          key: cargo-deps-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-${{ hashFiles('Cargo.lock', 'fuzz/Cargo.lock') }}
           restore-keys: |
             cargo-deps-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-
+      - id: dependency_audit_fetch
+        name: Fetch locked dependencies for offline provenance checks
+        if: needs.classify.outputs.dependency_audit == 'true'
+        run: |
+          cargo fetch --locked
+          cargo fetch --manifest-path fuzz/Cargo.toml --locked
       - id: rust_core
         name: Validate Rust core scope
         if: needs.classify.outputs.rust_core == 'true'
@@ -135,6 +142,11 @@ jobs:
         run: |
           node --test scripts/validate-realistic-fixtures.node-test.mjs
           node scripts/validate-realistic-fixtures.mjs
+          node --test scripts/mail-safety-catalogue.node-test.mjs
+          node scripts/validate-mail-safety-catalogue.mjs
+          node --test scripts/validate-mail-standards-requirements.node-test.mjs
+          node scripts/validate-mail-standards-requirements.mjs
+          node scripts/report-mail-safety-catalogue.mjs --lane pull-request
           if [ "${{ needs.classify.outputs.frontend }}" != "true" ]; then
             npx vitest run apps/desktop/src/apiMessageContent.test.ts apps/desktop/src/components/HtmlMessage.test.tsx apps/desktop/src/components/Reader.test.tsx --maxWorkers=1
           fi
@@ -150,10 +162,32 @@ jobs:
           npm run bundle:cli:dev
           cargo clippy -p dakia-desktop --all-targets -- -D warnings
           cargo test -p dakia-desktop
+          node scripts/test-realtime-delivery.mjs
+          node scripts/test-mime-reader-artifact.mjs
+          node scripts/test-attachment-command-artifact.mjs
+          node scripts/test-mail-command-tls.mjs
+          node scripts/test-unsubscribe-command-tls.mjs
+          cargo test --locked -p tauri-plugin-updater --lib
       - id: release_only
         name: Validate release scripts without packaging
         if: needs.classify.outputs.release_only == 'true'
         run: npm run test:release-scripts
+      - name: Cache pinned dependency audit executable
+        if: needs.classify.outputs.dependency_audit == 'true'
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-version-0.22.2
+      - id: dependency_audit
+        name: Audit changed dependency lockfiles
+        if: needs.classify.outputs.dependency_audit == 'true'
+        run: |
+          # Compile the audit tool with the repository's pinned MSRV rather
+          # than whatever Rust the hosted image happens to provide.
+          if ! cargo-audit --version 2>/dev/null | grep -Fxq 'cargo-audit 0.22.2'; then
+            cargo +1.89.0 install cargo-audit --version 0.22.2 --locked --force
+          fi
+          npm run audit:dependencies:npm
       - name: Report selected scopes
         if: always()
         run: |
@@ -165,4 +199,5 @@ jobs:
             echo '- mail-boundary: ${{ steps.mail_boundary.outcome }}'
             echo '- tauri-boundary: ${{ steps.tauri_boundary.outcome }}'
             echo '- release-only: ${{ steps.release_only.outcome }}'
+            echo '- dependency-audit: ${{ steps.dependency_audit.outcome }}'
           } | tee -a "$GITHUB_STEP_SUMMARY"

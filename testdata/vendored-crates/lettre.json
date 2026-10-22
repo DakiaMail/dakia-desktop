@@ -1,0 +1,442 @@
+{
+  "schemaVersion": 1,
+  "name": "lettre",
+  "version": "0.11.22",
+  "vendorPath": "vendor/lettre",
+  "registryChecksum": "0da65617f6cb926332d039cb578aad56178da86e128db6a1b09f4c94fa5b3349",
+  "upstreamRepository": "https://github.com/lettre/lettre",
+  "upstreamRevision": "9b88c4ff98fd8653cb389a66f885f02efd79ee6b",
+  "license": "MIT",
+  "review": {
+    "required": "independent-review",
+    "evidence": "2026-10-21 independent security review applied approved patch 5420143c0f7a2ba808230c42f22257aabc097d4aeb5630384a331d0b3feba20c to a fresh archive, matched all four patched hashes, and passed 24 focused tests; review document SHA-256 abc84c5d7bb2e95252693a54bd5277cd9796be7f366ba608ca2fddb772044b92."
+  },
+  "upstreamFiles": [
+    {
+      "path": ".cargo_vcs_info.json",
+      "sha256": "53172b6f1c003648c52eda1355e74211b458edbe01208f18265d7acb7702d8cc"
+    },
+    {
+      "path": ".clog.toml",
+      "sha256": "a09f3b650ceda319cf9278b4911f06b5bc4a45b418e11a647e65fcd51e4239c0"
+    },
+    {
+      "path": ".editorconfig",
+      "sha256": "16e95bb98d2ecb2998328c46cb9a4543f1b4d98badc69c9dc32152439409f9b5"
+    },
+    {
+      "path": ".github/FUNDING.yml",
+      "sha256": "cce5adef35c70d2d85771910236c0b2f71f5ce41ea052d4230a9339cce3f5e51"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/Bug_report.md",
+      "sha256": "16d8bf40b2cd870950db5aea63a98bdcb487be0a1c76ef48e5d71b804d94221a"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/Feature_request.md",
+      "sha256": "d3deddc385de26ce32a0bda71a4cb48026241c315c00e3e06c84d6a30058cdab"
+    },
+    {
+      "path": ".github/workflows/audit.yml",
+      "sha256": "293cd0849a27c21329581c397e5241662772ef00bba5731618f38832a3d3368d"
+    },
+    {
+      "path": ".github/workflows/test.yml",
+      "sha256": "cfcc1ebce49ed90aff9508af54b65b4c36910e031692aa27968b67c30795c509"
+    },
+    {
+      "path": ".gitignore",
+      "sha256": "f87c07753a4c765baa287b95bf52f6e6bf56d8617b56e471f15c68515026f94c"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "sha256": "265755b8c4cf3e7cdf79ba472a13aba13467679c9e9c108ac179a8f902025310"
+    },
+    {
+      "path": "CODE_OF_CONDUCT.md",
+      "sha256": "960de721a34e7090f2716ac313e6c4a79641469021fe23fc92689978ce21d7fd"
+    },
+    {
+      "path": "CONTRIBUTING.md",
+      "sha256": "77763a35f628c5a019ac1af767848de54482d36fdf3916ed7df1acfa860b2c9b"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "94e539d860d9e0ced60af4ce81d757229d5394fd912254adc5c91d0dd9561cce"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "e0d12fb15a63121d034457f5bfa255f67c239e9c3a4e239cebd4bc6e3987b4ab"
+    },
+    {
+      "path": "Cargo.toml.orig",
+      "sha256": "e09a2cb3ade0320fec6a422ddf6255c3c7cee7ee4e2baa74a04df1b755bdc7e1"
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "9a51230200e4e3eacdf1dc5d09a90ca17c798fd15b4c70919135a3eebb0389b0"
+    },
+    {
+      "path": "README.md",
+      "sha256": "c3dc3299e257f4a29f9e1e0612421c17aa20c17629489383a8331470c2cfce0b"
+    },
+    {
+      "path": "SECURITY.md",
+      "sha256": "28779fac2c9192a1ba22b57a29c634586fced4969c8689dce80b9a6a7873700b"
+    },
+    {
+      "path": "benches/mailbox_parsing.rs",
+      "sha256": "c350208ebd5f3fdbc82ce34b2cb7966917b15393e200e9db08cd91f741ec8372"
+    },
+    {
+      "path": "benches/transport_smtp.rs",
+      "sha256": "9aab823bf24a2ccf5baf3090e50cbf29806703d803d39d649adf32d4796d90fc"
+    },
+    {
+      "path": "clippy.toml",
+      "sha256": "2b79b9ddeab48ef48227d94607c2e442211fb949c3deb309e3c54a789d48701c"
+    },
+    {
+      "path": "docs/lettre.png",
+      "sha256": "88360afca389eeef89063b50e77e2ebc4cc58de0d5db1644701d18df508b036a"
+    },
+    {
+      "path": "examples/README.md",
+      "sha256": "8523a8bede4bf9c22ffe1b69747edf6bb60322c24fe9c8a57d74d6c9237a48d2"
+    },
+    {
+      "path": "examples/asyncstd1_smtp_starttls.rs",
+      "sha256": "562ce62e1819373d61d9f3ebc5abf67a05bd9d4803565cd0dfcb5666bc29a499"
+    },
+    {
+      "path": "examples/asyncstd1_smtp_tls.rs",
+      "sha256": "f3b3c7886a82b1af4348a422ef8c5db4c734721c6948d988b1de0e0fa157de05"
+    },
+    {
+      "path": "examples/autoconfigure.rs",
+      "sha256": "5371c03bf966a3fbe28d58038655e999a38cb631ea7935ddfb91c90cc327b3be"
+    },
+    {
+      "path": "examples/basic_html.rs",
+      "sha256": "7bc9c1b1b1d867e2e95b3a6a382b76872ca5178af81dfb56640e2abee20ec7c7"
+    },
+    {
+      "path": "examples/maud_html.rs",
+      "sha256": "b4405a423783b22d847e06268790a78f8699cd3b86874b9bd1ff722e7c5e80b6"
+    },
+    {
+      "path": "examples/smtp.rs",
+      "sha256": "4932d04fab12b2eeb57d3d72664c79231ebe13b0be493d170d3335215be610a4"
+    },
+    {
+      "path": "examples/smtp_selfsigned.rs",
+      "sha256": "b098d1f6525de063c360f0841f7642ab35f33e9a943c8605377fd0370f9086bd"
+    },
+    {
+      "path": "examples/smtp_starttls.rs",
+      "sha256": "ef47e5dbad85d354f35aca57dd66c35f504d171f181059e4bc8a0bee150f63b4"
+    },
+    {
+      "path": "examples/smtp_tls.rs",
+      "sha256": "c2d0e61b93f0d974b7c78bc2064ceb38afcd19705de62ff796aa178acbb5f3bf"
+    },
+    {
+      "path": "examples/tokio1_smtp_starttls.rs",
+      "sha256": "d94e5b5c9eb7b96ad2f2ac2a774d49c08f3c484474e3635c31ee5f93c3ab3f23"
+    },
+    {
+      "path": "examples/tokio1_smtp_tls.rs",
+      "sha256": "709fdedf778b0ac8566b10f43fe14fbd39dc7ac8857fb659e1a8432999092421"
+    },
+    {
+      "path": "rustfmt.toml",
+      "sha256": "5c44b8712775a2ac3bdc43da5448d2c82a999585e206263dcc5ca14177aac413"
+    },
+    {
+      "path": "src/address/envelope.rs",
+      "sha256": "8988215fe7a2ad093b00056127b59f0f54ec1fc0bb37592f719eba99ebb1bb47"
+    },
+    {
+      "path": "src/address/mod.rs",
+      "sha256": "259a1acbc855a039531f99f7b793357f0e586d7947b8680dbd896a337c065537"
+    },
+    {
+      "path": "src/address/serde.rs",
+      "sha256": "cebe31fa7e3768c62c9848455612b46b143291f4637a37bf51cebb86161335bf"
+    },
+    {
+      "path": "src/address/types.rs",
+      "sha256": "9154b4827f4397e213e67b85e525c6f06114f09031adc7b4b351535080caddf3"
+    },
+    {
+      "path": "src/base64.rs",
+      "sha256": "918e2dd0352881f336839162a6ae0092b68f305e81fcbb9adbf5eccf13f911ce"
+    },
+    {
+      "path": "src/error.rs",
+      "sha256": "9138fe1cb5c27412048cffa5eb1de4b83dcda06cd8cd90cf94348cec86b1f766"
+    },
+    {
+      "path": "src/executor.rs",
+      "sha256": "0400ae24486f4ca92f70c641ec1f2d4e9f8a25ef4669c25b0076e68b6dbbf924"
+    },
+    {
+      "path": "src/lib.rs",
+      "sha256": "5b02d6eaf7f4c0dd7edaed923ce46d3cdb99a96aba503636c3cc871c61a2f369"
+    },
+    {
+      "path": "src/message/attachment.rs",
+      "sha256": "5391dd3f83aaf9538cd8d8a9fbd378b875bce5addeeb7079c57191ddceb1ddfe"
+    },
+    {
+      "path": "src/message/body.rs",
+      "sha256": "46b6e1ea4279428309bb7cbfe81388be31af5f03d774d3691c63e1a8324247a8"
+    },
+    {
+      "path": "src/message/dkim.rs",
+      "sha256": "c859685b6c99ee2cdf6546bf7d644a4ec29ee467ffef251ee335e5026450f9aa"
+    },
+    {
+      "path": "src/message/header/content.rs",
+      "sha256": "3094a502f7eb05a138ef3451c258dac375d89cad4957d7e3e6a8d237eddb8325"
+    },
+    {
+      "path": "src/message/header/content_disposition.rs",
+      "sha256": "ed3fbb53597aad6929574bd55425f2a329f790bc82d11ebfdb84bc098f5186f6"
+    },
+    {
+      "path": "src/message/header/content_type.rs",
+      "sha256": "8e79f85355b1806f485ab98f31a993d0449031b06963992eed431f9cdbd7440f"
+    },
+    {
+      "path": "src/message/header/date.rs",
+      "sha256": "4db3a10089a3617a31645b6b98d6e05cb7912c76ec630d48048b07a81624fe70"
+    },
+    {
+      "path": "src/message/header/mailbox.rs",
+      "sha256": "404370b82ada7f6b2c54848707325faf3c36594263f233cb731045a41c5251ba"
+    },
+    {
+      "path": "src/message/header/mod.rs",
+      "sha256": "a44efb148f326d3d8ef45da0115dbfc157992c928894719aa7a89e5fa0fbdc72"
+    },
+    {
+      "path": "src/message/header/special.rs",
+      "sha256": "4cc1ae847d99735821f61e0179e6f25e46869d418440d98dda8873d06f5b294c"
+    },
+    {
+      "path": "src/message/header/textual.rs",
+      "sha256": "1d3411afd2c0aa44af6cf37f3c3a8958e2a5fb6c9e9619034e9fd52d22d596b0"
+    },
+    {
+      "path": "src/message/mailbox/mod.rs",
+      "sha256": "f9ad468f54c407afa2f1ddcfecba03e35707cf8a14c1aaf7f3b53b3ad6a6580b"
+    },
+    {
+      "path": "src/message/mailbox/parsers/mod.rs",
+      "sha256": "bc73d95bf93e668158f5bbd6ab76459486154c1194069f0bc9db5f3f2798c65f"
+    },
+    {
+      "path": "src/message/mailbox/parsers/rfc2234.rs",
+      "sha256": "969b657f70240f42baf4a99128f949466090a475cda2fd67f36ecafbb3c4da23"
+    },
+    {
+      "path": "src/message/mailbox/parsers/rfc2822.rs",
+      "sha256": "0edf1bf988e8b25686d10474737d255e35b24e19ae5062a9376d4932d82066c1"
+    },
+    {
+      "path": "src/message/mailbox/parsers/rfc5336.rs",
+      "sha256": "e8774ca11d16b04e3f39d837384db55e23e53e12c804241588b587ce799ac1bf"
+    },
+    {
+      "path": "src/message/mailbox/serde.rs",
+      "sha256": "b3ba723dd59101a626bd3a83844290103b0d80f677e486af90925808722494da"
+    },
+    {
+      "path": "src/message/mailbox/types.rs",
+      "sha256": "79e255c4ac81e6755ede1eee402d02fe85b2415546145aee2a4573603289ce08"
+    },
+    {
+      "path": "src/message/mimebody.rs",
+      "sha256": "809a7d5e7af4b5c0b3e0d40e2dd989918edc30b441c3f1972c2d3c7a5741ab80"
+    },
+    {
+      "path": "src/message/mod.rs",
+      "sha256": "54de89d3fd7266c0356ad37e9abbe219564df6941a55565d4aa9e9a96051aaca"
+    },
+    {
+      "path": "src/rustls_crypto.rs",
+      "sha256": "b67ba7c3fcd79b1a624ef4d5be16efc7988c856e4ba30be52dd8234696ef454d"
+    },
+    {
+      "path": "src/time.rs",
+      "sha256": "2bb918c517ae823564c07518abcd4a27399a53de9edfab67a85d9960a4b033b4"
+    },
+    {
+      "path": "src/transport/file/error.rs",
+      "sha256": "ee9e617e1f554c7571fb3a613207c83eb8669f413f9c750a53bfb210d2936a3d"
+    },
+    {
+      "path": "src/transport/file/mod.rs",
+      "sha256": "4194675aa52702f3c320cf5eed273f8f00cea27d6c05f5734b65a9d23d4cb85a"
+    },
+    {
+      "path": "src/transport/mod.rs",
+      "sha256": "b0436ed03a33d165212ba1eac9925ed8f95cac09e6ceb5d19ea051048fdecd17"
+    },
+    {
+      "path": "src/transport/sendmail/error.rs",
+      "sha256": "c463dc4c52f4f5512906321298e7e2ce6dc371bb6330ade6cff70a3381591a88"
+    },
+    {
+      "path": "src/transport/sendmail/mod.rs",
+      "sha256": "9e19557f28398672e46bde99f0a33a7ec1a2ea95b24710ecf3d5ac102ab1bf4d"
+    },
+    {
+      "path": "src/transport/smtp/async_transport.rs",
+      "sha256": "255d89efac4bd960ef364f2f6e602d551d89d0f4420d1bbb510d7ad7529e4c74"
+    },
+    {
+      "path": "src/transport/smtp/authentication.rs",
+      "sha256": "cfdf249caf204972cc1631550f5ed6a5eebeab4a2f81bd72911565c83118267a"
+    },
+    {
+      "path": "src/transport/smtp/client/async_connection.rs",
+      "sha256": "33d77882192253ea06af5ad4f9ab061c4b7979743b36011a4c16919d0f94d547"
+    },
+    {
+      "path": "src/transport/smtp/client/async_net.rs",
+      "sha256": "10dc022ddbca41f6688b740c6e45863b4746d89eb7851432a68b65907ae11fb7"
+    },
+    {
+      "path": "src/transport/smtp/client/connection.rs",
+      "sha256": "1bb1006e47fa0cc409bf3db9bf9e5635772e9f3e112c64ad8b11cb69678f4219"
+    },
+    {
+      "path": "src/transport/smtp/client/mod.rs",
+      "sha256": "932f91124433fbc9743c333aba7551f7d2f8b6cadb6777e6ecb5d6a8b2c30906"
+    },
+    {
+      "path": "src/transport/smtp/client/net.rs",
+      "sha256": "245be54343ee827936bc2884aa104f396052533e88ac4966266ddce1316bcfa7"
+    },
+    {
+      "path": "src/transport/smtp/client/tls.rs",
+      "sha256": "5521071acb93d955bb5cd2710c8d07275fd5bef5db69a95ffb32127b90561199"
+    },
+    {
+      "path": "src/transport/smtp/commands.rs",
+      "sha256": "f023e3b4e7ee3bcba5280ae70c0c1c17dcf5cb3c01d30eb36adf649c7e830f9f"
+    },
+    {
+      "path": "src/transport/smtp/connection_url.rs",
+      "sha256": "f2e40bc385aba79747e50cba63409f2ac0bcd6b1436f69150e6ea9114296e8f4"
+    },
+    {
+      "path": "src/transport/smtp/error.rs",
+      "sha256": "ea106770f954a860973ba549eb80431b3aa71fda65663ab087f16795f6b942d1"
+    },
+    {
+      "path": "src/transport/smtp/extension.rs",
+      "sha256": "2888f972568902c1efb4252ae99299f3137dbb7dcd041f72f16c11ed6051f314"
+    },
+    {
+      "path": "src/transport/smtp/mod.rs",
+      "sha256": "5c511929ce85196358b4dc37028911763bdb4a8b9e0daffd5774c37c5c669904"
+    },
+    {
+      "path": "src/transport/smtp/pool/async_impl.rs",
+      "sha256": "0cb9cee3cbadc548dfee0d9a3a694800ee0b50c1a069739306b6101ffe5832f8"
+    },
+    {
+      "path": "src/transport/smtp/pool/mod.rs",
+      "sha256": "7557fa1601a9a01499f18d6bad250d8ad7a9210ce904502c3c1c03ba5c061dde"
+    },
+    {
+      "path": "src/transport/smtp/pool/sync_impl.rs",
+      "sha256": "515399bc5204240a4717038c3f8101d04c7d65fc3ca4be260126fbc9b595058a"
+    },
+    {
+      "path": "src/transport/smtp/response.rs",
+      "sha256": "95e27039b62b08a13e7746bc5a9417018a37c77539f7b99f4458fedb274bf2af"
+    },
+    {
+      "path": "src/transport/smtp/transport.rs",
+      "sha256": "dfbbe7d3a3757035e30dab92906605dd945e1e546881fbdea25249c8241d9c43"
+    },
+    {
+      "path": "src/transport/smtp/util.rs",
+      "sha256": "5f224875a07d2ea6b1d4ffa0cff54840b37d48bbc1f47b2633866f8699399cf4"
+    },
+    {
+      "path": "src/transport/stub/mod.rs",
+      "sha256": "b774b7f105d4d5f7ccbdc51bdca3f4e12253d298322dce9fc3e54280150d7f54"
+    },
+    {
+      "path": "testdata/coredns.conf",
+      "sha256": "02b8eef424d810eb32d03b5208538e1dbf602e7fa060f63e608d0df7bec88d21"
+    },
+    {
+      "path": "testdata/db.example.org",
+      "sha256": "7722800b67cc293b00f1b9be3f3152ffb0f521029cade2143c7d38cf519328bb"
+    },
+    {
+      "path": "testdata/email_with_png.eml",
+      "sha256": "d20d926942b143863477963141d0910fd68a44f84d520e4406365f271d2a25f6"
+    },
+    {
+      "path": "tests/transport_file.rs",
+      "sha256": "e1b80a714d1043673419378ae82fb6eaeb31c5e71f2794094d36d2c25bc8f438"
+    },
+    {
+      "path": "tests/transport_sendmail.rs",
+      "sha256": "b525fe1056a0ec28056201429acae9f140d4564dcd7afbd30cdd3f5e41dff9e1"
+    },
+    {
+      "path": "tests/transport_smtp.rs",
+      "sha256": "eb0d0196d4dc614bee0a7b5ec981bd41f07054ceb8378defa61c5a972da8c232"
+    },
+    {
+      "path": "tests/transport_smtp_pool.rs",
+      "sha256": "a52faa0d16e0d506539f6c8bd40f62e564c87fc92efb5d0b4eeb73a5054f4b15"
+    },
+    {
+      "path": "tests/transport_stub.rs",
+      "sha256": "5bb9f59d5f814266a11b531687534cdb24c473f2f7c2dd025dbda22e0d4d5a5b"
+    }
+  ],
+  "allowedChanges": [
+    {
+      "path": "Cargo.toml",
+      "upstreamSha256": "e0d12fb15a63121d034457f5bfa255f67c239e9c3a4e239cebd4bc6e3987b4ab",
+      "patchedSha256": "b28c8327c3dc4a8b38eea9a3ad8a1e09972dbd18c059b3d4867284011317d7b4",
+      "reason": "Adds Tokio test utilities needed for the independently reviewed deterministic SMTP phase-timeout tests."
+    },
+    {
+      "path": "Cargo.toml.orig",
+      "upstreamSha256": "e09a2cb3ade0320fec6a422ddf6255c3c7cee7ee4e2baa74a04df1b755bdc7e1",
+      "patchedSha256": "4dedbd5f5bc45aad83ab1a5864d8542a79f0cbd1fda593fcc9b914bcf5046be6",
+      "reason": "Keeps the retained upstream source manifest consistent with the reviewed Tokio test-utility addition."
+    },
+    {
+      "path": "src/transport/smtp/client/async_connection.rs",
+      "upstreamSha256": "33d77882192253ea06af5ad4f9ab061c4b7979743b36011a4c16919d0f94d547",
+      "patchedSha256": "6f759ad5d6bd778574f1a02978d4ae1bc25e786edcfa5dc4955274d6022f3727",
+      "reason": "Adds the reviewed bounded SMTP phase APIs, exact reply validation, typed DATA failures, connection poisoning, and regressions."
+    },
+    {
+      "path": "src/transport/smtp/client/mod.rs",
+      "upstreamSha256": "932f91124433fbc9743c333aba7551f7d2f8b6cadb6777e6ecb5d6a8b2c30906",
+      "patchedSha256": "37f185303fb7bf9fd55e5d0fb955470ced795d8da18b7850c76cd15b66f97acd",
+      "reason": "Exports only the reviewed SMTP phase types required by Dakia integration."
+    }
+  ],
+  "vendorOnlyFiles": [
+    {
+      "path": "DAKIA_PROVENANCE.md",
+      "sha256": "658f2d08a3e9db4515375daeda0fde3471924f3e18b65ee09fdfdb41542cfbbc",
+      "reason": "Dakia provenance record for the independently reviewed local SMTP phase-timeout remediation."
+    }
+  ],
+  "omittedUpstreamFiles": []
+}

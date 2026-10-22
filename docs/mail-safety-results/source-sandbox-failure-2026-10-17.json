@@ -1,0 +1,150 @@
+{
+  "schemaVersion": 1,
+  "lane": "source",
+  "revision": "fccbace81192c5b5354f681e2feb2b66971e88cf",
+  "workingTree": "modified or unavailable",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "ad502e348cd774298b68d7a00f0816cc8914b41a592acca0f54641d23abf6130",
+    "fileCount": 664
+  },
+  "environment": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "node": "v22.23.2"
+  },
+  "startedAt": "2026-10-17T15:27:49.382Z",
+  "finishedAt": "2026-10-17T15:29:54.057Z",
+  "status": "failed",
+  "runs": [
+    {
+      "iteration": 1,
+      "status": "failed",
+      "commands": [
+        {
+          "command": "node",
+          "args": [
+            "scripts/validate-mail-safety-catalogue.mjs"
+          ],
+          "startedAt": "2026-10-17T15:27:49.383Z",
+          "finishedAt": "2026-10-17T15:27:49.670Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/validate-realistic-fixtures.mjs"
+          ],
+          "startedAt": "2026-10-17T15:27:49.670Z",
+          "finishedAt": "2026-10-17T15:27:49.778Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/tauri-contract-inventory.mjs"
+          ],
+          "startedAt": "2026-10-17T15:27:49.778Z",
+          "finishedAt": "2026-10-17T15:27:49.904Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "npm",
+          "args": [
+            "run",
+            "typecheck"
+          ],
+          "startedAt": "2026-10-17T15:27:49.904Z",
+          "finishedAt": "2026-10-17T15:27:53.058Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "npm",
+          "args": [
+            "run",
+            "format:check"
+          ],
+          "startedAt": "2026-10-17T15:27:53.058Z",
+          "finishedAt": "2026-10-17T15:27:54.550Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "cargo",
+          "args": [
+            "fmt",
+            "--all",
+            "--",
+            "--check"
+          ],
+          "startedAt": "2026-10-17T15:27:54.550Z",
+          "finishedAt": "2026-10-17T15:27:54.987Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "cargo",
+          "args": [
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--locked",
+            "--",
+            "-D",
+            "warnings"
+          ],
+          "startedAt": "2026-10-17T15:27:54.987Z",
+          "finishedAt": "2026-10-17T15:28:02.314Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "npm",
+          "args": [
+            "test",
+            "--",
+            "--maxWorkers=1"
+          ],
+          "startedAt": "2026-10-17T15:28:02.314Z",
+          "finishedAt": "2026-10-17T15:28:50.956Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "cargo",
+          "args": [
+            "test",
+            "--workspace",
+            "--locked"
+          ],
+          "startedAt": "2026-10-17T15:28:50.956Z",
+          "finishedAt": "2026-10-17T15:29:54.057Z",
+          "status": "failed",
+          "exitCode": 101,
+          "signal": null
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "Ignored credentialed/independent-server tests are separate evidence.",
+    "Native WebKit, packaged upgrades, live providers, audits, performance, and fuzzing are not established by this source run."
+  ],
+  "sourceTreeAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "ad502e348cd774298b68d7a00f0816cc8914b41a592acca0f54641d23abf6130",
+    "fileCount": 664
+  }
+}

@@ -1,0 +1,184 @@
+{
+  "schemaVersion": 1,
+  "sourceAccountId": "62a9320c-04f5-47c2-b4fa-d4952f0b6121",
+  "sourceMessageSubject": "Remote content safety check",
+  "recipientInvariant": "fictional@example.test",
+  "neverSend": true,
+  "warningText": "Some address or subject fields contain line breaks. Remove them before sending.",
+  "cases": [
+    {
+      "id": "native-mailto-cr-to",
+      "label": "Native mailto CR To rejection",
+      "href": "mailto:fictional%40example.test%0DBcc%3Afictional%40example.test?subject=Fictional%20report",
+      "expectedSeed": {
+        "to": "fictional@example.test\rBcc:fictional@example.test",
+        "subject": "Fictional report"
+      },
+      "expectedNormalizedSubmission": null,
+      "warningVisible": true,
+      "sendDisabled": true
+    },
+    {
+      "id": "native-mailto-cr-cc",
+      "label": "Native mailto CR Cc rejection",
+      "href": "mailto:fictional%40example.test?cc=fictional%40example.test%0DBcc%3Afictional%40example.test&subject=Fictional%20report",
+      "expectedSeed": {
+        "to": "fictional@example.test",
+        "cc": "fictional@example.test\rBcc:fictional@example.test",
+        "subject": "Fictional report"
+      },
+      "expectedNormalizedSubmission": null,
+      "warningVisible": true,
+      "sendDisabled": true
+    },
+    {
+      "id": "native-mailto-cr-subject",
+      "label": "Native mailto CR subject rejection",
+      "href": "mailto:fictional%40example.test?subject=Fictional%20report%0DX-Injected%3Ayes",
+      "expectedSeed": {
+        "to": "fictional@example.test",
+        "subject": "Fictional report\rX-Injected:yes"
+      },
+      "expectedNormalizedSubmission": null,
+      "warningVisible": true,
+      "sendDisabled": true
+    },
+    {
+      "id": "native-mailto-lf-to",
+      "label": "Native mailto LF To rejection",
+      "href": "mailto:fictional%40example.test%0ABcc%3Afictional%40example.test?subject=Fictional%20report",
+      "expectedSeed": {
+        "to": "fictional@example.test\nBcc:fictional@example.test",
+        "subject": "Fictional report"
+      },
+      "expectedNormalizedSubmission": null,
+      "warningVisible": true,
+      "sendDisabled": true
+    },
+    {
+      "id": "native-mailto-lf-cc",
+      "label": "Native mailto LF Cc rejection",
+      "href": "mailto:fictional%40example.test?cc=fictional%40example.test%0ABcc%3Afictional%40example.test&subject=Fictional%20report",
+      "expectedSeed": {
+        "to": "fictional@example.test",
+        "cc": "fictional@example.test\nBcc:fictional@example.test",
+        "subject": "Fictional report"
+      },
+      "expectedNormalizedSubmission": null,
+      "warningVisible": true,
+      "sendDisabled": true
+    },
+    {
+      "id": "native-mailto-lf-subject",
+      "label": "Native mailto LF subject rejection",
+      "href": "mailto:fictional%40example.test?subject=Fictional%20report%0AX-Injected%3Ayes",
+      "expectedSeed": {
+        "to": "fictional@example.test",
+        "subject": "Fictional report\nX-Injected:yes"
+      },
+      "expectedNormalizedSubmission": null,
+      "warningVisible": true,
+      "sendDisabled": true
+    },
+    {
+      "id": "native-mailto-double-to",
+      "label": "Native mailto double encoded To",
+      "href": "mailto:%22Fictional%250D%250AName%22%20%3Cfictional%40example.test%3E?subject=Fictional%20report",
+      "expectedSeed": {
+        "to": "\"Fictional%0D%0AName\" <fictional@example.test>",
+        "subject": "Fictional report"
+      },
+      "expectedNormalizedSubmission": {
+        "to": [
+          "\"Fictional%0D%0AName\" <fictional@example.test>"
+        ],
+        "cc": [],
+        "subject": "Fictional report",
+        "bodyText": ""
+      },
+      "warningVisible": false,
+      "sendDisabled": false
+    },
+    {
+      "id": "native-mailto-double-cc",
+      "label": "Native mailto double encoded Cc",
+      "href": "mailto:fictional%40example.test?cc=%22Fictional%250D%250AName%22%20%3Cfictional%40example.test%3E&subject=Fictional%20report",
+      "expectedSeed": {
+        "to": "fictional@example.test",
+        "cc": "\"Fictional%0D%0AName\" <fictional@example.test>",
+        "subject": "Fictional report"
+      },
+      "expectedNormalizedSubmission": {
+        "to": [
+          "fictional@example.test"
+        ],
+        "cc": [
+          "\"Fictional%0D%0AName\" <fictional@example.test>"
+        ],
+        "subject": "Fictional report",
+        "bodyText": ""
+      },
+      "warningVisible": false,
+      "sendDisabled": false
+    },
+    {
+      "id": "native-mailto-double-subject",
+      "label": "Native mailto double encoded subject",
+      "href": "mailto:fictional%40example.test?subject=Fictional%250D%250AX-Not-A-Header%3Ayes",
+      "expectedSeed": {
+        "to": "fictional@example.test",
+        "subject": "Fictional%0D%0AX-Not-A-Header:yes"
+      },
+      "expectedNormalizedSubmission": {
+        "to": [
+          "fictional@example.test"
+        ],
+        "cc": [],
+        "subject": "Fictional%0D%0AX-Not-A-Header:yes",
+        "bodyText": ""
+      },
+      "warningVisible": false,
+      "sendDisabled": false
+    },
+    {
+      "id": "native-mailto-double-body",
+      "label": "Native mailto double encoded body",
+      "href": "mailto:fictional%40example.test?subject=Fictional%20report&body=Literal%20keeps%20%250D%250Atext",
+      "expectedSeed": {
+        "to": "fictional@example.test",
+        "subject": "Fictional report",
+        "body": "Literal keeps %0D%0Atext"
+      },
+      "expectedNormalizedSubmission": {
+        "to": [
+          "fictional@example.test"
+        ],
+        "cc": [],
+        "subject": "Fictional report",
+        "bodyText": "Literal keeps %0D%0Atext"
+      },
+      "warningVisible": false,
+      "sendDisabled": false
+    },
+    {
+      "id": "native-mailto-body-crlf",
+      "label": "Native mailto body CRLF",
+      "href": "mailto:fictional%40example.test?subject=Fictional%20report&body=First%20line%0D%0ASecond%20line",
+      "expectedSeed": {
+        "to": "fictional@example.test",
+        "subject": "Fictional report",
+        "body": "First line\r\nSecond line"
+      },
+      "expectedNormalizedSubmission": {
+        "to": [
+          "fictional@example.test"
+        ],
+        "cc": [],
+        "subject": "Fictional report",
+        "bodyText": "First line\nSecond line"
+      },
+      "warningVisible": false,
+      "sendDisabled": false
+    }
+  ]
+}

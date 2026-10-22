@@ -1,7 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanEmailSnippet } from "./snippet";
 
 describe("cleanEmailSnippet", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("turns HTML email previews into clean readable text", () => {
     expect(
       cleanEmailSnippet(`
@@ -27,5 +31,22 @@ describe("cleanEmailSnippet", () => {
     expect(
       cleanEmailSnippet("<h1>Weekly update</h1><p>Three tasks done.</p>"),
     ).toBe("Weekly update Three tasks done.");
+  });
+
+  it("uses inert parsing for hostile markup instead of DOMParser", () => {
+    vi.stubGlobal(
+      "DOMParser",
+      class {
+        constructor() {
+          throw new Error("live parser must not run for snippets");
+        }
+      },
+    );
+
+    expect(
+      cleanEmailSnippet(
+        '<img src="https://images.example.test/open.png"><p>Visible preview</p>',
+      ),
+    ).toBe("Visible preview");
   });
 });

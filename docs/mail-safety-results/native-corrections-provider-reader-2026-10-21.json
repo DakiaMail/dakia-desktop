@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "status": "partial-failed",
+  "startedAt": "2026-10-21T12:10:25.141Z",
+  "updatedAt": "2026-10-21T12:32:38.109000+00:00",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "1a27848c0142d4b2f51439fc77caeae076acc9fd7a640b66569aa0b4d67376e6",
+    "fileCount": 761
+  },
+  "runtime": {
+    "pid": 994,
+    "appLog": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/app.log",
+    "appExecutable": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/Dakia Fictional Provider Reader.app/Contents/MacOS/dakia-desktop",
+    "appSha256": "2cc898a0691f8f9f3b015b33f841fca2847b7afca99b8a2c267c42a2e74c12f1",
+    "cli": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/Dakia Fictional Provider Reader.app/Contents/MacOS/dakia",
+    "cliSha256": "6b72b2de4f89f6910b01f0b7fc6198f42f3d54ccb5708c20aaea6d955e5ea0cd",
+    "database": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/profile/dakia.db",
+    "imapPort": 57265,
+    "smtpPort": 32897,
+    "imapProxyPid": 254,
+    "imapBackendPort": 32898
+  },
+  "sourceBaseline": "native-corrections-three-run-source-2026-10-21.json",
+  "passed": [
+    "mounted fictional SMTP arrival \u2192 production IMAP watcher \u2192 Tauri event \u2192 Smart inbox \u2192 Reader without manual refresh",
+    "selected remote message has exactly one ordinary Smart row after authoritative arrival refresh; after another selection original appears in Seen",
+    "actual WebKit Bergamot worker translated Estonian to visible English then Show original restored Estonian",
+    "zero controlled HTTP/TLS contacts before consent, including offline translation",
+    "unsafe leaf-symlink save preserved symlink and canary; exact collision copy bytes, 0600, quarantine, no auto-open",
+    "grant produced exact five HTTP requests (including redirect) and four separate negative TLS contacts",
+    "five real history expand/collapse transitions; visible quoted text appears/disappears, footer layout grows/shrinks; no new contacts",
+    "eleven physical mailto links reached account-one Compose; six injection cases warned and blocked Send, double-encoded values preserved literal, body CRLF remains two lines; all closed unsent",
+    "switch away and back resets remote permission",
+    "real full HFS+ attachment save visibly failed, no final/partial file; exact original Downloads restored, UI retry saved exact bytes/mode/quarantine",
+    "bulk Save all saved two with warning retained, all saved files 0600 and quarantined",
+    "account-two colliding UID/RFC Message-ID detached Reader, Reply/Forward FromB and onlyBattachment; actual39byteBsave",
+    "malformed message shows bounded useful error; later valid long message opens and its bottom+Replycontrols physically reachable",
+    "eight read-only bundled CLI processes passed while actual desktop remained alive",
+    "native dev ACL report all six summary checks passed; no packaged ACL claim",
+    "second fictional IMAP client verified exact UID4 Message-ID and setFlagged; mounted Reader changed to Remove star and Smart Starred appeared without manual refresh after reconnect"
+  ],
+  "failures": [
+    {
+      "kind": "test-helper",
+      "action": "enospc-fill",
+      "message": "duplicate hdiutil-info epoch-plus-PID evidence filename in two observations within one second",
+      "volumeState": "owned64MiB HFS+ mounted; genuinely full zero KiB; no attachment save attempted; guarded private helper correction under review",
+      "resolution": "private reviewed mktemp observation-name correction used; authenticated resume and full UI recovery passed; checked-in helper fix pending after source freeze"
+    },
+    {
+      "kind": "frontend-presentation",
+      "message": "UID3 omitted transiently from Smart Seen after selection/offline rollback/reconnect; List and readonly SQLite retain it; account/view switch restores it",
+      "status": "independently diagnosed probable global exit marker; private regression/fix preparation pending"
+    }
+  ],
+  "remaining": [
+    "Smart Seen omission fix and native replay",
+    "checked-in helper evidence-name correction",
+    "stable test application identity for future runs",
+    "packaged ACL",
+    "faithful previous-stable GUI upgrade"
+  ],
+  "limits": [
+    "Controlled resource endpoints alone are not a system-wide egress capture",
+    "No new Gmail sends or mailbox mutations",
+    "Current app display name and identity must be reused per user instruction"
+  ],
+  "finishedAt": "2026-10-21T12:36:39.292763+00:00",
+  "appExitCode": 0,
+  "sourceAfterRun": {
+    "status": "passed",
+    "baseline": {
+      "algorithm": "sha256-path-and-content-manifest",
+      "digest": "1a27848c0142d4b2f51439fc77caeae076acc9fd7a640b66569aa0b4d67376e6",
+      "fileCount": 761
+    },
+    "current": {
+      "algorithm": "sha256-path-and-content-manifest",
+      "digest": "1a27848c0142d4b2f51439fc77caeae076acc9fd7a640b66569aa0b4d67376e6",
+      "fileCount": 761
+    }
+  },
+  "cleanup": {
+    "ownedAppAndHarnessExited": true,
+    "ownedFixtureServicesStoppedByHarness": true,
+    "testDiskImageDetachedBeforeQuit": true,
+    "originalDownloadsRestored": true
+  }
+}

@@ -58,6 +58,25 @@ describe("reply history", () => {
     expect(quote.bodyHtml).toContain("Citation: mara@example.com");
   });
 
+  it("uses the final displayable instant for valid leap seconds and bounds malformed dates", () => {
+    const leapSecond = formatReplyHistory({
+      message: { ...message, received_at: "2016-12-31T23:59:60+00:00" },
+      bodyText: "Original body",
+      formatCitation: ({ date }) => `Citation: ${date}`,
+    });
+    const malformed = formatReplyHistory({
+      message: { ...message, received_at: "2016-02-30T23:59:60+00:00" },
+      bodyText: "Original body",
+      formatCitation: ({ date }) => `Citation: ${date}`,
+    });
+
+    expect(leapSecond.body).toContain(
+      `Citation: ${new Date("2016-12-31T23:59:59.999+00:00").toLocaleString()}`,
+    );
+    expect(leapSecond.body).not.toContain("Invalid Date");
+    expect(malformed.body).toContain("Citation: Unknown date");
+  });
+
   it("quotes the original rich HTML without replacing it with flattened text", () => {
     const quote = formatReplyHistory({
       message,

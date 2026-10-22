@@ -1,0 +1,43 @@
+{
+  "recordedAtUtc": "2026-10-17T21:11:21.321516+00:00",
+  "kind": "intermediate-integration-check",
+  "sourceStable": false,
+  "results": {
+    "workspace": {
+      "passedRuntimeTests": 714,
+      "passedDocTests": 2,
+      "ignoredTests": 8
+    },
+    "scripts": {
+      "passed": 159,
+      "failedSandboxLoopbackDenied": 2
+    },
+    "fixtureServerHost": "passed",
+    "frontend": {
+      "passed": 461,
+      "skippedSeparateArtifactLane": 1
+    }
+  },
+  "limitations": [
+    "Source edits continued during this check. This is not a final three-run baseline.",
+    "Native WebKit is separate and remains blocked by locked Mac."
+  ],
+  "logs": {
+    "workspace": {
+      "path": "/private/tmp/dakia-gap-next-workspace-recheck.log",
+      "sha256": "7b6f25be5dd6db13710caa0087d65e13eb358b47f0d86b8b36bcc1d3c3122212"
+    },
+    "scripts": {
+      "path": "/private/tmp/dakia-gap-next-node-recheck.log",
+      "sha256": "822e2ffb4df76642ce63dce6fadea5a84cfeaa941cb689be7073c7130c9a9abf"
+    },
+    "fixtureServerHost": {
+      "path": "/private/tmp/dakia-gap-next-fixture-server-host.log",
+      "sha256": "82d74b8599fcbf6a376fc222db9c989ddcf0bd8412749959006a41784f542fae"
+    },
+    "frontend": {
+      "path": "/private/tmp/dakia-gap-next-frontend-recheck.log",
+      "sha256": "16e97917dbf7bdfda70b9e800907efe9b6dbc59ff464be58d9ca7463ff6f903b"
+    }
+  }
+}

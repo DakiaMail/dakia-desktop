@@ -1,0 +1,510 @@
+{
+  "checks": {
+    "localBridgeReachedAcl": true,
+    "localRegisteredCommandsDenied": true,
+    "mainReadOnlyBridge": true,
+    "noSideEffects": true,
+    "remoteOriginIsolated": true,
+    "staticProbeWindowScopesDenied": true
+  },
+  "executable": {
+    "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.dzkRZz/Dakia Fictional Provider Reader.app/Contents/MacOS/dakia-desktop",
+    "pid": 25798,
+    "sha256": "25179f6341681f7c926f9a99e7ed8f0dcfa5f7814d0b7d039b01d5df0ef50301"
+  },
+  "feature": "native-mail-safety-fixture",
+  "localProbe": {
+    "label": "native-acl-local-probe",
+    "result": {
+      "href": "http://127.0.0.1:1420/__dakia_native_acl_probe__",
+      "inventoryProbes": [
+        {
+          "command": "provider_presets",
+          "error": "provider_presets not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"account\", URL: local]\n\nreferenced by: capability: account-setup, permission: allow-account-setup",
+          "outcome": "rejected"
+        },
+        {
+          "command": "message_content",
+          "error": "message_content not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local], [windows: \"reader-*\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail || capability: reader-mail, permission: allow-reader-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "configure_tray",
+          "error": "configure_tray not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "terminal_command_status",
+          "error": "terminal_command_status not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "message_attachments",
+          "error": "message_attachments not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local], [windows: \"reader-*\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail || capability: reader-mail, permission: allow-reader-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "save_attachment",
+          "error": "save_attachment not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local], [windows: \"reader-*\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail || capability: reader-mail, permission: allow-reader-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "export_message",
+          "error": "export_message not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local], [windows: \"reader-*\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail || capability: reader-mail, permission: allow-reader-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "save_all_attachments",
+          "error": "save_all_attachments not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local], [windows: \"reader-*\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail || capability: reader-mail, permission: allow-reader-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "forward_attachments",
+          "error": "forward_attachments not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"compose-*\", URL: local], [windows: \"main\", URL: local]\n\nreferenced by: capability: compose-mail, permission: allow-compose-mail || capability: main-mail, permission: allow-main-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "read_dropped_files",
+          "error": "read_dropped_files not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"compose-*\", URL: local]\n\nreferenced by: capability: compose-mail, permission: allow-compose-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "accounts",
+          "error": "accounts not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"compose-*\", URL: local], [windows: \"main\", URL: local], [windows: \"reader-*\", URL: local], [windows: \"settings\", URL: local]\n\nreferenced by: capability: compose-mail, permission: allow-compose-mail || capability: main-mail, permission: allow-main-mail || cap",
+          "outcome": "rejected"
+        },
+        {
+          "command": "update_account",
+          "error": "update_account not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"settings\", URL: local]\n\nreferenced by: capability: settings-mail, permission: allow-settings-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "show_account_context_menu",
+          "error": "show_account_context_menu not allowed. Command not found",
+          "outcome": "rejected"
+        },
+        {
+          "command": "show_email_address_context_menu",
+          "error": "show_email_address_context_menu not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"reader-*\", URL: local]\n\nreferenced by: capability: reader-mail, permission: allow-reader-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "remove_account",
+          "error": "remove_account not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"settings\", URL: local]\n\nreferenced by: capability: settings-mail, permission: allow-settings-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "open_external_url",
+          "error": "open_external_url not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"account\", URL: local], [windows: \"main\", URL: local], [windows: \"reader-*\", URL: local], [windows: \"settings\", URL: local]\n\nreferenced by: capability: account-setup, permission: allow-account-setup || capability: main-mail, permission: allow-main-ma",
+          "outcome": "rejected"
+        },
+        {
+          "command": "open_compose_window",
+          "error": "open_compose_window not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local], [windows: \"reader-*\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail || capability: reader-mail, permission: allow-reader-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "open_reader_window",
+          "error": "open_reader_window not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "open_settings_window",
+          "error": "open_settings_window not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "add_account",
+          "error": "add_account not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"account\", URL: local]\n\nreferenced by: capability: account-setup, permission: allow-account-setup",
+          "outcome": "rejected"
+        },
+        {
+          "command": "search",
+          "error": "search not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "search_smart_inbox",
+          "error": "search_smart_inbox not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "conversation_for_target",
+          "error": "conversation_for_target not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local], [windows: \"reader-*\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail || capability: reader-mail, permission: allow-reader-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "search_remote",
+          "error": "search_remote not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "set_message_category",
+          "error": "set_message_category not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "set_message_starred",
+          "error": "set_message_starred not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local], [windows: \"reader-*\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail || capability: reader-mail, permission: allow-reader-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "set_message_read",
+          "error": "set_message_read not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local], [windows: \"reader-*\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail || capability: reader-mail, permission: allow-reader-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "starred_conversation_count",
+          "error": "starred_conversation_count not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "realtime_sync_status",
+          "error": "realtime_sync_status not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local], [windows: \"settings\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail || capability: settings-mail, permission: allow-settings-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "record_notification_delivered",
+          "error": "record_notification_delivered not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "hydrate_message",
+          "error": "hydrate_message not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "mail_rebuild_status",
+          "error": "mail_rebuild_status not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local], [windows: \"settings\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail || capability: settings-mail, permission: allow-settings-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "sync_account",
+          "error": "sync_account not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local], [windows: \"settings\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail || capability: settings-mail, permission: allow-settings-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "send_message",
+          "error": "send_message not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"compose-*\", URL: local]\n\nreferenced by: capability: compose-mail, permission: allow-compose-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "apply_mailbox_action",
+          "error": "apply_mailbox_action not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local], [windows: \"reader-*\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail || capability: reader-mail, permission: allow-reader-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "unsubscribe_message",
+          "error": "unsubscribe_message not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local], [windows: \"reader-*\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail || capability: reader-mail, permission: allow-reader-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "trash_messages_from_sender",
+          "error": "trash_messages_from_sender not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local], [windows: \"reader-*\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail || capability: reader-mail, permission: allow-reader-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "ai_summarize",
+          "error": "ai_summarize not allowed. Command not found",
+          "outcome": "rejected"
+        },
+        {
+          "command": "ai_draft",
+          "error": "ai_draft not allowed. Command not found",
+          "outcome": "rejected"
+        },
+        {
+          "command": "ai_available",
+          "error": "ai_available not allowed. Command not found",
+          "outcome": "rejected"
+        },
+        {
+          "command": "send_desktop_notification",
+          "error": "send_desktop_notification not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "set_ai_api_key",
+          "error": "set_ai_api_key not allowed. Command not found",
+          "outcome": "rejected"
+        },
+        {
+          "command": "translation_models",
+          "error": "translation_models not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local], [windows: \"reader-*\", URL: local], [windows: \"settings\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail || capability: reader-mail, permission: allow-reader-mail || capability: settings-mail, perm",
+          "outcome": "rejected"
+        },
+        {
+          "command": "translation_model_files",
+          "error": "translation_model_files not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local], [windows: \"reader-*\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail || capability: reader-mail, permission: allow-reader-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "translation_detect_language",
+          "error": "translation_detect_language not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local], [windows: \"reader-*\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail || capability: reader-mail, permission: allow-reader-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "translation_install_model",
+          "error": "translation_install_model not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local], [windows: \"reader-*\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail || capability: reader-mail, permission: allow-reader-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "translation_cancel_install",
+          "error": "translation_cancel_install not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local], [windows: \"reader-*\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail || capability: reader-mail, permission: allow-reader-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "translation_remove_model",
+          "error": "translation_remove_model not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local], [windows: \"settings\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail || capability: settings-mail, permission: allow-settings-mail",
+          "outcome": "rejected"
+        }
+      ],
+      "ipcAvailable": true,
+      "probes": [
+        {
+          "command": "set_message_read",
+          "error": "set_message_read not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local], [windows: \"reader-*\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail || capability: reader-mail, permission: allow-reader-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "save_attachment",
+          "error": "save_attachment not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local], [windows: \"reader-*\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail || capability: reader-mail, permission: allow-reader-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "open_external_url",
+          "error": "open_external_url not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"account\", URL: local], [windows: \"main\", URL: local], [windows: \"reader-*\", URL: local], [windows: \"settings\", URL: local]\n\nreferenced by: capability: account-setup, permission: allow-account-setup || capability: main-mail, permission: allow-main-mail || capability: reader-mail, permission: allow-reader-mail || capability: settings-mail, permission: allow-settings-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "send_desktop_notification",
+          "error": "send_desktop_notification not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "open_settings_window",
+          "error": "open_settings_window not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "plugin:webview|create_webview_window",
+          "error": "webview.create_webview_window not allowed. Permissions associated with this command: core:webview:allow-create-webview-window",
+          "outcome": "rejected"
+        },
+        {
+          "command": "plugin:opener|open_url",
+          "error": "opener.open_url not allowed. Permissions associated with this command: opener:allow-open-url, opener:default",
+          "outcome": "rejected"
+        },
+        {
+          "command": "plugin:notification|notify",
+          "error": "notification.notify not allowed on window \"native-acl-local-probe\", webview \"native-acl-local-probe\", URL: local\n\nallowed on: [windows: \"main\", URL: local], [windows: \"settings\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-notify || capability: settings-mail, permission: allow-notify",
+          "outcome": "rejected"
+        }
+      ]
+    },
+    "url": "http://127.0.0.1:1420/__dakia_native_acl_probe__"
+  },
+  "main": {
+    "control": {
+      "ipcAvailable": true,
+      "outcome": "resolved",
+      "value": []
+    },
+    "label": "main",
+    "url": "http://127.0.0.1:1420/"
+  },
+  "probeCommands": [
+    "set_message_read",
+    "save_attachment",
+    "open_external_url",
+    "send_desktop_notification",
+    "open_settings_window",
+    "plugin:webview|create_webview_window",
+    "plugin:opener|open_url",
+    "plugin:notification|notify"
+  ],
+  "probeFlag": "DAKIA_NATIVE_MAIL_SAFETY_ACL_PROBE",
+  "profile": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.dzkRZz/profile",
+  "registeredCommandInventory": [
+    "provider_presets",
+    "message_content",
+    "configure_tray",
+    "terminal_command_status",
+    "install_terminal_command",
+    "remove_terminal_command",
+    "message_attachments",
+    "save_attachment",
+    "export_message",
+    "save_all_attachments",
+    "forward_attachments",
+    "read_dropped_files",
+    "accounts",
+    "update_account",
+    "show_account_context_menu",
+    "show_email_address_context_menu",
+    "remove_account",
+    "open_external_url",
+    "open_compose_window",
+    "open_reader_window",
+    "open_settings_window",
+    "open_account_window",
+    "add_account",
+    "search",
+    "search_smart_inbox",
+    "conversation_for_target",
+    "search_remote",
+    "set_message_category",
+    "set_message_starred",
+    "set_message_read",
+    "starred_conversation_count",
+    "classify_pending",
+    "start_realtime_sync",
+    "reconcile_realtime_sync",
+    "realtime_sync_status",
+    "record_notification_delivered",
+    "hydrate_message",
+    "mail_rebuild_status",
+    "sync_account",
+    "send_message",
+    "apply_mailbox_action",
+    "unsubscribe_message",
+    "trash_messages_from_sender",
+    "ai_summarize",
+    "ai_draft",
+    "ai_available",
+    "send_desktop_notification",
+    "set_ai_api_key",
+    "translation_models",
+    "translation_model_files",
+    "translation_detect_language",
+    "translation_install_model",
+    "translation_cancel_install",
+    "translation_remove_model"
+  ],
+  "remoteProbe": {
+    "label": "native-acl-remote-probe",
+    "malformedRequests": 0,
+    "result": {
+      "href": "http://127.0.0.1:58806/probe?nonce=84cd587eb45c458d8750994ec927e5cc",
+      "ipcAvailable": true,
+      "nonce": "84cd587eb45c458d8750994ec927e5cc",
+      "probes": [
+        {
+          "command": "set_message_read",
+          "error": "set_message_read not allowed on window \"native-acl-remote-probe\", webview \"native-acl-remote-probe\", URL: http://127.0.0.1:58806/probe?nonce=84cd587eb45c458d8750994ec927e5cc\n\nallowed on: [windows: \"main\", URL: local], [windows: \"reader-*\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail || capability: reader-mail, permission: allow-reader-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "save_attachment",
+          "error": "save_attachment not allowed on window \"native-acl-remote-probe\", webview \"native-acl-remote-probe\", URL: http://127.0.0.1:58806/probe?nonce=84cd587eb45c458d8750994ec927e5cc\n\nallowed on: [windows: \"main\", URL: local], [windows: \"reader-*\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail || capability: reader-mail, permission: allow-reader-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "open_external_url",
+          "error": "open_external_url not allowed on window \"native-acl-remote-probe\", webview \"native-acl-remote-probe\", URL: http://127.0.0.1:58806/probe?nonce=84cd587eb45c458d8750994ec927e5cc\n\nallowed on: [windows: \"account\", URL: local], [windows: \"main\", URL: local], [windows: \"reader-*\", URL: local], [windows: \"settings\", URL: local]\n\nreferenced by: capability: account-setup, permission: allow-account-setup || capability: main-mail, permission: allow-main-mail || capability: reader-mail, permission: allow-reader-mail || capability: settings-mail, permission: allow-settings-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "send_desktop_notification",
+          "error": "send_desktop_notification not allowed on window \"native-acl-remote-probe\", webview \"native-acl-remote-probe\", URL: http://127.0.0.1:58806/probe?nonce=84cd587eb45c458d8750994ec927e5cc\n\nallowed on: [windows: \"main\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "open_settings_window",
+          "error": "open_settings_window not allowed on window \"native-acl-remote-probe\", webview \"native-acl-remote-probe\", URL: http://127.0.0.1:58806/probe?nonce=84cd587eb45c458d8750994ec927e5cc\n\nallowed on: [windows: \"main\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-main-mail",
+          "outcome": "rejected"
+        },
+        {
+          "command": "plugin:webview|create_webview_window",
+          "error": "webview.create_webview_window not allowed. Permissions associated with this command: core:webview:allow-create-webview-window",
+          "outcome": "rejected"
+        },
+        {
+          "command": "plugin:opener|open_url",
+          "error": "opener.open_url not allowed. Permissions associated with this command: opener:allow-open-url, opener:default",
+          "outcome": "rejected"
+        },
+        {
+          "command": "plugin:notification|notify",
+          "error": "notification.notify not allowed on window \"native-acl-remote-probe\", webview \"native-acl-remote-probe\", URL: http://127.0.0.1:58806/probe?nonce=84cd587eb45c458d8750994ec927e5cc\n\nallowed on: [windows: \"main\", URL: local], [windows: \"settings\", URL: local]\n\nreferenced by: capability: main-mail, permission: allow-notify || capability: settings-mail, permission: allow-notify",
+          "outcome": "rejected"
+        }
+      ]
+    },
+    "url": "http://127.0.0.1:58806/probe?nonce=84cd587eb45c458d8750994ec927e5cc"
+  },
+  "runtimeCommandInventory": [
+    "provider_presets",
+    "message_content",
+    "configure_tray",
+    "terminal_command_status",
+    "message_attachments",
+    "save_attachment",
+    "export_message",
+    "save_all_attachments",
+    "forward_attachments",
+    "read_dropped_files",
+    "accounts",
+    "update_account",
+    "show_account_context_menu",
+    "show_email_address_context_menu",
+    "remove_account",
+    "open_external_url",
+    "open_compose_window",
+    "open_reader_window",
+    "open_settings_window",
+    "add_account",
+    "search",
+    "search_smart_inbox",
+    "conversation_for_target",
+    "search_remote",
+    "set_message_category",
+    "set_message_starred",
+    "set_message_read",
+    "starred_conversation_count",
+    "realtime_sync_status",
+    "record_notification_delivered",
+    "hydrate_message",
+    "mail_rebuild_status",
+    "sync_account",
+    "send_message",
+    "apply_mailbox_action",
+    "unsubscribe_message",
+    "trash_messages_from_sender",
+    "ai_summarize",
+    "ai_draft",
+    "ai_available",
+    "send_desktop_notification",
+    "set_ai_api_key",
+    "translation_models",
+    "translation_model_files",
+    "translation_detect_language",
+    "translation_install_model",
+    "translation_cancel_install",
+    "translation_remove_model"
+  ],
+  "schemaVersion": 1,
+  "sideEffects": {
+    "downloadsUnchanged": true,
+    "forgedWindowAbsent": true,
+    "messageUnchanged": true,
+    "openerCanaryHits": 0,
+    "settingsWindowAbsent": true
+  },
+  "staticOnlyCommands": [
+    "install_terminal_command",
+    "remove_terminal_command",
+    "open_account_window",
+    "classify_pending",
+    "start_realtime_sync",
+    "reconcile_realtime_sync"
+  ],
+  "status": "passed",
+  "target": {
+    "mailbox": "INBOX",
+    "messageId": "62a9320c-04f5-47c2-b4fa-d4952f0b6121:INBOX:3",
+    "uid": 3,
+    "uidValidity": 1792573314
+  }
+}

@@ -73,6 +73,42 @@ textarea {
   outline-offset: 2px;
 }
 
+.send-recoveries {
+  padding: 16px;
+  border-bottom: 1px solid var(--dakia-divider);
+}
+.send-recoveries h2 {
+  margin: 0 0 12px;
+  font-size: 15px;
+}
+.send-recoveries ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.send-recovery-open {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  padding: 12px 0;
+  border: 0;
+  border-bottom: 1px solid var(--dakia-divider);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.send-recovery-open:hover {
+  background: var(--dakia-selection);
+}
+.send-recovery-outcome {
+  color: var(--dakia-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: minmax(205px, 15vw) minmax(330px, 26vw) minmax(
@@ -1195,18 +1231,30 @@ textarea {
   border: 0;
   background: #fff;
   color-scheme: light;
+  --dakia-email-control-surface: var(--dakia-canvas);
+  --dakia-email-control-ink: #292d2b;
+  --dakia-email-control-border: var(--dakia-divider);
+  --dakia-email-control-hover: var(--dakia-selection);
 }
 .html-message--dark {
   background: var(--dakia-paper);
   color-scheme: dark;
+  --dakia-email-control-surface: #2a2e2b;
+  --dakia-email-control-ink: #f1f3f1;
+  --dakia-email-control-border: #525955;
+  --dakia-email-control-hover: #3a403c;
 }
+.html-message-remote-content-toggle,
+.html-message-history-toggle {
+  color: var(--dakia-email-control-ink);
+  background: var(--dakia-email-control-surface);
+  border: 1px solid var(--dakia-email-control-border);
+}
+.html-message-remote-content-toggle:hover,
 .html-message-history-toggle:hover {
-  background: color-mix(
-    in srgb,
-    var(--mantine-color-gray-1) 58%,
-    transparent
-  ) !important;
+  background: var(--dakia-email-control-hover);
 }
+.html-message-remote-content-toggle:focus-visible,
 .html-message-history-toggle:focus-visible {
   outline: 2px solid var(--mantine-color-ember-5);
   outline-offset: 2px;

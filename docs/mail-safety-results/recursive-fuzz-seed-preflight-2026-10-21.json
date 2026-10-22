@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T13:45:19.462198+00:00",
+  "status": "passed-focused-seed-preflight",
+  "scope": "Recursive deterministic checked-in MIME seeding for both manual fuzz targets. No fuzz campaign or full-source result is established here.",
+  "checks": [
+    {
+      "command": "node --test scripts/seed-mail-safety-fuzz.node-test.mjs scripts/run-mail-safety-fuzz.node-test.mjs",
+      "result": "3 passed, 0 failed, 0 skipped"
+    },
+    {
+      "command": "bash -n scripts/run-mail-safety-fuzz.sh; node --check on all three MJS files",
+      "result": "passed"
+    },
+    {
+      "command": "Independent actual-corpus seeding in two fresh private roots",
+      "result": "75 unique raw fixtures in both targets; all 48 nested obsolete fixtures included; all source/copy byte lengths and hashes independently verified; repeated manifests and corpora identical; printed manifest SHA matched actual file"
+    }
+  ],
+  "sensitivity": [
+    "Restricting traversal to the top directory fails the nested seed count and source-path assertions.",
+    "Using basename alone fails the collision or exclusive-write oracle.",
+    "Changing manifest byte counts or hashes fails independent source-byte recomputation.",
+    "Changing printed digest fails actual CLI-to-file comparison."
+  ],
+  "review": {
+    "result": "approved",
+    "reviewer": "remote_search_limit",
+    "remainingFinding": "none material"
+  },
+  "files": [
+    {
+      "path": "scripts/run-mail-safety-fuzz.sh",
+      "sha256": "786879e6d825cbb1e7d53f4be3f7d08f2977ab5517ec0d00a2ef408382bdcd5f"
+    },
+    {
+      "path": "scripts/run-mail-safety-fuzz.node-test.mjs",
+      "sha256": "112ab0c46aa240f321abc99b002038cae6f368b568f982dc7f6a75a653c66619"
+    },
+    {
+      "path": "scripts/seed-mail-safety-fuzz.mjs",
+      "sha256": "02be2946dd1480e7abf73c5758cafe4c40c1d76639f65348a140240a9f02ea3f"
+    },
+    {
+      "path": "scripts/seed-mail-safety-fuzz.node-test.mjs",
+      "sha256": "5a67494576a8b9d8e7a089057db0069b158904207741c996816717e486b2dee6"
+    }
+  ],
+  "limits": [
+    "The runner provides a fresh private mktemp output root and trusted checked-in source. It is not a hardened general-purpose copy utility for adversarial concurrent filesystems.",
+    "The manifest includes an absolute source path, so its digest identifies the exact run environment rather than a portable cross-worktree corpus.",
+    "Deep-lane fuzzing must still run after final source freeze."
+  ]
+}

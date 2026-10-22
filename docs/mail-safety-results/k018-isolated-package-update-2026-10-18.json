@@ -1,0 +1,209 @@
+{
+  "kind": "isolated-macos-package-updater-acceptance",
+  "date": "2026-10-18",
+  "catalogueCoverage": [
+    "MS-H-014",
+    "MS-K-004",
+    "MS-K-017",
+    "MS-K-018-partial"
+  ],
+  "scope": {
+    "supportedPredecessor": "published stable v0.4.4 only",
+    "candidateVersion": "0.4.5 fictional fixture",
+    "platform": "darwin-aarch64",
+    "evidenceRoot": "/private/tmp/dakia-k018-overlay.GQsOkd",
+    "command": "/usr/bin/script -q /private/tmp/dakia-k018-overlay.GQsOkd/evidence/package-runtime-retry3.log /private/tmp/dakia-k018-overlay.GQsOkd/run-package-update.sh",
+    "network": "loopback HTTP server on 127.0.0.1 with an ephemeral port",
+    "requestedPaths": [
+      "/latest.json",
+      "/v0.4.5/Dakia-aarch64.app.tar.gz"
+    ]
+  },
+  "sourceProvenance": {
+    "baseCommit": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+    "fullSourceBaselineDigestBeforePackageRun": "19097dead985f3c0d59fa4ae89cf788553675f667be54d9586805e2388e18dcf",
+    "candidateSourceHashes": "/private/tmp/dakia-k018-overlay.GQsOkd/evidence/source-at-resume-build-inputs.sha256",
+    "sourceSnapshotDifferenceAcceptedBeforeBuild": [
+      "docs/mail-safety-evidence.md",
+      "docs/mail-safety-remaining-gaps.md"
+    ],
+    "sourceSnapshotDifferenceEvidence": "/private/tmp/dakia-k018-overlay.GQsOkd/evidence/source-resume-allowed-docs.diff",
+    "note": "The two changed files were documentation and were not candidate build inputs. No product source file was edited by this package acceptance lane."
+  },
+  "publishedStable": {
+    "version": "0.4.4",
+    "sourceCommit": "8af5c397d81cc9aa60ddaca9b5eb15ecac9f6255",
+    "bundleIdentifier": "dev.dakia.mail",
+    "architecture": "arm64",
+    "archiveSha256": "8c52b32572e3d31d867cecac9c0306df0dda614251e6fa477c93ef569b442888",
+    "signatureSha256": "3a29859be317be008fd29c1d1d99712859b49dc9a23044e6d600e5172d593bb1",
+    "bundledCliSha256": "73f4d7fdde0a8322b0152aa0778def1766a00d7e5ed9314f36a53142db712806",
+    "developerIdCodesign": "passed in published-v0.4.4-artifact-verification-2026-10-17.json",
+    "gatekeeper": "passed in published-v0.4.4-artifact-verification-2026-10-17.json",
+    "notarizationStaple": "passed in published-v0.4.4-artifact-verification-2026-10-17.json",
+    "tauriUpdaterSignature": "passed"
+  },
+  "fictionalCandidate": {
+    "version": "0.4.5",
+    "bundleIdentifier": "dev.dakia.mail.k018",
+    "architecture": "arm64",
+    "archiveSha256": "a6e17d33215886e9d4f74c21a5b33659588cb0408186b3e8cef3fe77039d3da1",
+    "signatureSha256": "ccbfd7b69e787777f18b6d2812cfc483090cc8efb0e5fe6c772fb56ad875996b",
+    "desktopExecutableSha256": "0f156bf4ab6ac7c1955f33e624cdd3526a55f125b3ab0b43553cbd076cd8bb49",
+    "bundledCliSha256": "b5d567e1ff19dd6fbd0c91b55b058a7e83604d05d11a86ea77a848703d1a4072",
+    "onnxRuntimeSha256": "6fee21a0dbcaa98fe082cb4f7ed07ec5def439df36198f47b61dc205e7d2a1fa",
+    "candidateTreeManifestSha256": "3cd8cb594fb9b25ce51a38dd15b4445057d37a29e1d464ccb2fc122b369dfd8c",
+    "tauriUpdaterSigning": "passed with a generated fictional key",
+    "appleCodeSigning": "ad-hoc linker signature only",
+    "developerIdSigning": "not performed",
+    "notarization": "not performed",
+    "stapling": "not performed",
+    "publicReachability": "not applicable to the loopback fixture"
+  },
+  "gates": [
+    {
+      "gate": "Published v0.4.4 archive provenance, checksums, arm64 architecture, Developer ID, Gatekeeper, notarization staple, and Tauri signature",
+      "status": "passed",
+      "evidence": "docs/mail-safety-results/published-v0.4.4-artifact-verification-2026-10-17.json"
+    },
+    {
+      "gate": "Source-derived arm64 candidate package and bundled CLI",
+      "status": "passed",
+      "evidence": "/private/tmp/dakia-k018-overlay.GQsOkd/evidence/build-runtime-retry2.log"
+    },
+    {
+      "gate": "Interrupted artifact download is rejected before changing the old app",
+      "status": "passed",
+      "evidence": "interrupted stderr is error decoding response body; old-pristine-tree.jsonl equals interrupted-tree.jsonl"
+    },
+    {
+      "gate": "Tampered artifact is rejected specifically by Tauri signature verification before changing the old app",
+      "status": "passed",
+      "evidence": "tampered stderr is The signature verification failed; old-pristine-tree.jsonl equals tampered-tree.jsonl"
+    },
+    {
+      "gate": "Valid signed artifact replaces only the isolated app copy",
+      "status": "passed",
+      "evidence": "candidate-tree.jsonl equals installed-candidate-tree.jsonl"
+    },
+    {
+      "gate": "Published v0.4.4 bundled CLI creates the isolated fictional profile",
+      "status": "passed",
+      "evidence": "old-cli-create-profile.json and empty old-cli-create-profile.stderr"
+    },
+    {
+      "gate": "Candidate bundled CLI upgrades the v0.4.4 profile and preserves the disabled fictional account and message",
+      "status": "passed",
+      "evidence": "profile pre and post account and message projections are byte-identical; integrity_check is ok; foreign_key_check is empty"
+    },
+    {
+      "gate": "Manual recovery can restore the preserved old bundle after a successful replacement",
+      "status": "passed",
+      "evidence": "old-pristine-tree.jsonl equals manual-rollback-tree.jsonl"
+    },
+    {
+      "gate": "Automatic rollback after a failure that occurs after replacement begins",
+      "status": "skipped",
+      "reason": "The exercised failures occurred before replacement. Manual recovery was verified separately."
+    },
+    {
+      "gate": "Packaged desktop GUI, exact executable identity, webview identity, and simultaneous desktop plus bundled CLI profile use",
+      "status": "skipped",
+      "reason": "No GUI was launched in this non-GUI package run. This remains the unfinished part of MS-K-018 and MS-H-015."
+    },
+    {
+      "gate": "Apple Developer ID signing, notarization, stapling, Gatekeeper, public update URL, and installed-client behavior for the candidate release",
+      "status": "skipped",
+      "reason": "The candidate is an isolated fictional package, not an authorized production release. These gates must be rerun on the immutable release artifact."
+    },
+    {
+      "gate": "Intel macOS architecture",
+      "status": "waived",
+      "reason": "The accepted programme is Apple Silicon only. Intel was not executed and is not counted as a pass."
+    },
+    {
+      "gate": "Published v0.4.4 rejects a profile carrying the candidate schema marker",
+      "status": "failed-known-immutable-predecessor-limitation",
+      "evidence": "docs/mail-safety-results/published-v0.4.4-profile-upgrade-2026-10-18.json",
+      "reason": "The already published v0.4.4 binary does not fail closed on a newer profile marker. The bounded earlier trial observed no data mutation and the candidate reopened the profile successfully, but v0.4.4 cannot be retrofitted. This does not invalidate the successful forward v0.4.4 to candidate upgrade."
+    }
+  ],
+  "fixtureProfile": {
+    "account": "k018-fixture@example.test",
+    "accountEnabled": false,
+    "providerHosts": [
+      "imap.invalid",
+      "smtp.invalid"
+    ],
+    "credentials": 0,
+    "messages": 1,
+    "profileSchemaVersionAfterUpgrade": 1,
+    "sendAttemptsTableAfterUpgrade": true,
+    "databaseIntegrity": "ok",
+    "foreignKeyErrors": 0
+  },
+  "retainedNativeExecutables": {
+    "status": "unchanged",
+    "desktopDebugSha256": "1373736f9e6423854530ea5aaec1493c5935b92b173133706fea6014d8d385a6",
+    "cliDebugSha256": "dc1cd1a2de8f5f5e1646d657bfde52dc45c50932e469b52eaac8234da7cc1bb6",
+    "priorNativeAcceptanceDesktopSha256": "9fd8c432d1bc78b89229689f391641416c0b5d9c771be21b8fd9e544b444100a",
+    "evidence": "retained-executables-before.sha256 equals retained-executables-after-harness.sha256"
+  },
+  "attemptHistory": [
+    {
+      "attempt": "candidate build initial",
+      "status": "harness-failure",
+      "cause": "The isolated framework copy omitted the canonical libonnxruntime.dylib linker alias.",
+      "productFailure": false
+    },
+    {
+      "attempt": "candidate build retry 1",
+      "status": "safe-stop",
+      "cause": "The source snapshot guard detected two documentation changes. The retry allowed exactly those non-build files and preserved the diff.",
+      "productFailure": false
+    },
+    {
+      "attempt": "package initial",
+      "status": "harness-failure",
+      "cause": "A component-based Path.starts_with check rejected the valid marked private root before updater I/O.",
+      "productFailure": false
+    },
+    {
+      "attempt": "package retry 1",
+      "status": "harness-failure",
+      "cause": "The accepted loopback socket inherited nonblocking mode and returned EAGAIN during the deliberate interrupted response.",
+      "productFailure": false
+    },
+    {
+      "attempt": "package retry 2",
+      "status": "harness-failure-after-updater-modes-passed",
+      "cause": "PATH selected Android platform-tools sqlite3, which lacks FTS5, during profile seeding. The attempt was preserved and excluded from final profile evidence.",
+      "productFailure": false
+    },
+    {
+      "attempt": "package retry 3",
+      "status": "passed",
+      "cause": null,
+      "productFailure": false
+    }
+  ],
+  "flakyTests": [],
+  "safety": {
+    "applicationsDirectoryTouched": false,
+    "normalUserProfileTouched": false,
+    "guiLaunched": false,
+    "providerNetworkUsed": false,
+    "productionCredentialsUsed": false,
+    "productionUpdaterFeedUsed": false,
+    "productionSigningOrNotarizationUsed": false,
+    "releasePublished": false
+  },
+  "remainingReleaseRisk": [
+    "MS-K-018 still needs the packaged fictional-mailbox GUI smoke with exact executable and webview identity.",
+    "MS-H-015 still needs simultaneous packaged desktop and bundled CLI access to the same copied fictional profile.",
+    "Automatic rollback after a post-replacement failure is not verified.",
+    "The immutable published v0.4.4 binary does not reject a newer profile marker.",
+    "The real candidate release must independently pass Developer ID signing, notarization, stapling, Gatekeeper, public reachability, immutable checksums, update manifest validation, and installed-client update behavior.",
+    "Intel macOS was waived and remains untested."
+  ]
+}

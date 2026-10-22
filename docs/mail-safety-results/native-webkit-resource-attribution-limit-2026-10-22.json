@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "status": "full-webkit-cohort-unavailable",
+  "recordedAtUtc": "2026-10-22T00:10:04.482553+00:00",
+  "historicalSummary": {
+    "path": "/private/tmp/dakia-l013-native-resource-run-yRGRww/evidence/resource-summary.json",
+    "sha256": "ffa67c85f8dd2559bc59c994a02260855dd36b1a97fc5ba796117e700edc4fce"
+  },
+  "interpretation": {
+    "allWebKitMemoryClaimed": false,
+    "webKitProcessCount": null,
+    "webKitRssBytes": null,
+    "webKitOpenFileDescriptors": null,
+    "reason": "The existing collector follows only recursive parent-child relationships. WebKit XPC services may run outside that tree, so zero mapped descendants is unavailable attribution, not measured zero WebKit processes or memory."
+  },
+  "acceptance": "Main-process metrics remain scoped to their original run. No complete native WebKit cohort or long-term leak pass is established.",
+  "possibleFutureLowerBound": {
+    "executed": false,
+    "method": "Match exact same-UID PID/start/Apple executable identity and an open vnode below the validated fictional bundle and datastore UUID root.",
+    "scope": "positively_attributed_lower_bound",
+    "noMatch": "unavailable",
+    "limitBelowCeiling": "unassessable_partial_attribution",
+    "limitAboveCeiling": "failure"
+  },
+  "constraints": [
+    "Do not use private WebKit PID APIs, root-only mechanisms or privileged entitlement workarounds.",
+    "Do not inspect personal application data.",
+    "An incomplete lower bound cannot certify a resource ceiling."
+  ]
+}

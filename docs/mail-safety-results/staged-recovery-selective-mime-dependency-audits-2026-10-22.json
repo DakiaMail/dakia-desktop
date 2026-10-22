@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "status": "passed-with-retained-warnings",
+  "recordedAtUtc": "2026-10-21T23:39:50.351639+00:00",
+  "stagingSourceDigest": "fa50b916653bfc470eb69d22d34046a1867b03d022313d1a5e66eba04d44b131",
+  "sourceFileCount": 951,
+  "sourceAppliedToPrimary": false,
+  "rustRootExitCode": 0,
+  "npmExitCode": 0,
+  "fuzzAuditExitCode": 0,
+  "npmVulnerabilities": 0,
+  "rustRootAllowedWarnings": 10,
+  "fuzzAllowedWarnings": 1,
+  "advisoryDatabaseRevision": "4b587f00996ebe5c05a73eaef105ef241e876414",
+  "loadedAdvisories": 1348,
+  "npmAuditDestination": {
+    "protocol": "https:",
+    "hostname": "registry.npmjs.org",
+    "embeddedCredentials": false
+  },
+  "vendoredDeclarationsVerified": 5,
+  "ignoredInactiveAdvisories": [
+    "RUSTSEC-2023-0071",
+    "RUSTSEC-2024-0429"
+  ],
+  "inactiveAdvisoryPolicy": "The audit gate proves rsa@0.9.10 and glib@0.18.5 unreachable in the supported aarch64-apple-darwin workspace graph before allowing their exceptions.",
+  "inputs": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "a101a1b7d6ef9e1015f15d93fc722a927f38a60cf5fe85c0fc494d41d95561eb",
+      "byteIdenticalToPrimary": true
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "78e7136d6ff7a477e2317feb99a976a75376b1283a331babaca26b83c27f58b2",
+      "byteIdenticalToPrimary": true
+    },
+    {
+      "path": "crates/dakia-core/Cargo.toml",
+      "sha256": "f69475dc8dd0741daa758a623a886d37431b7969ae6e87cc23e268ab136f0d13",
+      "byteIdenticalToPrimary": true
+    },
+    {
+      "path": "crates/dakia-cli/Cargo.toml",
+      "sha256": "3c2e830d6aef5a1b34bc989aaf2b61632359bd721377ba198c0204b5bb197951",
+      "byteIdenticalToPrimary": true
+    },
+    {
+      "path": "apps/desktop/src-tauri/Cargo.toml",
+      "sha256": "07b3145666e7ee2bf014e6b1d32a5dad216d758696a55989f361ed320a96f03c",
+      "byteIdenticalToPrimary": true
+    },
+    {
+      "path": "fuzz/Cargo.toml",
+      "sha256": "b02dfd24bab25267483d572c36da5e71af3b61a907d4912fb8c0e86cfb811eae",
+      "byteIdenticalToPrimary": true
+    },
+    {
+      "path": "fuzz/Cargo.lock",
+      "sha256": "f07697a88633babbc07378ec41088987457527ec00f217566d6bb573411c71a3",
+      "byteIdenticalToPrimary": true
+    },
+    {
+      "path": "package-lock.json",
+      "sha256": "ec85e8d77a670963d49224d083cc9133b30763f048e8b520360f9c51c4bb5e1b",
+      "byteIdenticalToPrimary": true
+    },
+    {
+      "path": ".cargo/audit.toml",
+      "sha256": "0a31dab852dead3b6c393c395475001792fde4cb008bad2c478d6776d0e52cc0",
+      "byteIdenticalToPrimary": true
+    },
+    {
+      "path": "scripts/audit-dependencies.sh",
+      "sha256": "78a1949129f8863be0f70e4e54651552c537781aab07f3da7dce8ace5fe9503b",
+      "byteIdenticalToPrimary": true
+    },
+    {
+      "path": "scripts/verify-vendored-crates.mjs",
+      "sha256": "1b5edfd506b5cd15fb96b8a1ce702fbf01791ff1c105815a2a8984dae4ad504c",
+      "byteIdenticalToPrimary": true
+    }
+  ],
+  "logs": [
+    {
+      "path": "/private/tmp/dakia-staged-fresh-dependency-audits-recovery-20261022.log",
+      "sha256": "1a314d5fc06f7af86f8e69c3411d89426934298fe2967288e419493ef94c2cc5"
+    },
+    {
+      "path": "/private/tmp/dakia-staged-fresh-fuzz-dependency-audit-recovery-20261022.log",
+      "sha256": "b1868759b0e3398db1bb224f7fd0424fcf5d6b9e1c3002dc3dd93066aebfe142"
+    }
+  ],
+  "limitations": [
+    "Dependency audits are separate from source, native, provider and release acceptance.",
+    "Audit success follows the checked-in supported-target policy and retains maintenance warnings."
+  ]
+}

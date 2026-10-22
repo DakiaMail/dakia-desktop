@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "kind": "provider-reader-thirteen-fixture-typescript-correction-result",
+  "status": "passed",
+  "recordedAtUtc": "2026-10-22T12:00:02Z",
+  "scope": "A focused correction and rerun after the combined source lane found that three React Reader attachment-row assertions passed DOM Element values to a helper requiring HTMLElement. The correction adds runtime HTMLElement narrowing and reruns typecheck, formatting, and the same-profile thirteen-fixture production-coupled pipeline. It does not replace or expand the earlier native, provider, release, performance, fuzz, package, or full-source evidence.",
+  "retainedFailure": {
+    "classification": "deterministic TypeScript integration failure, not a product runtime failure and not a flaky test",
+    "log": {
+      "path": "/private/tmp/dakia-final-gmail-schema3-catalogue-corrected-source-20261022/source-repeat3.log",
+      "sha256": "df15b8b607eedffad015b12404208455ba360ff194345b01e036821b7a7b051a"
+    },
+    "errors": [
+      "mimeReaderArtifact.test.tsx:181 TS2345 Element is not assignable to HTMLElement",
+      "mimeReaderArtifact.test.tsx:235 TS2345 Element is not assignable to HTMLElement",
+      "mimeReaderArtifact.test.tsx:240 TS2345 Element is not assignable to HTMLElement"
+    ]
+  },
+  "correction": {
+    "file": "apps/desktop/src/components/mimeReaderArtifact.test.tsx",
+    "beforeSha256": "056adf2dd4a5930bf45eeee3bee49a5a816b960f4ec70587eea21bd5d06aa8df",
+    "afterSha256": "7da119453eca70a3fd7b8e494e7406646dbcfacd9c2973397276b8abeebd3d2a",
+    "behavior": "Each closest attachment-row result must be an HTMLElement at runtime before it reaches Testing Library within(). The existing unsafe-warning and safe-row absence assertions remain unchanged.",
+    "journal": {
+      "path": "/private/tmp/dakia-phase2-typescript-correction-20261022/correction-journal.json",
+      "sha256": "6d24556ce9800499ba68a4bd0dfee16fd616deb3b834b371f27558661220e27f"
+    }
+  },
+  "focusedChecks": [
+    {
+      "command": "npm run typecheck",
+      "status": "passed"
+    },
+    {
+      "command": "npm run format:check",
+      "status": "passed"
+    },
+    {
+      "command": "env -u GMAIL_ACCOUNT -u GMAIL_PASSWORD CARGO_TARGET_DIR=/private/tmp/dakia-primary-gmail-integration-target DAKIA_KEEP_MIME_READER_ARTIFACTS=1 node scripts/test-mime-reader-artifact.mjs",
+      "status": "passed",
+      "networkScope": "Loopback-only fictional IMAP listeners; no external provider or user mailbox access.",
+      "results": {
+        "coreProductionMailService": {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        "tauriMessageContent": {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "runtime": "Tauri mock runtime"
+        },
+        "reactReader": {
+          "passed": 13,
+          "failed": 0,
+          "skipped": 0,
+          "runtime": "Vitest jsdom"
+        }
+      }
+    }
+  ],
+  "pipeline": {
+    "retainedArtifactRoot": "/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-mime-reader-artifact-0jGUVQ",
+    "receipt": {
+      "path": "/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-mime-reader-artifact-0jGUVQ/pipeline-receipt.json",
+      "sha256": "2c763fac40a04d7a6511e9d1bc412daa56f6f68830f9ce687cbc787a75e49079",
+      "nonce": "4ed58d76-6502-4666-a18b-b99186114b62",
+      "producer": "MailService::hydrate_message_with_imap_endpoint_for_test",
+      "profileState": "closed-and-reopened-after-provider-hydration"
+    },
+    "source": {
+      "algorithm": "sha256-path-and-content-manifest",
+      "before": "681dfc29e1cc782d363999cf572dc56be9498565d34f78ba5f0120187e0c70e9",
+      "after": "681dfc29e1cc782d363999cf572dc56be9498565d34f78ba5f0120187e0c70e9",
+      "fileCount": 996,
+      "bindingSha256": "df63ff12ad446d04476b4529c7dd6532e6bdb8017294d17f8625f854bd032edb"
+    },
+    "artifacts": {
+      "coreManifestSha256": "eea5e720dfb94a7db49ccb8b8d9c89a4a6308ae5eb1d6b713b30fac7ac7500a3",
+      "tauriPayloadSha256": "32216fac408cadb00004f9f78795557800be909fc739730989644cae4f4e1854",
+      "frontendResultsSha256": "82d8453a4382da7291927234c88138e671c142491288098eac77913ba2901aec",
+      "databaseSha256": "198df4d70711581589b9d548f094c0fcf09e0ac61f4df93ad5e1f4e79740df39",
+      "databaseWalSha256": "3263c07722920e955f637aa85402b245ac9e78e44f5c0396ce58872076839d92"
+    }
+  },
+  "priorEvidence": {
+    "path": "docs/mail-safety-results/provider-hydrated-thirteen-fixture-reader-primary-focused-2026-10-22.json",
+    "relationship": "The earlier 21cb source-bound thirteen-fixture result remains immutable. This report records only the later TypeScript correction and focused rerun."
+  },
+  "limitations": [
+    "This focused rerun is not a full combined source-lane result.",
+    "The Tauri stage uses the mock runtime and the React stage uses jsdom, so it is not native WebKit evidence.",
+    "No attachment save was invoked and no native filesystem bytes were checked.",
+    "No external provider, user mailbox, native app, package, release, performance, fuzz, or dependency-audit result is claimed."
+  ]
+}

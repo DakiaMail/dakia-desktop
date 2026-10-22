@@ -1,0 +1,54 @@
+{
+  "execution": {
+    "environment": {
+      "architecture": "arm64",
+      "cargoTargetDir": "/private/tmp/dakia-primary-gmail-integration-target",
+      "gmailCredentials": "GMAIL_ACCOUNT, GMAIL_PASSWORD, and PROVIDER_SMOKE_CONFIG unset",
+      "node": "v22.23.2",
+      "nodeOptions": "--no-experimental-webstorage",
+      "platform": "darwin",
+      "stdin": "/dev/null"
+    },
+    "exitCode": 1,
+    "gatesPassed": 0,
+    "gatesPerRun": 18,
+    "retries": 0,
+    "runner": "node scripts/run-mail-safety.mjs --lane source --repeat 3",
+    "runsRequested": 3,
+    "runsStarted": 1,
+    "sessionId": null
+  },
+  "failure": {
+    "command": "node scripts/validate-mail-safety-catalogue.mjs",
+    "gate": 1,
+    "message": "Scenario MS-B-016 evidence does not declare test gmail_inbox_and_all_mail_sync_persists_only_one_representation_after_restart: crates/dakia-core/src/mail/tests/remote_search_safety_tests.rs",
+    "otherGatesRun": false
+  },
+  "kind": "gmail-schema3-source-catalogue-first-gate-failure",
+  "limitations": [
+    "This is a first-gate catalogue failure, not a full source baseline.",
+    "No full source cycles, strict fixture-feature clippy check, native, provider, or deep lane ran after the failed catalogue gate.",
+    "The report records the same frozen source before and after the attempted run."
+  ],
+  "rawEvidence": {
+    "log": "/private/tmp/dakia-final-gmail-schema3-full-source-20261022/source-repeat3.log",
+    "logSha256": "cbfefb0b0a646670308e6c3c9759517b8a8888f2180813ce9b29acd94f659951",
+    "report": "/private/tmp/dakia-final-gmail-schema3-full-source-20261022/report.json",
+    "reportSha256": "d70a20de4665e95c3f837a357efb94238ecbd091be04b072780e257c1b64af5c",
+    "sourceManifest": "/private/tmp/dakia-final-gmail-schema3-full-source-20261022/source-manifest.json",
+    "sourceManifestSha256": "13704ff6823d9576b6d3afdfd2a6f5d16a81009d92f30fae975a52463bbc2962"
+  },
+  "schemaVersion": 1,
+  "sourceScope": "source lane only",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "78cdb7b60e2cb68a1d04ede3172c0c4a1b1a8ddc6b0db3535c6c0a1e79d30c22",
+    "fileCount": 996
+  },
+  "sourceTreeAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "78cdb7b60e2cb68a1d04ede3172c0c4a1b1a8ddc6b0db3535c6c0a1e79d30c22",
+    "fileCount": 996
+  },
+  "status": "failed"
+}

@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "lane": "intermediate-integration",
+  "rust": {
+    "command": "cargo test --workspace --locked",
+    "passedRuntime": 749,
+    "passedDocs": 2,
+    "ignored": 8,
+    "failed": 0,
+    "logPath": "/private/tmp/dakia-next-gap-workspace.log",
+    "logSha256": "d057931290486134049ff3122151e61c3f8dc4d484da73330fc96ab0c980e3ad"
+  },
+  "workspaceClippy": "passed",
+  "frontendLatestOwnerReport": {
+    "passed": 491,
+    "skippedTests": 2,
+    "typecheck": "passed",
+    "independentReview": "approved"
+  },
+  "limitations": [
+    "Frontend and fixture source changed during this integration phase; this is not the final unchanged-source three-run baseline.",
+    "Native WebKit remains blocked by the locked Mac.",
+    "Live Gmail recovery and packaged/upgrade evidence are separate records."
+  ]
+}

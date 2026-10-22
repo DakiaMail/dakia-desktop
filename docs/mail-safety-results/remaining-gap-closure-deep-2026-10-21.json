@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-21",
+  "lane": "deep",
+  "status": "failed",
+  "acceptance": "not-established",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "e9d99598cfa7d3adf3cba2fee4487a8fb61151f9bfd29950dd3bc50950dd74c4",
+    "fileCount": 929
+  },
+  "sourceTreeAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "d9315b74058af365cd11d5e9bba375988ee09945ec0f0cc49b49c7005cd26f71",
+    "fileCount": 929
+  },
+  "environment": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "node": "v22.23.2",
+    "cargoBuildJobs": 2,
+    "fuzzTargetDirectory": "/private/tmp/dakia-mail-safety-expanded-fuzz-target-20261021",
+    "fuzzTargetDirectoryState": "absent before the first attempt; current attempt compiled in this fresh target directory"
+  },
+  "attempts": [
+    {
+      "number": 1,
+      "access": "sandbox",
+      "status": "failed",
+      "stage": "independent-server startup",
+      "result": "Docker daemon unavailable",
+      "exitCode": 69,
+      "rawLog": "/private/tmp/dakia-remaining-gap-closure-deep-20261021.log",
+      "rawLogSha256": "b87c239ed8d4248d7b199452a37820507f8add85877a278143c3c640ef5d61ba"
+    },
+    {
+      "number": 2,
+      "access": "authorized local Docker daemon",
+      "status": "failed",
+      "startedAt": "2026-10-21T14:32:54.884Z",
+      "finishedAt": "2026-10-21T14:38:09.099Z",
+      "runner": {
+        "command": "node scripts/run-mail-safety.mjs --lane deep --output docs/mail-safety-results/remaining-gap-closure-deep-2026-10-21.json",
+        "runnerReport": "docs/mail-safety-results/remaining-gap-closure-deep-changed-source-fuzz-oom-2026-10-21.json",
+        "runnerReportSha256": "8af9bf6a7b5e62ab08e13cef5710b58edc7e80d7f0f8ede109b2dc8b75903db8",
+        "rawLog": "/private/tmp/dakia-remaining-gap-closure-deep-20261021-retry.log",
+        "rawLogSha256": "e98116c70ba964edb6691d85f7688c4c2bbfdd05a1882e0afe4e7310ac6f6a53"
+      },
+      "independentServers": [
+        {
+          "name": "GreenMail public-root TLS rejection",
+          "status": "passed",
+          "tests": 1
+        },
+        {
+          "name": "GreenMail trusted IMAP/SMTP round trip",
+          "status": "passed",
+          "tests": 1
+        },
+        {
+          "name": "Dovecot trusted production-connector round trip",
+          "status": "passed",
+          "tests": 1
+        }
+      ],
+      "fuzz": {
+        "seedCount": 75,
+        "seedManifestSha256": "3c7b7baad7f2b08377a371ef9bd398b60b201ab3362df63397bab1088dfbabf3",
+        "temporaryFuzzDirectory": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-mail-safety-fuzz.kIDWvc",
+        "targets": {
+          "mime_budget": {
+            "status": "failed",
+            "executedFuzzerIterations": 37047,
+            "corpusAtFailure": {
+              "entries": 3024,
+              "bytes": 3310592
+            },
+            "rssAtFailureMb": 523,
+            "configuredRssLimitMb": 512,
+            "failure": "libFuzzer out-of-memory",
+            "fuzzTargetExitCode": 71,
+            "targetLog": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-mail-safety-fuzz.kIDWvc/mime_budget.log",
+            "targetLogSha256": "7a6f72ef32733f82432ff9db498fb9602d669c81d5b204d24d1d16874df30774",
+            "artifact": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-mail-safety-fuzz.kIDWvc/artifacts/mime_budget/oom-da39a3ee5e6b4b0d3255bfef95601890afd80709",
+            "artifactSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "artifactBytes": 0,
+            "artifactInterpretation": "The OOM marker is empty, so it is not a reproducing MIME input or a parser crash fixture."
+          },
+          "attachment_metadata": {
+            "status": "not-started",
+            "executedFuzzerIterations": 0,
+            "reason": "mime_budget exited 71 and the fail-closed fuzz script stopped before this target."
+          }
+        }
+      }
+    }
+  ],
+  "evidenceCorrection": {
+    "invalidPrematureReport": "docs/mail-safety-results/remaining-gap-closure-deep-premature-report-2026-10-21.json",
+    "reason": "That preserved report confused an unfinished current campaign with the historical 07tp0x fuzz directory. It is explicitly invalid and is not used here.",
+    "actualCurrentDirectory": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-mail-safety-fuzz.kIDWvc"
+  },
+  "limitations": [
+    "The source digest changed during the authorized Docker campaign, so it is not a clean final-source baseline.",
+    "A final warm campaign was not run because the actual first campaign had a real libFuzzer OOM failure; no retry is counted as a pass.",
+    "This lane does not establish native WebKit, live-provider, packaged-release, or performance acceptance."
+  ]
+}

@@ -1,0 +1,217 @@
+{
+  "schemaVersion": 1,
+  "lane": "optional-credentialed-provider-read-only-recovery-observation",
+  "status": "passed-for-exact-read-only-recovery-path",
+  "recordedAtUtc": "2026-10-21T20:35:15.766365+00:00",
+  "provider": "gmail",
+  "authenticationMethod": "app_password",
+  "accountScope": "one explicit disposable allowlisted account",
+  "roundtripId": "45bacd384f0c4a74893f14e4fea23d9a",
+  "plannedObservations": 3,
+  "completedObservations": 3,
+  "allPassed": true,
+  "remoteMutationRequested": false,
+  "testedPath": {
+    "kind": "production-rust-recovery-observation",
+    "stage": "inbox_observation",
+    "result": "exact_message_verified",
+    "readOnly": true,
+    "readNeutralImapMessageFetchLimit": 0,
+    "roundtripInboxSyncLimit": 1,
+    "roundtripRemoteSearchLimit": 10,
+    "roundtripMessageLimit": 0,
+    "smtpBehavior": "authenticate-and-quit-without-envelope-or-message-submission"
+  },
+  "executionIdentity": {
+    "wrapper": {
+      "artifact": "dakia-gmail-recover-progress-hardened-20261021.py",
+      "sha256": "3f51d93ff6b283956fc6107b45c653b36f13da3ab9e9273292897d2e0e731bf5"
+    },
+    "executable": {
+      "artifact": "dakia-provider-smoke",
+      "sha256": "896c4e2aafe4fe15fa6d35f6793f2b0b114d467858c06f75b79623595ca75e9b"
+    },
+    "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+    "frozenSource": {
+      "digest": "c56d2d806d8623dd14c858c8a8362729655496036405ad8c24162fce02a9a85b",
+      "manifestSha256": "6a983e12901b7042fd0c3bfbd0fe3d38e6c08447c667d19d03bcdc786654679b",
+      "manifestFileCount": 939
+    }
+  },
+  "observations": [
+    {
+      "iteration": 1,
+      "startedAtUtc": "2026-10-21T20:34:37.339719+00:00",
+      "finishedAtUtc": "2026-10-21T20:34:47.387494+00:00",
+      "wallElapsedSeconds": 10.047775,
+      "recordedPhaseElapsedMs": 7306,
+      "processExitCode": 0,
+      "outcome": "passed",
+      "stage": "inbox_observation",
+      "credentialsFileUnchanged": true,
+      "remoteMutationRequested": false,
+      "evidenceContentCheck": "passed",
+      "operationsClamped": false,
+      "completedOperations": [
+        { "operation": "store_open", "elapsedMs": 47 },
+        { "operation": "account_persist", "elapsedMs": 8 },
+        { "operation": "credential_persist", "elapsedMs": 4 },
+        { "operation": "imap_tcp_connect", "elapsedMs": 62 },
+        { "operation": "imap_tls_handshake", "elapsedMs": 18 },
+        { "operation": "imap_greeting", "elapsedMs": 9 },
+        { "operation": "imap_post_tls_capability", "elapsedMs": 13 },
+        { "operation": "imap_capability", "elapsedMs": 12 },
+        { "operation": "imap_authenticate", "elapsedMs": 136 },
+        { "operation": "imap_list_inbox", "elapsedMs": 24 },
+        { "operation": "imap_examine_inbox", "elapsedMs": 51 },
+        { "operation": "imap_inbox_status", "elapsedMs": 20 },
+        { "operation": "imap_logout", "elapsedMs": 15 },
+        { "operation": "smtp_connect", "elapsedMs": 68 },
+        { "operation": "smtp_ehlo", "elapsedMs": 15 },
+        { "operation": "smtp_authenticate", "elapsedMs": 100 },
+        { "operation": "smtp_quit", "elapsedMs": 13 },
+        { "operation": "header_sync", "elapsedMs": 3784 },
+        { "operation": "exact_search", "elapsedMs": 350 },
+        { "operation": "full_fetch", "elapsedMs": 368 },
+        { "operation": "hydrate", "elapsedMs": 2178 },
+        { "operation": "cache_read", "elapsedMs": 11 }
+      ],
+      "evidence": {
+        "path": "/private/tmp/dakia-gmail-recovery-progress-fntboz8d/provider-smoke-evidence.json",
+        "sha256": "9ccd1fc000d75371acb7198674b9f0d331fba14372f4230a3e3f59329120da41",
+        "mode": "0600"
+      }
+    },
+    {
+      "iteration": 2,
+      "startedAtUtc": "2026-10-21T20:34:47.388139+00:00",
+      "finishedAtUtc": "2026-10-21T20:35:02.258136+00:00",
+      "wallElapsedSeconds": 14.869997,
+      "recordedPhaseElapsedMs": 12161,
+      "processExitCode": 0,
+      "outcome": "passed",
+      "stage": "inbox_observation",
+      "credentialsFileUnchanged": true,
+      "remoteMutationRequested": false,
+      "evidenceContentCheck": "passed",
+      "operationsClamped": false,
+      "completedOperations": [
+        { "operation": "store_open", "elapsedMs": 40 },
+        { "operation": "account_persist", "elapsedMs": 5 },
+        { "operation": "credential_persist", "elapsedMs": 5 },
+        { "operation": "imap_tcp_connect", "elapsedMs": 20 },
+        { "operation": "imap_tls_handshake", "elapsedMs": 16 },
+        { "operation": "imap_greeting", "elapsedMs": 9 },
+        { "operation": "imap_post_tls_capability", "elapsedMs": 12 },
+        { "operation": "imap_capability", "elapsedMs": 12 },
+        { "operation": "imap_authenticate", "elapsedMs": 316 },
+        { "operation": "imap_list_inbox", "elapsedMs": 47 },
+        { "operation": "imap_examine_inbox", "elapsedMs": 26 },
+        { "operation": "imap_inbox_status", "elapsedMs": 18 },
+        { "operation": "imap_logout", "elapsedMs": 15 },
+        { "operation": "smtp_connect", "elapsedMs": 53 },
+        { "operation": "smtp_ehlo", "elapsedMs": 14 },
+        { "operation": "smtp_authenticate", "elapsedMs": 49 },
+        { "operation": "smtp_quit", "elapsedMs": 12 },
+        { "operation": "header_sync", "elapsedMs": 2001 },
+        { "operation": "exact_search", "elapsedMs": 374 },
+        { "operation": "full_fetch", "elapsedMs": 536 },
+        { "operation": "hydrate", "elapsedMs": 8566 },
+        { "operation": "cache_read", "elapsedMs": 15 }
+      ],
+      "evidence": {
+        "path": "/private/tmp/dakia-gmail-recovery-progress-_0tpgtru/provider-smoke-evidence.json",
+        "sha256": "375ad72d91ae8cd24c74804dcc3cab9ac9b81d27eae6954c2c3923d20304b494",
+        "mode": "0600"
+      }
+    },
+    {
+      "iteration": 3,
+      "startedAtUtc": "2026-10-21T20:35:02.258818+00:00",
+      "finishedAtUtc": "2026-10-21T20:35:15.766365+00:00",
+      "wallElapsedSeconds": 13.507547,
+      "recordedPhaseElapsedMs": 10683,
+      "processExitCode": 0,
+      "outcome": "passed",
+      "stage": "inbox_observation",
+      "credentialsFileUnchanged": true,
+      "remoteMutationRequested": false,
+      "evidenceContentCheck": "passed",
+      "operationsClamped": false,
+      "completedOperations": [
+        { "operation": "store_open", "elapsedMs": 50 },
+        { "operation": "account_persist", "elapsedMs": 8 },
+        { "operation": "credential_persist", "elapsedMs": 5 },
+        { "operation": "imap_tcp_connect", "elapsedMs": 16 },
+        { "operation": "imap_tls_handshake", "elapsedMs": 16 },
+        { "operation": "imap_greeting", "elapsedMs": 18 },
+        { "operation": "imap_post_tls_capability", "elapsedMs": 14 },
+        { "operation": "imap_capability", "elapsedMs": 14 },
+        { "operation": "imap_authenticate", "elapsedMs": 121 },
+        { "operation": "imap_list_inbox", "elapsedMs": 15 },
+        { "operation": "imap_examine_inbox", "elapsedMs": 17 },
+        { "operation": "imap_inbox_status", "elapsedMs": 20 },
+        { "operation": "imap_logout", "elapsedMs": 13 },
+        { "operation": "smtp_connect", "elapsedMs": 142 },
+        { "operation": "smtp_ehlo", "elapsedMs": 14 },
+        { "operation": "smtp_authenticate", "elapsedMs": 51 },
+        { "operation": "smtp_quit", "elapsedMs": 13 },
+        { "operation": "header_sync", "elapsedMs": 1079 },
+        { "operation": "exact_search", "elapsedMs": 1614 },
+        { "operation": "full_fetch", "elapsedMs": 383 },
+        { "operation": "hydrate", "elapsedMs": 7051 },
+        { "operation": "cache_read", "elapsedMs": 9 }
+      ],
+      "evidence": {
+        "path": "/private/tmp/dakia-gmail-recovery-progress-xf28azn1/provider-smoke-evidence.json",
+        "sha256": "e4364773dff116621e6623ae1ea2cccdaaf53a38451b58e8c8df9e8af62d9a6f",
+        "mode": "0600"
+      }
+    }
+  ],
+  "summaryEvidence": {
+    "path": "/private/tmp/dakia-gmail-three-readonly-observations-20261021/summary.json",
+    "sha256": "80bbcb8a58eb2b845fb3bdcd7c630fc4a2aacd0d819903854cd6f64348f9553b",
+    "mode": "0600"
+  },
+  "currentInputComparison": {
+    "comparedAgainstFrozenManifestAtRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+    "scope": [
+      "root Cargo.toml and Cargo.lock",
+      ".cargo",
+      "crates/dakia-core",
+      "crates/dakia-cli",
+      "vendor"
+    ],
+    "frozenEntriesCompared": 657,
+    "hashMismatches": 0,
+    "extraCurrentFiles": 0,
+    "wholeManifestDifferencesOutsideScope": 20,
+    "outsideScopeDifferenceCategories": {
+      "nativeBridgeRustFiles": 2,
+      "frontendImplementationAndTestFiles": 15,
+      "tauriContractMetadataAndTestFiles": 2,
+      "mailSafetyCatalogueMetadataFiles": 1
+    },
+    "conclusion": "The current core, CLI, root Rust manifests, lockfile, Cargo configuration, and vendored inputs remain byte-identical to the c56 frozen manifest used for the tested executable. Later changes are outside that executable input scope."
+  },
+  "privacyChecks": {
+    "credentialsFileUnchangedInEveryObservation": true,
+    "evidenceContentCheckPassedInEveryObservation": true,
+    "remoteMutationRequestedInAnyObservation": false,
+    "newMessageSubmitted": false,
+    "mailboxMutationRequested": false
+  },
+  "separateB004Status": {
+    "providerProofPassed": false,
+    "liveExecution": "not-run",
+    "wrapperV3": "held pending a new governed source freeze, compiled-core equivalence check, reviewed binding, and authorization"
+  },
+  "limitations": [
+    "These are three consecutive observations of one existing message in one disposable Gmail account through one exact recovery path.",
+    "The passes do not explain or resolve the earlier approximately 45-second provider timeouts.",
+    "The passes do not establish broad Gmail label behavior, sending reliability, cross-provider reliability, native Reader behavior, or long-duration provider stability.",
+    "SMTP was authenticated only to verify connectivity and then quit without an envelope or message submission.",
+    "The separate B004 provider-to-parser-to-Store proof was not executed live and remains unpassed."
+  ]
+}

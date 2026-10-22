@@ -8,6 +8,16 @@
     <title>Dakia</title>
   </head>
   <body>
+    <script>
+      // The local native provider acceptance runner has an isolated origin and
+      // explicitly disables features unrelated to mail rendering. Production
+      // builds do not replace this Vite value with "1".
+      if ("%VITE_NATIVE_MAIL_SAFETY_FIXTURE%" === "1") {
+        localStorage.setItem("dakia.analytics", JSON.stringify({ consent: "disabled" }));
+        localStorage.setItem("dakia.notifications", JSON.stringify({ enabled: false, soundEnabled: false, showPreview: false }));
+        localStorage.setItem("dakia.updates.last-successful-check", new Date().toISOString());
+      }
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "sourceManifest": "ad502e348cd774298b68d7a00f0816cc8914b41a592acca0f54641d23abf6130",
+  "scope": "Isolated fictional development mailbox; no provider source, packaged release, or actual file-saving claim.",
+  "artifacts": [
+    {
+      "path": "final-request-evidence.json",
+      "sha256": "f265535ffae7382c51a218c623e572f4b8376d99e6fd6e692d19688dfcddd346"
+    },
+    {
+      "path": "remote-before-consent.png",
+      "sha256": "2d4d88eaf91101861c4db2d0a3d2880196dfb322509a38dfac994c472ce2791d"
+    },
+    {
+      "path": "remote-after-consent.png",
+      "sha256": "66b44bc4b9a0f4afee207489217a63b6cb10ef2b96314f00813a22f89687f89d"
+    },
+    {
+      "path": "remote-reset-after-switch.png",
+      "sha256": "7f8628ab99d899ae5406af49e910227b74deda13888877bf9687402f5e7fb42d"
+    },
+    {
+      "path": "thread-both-collapsed.png",
+      "sha256": "0bdf9446499ddb2eb685afbdfd3605f12ca1af19d22aa4b1e6572afb4f1c7b26"
+    },
+    {
+      "path": "thread-expanded-1.png",
+      "sha256": "48921597136e6ac778785d591ff8dd6a620a817106d4a7f480ca745326f5750c"
+    },
+    {
+      "path": "thread-expanded-2.png",
+      "sha256": "48921597136e6ac778785d591ff8dd6a620a817106d4a7f480ca745326f5750c"
+    },
+    {
+      "path": "k015-prepared-starred.png",
+      "sha256": "21acdeb50dd8de20441c7ff6996c08d40296ff7e4ea12e0b1d08baa9d4f183d1"
+    },
+    {
+      "path": "k015-emitted-starred.png",
+      "sha256": "6d8dc463fc0f7aa5ae12a945c93c332974baa254f93c5d74d249ae86b39442ac"
+    },
+    {
+      "path": "k015-prepared-unstarred.png",
+      "sha256": "8383121f387649aee2ba7c9927521a7b7e1c7fa9b1fa61f100f2e3952db731d4"
+    },
+    {
+      "path": "k015-emitted-unstarred.png",
+      "sha256": "b4ac9029a3e05739a234f5ae3d315b4de2bcad49ab9454054fdb5061a3b6ea51"
+    },
+    {
+      "path": "native-acceptance-harness.ts",
+      "sha256": "2fec9f80dcb18e82702fe87bc486f102bc37f378b192626a5d151f9d1ee77e2e"
+    },
+    {
+      "path": "vite.native-acceptance.ts",
+      "sha256": "0e1059851848c7deb235b9d3589cd9060aabcdd92b87368718b96ef65b776841"
+    },
+    {
+      "path": "tauri.native-mail-safety.json",
+      "sha256": "e6bb8f5108630763f0445bf5ce414c4dbb3ccb449087d13918c9edfbf2e9af54"
+    },
+    {
+      "path": "dakia-ax.swift",
+      "sha256": "8f75b239172b7f78eb73741aa1cf5b23a19f7e995ff004b8000376a7d22c2a34"
+    }
+  ]
+}

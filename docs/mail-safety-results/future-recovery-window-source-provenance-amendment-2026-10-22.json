@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-22T05:53:23.652Z",
+  "status": "failed-candidate-with-provenance-amendment",
+  "scope": "Preserved failed future recovery-window candidate and the correction to its source-snapshot attribution. This is not a successful source, native, provider, package, release, or acceptance record.",
+  "failedCandidate": {
+    "manualManifest": {
+      "digest": "eba4bbafdb2b2ff52e1f38dc9efcad0eaeb8ece18f429bfe8c2936b0cd3d4c90",
+      "fileCount": 956,
+      "kind": "manual manifest validation, not the standard source snapshot"
+    },
+    "failedGate": {
+      "command": "cargo clippy --workspace --all-targets --locked -- -D warnings",
+      "exitCode": 101,
+      "diagnostic": "clippy::type_complexity",
+      "iteration": 1
+    },
+    "privateReport": {
+      "path": "/private/tmp/dakia-next-fatal-recovery-evidence-20261022/mail-safety-source-repeat3-eba4bbaf.json",
+      "sha256": "50d5204047516d1dd3d92a08b8e2ca634d114e724a8cae47bc2d901ab6797568"
+    },
+    "privateLog": {
+      "path": "/private/tmp/dakia-next-fatal-recovery-evidence-20261022/mail-safety-source-repeat3-eba4bbaf.log",
+      "sha256": "22d40eea5dd04f507c429b5f1f9ade6888acb380a6d7dc353c0f535b4c7dfc4c"
+    },
+    "sourceSnapshotCorrection": {
+      "directStandardDigest": "c9ab18057f88dbb75cc1701961eb28eb7ce913382a4092bdf78f8c64de510dc1",
+      "directStandardFileCount": 955,
+      "omittedPath": "apps/desktop/fatal-recovery.html",
+      "explanation": "The private harness copied manual manifest validation into sourceTree/sourceTreeAfter. Those are not standard scripts/run-mail-safety.mjs sourceSnapshot observations and are not used as runtime source-snapshot evidence."
+    }
+  },
+  "repairedCandidate": {
+    "directStandardDigest": "4e69e58bda85b0879242d33890c02a0452bd25d01ae608c5d0c89ce1b6d1a270",
+    "directStandardFileCount": 956,
+    "snapshotScopeFix": "SOURCE_SNAPSHOT_PATHS explicitly includes apps/desktop/fatal-recovery.html and a node regression asserts that entry.",
+    "requiredNextExecution": "Use only node scripts/run-mail-safety.mjs --lane source --repeat 3 --output REPORT. Do not adapt sourceTree fields or retry failed commands.",
+    "privateSnapshot": {
+      "path": "/private/tmp/dakia-next-fatal-recovery-evidence-v2-20261022/direct-standard-source-snapshot.json",
+      "sha256": "e1906a2f148b7b8b58dce3b251c3f2da8ceb3ffc2dc097fdb2ed0c2379a8f9a6"
+    },
+    "standardRepeat3Status": "interrupted-not-a-pass",
+    "interruption": {
+      "privateReceipt": "/private/tmp/dakia-next-fatal-recovery-evidence-v2-20261022/mail-safety-source-repeat3-4e69e58b-unrestricted-interruption.json",
+      "sha256": "998077af5f212d95e54df038104e6333d546558024390b635f094ca17cb12c39",
+      "reason": "Superseded before completion by a fatal-startup normal-exit status-0 defect.",
+      "result": "No completed source report or pass was produced."
+    }
+  },
+  "amendment": {
+    "privatePath": "/private/tmp/dakia-next-fatal-recovery-evidence-v2-20261022/source-snapshot-provenance-amendment.json",
+    "sha256": "2ae211ce7099539fafddf7fc37db09bc48707b2bd7e5e5bfd7e56701566c8c34"
+  },
+  "limitations": [
+    "The failed private harness was not the standard scripts/run-mail-safety.mjs runner, so its sourceTree fields do not establish standard source-snapshot observations.",
+    "No postprocessing retries or converts the failed clippy gate into a pass.",
+    "The primary checkout remains 04b. The earlier a6 source-lane pass remains a separate unapplied-candidate record.",
+    "The current 09a5 noninteractive standard run was pending when this amendment was updated; no result is inferred from its partial log."
+  ],
+  "currentCandidate": {
+    "directStandardDigest": "09a533c681e40a8a36fbb0159a5c5de025c43c88dbca3dbdc7b0abec91aad2c4",
+    "directStandardFileCount": 956,
+    "manifest": {
+      "path": "/private/tmp/dakia-next-fatal-recovery-evidence-v3-20261022/dakia-next-fatal-recovery-v3-source-manifest-20261022.json",
+      "sha256": "eddd189bddadc876eaf55d4cc9c15be986583703a2fe4e82bdbca97de24f2a92"
+    },
+    "sourceLane": {
+      "status": "pending-noninteractive-standard-repeat3",
+      "privateLog": "/private/tmp/dakia-next-fatal-recovery-evidence-v3-20261022/mail-safety-source-repeat3-09a533c6-noninteractive.log"
+    },
+    "retainedInterruption": {
+      "kind": "clean-PTY-interruption-before-a-complete-source-result",
+      "cause": "The optional AI privacy test inherited stdin through Tokio LocalCommand.output and waited for its fixture cat process to receive EOF.",
+      "scope": "Desktop AI commands remain disabled. The separate backend remedy is not evidence in this record."
+    }
+  }
+}

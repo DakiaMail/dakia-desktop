@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-21T22:46:22.000Z",
+  "lane": "native-WebKit-packaged-fixture-companion",
+  "status": "partial-failed",
+  "purpose": "Records a later bounded H016 upgrade pass and a confirmed UID 6 MIME-header diagnostic without revising earlier partial-failed receipts.",
+  "companionTo": [
+    {
+      "path": "docs/mail-safety-results/native-provider-reader-a86-partial-checkpoint-2026-10-22.json",
+      "sha256": "2622c1ed041e70366fbca6cfdbe1afbf88187ce09e9176ac1274ea9ad6cd906b",
+      "relationship": "Original a86 native checkpoint, retained unchanged."
+    },
+    {
+      "path": "docs/mail-safety-results/native-provider-reader-a86-partial-followup-2026-10-22.json",
+      "sha256": "32b1b25ed6d1d1d50411c7ab7968f7e2c2baabcc777c6623e58ce791ee722bc2",
+      "relationship": "Earlier follow-up, retained unchanged."
+    }
+  ],
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "a86feeae88ffe172c8697a84f1d29afa123856661ee3765ca3307562c410193c",
+    "fileCount": 940,
+    "sourceSuiteStatus": "passed: 48 of 48 gates across three unchanged runs"
+  },
+  "runtime": {
+    "desktopSha256": "1f3a21dff8d83bad428602b1950b79280af5b88d08809517a1a5dc4176135510",
+    "bundledCliSha256": "1e5b9aee65b422b06af5812830d0f6fbd994fb4aa1bcd337137049f593a6ca25",
+    "releaseBoundary": "Private ad-hoc fictional arm64 fixture. It is not published-release, Developer ID, notarization, stapling, updater-signing, or installation evidence."
+  },
+  "h016FaithfulForwardUpgrade": {
+    "status": "passed-for-bounded-packaged-gui-scope",
+    "evidenceRoot": "/private/tmp/dakia-h016-packaged-upgrade.eae1dc9d-487c-4af0-83c1-7fa65fb21c1d",
+    "sealedResult": {
+      "path": "/private/tmp/dakia-h016-packaged-upgrade.eae1dc9d-487c-4af0-83c1-7fa65fb21c1d/h016-faithful-packaged-gui-upgrade.json",
+      "sha256": "95094865ac738e3cdf9ee519e70b6be554bbd43c60d74567fca964fc84d8ddc5",
+      "sealedAt": "2026-10-21T22:44:16.817Z"
+    },
+    "helper": {
+      "path": "/private/tmp/dakia-h016-faithful-upgrade-provider-reader-classifier-revision-bound.mjs",
+      "sha256": "0deb0e66960d0dc2d8187d0f032c58e015e47003a8c40abed9e4fbbc95ae925d",
+      "oracle": "The exact v0.4.4 fixture inventory and classification-model revision were preserved through the forward upgrade."
+    },
+    "observedGuiState": {
+      "webviewUrl": "tauri://localhost/",
+      "subject": "Fictional previous-stable upgrade evidence",
+      "body": "Preserve this fictional message across the forward upgrade.",
+      "unread": true,
+      "starred": true,
+      "classificationModelRevision": "1647390c9d90c7c09983f69ef239cd80da7d10368766ee5193b340ae3970bbf9"
+    },
+    "cuaArtifacts": [
+      {
+        "name": "upgraded inbox",
+        "pngSha256": "01a92aa132f0c1b055ac534d7eb4c68bc450e2c6a372bf85b773d6f21207d864",
+        "textSha256": "eb4ccd7b656b2a91513aaa09e201372076b3d075c5a2185444fd2905405903d6"
+      },
+      {
+        "name": "unread filter",
+        "pngSha256": "d9c2c192186a7339d7b90bcc43070ea3ff3f84911322cad4d4c0281af7705d03",
+        "textSha256": "0ee860040dba2158a4542e8da09525f9fdcc1c7cf5782136a62032d95f50745b"
+      },
+      {
+        "name": "upgraded message body",
+        "pngSha256": "cab7faacbbd071659409aee5eb27c64c9a399e255a8999f4851c4cdc4240dcc7",
+        "textSha256": "072b051ab498ff32725cbc2bf9dfdb7c302951d138539809739f1e85a2916d50"
+      }
+    ],
+    "runtimeAttestation": {
+      "path": "/private/tmp/dakia-h016-packaged-upgrade.eae1dc9d-487c-4af0-83c1-7fa65fb21c1d/runtime-attestation.json",
+      "sha256": "f4f6e005c7017c499912288d660dba789a5606cf1feb948705009da121715b05"
+    },
+    "normalExit": {
+      "path": "/private/tmp/dakia-h016-packaged-upgrade.eae1dc9d-487c-4af0-83c1-7fa65fb21c1d/exit.json",
+      "sha256": "3027084a56309521fc65921f7c5e9d53089389fd1c04e565a7f4854689aec119",
+      "code": 0,
+      "signal": null
+    },
+    "scopeLimit": "This accepts only the sealed v0.4.4 forward-upgrade fixture and its visible state. It does not accept downgrade behavior, published packaging, installer behavior, signing, or updater delivery. The prior e533 H016 seal-helper failure remains historical evidence."
+  },
+  "uid6SelectiveReaderDiagnostic": {
+    "status": "observed-client-and-fixture-compatibility-gap",
+    "rawMessage": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8VRoLm/.dakia-uid6-readonly-source.eml",
+      "sha256": "47b7a1060fdaf4fc57122fe3491b31d38a2a902f48e6db952182289a5c1584ba",
+      "description": "A valid fictional multipart/mixed message with nested multipart/alternative plain and HTML leaves and no attachments."
+    },
+    "transcript": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8VRoLm/.dakia-uid6-selective-reader-transcript.json",
+      "sha256": "5aed47c1d302baf844fdbe43a55cdb8a8d09b9172af4d4dbb31b373ee64a72c0"
+    },
+    "observedServerResponse": "GreenMail 2.1.14, observed through the transparent encrypted fixture proxy, returned the parent multipart/alternative MIME header for the leaf BODY.PEEK[1.1.MIME] and BODY.PEEK[1.2.MIME] requests despite a valid BODYSTRUCTURE.",
+    "observedClientBehavior": "Dakia silently accepted the contradictory leaf MIME headers. The native Reader then showed a blank body and two false multipart/alternative attachments after full hydration and after settling.",
+    "readerArtifacts": {
+      "afterFullHydrationTextSha256": "f72207c8f0fbbffdb3f7e7a662530d1ddffd7ae5134d020a81c98aeaa7decf9f",
+      "afterFullHydrationPngSha256": "4dc3133c64d2a0a981bc40919d417a0b358f7926c13a82ffa175a1480a9243fb",
+      "settledTextSha256": "96807906d325f4a1a1049f16b959d4bae54fb13ee22a95f7cd9863c1ab3f1d5f",
+      "settledPngSha256": "2d514c05ed7a5d75178f9ccf0b2dfdde6c6e328e636069b33fdf83817370e4ff"
+    },
+    "proposedRemediation": "A bounded raw-message fallback is proposed but not implemented.",
+    "notRun": "The UID 7 leap-second scenario did not run after this failure."
+  },
+  "startupAlertPreflight": {
+    "status": "failed-safely-before-alert-execution",
+    "helperSha256": "cf994",
+    "failure": "The preparation helper expected a JavaScript default file mode of 0700, while the sealed app mode was 0755.",
+    "consequence": "No fatal-alert scenario ran. A private repair is in progress and no alert acceptance is claimed."
+  },
+  "unchangedOpenResults": {
+    "nativeOverall": "partial-failed",
+    "sourceSuite": "passed: 48 of 48 gates across three unchanged a86 runs",
+    "performance": "The current 2k benchmark regression remains failed; this receipt does not alter that result."
+  },
+  "limitations": [
+    "This companion adds evidence only. It does not modify the earlier failure receipts or promote aggregate native acceptance.",
+    "The H016 result is a bounded private fixture result, not a release or provider-conformance certificate.",
+    "The UID 6 mismatch is an observed server-response and client-handling compatibility problem. No ownership conclusion beyond the captured behavior, and no fix, is recorded here."
+  ]
+}

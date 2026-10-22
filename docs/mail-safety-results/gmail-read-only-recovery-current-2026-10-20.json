@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "outcome": "passed",
+  "stage": "inbox_observation",
+  "completedAtUtc": "2026-10-20T20:48:18.172700+00:00",
+  "provider": "gmail",
+  "authenticationMethod": "app_password",
+  "accountScope": "one explicit disposable allowlisted account",
+  "operations": [
+    "IMAP read-neutral authentication/discovery",
+    "SMTP authentication and QUIT",
+    "read-only exact INBOX UUID search and body observation"
+  ],
+  "readNeutralImapMessageFetchLimit": 0,
+  "roundtripInboxSyncLimit": 1,
+  "roundtripRemoteSearchLimit": 10,
+  "roundtripMessageLimit": 0,
+  "remoteMutationRequested": false,
+  "roundtripId": "45bacd384f0c4a74893f14e4fea23d9a",
+  "roundtripObservation": "exact_message_verified",
+  "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "executableSha256": "6997d53a8d7fc7e9eb670b0c1176f0293a244736d762dd9522731f2505b45312"
+}

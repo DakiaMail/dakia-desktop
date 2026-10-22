@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T15:02:45.471798+00:00",
+  "status": "passed-focused-leap-position-validation",
+  "lane": "source-focused-core-date",
+  "revision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "scope": "Potential UTC leap-second positions across complete, header and catalogue parsing; no IERS historical schedule certification.",
+  "references": [
+    "https://www.rfc-editor.org/rfc/rfc3339.html#section-5.7",
+    "https://www.rfc-editor.org/rfc/rfc3339.html#appendix-D",
+    "https://www.rfc-editor.org/rfc/rfc5322.html#section-3.3"
+  ],
+  "regression": {
+    "beforeLog": "/private/tmp/dakia-leap-position-regression-before-fix-20261021.log",
+    "beforeSha256": "3e156c2a2ee74792931d65ebe7395c4359d051224e5d75fc79c8fc746bdd2c29",
+    "exitCode": 101,
+    "actual": "2016-12-31T12:34:60+00:00",
+    "expected": "2026-02-09T06:16:47+00:00 provider INTERNALDATE"
+  },
+  "verification": {
+    "focusedTestPassed": 1,
+    "afterLog": "/private/tmp/dakia-leap-position-after-fix-20261021.log",
+    "afterSha256": "7d47f5131c0133ed858b1875c9d9ba48abd15ae76797504e23c27457cd026e42",
+    "independentChecks": "focused shared-path, related date and missing-date error checks; formatting, diff check and Clippy passed",
+    "independentReview": "security_review approved"
+  },
+  "behavior": [
+    "Apply the declared numeric offset before validating the UTC insertion position.",
+    "Require UTC23:59 on the final calendar day of any month for source second60.",
+    "Invalid positions use only valid provider receipt evidence or return the existing metadata error.",
+    "Preserve leap-second representation and raw source rather than normalizing it into a different minute.",
+    "Positive controls include the2016December insertion and structurally possible March/February positions including local-date offset crossings."
+  ],
+  "limitations": [
+    "Potential insertion positions are accepted without consulting an IERS historical schedule.",
+    "A first command used an incomplete exact test name and executed zero tests; its log is retained separately and is not counted as a pass.",
+    "Full-source, fuzz, provider and native acceptance remain separate."
+  ]
+}

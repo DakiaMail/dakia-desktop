@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 3,
+  "startedAt": "2026-10-21T12:10:25.141Z",
+  "capturedAt": "2026-10-21T12:22:50.923Z",
+  "listeners": {
+    "http": {
+      "host": "127.0.0.1",
+      "port": 48731
+    },
+    "tlsProbe": {
+      "host": "127.0.0.1",
+      "port": 48732
+    }
+  },
+  "totalRequests": 0,
+  "tlsContactAttempts": 0,
+  "unexpectedHttpTlsContactAttempts": 0,
+  "totalContacts": 0,
+  "counts": {},
+  "requests": [],
+  "responseObservations": [],
+  "transportEvents": []
+}

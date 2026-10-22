@@ -1,0 +1,11 @@
+X-Dakia-Corpus-Case: obs-05-year-thresholds-50
+X-Dakia-Corpus-Source: RFC 5322 section 4.3; fictional
+From: Sender <sender@example.test>
+To: Reader <reader@example.test>
+Subject: Fictional obsolete syntax
+Message-ID: <obs-obs-05-year-thresholds-50@example.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Date: 1 Jan 50 00:00:00 GMT
+
+Fictional body obs-05-year-thresholds-50.

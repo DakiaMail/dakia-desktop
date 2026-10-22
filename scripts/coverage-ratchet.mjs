@@ -113,6 +113,26 @@ function assertSummary(summary, label) {
   }
 }
 
+/**
+ * LCOV producers do not all emit every metric.  In particular, the current
+ * Rust report can contain executable lines while containing no BRDA records.
+ * A zero denominator is missing observation, not 100% coverage.
+ */
+export function coverageAvailability(summary) {
+  assertSummary(summary, "coverage summary");
+  return Object.fromEntries(
+    ["lines", "branches", "functions"].map((kind) => [
+      kind,
+      summary[kind].found === 0
+        ? {
+            status: "unavailable",
+            reason: "LCOV reported no observable items for this metric",
+          }
+        : { status: "observed" },
+    ]),
+  );
+}
+
 export function compareCoverage(candidate, baseline) {
   const failures = [];
   for (const component of Object.keys(baseline.components)) {
@@ -124,6 +144,17 @@ export function compareCoverage(candidate, baseline) {
     for (const kind of ["lines", "branches", "functions"]) {
       const oldMetric = baseline.components[component][kind];
       const nextMetric = next[kind];
+      if (oldMetric.found === 0) {
+        // There is no baseline ratio to preserve.  This remains explicitly
+        // unavailable in the candidate report and must never print as 100%.
+        continue;
+      }
+      if (nextMetric.found === 0) {
+        failures.push(
+          `${component} ${kind} is unavailable in the candidate; baseline observed ${oldMetric.hit}/${oldMetric.found}`,
+        );
+        continue;
+      }
       // Cross multiplication avoids rounding a tiny regression into a pass.
       if (nextMetric.hit * oldMetric.found < oldMetric.hit * nextMetric.found) {
         failures.push(
@@ -187,9 +218,27 @@ function main() {
       frontend: readLcov(options.frontend_lcov, "Frontend"),
     },
   };
+  candidate.observations = Object.fromEntries(
+    Object.entries(candidate.components).map(([component, summary]) => [
+      component,
+      coverageAvailability(summary),
+    ]),
+  );
   const output = resolve(options.output);
   mkdirSync(dirname(output), { recursive: true });
   writeFileSync(output, `${JSON.stringify(candidate, null, 2)}\n`);
+
+  const unavailable = Object.entries(candidate.observations).flatMap(
+    ([component, metrics]) =>
+      Object.entries(metrics)
+        .filter(([, observation]) => observation.status === "unavailable")
+        .map(([kind]) => `${component} ${kind}`),
+  );
+  if (unavailable.length > 0) {
+    console.log(
+      `Coverage observations unavailable: ${unavailable.join(", ")}. This is unavailable evidence, not 100% coverage.`,
+    );
+  }
 
   if (!options.baseline) {
     console.log(`Wrote coverage candidate without a baseline: ${output}`);

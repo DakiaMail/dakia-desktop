@@ -27,7 +27,8 @@ type Props = {
   onMailbox: (mailbox: string) => void;
   onFeedback: () => void;
   feedbackDisabled?: boolean;
-  outboxCount?: number;
+  outboxSendingCount?: number;
+  outboxRecoveryCount?: number;
   starredCount?: number;
 };
 
@@ -41,11 +42,23 @@ export function MailboxNav({
   onMailbox,
   onFeedback,
   feedbackDisabled = false,
-  outboxCount = 0,
+  outboxSendingCount = 0,
+  outboxRecoveryCount = 0,
   starredCount = 0,
 }: Props) {
   const { t } = useTranslation();
   const [accountsExpanded, setAccountsExpanded] = useState(true);
+  const outboxCount = outboxSendingCount + outboxRecoveryCount;
+  const outboxLabel = [
+    outboxSendingCount > 0
+      ? t("nav.outboxSendingCount", { count: outboxSendingCount })
+      : undefined,
+    outboxRecoveryCount > 0
+      ? t("nav.outboxRecoveryCount", { count: outboxRecoveryCount })
+      : undefined,
+  ]
+    .filter((label): label is string => Boolean(label))
+    .join(", ");
   const links = [
     ["", t("nav.allMail"), IconMail],
     ["unread", t("nav.unread"), IconSparkles],
@@ -138,10 +151,7 @@ export function MailboxNav({
             <Icon size={18} stroke={1.7} />
             <span>{label}</span>
             {id === "Outbox" && outboxCount > 0 ? (
-              <span
-                className="nav-count"
-                aria-label={t("nav.outboxCount", { count: outboxCount })}
-              >
+              <span className="nav-count" aria-label={outboxLabel}>
                 {outboxCount}
               </span>
             ) : null}

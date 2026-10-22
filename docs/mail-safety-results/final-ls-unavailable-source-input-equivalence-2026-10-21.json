@@ -1,0 +1,235 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-21T18:03:29.352Z",
+  "lane": "final-ls-unavailable-source-input-equivalence",
+  "status": "passed",
+  "scope": "read-only path-and-content equivalence for previously measured core, deep, performance, storage, and dependency-audit inputs",
+  "sourceChain": {
+    "measuredCoreDeepPerformance": {
+      "digest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+      "fileCount": 933,
+      "manifestPath": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-c47c2de0.json",
+      "manifestSha256": "43060add67b37337eec6820d93c0d8dfe00db7fc0123fa188b58b452778bc3d2"
+    },
+    "finalPlistSafeSource": {
+      "digest": "f8209887faad2ed25f965c55ef7a3680f7663852bfa33674406dc02da5b6063c",
+      "fileCount": 935,
+      "manifestPath": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-plist-safe.json",
+      "manifestSha256": "8e7c088c29283931b0f1f5e1d23109489b9c00679d46daff5d2527e1b4677979"
+    },
+    "finalNotificationSafeSource": {
+      "digest": "a7a9edfa42117d74424c4ea25c646aca6be0cd6912ddad791d68002083bdb1ed",
+      "fileCount": 937,
+      "manifestPath": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-notification-safe.json",
+      "manifestSha256": "3a8497de99abf429fc8712bef7a4bebff53f3d1ee2634159cddcb7e716757ebf"
+    },
+    "finalRegistrationSafeSource": {
+      "digest": "cedc3777c2fe96cd54160fd661521751ab688da6bf2aab7a4a486be23a3de0da",
+      "fileCount": 937,
+      "manifestPath": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-registration-safe.json",
+      "manifestSha256": "fff69f063ee5cae7638d851d5b048d78a2a2bdd8b20329be5082a03febca0b51"
+    },
+    "finalUpdaterSafeSource": {
+      "digest": "4e75af1f1febac3f261f7002d85565dafdd2860fe714cf99d9fbdaa970c6e4eb",
+      "fileCount": 937,
+      "manifestPath": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-updater-safe.json",
+      "manifestSha256": "636fc173a5f0bae611f98c10821ece529bc40c8c4027b0f1007d5745e814a37c",
+      "equivalenceReport": "docs/mail-safety-results/final-updater-safe-source-input-equivalence-2026-10-21.json",
+      "equivalenceReportSha256": "659c7112152a62105cd189aab870a55b60165ea6043922121db2b63f2a3efd1d"
+    },
+    "finalLsUnavailableSource": {
+      "digest": "a3f5e5edcef56f09522ee3f5f4485b0a5b804df4065624e355a24aa532b15b71",
+      "fileCount": 937,
+      "manifestPath": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-ls-unavailable.json",
+      "manifestSha256": "4ddff015b80254f000bf365f080336c6d4b230d3ae6fa11c2877b1fabeb394dd",
+      "liveFilesVerified": 937,
+      "liveMismatches": 0
+    }
+  },
+  "lsUnavailableDelta": {
+    "fromDigest": "4e75af1f1febac3f261f7002d85565dafdd2860fe714cf99d9fbdaa970c6e4eb",
+    "toDigest": "a3f5e5edcef56f09522ee3f5f4485b0a5b804df4065624e355a24aa532b15b71",
+    "changedPathCount": 2,
+    "changedPaths": [
+      {
+        "path": "scripts/native-provider-reader-acceptance.sh",
+        "beforeSha256": "2d543a203f94aff48e4c696e4c1bd6a60e6afa3db2b282a871251fa9f0935ab7",
+        "afterSha256": "6c98e4eae657abbc946df5b1e7c7aaa468b3d5496c578028e9461e816a08e054"
+      },
+      {
+        "path": "scripts/native-provider-reader-fixture.node-test.mjs",
+        "beforeSha256": "bfa4e4a876915bd7e655ad5ff0246ca9e82e13c6e482f70045f48e2f26b2bbde",
+        "afterSha256": "12c40f23382475ce58085377305f76c080a1911c534fba3cbeaf5f1ffd35a12e"
+      }
+    ],
+    "directC47ToLsUnavailableChangedPathCount": 18,
+    "directC47ToLsUnavailableChangedPaths": [
+      {
+        "path": "apps/desktop/src-tauri/capabilities/default.json",
+        "beforeSha256": "48469c3bf3a5dacad1d04f9eabe7e5480c0a0779da76278564c1ab4296f35ff2",
+        "afterSha256": "34b379fa2f3ce986deb0c95243dbc2df5fac2d052e0506cc3c7380b337f8f6d3"
+      },
+      {
+        "path": "apps/desktop/src-tauri/capabilities/notification-non-macos.json",
+        "beforeSha256": null,
+        "afterSha256": "a20a367a4ed3a6a601a4edc0a32a9303eba3f2ca0e3be179e5edf1fba87cabf8"
+      },
+      {
+        "path": "apps/desktop/src-tauri/capabilities/notification-permission-macos.json",
+        "beforeSha256": null,
+        "afterSha256": "c59322219c6d5cec8aa6c8810b22f234235e3d4d42a152ee41292a1035c2523f"
+      },
+      {
+        "path": "apps/desktop/src-tauri/capabilities/settings.json",
+        "beforeSha256": "1b6c0c6b05c5289565cfee8f8eb95e55833c18d6007da8b21b0827f46d7b75f3",
+        "afterSha256": "91aefb33278f0b03e7055549872af629f09a141229d2bfb3b3ad6e73fdb9d9d3"
+      },
+      {
+        "path": "apps/desktop/src-tauri/permissions/mail-commands.toml",
+        "beforeSha256": "dd1a0c2ba28966fadbe65f889a81be9974bde19329fee4e25d7ecd1d398ed05b",
+        "afterSha256": "d3570d18f4619453f8635f7e045b46e914c651cce50ee89528559692317b2047"
+      },
+      {
+        "path": "apps/desktop/src-tauri/src/bridge_security_tests.rs",
+        "beforeSha256": "5f341aaeb7b8b26b7fbd397ba77049627152c1de4ee1b179953974989ecbff8b",
+        "afterSha256": "2e100acc439f279f0c0f14d5e8e796ff48d7e6d63b23c8190795c8b33bf6477c"
+      },
+      {
+        "path": "apps/desktop/src-tauri/src/lib.rs",
+        "beforeSha256": "8acbc2887a088bb2f33caaf10baf3ae621148742898eba7c851620b207a3f05b",
+        "afterSha256": "c5bec752891dbbed9ec4a31e187446e6d47a9eb2f15aea00823ad024f0a10197"
+      },
+      {
+        "path": "apps/desktop/src-tauri/src/native_acl_acceptance.rs",
+        "beforeSha256": "2bf3fb340b6562c24a3cfb270a040c47da23b6a6b2cd7c005fcd558062d7d9e5",
+        "afterSha256": "31afb344e1d0923f606bcfb707ce6b7c888000176c2fa80087e0b28332049334"
+      },
+      {
+        "path": "apps/desktop/src-tauri/src/updater_acceptance_tests.rs",
+        "beforeSha256": "8fe0ed6cc245bfe754ba3832f2a24b477aa90fd84bfa72e153377bf7b4c67d57",
+        "afterSha256": "1c6b3dd2265590248ffcb34e8ba497c0b4d354c6608c0d7fd58fa63b795adcc6"
+      },
+      {
+        "path": "apps/desktop/src/notifications.test.ts",
+        "beforeSha256": "59a61962b43a257612962e652d588cacdb64af89a16a2e615fe28ebea71940d8",
+        "afterSha256": "7e5044563731e587ba0b0dbcee8fee58a6e82158d5dc0b4c73b551c5c384f380"
+      },
+      {
+        "path": "apps/desktop/src/notifications.ts",
+        "beforeSha256": "40a011b7eac7680156df56232e6082d81093f48e3b3c8bd57211c25c6217a382",
+        "afterSha256": "8f40c15f4f6b61b7b5adf6bf64b6f7a3df0d2f44428f074c347780a753430c36"
+      },
+      {
+        "path": "scripts/native-provider-reader-acceptance.sh",
+        "beforeSha256": "50419da17ac70e8bf2a497758c5bcaab147413834fe6662d096d7c2e3bb0745b",
+        "afterSha256": "6c98e4eae657abbc946df5b1e7c7aaa468b3d5496c578028e9461e816a08e054"
+      },
+      {
+        "path": "scripts/native-provider-reader-fixture.node-test.mjs",
+        "beforeSha256": "1b63b7b33d03dc79b84341cb3e0cfcd589ffb37c6a5602523063cc3fedfc60f3",
+        "afterSha256": "12c40f23382475ce58085377305f76c080a1911c534fba3cbeaf5f1ffd35a12e"
+      },
+      {
+        "path": "scripts/native-shared-profile-acceptance.mjs",
+        "beforeSha256": "3e4b9cc02d2fc226e458a97f4917f4c8b2152530ccd936f0374c8f3f0b03c9e6",
+        "afterSha256": "876bd2610e0961b074f4280b7ff1ee9e0cc501805ed1fbf6636c1d7907aaaccb"
+      },
+      {
+        "path": "scripts/native-shared-profile-acceptance.node-test.mjs",
+        "beforeSha256": "7ec75ec4e25e6e5acf23d4bbcbce7b584c8e578855fce3854bec2b7f02e82d92",
+        "afterSha256": "d3cc3a4f0466c224862465bdd86b85568bc1601653d23753d9d7471e1caaac49"
+      },
+      {
+        "path": "testdata/mail-safety-catalogue.json",
+        "beforeSha256": "a743c55759f501cb14129ccee509bc7ede9ffcb450cba93e3f4ab00329e9669d",
+        "afterSha256": "66a9e22386aa441e70ab8b07f29ec10d02b8c31ffa1bf97b1ab2264a1716c518"
+      },
+      {
+        "path": "testdata/native-mail-safety/packaged-info.plist",
+        "beforeSha256": null,
+        "afterSha256": "cd9d1f83516904f288db94d99271f014023c9ce5625a4059ff5dcf83e7900746"
+      },
+      {
+        "path": "testdata/native-mail-safety/packaged-info.plist.provenance.json",
+        "beforeSha256": null,
+        "afterSha256": "1ecf8b3181ceedf17e48c1a6246a42ac461347286664760bd47ed7d2eda101e1"
+      }
+    ],
+    "privateVerificationArtifact": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-ls-unavailable.json",
+    "privateVerificationArtifactSha256": "4ddff015b80254f000bf365f080336c6d4b230d3ae6fa11c2877b1fabeb394dd"
+  },
+  "coreInputEquivalence": {
+    "status": "passed",
+    "referenceSourceReport": "docs/mail-safety-results/remaining-gap-closure-three-run-source-2026-10-21.json",
+    "referenceSourceReportSha256": "0b0d137906a3845ba87e23f18613d5768d2643c3d1fabe4311ce3b0f2252e6f9",
+    "referenceSourceDigest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+    "oracle": "The direct c47-to-ls-unavailable manifest delta contains no root Cargo, dakia-core, fuzz, mail-parser, lettre, or core test-data path.",
+    "conclusion": "The Rust core and vendored parser and SMTP inputs exercised by the c47 source run remain byte-identical. This does not carry forward a whole-source or native desktop result."
+  },
+  "deepInputEquivalence": {
+    "status": "passed",
+    "referenceSourceReport": "docs/mail-safety-results/remaining-gap-closure-deep-current-source-2026-10-21.json",
+    "referenceSourceReportSha256": "3fcc68edc2aa7f378c194e64cdcec4d24faba880609c93917aa8aa729ced174f",
+    "referenceDetailReport": "docs/mail-safety-results/remaining-gap-closure-deep-current-detail-2026-10-21.json",
+    "referenceDetailReportSha256": "d97b02f5fd85f8a5e41e7f1a4bd8545180fb58b15e71ad199fa4bb921630cfd6",
+    "referenceSourceDigest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+    "entrypointHashes": {
+      "scripts/run-mail-safety.mjs": "263bb2d30aa7c81e35f046d80f6a5619f61695bc9a911d2feddfe0837d50ec0b",
+      "scripts/mail-safety-servers.sh": "67db72d6631db23d4896b77447a273ed0a40cdfdd2e7aff5863592d8dbc7c24a",
+      "scripts/run-mail-safety-fuzz.sh": "dab7c5caa313c2322111dd2ffc6775b2f9466fcb86d874a2e9bc9005d76c7d38",
+      "fuzz/Cargo.toml": "b02dfd24bab25267483d572c36da5e71af3b61a907d4912fb8c0e86cfb811eae",
+      "fuzz/Cargo.lock": "f07697a88633babbc07378ec41088987457527ec00f217566d6bb573411c71a3"
+    },
+    "oracle": "The deep entrypoints and their Cargo, dakia-core, fuzz corpus, fixture, and vendor inputs are absent from the direct c47-to-ls-unavailable changed path set.",
+    "conclusion": "The recorded c47 independent-server and bounded fuzz inputs remain byte-identical. This is not another deep execution."
+  },
+  "performanceInputEquivalence": {
+    "status": "passed",
+    "referenceReport": "docs/mail-safety-results/remaining-gap-closure-performance-2026-10-21.json",
+    "referenceReportSha256": "6b5d4c28d6f95f3370c6fe6689a43aade155b5caf65b7796d61df837a7b85352",
+    "referenceSourceDigest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+    "runnerPath": "scripts/run-mail-resilience-performance.mjs",
+    "runnerSha256": "7a7997823931a48979c25458ab3ab36230d39c858e921de004fe83a61c72c97f",
+    "oracle": "The performance runner, Cargo resolution, dakia-core implementation, and resilience and performance tests are absent from the direct c47-to-ls-unavailable changed path set.",
+    "conclusion": "The recorded c47 mailbox-scale and resource-soak inputs remain byte-identical. Matching inputs does not prove identical timing, code generation, system load, or incremental-cache state."
+  },
+  "storageCoverageInputEquivalence": {
+    "status": "passed",
+    "referenceReport": "docs/mail-safety-results/remaining-gap-closure-final-storage-branch-coverage-2026-10-21.json",
+    "referenceReportSha256": "0fb107639b55242dae6a360e43a408ec7bf145628bab7fa16f5fc88055705ea1",
+    "referenceMeasuredSourceDigest": "14081b6cb59e0ea43082ef5b2edd1dccba85736dfd17ce4674cf36042c7de308",
+    "inputManifestPath": "/private/tmp/dakia-mail-safety-remaining-gap-final-storage-branch-coverage-2026-10-21/input-after.sha256",
+    "inputManifestSha256": "28fdc43ae6ca1266cf7624f8b41a4b748e53265e23331c8ba681d7c10063141d",
+    "inputFileCount": 538,
+    "currentMismatchCount": 0,
+    "conclusion": "Every recorded root Cargo, dakia-core, mail-parser, and lettre input for the three separate storage coverage cohorts remains byte-identical."
+  },
+  "dependencyAuditInputEquivalence": {
+    "status": "passed",
+    "referenceReport": "docs/mail-safety-results/final-dependency-audit-2026-10-21.json",
+    "referenceReportSha256": "b380755a49ca459cd642d4ad5d774bbf5a37858236b10f1c933713cf38777e42",
+    "referenceSourceDigest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+    "inputs": {
+      "Cargo.lock": "78e7136d6ff7a477e2317feb99a976a75376b1283a331babaca26b83c27f58b2",
+      "fuzz/Cargo.lock": "f07697a88633babbc07378ec41088987457527ec00f217566d6bb573411c71a3",
+      "package-lock.json": "ec85e8d77a670963d49224d083cc9133b30763f048e8b520360f9c51c4bb5e1b",
+      ".cargo/audit.toml": "0a31dab852dead3b6c393c395475001792fde4cb008bad2c478d6776d0e52cc0",
+      "scripts/audit-dependencies.sh": "78a1949129f8863be0f70e4e54651552c537781aab07f3da7dce8ace5fe9503b",
+      "scripts/verify-vendored-crates.mjs": "1b5edfd506b5cd15fb96b8a1ce702fbf01791ff1c105815a2a8984dae4ad504c",
+      "testdata/vendored-crates/mail-parser.json": "c3e8a70769cff092572b7c596c4e8f577c8073db15f241648a3a406dfeddcf58",
+      "testdata/vendored-crates/lettre.json": "e83a4564682f3d2d6619068efafb1af2c9854d1e941fab6fc0393319850ff50e",
+      "testdata/vendored-crates/tauri-plugin-updater.json": "b1eca38b3ce7e43c84929ddeafb53ceed67b79f6106f8108f19d520f90ee3815"
+    },
+    "currentMismatchCount": 0,
+    "conclusion": "The recorded root and fuzz locks, audit configuration, audit and provenance entrypoints, and all three vendored provenance declarations remain byte-identical. This does not rerun an audit."
+  },
+  "limitations": [
+    "This is path-and-content equivalence evidence. It does not rerun source, core, deep, fuzz, performance, coverage, audit, native, provider, or packaged-app lanes.",
+    "The final source is not wholly equivalent to c47, f820, a7, cedc, or updater-safe. The LS-unavailable delta changes only native fixture harness and fixture test inputs; earlier notification, ACL, capability, permission, frontend notification, native fixture harness, catalogue, and updater-test changes remain non-equivalent.",
+    "No earlier native, packaged-app, shared-profile, or live UI result is carried forward by this report.",
+    "The deep result retains its recorded bounded fuzz limits and temporal-safety limitation.",
+    "The performance result remains tied to its recorded hardware, build profile, and load conditions.",
+    "The storage result remains three separate focused cohorts. Branch observations are not aggregated into product or workspace coverage.",
+    "The dependency audit result retains its recorded allowed warnings and is not a fresh audit result."
+  ]
+}

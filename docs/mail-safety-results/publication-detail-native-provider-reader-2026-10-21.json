@@ -1,0 +1,202 @@
+{
+  "schemaVersion": 1,
+  "lane": "native-fictional-provider-reader",
+  "status": "partial-failed",
+  "sourceDigest": "2a4e14731ba246806f3700b020ff7c1ec4afdbce0ceea6466fcfa46cb41d475f",
+  "privateEvidenceRoot": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.dzkRZz",
+  "runtime": {
+    "pid": 25798,
+    "appLog": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.dzkRZz/app.log",
+    "appExecutable": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.dzkRZz/Dakia Fictional Provider Reader.app/Contents/MacOS/dakia-desktop",
+    "appSha256": "25179f6341681f7c926f9a99e7ed8f0dcfa5f7814d0b7d039b01d5df0ef50301",
+    "cli": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.dzkRZz/Dakia Fictional Provider Reader.app/Contents/MacOS/dakia",
+    "cliSha256": "6b72b2de4f89f6910b01f0b7fc6198f42f3d54ccb5708c20aaea6d955e5ea0cd",
+    "database": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.dzkRZz/profile/dakia.db",
+    "imapPort": 58731,
+    "smtpPort": 32895,
+    "imapProxyPid": 22480,
+    "imapBackendPort": 32896
+  },
+  "observations": [
+    {
+      "id": "runtime-identity",
+      "status": "passed",
+      "observed": "PID 25798 matched the owned wrapper executable and SHA-256. CUA showed the unique fixture app at 127.0.0.1:1420/."
+    },
+    {
+      "id": "smart-initial",
+      "status": "passed",
+      "observed": "All three account-one messages appeared in Smart mode before switching to List."
+    },
+    {
+      "id": "read-neutral",
+      "status": "passed",
+      "observed": "After opening account-one UID 3, only that UID was Seen. UIDs 1 and 2 and all three account-two messages remained unseen."
+    },
+    {
+      "id": "before-consent",
+      "status": "passed",
+      "observed": "Both owned listeners recorded zero contacts after initial display and local model preparation."
+    },
+    {
+      "id": "postmounted-arrival",
+      "status": "passed",
+      "observed": "One local Estonian fixture was accepted as UID 4 and appeared in the already-mounted Smart list without refresh."
+    },
+    {
+      "id": "smart-duplicate",
+      "status": "failed",
+      "observed": "The selected UID 3 appeared in both Other and Seen until another message opened. Source inspection confirmed retention deduplicates only within its original section."
+    },
+    {
+      "id": "actual-webkit-translation",
+      "status": "failed-fixture-permission",
+      "observed": "The UI reported Offline translation failed. Rust rejected all three temporary model paths because the fixture profile is outside the configured APPLOCALDATA translation scope."
+    },
+    {
+      "id": "allowed-redirect-and-svg",
+      "status": "passed",
+      "observed": "All five allowed HTTP requests completed, including the 302 redirect followed by a 200 image response. Remote images and embedded SVG were visible in WebKit. Forbidden canaries remained inert; the separate negative TLS listener recorded four attempts."
+    },
+    {
+      "id": "history-layout",
+      "status": "passed",
+      "observed": "Actual expand, collapse, expand, collapse, expand transitions showed history appearing and disappearing and Reader controls reflowing. HTTP and TLS counters stayed at five and four after at least 15 seconds."
+    },
+    {
+      "id": "attachment-leaf-symlink",
+      "status": "passed",
+      "observed": "The warned attachment saved through the visible control to a collision filename with exactly 28 bytes, mode 0600, and quarantine. The canary and symlink were unchanged. The spinner cleared and success appeared; no automatic opening occurred."
+    },
+    {
+      "id": "attachment-enospc-prepare-first",
+      "status": "failed-fixture-command",
+      "observed": "hdiutil rejected combining type UDIF with format UDRW before creating an image, mounting, or renaming Downloads. The original Downloads directory was untouched."
+    },
+    {
+      "id": "reply-forward-privacy",
+      "status": "passed",
+      "observed": "Reply used provider@example.test and account-one From. Reply and forward had the expected subjects and retained local embedded content. Forward retained the 28-byte and 32-byte attachments. Both windows closed unsent, with no extra resource contacts."
+    },
+    {
+      "id": "mailto-physical-all11",
+      "status": "passed",
+      "observed": "All 11 physical WebKit link clicks opened compose for account one. Six CR/LF header cases showed the warning and disabled Send. Double-encoded To, Cc, subject, and body retained literal percent escapes. Body CRLF became two body lines. Send was never clicked and every window closed unsent."
+    },
+    {
+      "id": "simultaneous-desktop-cli",
+      "status": "passed",
+      "evidence": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.dzkRZz/native-shared-profile-acceptance.json",
+      "observed": "Eight read-only bundled CLI processes completed while the exact native desktop remained open. Logical state, database integrity, and foreign keys remained valid."
+    },
+    {
+      "id": "account-two-detached",
+      "status": "passed",
+      "observed": "Scoped search and double-click opened the detached Reader with account-two body and its 39-byte attachment despite colliding UID and Message-ID. Reply and forward retained account-two From. The forward included only its attachment. The saved file was exactly 39 bytes, mode 0600, with quarantine. Compose windows closed unsent."
+    },
+    {
+      "id": "malformed-neighbor-and-long-layout",
+      "status": "passed",
+      "observed": "Malformed UID 2 showed a bounded, readable error. Valid UID 1 opened afterward. Setting its actual scrollbar to the bottom and scrolling the outer Reader revealed the bottom marker and reply controls in WebKit."
+    },
+    {
+      "id": "attachment-enospc-prepare-second",
+      "status": "failed-fixture-command",
+      "observed": "Keeping format UDRW without a source folder still failed blank-image creation. No image, mount, or directory rename occurred."
+    },
+    {
+      "id": "attachment-enospc-prepare-third",
+      "status": "passed",
+      "observed": "The validated default blank-image command created an exact 64 MiB UDRW HFS+ image. Image bounds were checked before renaming Downloads, and only the owned Downloads path was mounted."
+    },
+    {
+      "id": "attachment-enospc-fill-first",
+      "status": "failed-fixture-fill-guard",
+      "observed": "The bounded large-block write returned ENOSPC but left 984 KiB free. The helper refused to publish a full-volume result, and no attachment save was attempted on that volume."
+    },
+    {
+      "id": "offline-cached-read-and-reconnect",
+      "status": "passed",
+      "observed": "Owned proxy acknowledged disabled with zero active sockets. Cached UID 4 remained readable. Mark-unread showed a clear failure and reverted. After resume, both watchers reconnected automatically within about 26 seconds. A separate fictional client set Flagged on the exact Message-ID-bound UID 4, and the mounted Reader and Smart list showed Remove star without manual sync."
+    },
+    {
+      "id": "enospc-native-failure-and-retry",
+      "status": "passed",
+      "observed": "Guarded resume established ENOSPC. A real visible save failed, its spinner cleared, and no partial or final attachment existed. The exact owned image was detached, original Downloads identity restored, and retry saved exact 32 bytes with mode 0600 and quarantine; no auto-open occurred. Earlier fixture preparation failures are retained separately.",
+      "evidence": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.dzkRZz/native-attachment-fault-evidence"
+    },
+    {
+      "id": "bulk-native-save",
+      "status": "passed",
+      "observed": "Visible Save all reported two attachments saved and preserved the unsafe warning. Existing files and leaf symlink were retained, with collision filenames used.",
+      "evidence": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.dzkRZz/final-saved-attachments.json"
+    }
+  ],
+  "limitations": [
+    "No overall native pass is claimed. Selected Smart-row duplication and fixture model-file permission require correction and replay.",
+    "The full-volume preparation failures remain recorded even though the final guarded fill, visible save failure, restore, and retry passed.",
+    "The initial CUA getApp call stalled for 8,328 seconds. The exact owned process and zero-contact counters were reverified after it returned.",
+    "The known sender-resource counters do not establish a system-wide network-denial proof.",
+    "Physical sleep and wake were explicitly declined. No Gmail send, personal mailbox change, or public release acceptance is included."
+  ],
+  "savedAttachments": [
+    {
+      "name": "account-two-notes.txt",
+      "bytes": 39,
+      "mode": "0o600",
+      "sha256": "8d75a6c97173c8be55b14daccce4f7cc4cfb2821ce13d3cb98fe2b2b28796541",
+      "quarantine": "0081;6ad8a2e3;Dakia;"
+    },
+    {
+      "name": "meeting-notes (1).txt",
+      "bytes": 32,
+      "mode": "0o600",
+      "sha256": "666dec5256feac267cd6c46b97107397c0a87fcde80a932321819f5a1cf2955e",
+      "quarantine": "0081;6ad8a54c;Dakia;"
+    },
+    {
+      "name": "meeting-notes.txt",
+      "bytes": 32,
+      "mode": "0o600",
+      "sha256": "666dec5256feac267cd6c46b97107397c0a87fcde80a932321819f5a1cf2955e",
+      "quarantine": "0081;6ad8a528;Dakia;"
+    },
+    {
+      "name": "quarterly-report.pdf (1).command",
+      "bytes": 28,
+      "mode": "0o600",
+      "sha256": "1679a56fbd964b0463ec644f56fa9a3189d1402343de932a66b210586d00c02f",
+      "quarantine": "0081;6ad8a1a9;Dakia;"
+    },
+    {
+      "name": "quarterly-report.pdf (2).command",
+      "bytes": 28,
+      "mode": "0o600",
+      "sha256": "1679a56fbd964b0463ec644f56fa9a3189d1402343de932a66b210586d00c02f",
+      "quarantine": "0081;6ad8a54c;Dakia;"
+    },
+    {
+      "name": "quarterly-report.pdf.command",
+      "symlink": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.dzkRZz/attachment-leaf-symlink-canary.txt"
+    }
+  ],
+  "appExitCode": 0,
+  "finishedAt": "2026-10-21T11:45:39.005161+00:00",
+  "sourceAfterRun": {
+    "status": "passed",
+    "baseline": {
+      "algorithm": "sha256-path-and-content-manifest",
+      "digest": "2a4e14731ba246806f3700b020ff7c1ec4afdbce0ceea6466fcfa46cb41d475f",
+      "fileCount": 758
+    },
+    "current": {
+      "algorithm": "sha256-path-and-content-manifest",
+      "digest": "2a4e14731ba246806f3700b020ff7c1ec4afdbce0ceea6466fcfa46cb41d475f",
+      "fileCount": 758
+    }
+  },
+  "testVolumeDetached": true,
+  "ownedHarnessCleanup": "Completed after normal CUA Quit. Owned Vite, proxy, request listener, and fictional container stopped; fixture artifacts retained.",
+  "attachmentHelperSha256": "bac844b5088d0bfdfa09328c170be27fdc57dd9684acce87afacfec49efeb3f3",
+  "attachmentHelperTestSha256": "0c6ed1748e44f17b3e1f3652c86ed391d7cf720a9a6edcc10f832ab16b265df6"
+}

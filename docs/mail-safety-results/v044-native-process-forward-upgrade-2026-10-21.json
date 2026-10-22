@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "lane": "native-process-forward-upgrade",
+  "status": "passed-bounded",
+  "previousVersion": "0.4.4",
+  "desktopSha256": "53215eb037166cab2cefd3894b0a8e9d44f6b92e9247be1b6e80b2d32fa2eb5a",
+  "sourceDigest": "7126a3b01086f50ffb453b8ddc7ba68909c25258f31058b256c2393d6c521162",
+  "exitCode": 0,
+  "startupMarkerObserved": true,
+  "subsequentCliReadPreservedMessage": true,
+  "limitations": [
+    "Release smoke exits before full UI; no visible GUI upgrade acceptance",
+    "Sequential desktop then CLI; no concurrent access claim",
+    "Ad-hoc test wrapper, not signed release candidate",
+    "No credentials seeded"
+  ],
+  "privateEvidenceRoot": "/private/tmp/dakia-forward-upgrade-20261021"
+}

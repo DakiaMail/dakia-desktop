@@ -1,0 +1,199 @@
+{
+  "runReport": {
+    "schemaVersion": 1,
+    "lane": "manual-mailbox-performance",
+    "status": "passed",
+    "startedAt": "2026-10-21T23:48:22.149Z",
+    "finishedAt": "2026-10-21T23:53:05.394Z",
+    "sourceTree": {
+      "algorithm": "sha256-path-and-content-manifest",
+      "digest": "fa50b916653bfc470eb69d22d34046a1867b03d022313d1a5e66eba04d44b131",
+      "fileCount": 951
+    },
+    "sourceTreeAfter": {
+      "algorithm": "sha256-path-and-content-manifest",
+      "digest": "fa50b916653bfc470eb69d22d34046a1867b03d022313d1a5e66eba04d44b131",
+      "fileCount": 951
+    },
+    "hardware": {
+      "platform": "darwin",
+      "architecture": "arm64",
+      "osRelease": "25.6.0",
+      "cpuModel": "Apple M1 Max",
+      "logicalCpuCount": 10,
+      "totalMemoryBytes": 68719476736,
+      "node": "v22.23.2"
+    },
+    "build": {
+      "rustProfile": "cargo-test-unoptimized-debuginfo",
+      "rustc": "rustc 1.89.0 (29483883e 2025-08-04)\nbinary: rustc\ncommit-hash: 29483883eed69d5fb4db01964cdf2af4d86e9cb2\ncommit-date: 2025-08-04\nhost: aarch64-apple-darwin\nrelease: 1.89.0\nLLVM version: 20.1.7",
+      "cargo": "cargo 1.89.0 (c24e10642 2025-06-23)"
+    },
+    "repeat": 3,
+    "measurements": [
+      {
+        "iteration": 1,
+        "testName": "manual_two_thousand_message_snapshot_baseline",
+        "messageCount": 2000,
+        "pageSize": 500,
+        "pageCount": 4,
+        "elapsedMilliseconds": 837
+      },
+      {
+        "iteration": 1,
+        "testName": "manual_thirty_thousand_message_snapshot_baseline",
+        "messageCount": 30000,
+        "pageSize": 500,
+        "pageCount": 60,
+        "elapsedMilliseconds": 8062
+      },
+      {
+        "iteration": 1,
+        "testName": "manual_one_hundred_thousand_message_snapshot_baseline",
+        "messageCount": 100000,
+        "pageSize": 500,
+        "pageCount": 200,
+        "elapsedMilliseconds": 27500
+      },
+      {
+        "iteration": 1,
+        "testName": "manual_two_hundred_thousand_message_snapshot_baseline",
+        "messageCount": 200000,
+        "pageSize": 500,
+        "pageCount": 400,
+        "elapsedMilliseconds": 57526
+      },
+      {
+        "iteration": 2,
+        "testName": "manual_two_thousand_message_snapshot_baseline",
+        "messageCount": 2000,
+        "pageSize": 500,
+        "pageCount": 4,
+        "elapsedMilliseconds": 617
+      },
+      {
+        "iteration": 2,
+        "testName": "manual_thirty_thousand_message_snapshot_baseline",
+        "messageCount": 30000,
+        "pageSize": 500,
+        "pageCount": 60,
+        "elapsedMilliseconds": 8297
+      },
+      {
+        "iteration": 2,
+        "testName": "manual_one_hundred_thousand_message_snapshot_baseline",
+        "messageCount": 100000,
+        "pageSize": 500,
+        "pageCount": 200,
+        "elapsedMilliseconds": 27577
+      },
+      {
+        "iteration": 2,
+        "testName": "manual_two_hundred_thousand_message_snapshot_baseline",
+        "messageCount": 200000,
+        "pageSize": 500,
+        "pageCount": 400,
+        "elapsedMilliseconds": 55904
+      },
+      {
+        "iteration": 3,
+        "testName": "manual_two_thousand_message_snapshot_baseline",
+        "messageCount": 2000,
+        "pageSize": 500,
+        "pageCount": 4,
+        "elapsedMilliseconds": 623
+      },
+      {
+        "iteration": 3,
+        "testName": "manual_thirty_thousand_message_snapshot_baseline",
+        "messageCount": 30000,
+        "pageSize": 500,
+        "pageCount": 60,
+        "elapsedMilliseconds": 8184
+      },
+      {
+        "iteration": 3,
+        "testName": "manual_one_hundred_thousand_message_snapshot_baseline",
+        "messageCount": 100000,
+        "pageSize": 500,
+        "pageCount": 200,
+        "elapsedMilliseconds": 27327
+      },
+      {
+        "iteration": 3,
+        "testName": "manual_two_hundred_thousand_message_snapshot_baseline",
+        "messageCount": 200000,
+        "pageSize": 500,
+        "pageCount": 400,
+        "elapsedMilliseconds": 55306
+      }
+    ],
+    "resourceSoak": {
+      "reconnectCycles": 200,
+      "storeOpenCycles": 100,
+      "elapsedMilliseconds": 1599,
+      "fileDescriptorsBefore": 10,
+      "fileDescriptorsAfter": 10,
+      "residentBytesBefore": 27459584,
+      "residentBytesAfter": 28835840,
+      "residentGrowthBytes": 1376256,
+      "residentGrowthLimitBytes": 67108864
+    },
+    "comparisons": [
+      {
+        "messageCount": 2000,
+        "currentMedianMilliseconds": 623,
+        "baselineMedianMilliseconds": 560,
+        "changePercent": 11.25,
+        "status": "passed"
+      },
+      {
+        "messageCount": 30000,
+        "currentMedianMilliseconds": 8184,
+        "baselineMedianMilliseconds": 7660,
+        "changePercent": 6.8407310704960835,
+        "status": "passed"
+      },
+      {
+        "messageCount": 100000,
+        "currentMedianMilliseconds": 27500,
+        "baselineMedianMilliseconds": 25662,
+        "changePercent": 7.162341204894396,
+        "status": "passed"
+      },
+      {
+        "messageCount": 200000,
+        "currentMedianMilliseconds": 55904,
+        "baselineMedianMilliseconds": 52573,
+        "changePercent": 6.335951914480817,
+        "status": "passed"
+      }
+    ],
+    "limitations": [
+      "Loopback scripted IMAP measures Dakia's production protocol and SQLite paths, not provider latency.",
+      "Elapsed time is comparable only on the same idle hardware and build profile.",
+      "This runner does not establish native WebKit responsiveness or sustained process memory."
+    ]
+  },
+  "detail": {
+    "sourceAppliedToPrimary": false,
+    "baselinePath": "/Users/arsalan/code/codex-worktrees/36f9/dakia-desktop/docs/mail-safety-results/remaining-gap-closure-performance-2026-10-21.json",
+    "baselineSha256": "6b5d4c28d6f95f3370c6fe6689a43aade155b5caf65b7796d61df837a7b85352",
+    "privateReport": "/private/tmp/dakia-staged-performance-recovery-and-selective-mime-20261022.json",
+    "reportSha256": "f7662ccacbfa4369d11a22578d765bdd0c97e8dbf9dcd8be8bca860ef1bfa7b4",
+    "privateLog": "/private/tmp/dakia-staged-performance-recovery-and-selective-mime-20261022.log",
+    "logSha256": "13e7e7670b21827fa88847b4df99e499d98f0361611b5692c1abb962608e2a93",
+    "privateObserver": "/private/tmp/dakia-staged-performance-observations-fa50-20261022.json",
+    "observerSha256": "891f0d7505700337de7f07db9e876d3f9dc9e0395c4093bc0af643b275c89d32",
+    "testExecutable": "/private/tmp/dakia-next-safety-fixes-a86-staging-20261022/target/debug/deps/dakia_core-a91e447a9eb4eadc",
+    "testExecutableSha256": "8e982d77729fbe3b1b1340c30a332b824da4f7d191efb0d99884f2170343a11b",
+    "observationCount": 29,
+    "limitations": [
+      "Current fa50 result passes; historical a86 and c56 regressions remain unchanged and their root cause is unproven.",
+      "The 560ms historical baseline is retained, not reset.",
+      "The measured timer includes fixture loading and Store setup as well as synchronization.",
+      "Intermittent process observations do not establish causation or absence of all competing load.",
+      "This loopback benchmark and short resource soak do not establish native responsiveness, provider latency, or absence of long-term leaks."
+    ]
+  }
+}

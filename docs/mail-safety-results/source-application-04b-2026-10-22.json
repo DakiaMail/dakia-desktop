@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "status": "applied-and-source-equivalent",
+  "recordedAtUtc": "2026-10-22T04:04:54.746477+00:00",
+  "before": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "a86feeae88ffe172c8697a84f1d29afa123856661ee3765ca3307562c410193c",
+    "fileCount": 940
+  },
+  "after": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "04b1368f7a758b2ad77d95442a2d5a0d3b7ce74f1f100bb59967aeef8b9ad471",
+    "fileCount": 952
+  },
+  "changedCount": 50,
+  "newCount": 12,
+  "removedCount": 0,
+  "durableBackup": "/private/tmp/dakia-source-application-04b1368.616d3124-b0bc-40b4-ac8c-e1c43c5a3902",
+  "receipt": "/private/tmp/dakia-source-application-04b1368.616d3124-b0bc-40b4-ac8c-e1c43c5a3902/journal.json",
+  "receiptSha256": "cf4a7d206cc9fa2420b5776708c32099dfe7439fc8210f8d79e3ab8cd35e4599",
+  "all62ModesVerified": true,
+  "applyHelperSha256": "f9cc3f915be8ed7b1591ac3cf253868d0a7035792a5dbcf4870f0c7ad746c3cc",
+  "sourceEvidence": "staged-logout-full-list-three-run-source-2026-10-22.json",
+  "limits": [
+    "The source runs executed in isolated staging. Exact path/content equivalence carries that source evidence to this checkout; it is not a second three-run execution.",
+    "No commit, push, release or publication was performed.",
+    "Final native acceptance is now starting, not passed."
+  ]
+}

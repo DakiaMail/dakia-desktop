@@ -1,0 +1,167 @@
+{
+  "schemaVersion": 1,
+  "receiptType": "webkit-resource-attribution-research",
+  "researchDate": "2026-10-22",
+  "scope": {
+    "purpose": "Determine whether macOS can attribute an exact WKWebView WebKit/XPC resource cohort to the approved app by responsible PID.",
+    "method": "Static inspection of the installed macOS SDK and primary Apple, XNU, and WebKit sources.",
+    "sourceSnapshotModified": false,
+    "nativeAppLaunched": false,
+    "liveProcessCollectionPerformed": false,
+    "buildPerformed": false,
+    "profileOrMailboxDataAccessed": false
+  },
+  "environment": {
+    "xcode": {
+      "version": "27.1",
+      "buildVersion": "27A9275"
+    },
+    "macosSdk": {
+      "version": "27.0",
+      "path": "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+    },
+    "ripgrep": {
+      "version": "15.2.0",
+      "revision": "e89fff89ac"
+    }
+  },
+  "conclusion": {
+    "exactSupportedCohortAttributionAvailable": false,
+    "fullWebKitResourcePass": false,
+    "allWebKitMemoryClaimed": false,
+    "summary": "No supported ordinary macOS API was found that enumerates and attributes the complete WebKit/XPC process cohort for an arbitrary WKWebView app. Known-PID resource APIs remain useful, and responsible-process metadata can strengthen attribution for a candidate PID, but it does not discover a complete cohort.",
+    "currentPolicy": "Retain unavailable when no process is positively mapped. Treat positive matches as a bounded lower bound only. A lower bound can fail an upper ceiling when it is already above that ceiling, but a lower bound below a ceiling cannot establish a pass. Never interpret unavailable as numeric zero."
+  },
+  "findings": [
+    {
+      "subject": "proc_listchildpids",
+      "classification": "sdk-declared-private-interface",
+      "finding": "Apple's implementation delegates to PROC_PPID_ONLY, so it follows physical parentage and cannot by itself find launchd-parented or otherwise out-of-tree WebKit services."
+    },
+    {
+      "subject": "proc_pidinfo and proc_pid_rusage",
+      "classification": "sdk-declared-private-interface",
+      "finding": "They can collect metadata and resources for a known PID. The SDK process structures expose PID, PPID, UID, start time, and resource fields, but no responsible PID field. The installed libproc.h labels its interfaces private and subject to change."
+    },
+    {
+      "subject": "responsibility_get_pid_responsible_for_pid",
+      "classification": "undocumented-private-spi",
+      "finding": "The symbol is exported in the installed libSystem.B.tbd and libquarantine.tbd stubs but is absent from SDK headers. It can only strengthen attribution for a PID already discovered. Its availability, permission behavior, attribution-domain breadth, and completeness are not a supported contract."
+    },
+    {
+      "subject": "proc_pidoriginatorinfo",
+      "classification": "private-self-only-interface",
+      "finding": "The originator flavors are guarded by PRIVATE. The userspace wrapper supplies getpid(), and XNU rejects an arbitrary nonzero PID other than the caller's PID. It cannot classify external WebKit candidates."
+    },
+    {
+      "subject": "process coalitions",
+      "classification": "private-and-semantically-broad",
+      "finding": "Coalition structures and list flavors are guarded by PRIVATE and absent from the installed SDK declaration surface. Coalition membership is an accounting domain and is not an exact WKWebView process ownership contract."
+    },
+    {
+      "subject": "WKWebView process identifiers",
+      "classification": "private-webkit-spi",
+      "finding": "Public WKWebView headers expose no complete PID enumeration. WebKit's private category exposes selected web, provisional web, GPU, and model process identifiers, but does not provide a supported complete-cohort contract."
+    },
+    {
+      "subject": "Endpoint Security responsible_audit_token",
+      "classification": "documented-restricted-api",
+      "finding": "Endpoint Security messages provide a responsible audit token and PID version at event time. Use requires an Apple-approved restricted entitlement and an Endpoint Security deployment model, so it is not an ordinary in-app collector replacement for this evidence run."
+    }
+  ],
+  "authorizationAndConstraints": {
+    "humanApprovalRequested": false,
+    "humanApprovalNeededForThisReceipt": false,
+    "currentGoalAuthorization": "The current goal already authorizes read-only process metadata research and local fictional native validation. No additional human approval should be requested merely to perform work already inside that scope.",
+    "allPidClarification": "The earlier prohibition on global WebKit scanning was a constraint on the shipped collector design, not a global user policy against a finite local metadata experiment.",
+    "currentTaskConstraint": "This receipt task explicitly prohibited running the experiment, launching the app, building, or editing frozen source, so none occurred.",
+    "privateSpiPolicy": "Do not create a new manual acceptance requirement around unproven private SPI. Keep the existing truthful unavailable and lower-bound semantics unless a later bounded experiment produces evidence."
+  },
+  "boundedExperimentAssessment": {
+    "status": "not-run",
+    "additionalHumanApprovalRequiredWithinCurrentGoal": false,
+    "possibleMethod": "In an isolated fictional local session, take bounded same-UID process metadata snapshots, restrict candidates to newly observed WebKit service executable identities, dynamically resolve the responsible-PID SPI, preserve PID plus start identity, require stable mapping to the approved app, and include a concurrent fictional WKWebView negative control.",
+    "interpretationIfSuccessful": "A successful experiment would establish only a macOS-version-specific bounded observed lower bound. It would not prove that all WebKit processes were enumerated, would not establish allWebKitMemoryClaimed, and would not close the complete-cohort gap.",
+    "failurePolicy": "Missing symbols, lookup errors, self or ambiguous fallbacks, PID identity changes, unstable mappings, or negative-control crossover must remain unavailable rather than zero or pass."
+  },
+  "primarySourcesChecked": [
+    {
+      "title": "Apple XNU libproc wrapper implementation",
+      "url": "https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/libproc/libproc.c",
+      "relevance": "proc_listchildpids, proc_pidinfo, proc_pidoriginatorinfo, proc_listcoalitions, and proc_pid_rusage wrappers"
+    },
+    {
+      "title": "Apple XNU process information definitions",
+      "url": "https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/proc_info.h",
+      "relevance": "Publicly visible BSD process metadata and PRIVATE originator and coalition definitions"
+    },
+    {
+      "title": "Apple XNU proc_info kernel implementation",
+      "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/kern/proc_info.c",
+      "relevance": "Physical PPID filtering, self-only originator enforcement, and resource query behavior"
+    },
+    {
+      "title": "Apple Endpoint Security responsible_audit_token documentation",
+      "url": "https://developer.apple.com/documentation/endpointsecurity/es_process_t/responsible_audit_token",
+      "relevance": "Documented event-time responsible process identity"
+    },
+    {
+      "title": "Apple Endpoint Security entitlement documentation",
+      "url": "https://developer.apple.com/documentation/BundleResources/Entitlements/com.apple.developer.endpoint-security.client",
+      "relevance": "Restricted entitlement requirement"
+    },
+    {
+      "title": "Apple Endpoint Security client documentation",
+      "url": "https://developer.apple.com/documentation/endpointsecurity/client",
+      "relevance": "Deployment, privilege, and user-approval requirements"
+    },
+    {
+      "title": "Apple WKWebView public documentation",
+      "url": "https://developer.apple.com/documentation/webkit/wkwebview/",
+      "relevance": "Public WKWebView API surface"
+    },
+    {
+      "title": "WebKit WKWebView private header",
+      "url": "https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/API/Cocoa/WKWebViewPrivate.h",
+      "relevance": "Selected private WebKit process identifier properties"
+    }
+  ],
+  "localStaticChecks": [
+    "xcrun --show-sdk-path",
+    "xcrun --show-sdk-version",
+    "xcodebuild -version",
+    "rg --version",
+    "rg -n responsibility_get_pid_responsible_for_pid|responsible_audit_token <MacOSX.sdk>/usr/include <MacOSX.sdk>/usr/lib",
+    "rg -n proc_listcoalitions|proc_pidcoalitioninfo|PROC_PIDCOALITION <MacOSX.sdk>/usr/include",
+    "rg -n processIdentifier|processID|WebContentProcess <MacOSX.sdk>/System/Library/Frameworks/WebKit.framework/Headers"
+  ],
+  "gates": [
+    {
+      "gate": "Installed SDK and symbol surface inspected",
+      "status": "passed"
+    },
+    {
+      "gate": "Primary Apple XNU implementation inspected",
+      "status": "passed"
+    },
+    {
+      "gate": "Public and private WebKit process API surfaces distinguished",
+      "status": "passed"
+    },
+    {
+      "gate": "Supported exact arbitrary-app WebKit cohort API found",
+      "status": "failed"
+    },
+    {
+      "gate": "Live approved-app WebKit cohort attributed",
+      "status": "skipped",
+      "reason": "Explicitly outside this receipt task"
+    },
+    {
+      "gate": "Architecture and runtime compatibility demonstrated",
+      "status": "waived",
+      "reason": "No binary was built or executed; this remains unresolved evidence rather than a pass"
+    }
+  ],
+  "remainingRisk": "The complete WebKit/XPC cohort is still not enumerable through a supported ordinary app API. Private responsible-process or WebKit SPI can change across macOS releases, may group a broader responsibility domain than one WKWebView, and cannot establish that no candidate was missed."
+}

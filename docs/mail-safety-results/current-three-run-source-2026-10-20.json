@@ -1,0 +1,194 @@
+{
+  "schemaVersion": 1,
+  "lane": "source",
+  "revision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "workingTree": "modified or unavailable",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "39f831b20fdf0eb9226362d1fb5e3dc5d639223b881d674f0ef2ad237ecb33f8",
+    "fileCount": 736
+  },
+  "environment": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "node": "v22.23.2"
+  },
+  "startedAt": "2026-10-20T20:39:32.851Z",
+  "finishedAt": "2026-10-20T20:42:43.279Z",
+  "status": "failed",
+  "runs": [
+    {
+      "iteration": 1,
+      "status": "failed",
+      "commands": [
+        {
+          "command": "node",
+          "args": [
+            "scripts/validate-mail-safety-catalogue.mjs"
+          ],
+          "startedAt": "2026-10-20T20:39:32.852Z",
+          "finishedAt": "2026-10-20T20:39:33.231Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/validate-mail-standards-requirements.mjs"
+          ],
+          "startedAt": "2026-10-20T20:39:33.231Z",
+          "finishedAt": "2026-10-20T20:39:33.437Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/validate-realistic-fixtures.mjs"
+          ],
+          "startedAt": "2026-10-20T20:39:33.437Z",
+          "finishedAt": "2026-10-20T20:39:33.559Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/tauri-contract-inventory.mjs"
+          ],
+          "startedAt": "2026-10-20T20:39:33.559Z",
+          "finishedAt": "2026-10-20T20:39:33.702Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "npm",
+          "args": [
+            "run",
+            "typecheck"
+          ],
+          "startedAt": "2026-10-20T20:39:33.702Z",
+          "finishedAt": "2026-10-20T20:39:37.188Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "npm",
+          "args": [
+            "run",
+            "format:check"
+          ],
+          "startedAt": "2026-10-20T20:39:37.188Z",
+          "finishedAt": "2026-10-20T20:39:38.890Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "cargo",
+          "args": [
+            "fmt",
+            "--all",
+            "--",
+            "--check"
+          ],
+          "startedAt": "2026-10-20T20:39:38.890Z",
+          "finishedAt": "2026-10-20T20:39:39.533Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "cargo",
+          "args": [
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--locked",
+            "--",
+            "-D",
+            "warnings"
+          ],
+          "startedAt": "2026-10-20T20:39:39.533Z",
+          "finishedAt": "2026-10-20T20:39:54.929Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "npm",
+          "args": [
+            "test",
+            "--",
+            "--maxWorkers=1"
+          ],
+          "startedAt": "2026-10-20T20:39:54.930Z",
+          "finishedAt": "2026-10-20T20:41:02.502Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "cargo",
+          "args": [
+            "test",
+            "--workspace",
+            "--locked"
+          ],
+          "startedAt": "2026-10-20T20:41:02.502Z",
+          "finishedAt": "2026-10-20T20:41:58.654Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/test-realtime-delivery.mjs"
+          ],
+          "startedAt": "2026-10-20T20:41:58.654Z",
+          "finishedAt": "2026-10-20T20:42:16.813Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/test-mime-reader-artifact.mjs"
+          ],
+          "startedAt": "2026-10-20T20:42:16.813Z",
+          "finishedAt": "2026-10-20T20:42:20.293Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/test-attachment-command-artifact.mjs"
+          ],
+          "startedAt": "2026-10-20T20:42:20.293Z",
+          "finishedAt": "2026-10-20T20:42:43.279Z",
+          "status": "failed",
+          "exitCode": 1,
+          "signal": null
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "Ignored credentialed/independent-server tests are separate evidence.",
+    "Native WebKit, packaged upgrades, live providers, audits, performance, and fuzzing are not established by this source run."
+  ],
+  "sourceTreeAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "39f831b20fdf0eb9226362d1fb5e3dc5d639223b881d674f0ef2ad237ecb33f8",
+    "fileCount": 736
+  }
+}

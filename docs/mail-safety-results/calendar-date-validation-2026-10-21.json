@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T14:03:52.214543+00:00",
+  "status": "passed-focused-calendar-date-fix",
+  "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "scope": "Calendar and clock validation on the shared complete/header/catalogue metadata path. Wider source and native lanes are not established by this report.",
+  "beforeFix": {
+    "command": "cargo test --locked -p dakia-core --lib uses_internal_date_when_the_message_date_is_missing_or_invalid -- --nocapture",
+    "exitCode": 101,
+    "observed": "31 Feb 2026 was normalized to 2026-03-03T12:34:56+00:00 instead of using server receipt 2026-02-09T06:16:47+00:00",
+    "log": "/private/tmp/dakia-invalid-calendar-date-before-fix-20261021.log",
+    "logSha256": "b099d5073d2e265dcf4da8902ae26e0f4a1fa69f43cd7f7a29d0fecfc9a4be6c"
+  },
+  "behavior": [
+    "Validate actual calendar dates and clock fields before any timestamp conversion.",
+    "Use only valid provider INTERNALDATE when the original Date is missing or invalid; otherwise return the existing metadata error.",
+    "Preserve explicit RFC leap seconds using chrono leap nanoseconds.",
+    "Keep valid leap days and years beyond the upstream helper arbitrary 3000 ceiling."
+  ],
+  "verification": [
+    {
+      "command": "cargo test --locked -p dakia-core --lib calendar_date_validation -- --nocapture",
+      "result": "1 passed, 0 failed; complete/header/catalogue invalid and positive controls"
+    },
+    {
+      "command": "Independent new shared-path regression plus existing valid/fallback/error tests",
+      "result": "4 passed; formatting and scoped diff check passed"
+    }
+  ],
+  "independentReview": {
+    "reviewer": "security_review",
+    "status": "approved",
+    "remainingMaterialFinding": "none in core hunk"
+  },
+  "files": [
+    {
+      "path": "crates/dakia-core/src/mail.rs",
+      "sha256": "7640981d6c40cb84acfdb42d78954b37bcbb7342c8d48e3252800c79ba05ad9d",
+      "validatedFunctionsSha256": "b7fa7af388f24aacd76e19ac38d58993dbb13f0cd1f4ff9d740cae5d8eebc7eb"
+    }
+  ],
+  "limitations": [
+    "Raw malformed timezone and oversized-year tokens must also be rejected in the vendored parser before numeric fields can be normalized. Those parallel changes have separate review and tests.",
+    "A first attempted new test compile omitted an optional DKIM argument in three calls; that implementation error was repaired before the passing runs.",
+    "No complete-source, live provider, WebKit, or packaged release claim is made."
+  ]
+}

@@ -14,6 +14,7 @@
           "filename": "update.pdf",
           "mime_type": "application/pdf",
           "size_bytes": 4096,
+          "size_kind": "decoded",
           "is_inline": false,
           "presentation": "downloadable",
           "is_potentially_unsafe": false
@@ -31,9 +32,28 @@
           "filename": "claim-documents.pdf",
           "mime_type": "application/pdf",
           "size_bytes": 3,
+          "size_kind": "decoded",
           "is_inline": false,
           "presentation": "downloadable",
           "is_potentially_unsafe": false
+        }
+      ]
+    },
+    "unsafeAttachment": {
+      "body_text": "A fictional executable attachment is included for safety testing.",
+      "body_html": null,
+      "unsubscribe_kind": null,
+      "attachments": [
+        {
+          "id": "unsafe-attachment-01",
+          "message_id": "message-unsafe-attachment",
+          "filename": "invoice.猫.command",
+          "mime_type": "application/octet-stream",
+          "size_bytes": 9,
+          "size_kind": "decoded",
+          "is_inline": false,
+          "presentation": "downloadable",
+          "is_potentially_unsafe": true
         }
       ]
     },
@@ -41,11 +61,21 @@
       "kind": "resource_limit"
     },
     "errorVariants": [
-      { "kind": "resource_limit" },
-      { "kind": "malformed" },
-      { "kind": "undecodable" },
-      { "kind": "unsupported" },
-      { "kind": "transient" }
+      {
+        "kind": "resource_limit"
+      },
+      {
+        "kind": "malformed"
+      },
+      {
+        "kind": "undecodable"
+      },
+      {
+        "kind": "unsupported"
+      },
+      {
+        "kind": "transient"
+      }
     ]
   },
   "events": {
@@ -104,40 +134,179 @@
       "state": "retrying",
       "retryAt": "2026-07-30T09:20:00Z",
       "errorKind": "connection"
-    }
+    },
+    "lateArrivalAfterAccountRemoval": [
+      {
+        "event": "account-removed",
+        "payload": {
+          "accountId": "3a2a2c45-4d19-4a53-ae1d-92671c3f43c2"
+        }
+      },
+      {
+        "event": "mail-arrived",
+        "payload": {
+          "eventId": "ee8b4d25-f8a7-4c47-9ba2-e96c583e7cd0",
+          "accountId": "3a2a2c45-4d19-4a53-ae1d-92671c3f43c2",
+          "messages": [
+            {
+              "id": "message-unsafe-attachment",
+              "account_id": "3a2a2c45-4d19-4a53-ae1d-92671c3f43c2",
+              "mailbox": "INBOX",
+              "uid": 77,
+              "mailbox_uid_validity": 424242,
+              "message_id": "<unsafe-attachment@example.test>",
+              "in_reply_to": null,
+              "reference_ids": null,
+              "thread_id": "thread-unsafe-attachment",
+              "subject": "Fictional attachment safety check",
+              "from_name": "Fixture Sender",
+              "from_address": "fixture-sender@example.test",
+              "to_addresses": "fixture-recipient@example.test",
+              "cc_addresses": "",
+              "bcc_addresses": "",
+              "reply_to_addresses": "",
+              "received_at": "2026-07-30T09:21:00Z",
+              "snippet": "A fictional executable attachment is included.",
+              "body_text": "",
+              "body_html": null,
+              "content_state": "headers_only",
+              "unsubscribe_kind": null,
+              "is_read": false,
+              "is_flagged": false,
+              "has_attachments": true,
+              "category": null,
+              "classification_confidence": null,
+              "classification_source": null,
+              "classification_signals": ""
+            }
+          ],
+          "detectedAt": "2026-07-30T09:21:03Z"
+        }
+      }
+    ]
   },
   "commands": {
     "messageContent": {
       "command": "message_content",
       "arguments": {
-        "messageId": "message-01"
+        "messageId": "message-01",
+        "expectedUidValidity": 424242
+      }
+    },
+    "messageAttachments": {
+      "command": "message_attachments",
+      "arguments": {
+        "messageId": "message-01",
+        "expectedUidValidity": 424242
       }
     },
     "hydrateMessage": {
       "command": "hydrate_message",
       "arguments": {
-        "messageId": "message-01"
+        "messageId": "message-01",
+        "expectedUidValidity": 424242
+      }
+    },
+    "saveAttachment": {
+      "command": "save_attachment",
+      "arguments": {
+        "messageId": "message-01",
+        "attachmentId": "attachment-01",
+        "expectedUidValidity": 424242
+      }
+    },
+    "saveAllAttachments": {
+      "command": "save_all_attachments",
+      "arguments": {
+        "messageId": "message-01",
+        "expectedUidValidity": 424242
+      }
+    },
+    "exportMessage": {
+      "command": "export_message",
+      "arguments": {
+        "messageId": "message-01",
+        "expectedUidValidity": 424242
+      }
+    },
+    "forwardAttachments": {
+      "command": "forward_attachments",
+      "arguments": {
+        "messageId": "message-01",
+        "expectedUidValidity": 424242
+      }
+    },
+    "unsubscribeMessage": {
+      "command": "unsubscribe_message",
+      "arguments": {
+        "messageId": "message-01",
+        "expectedUidValidity": 424242
+      }
+    },
+    "aiSummarize": {
+      "command": "ai_summarize",
+      "arguments": {
+        "input": {
+          "provider": "local",
+          "baseUrl": null,
+          "model": "fictional-local-model",
+          "apiKey": null,
+          "executable": null,
+          "modelPath": null,
+          "messageIds": ["message-01"],
+          "messageTargets": [
+            {
+              "messageId": "message-01",
+              "expectedUidValidity": 424242
+            }
+          ],
+          "instruction": null
+        }
+      }
+    },
+    "aiDraft": {
+      "command": "ai_draft",
+      "arguments": {
+        "input": {
+          "provider": "local",
+          "baseUrl": null,
+          "model": "fictional-local-model",
+          "apiKey": null,
+          "executable": null,
+          "modelPath": null,
+          "messageIds": ["message-01"],
+          "messageTargets": [
+            {
+              "messageId": "message-01",
+              "expectedUidValidity": 424242
+            }
+          ],
+          "instruction": "Write a brief, factual reply."
+        }
       }
     },
     "setMessageCategory": {
       "command": "set_message_category",
       "arguments": {
         "messageId": "message-01",
-        "category": "newsletters"
+        "category": "newsletters",
+        "expectedUidValidity": 424242
       }
     },
     "setMessageStarred": {
       "command": "set_message_starred",
       "arguments": {
         "messageId": "message-01",
-        "starred": true
+        "starred": true,
+        "expectedUidValidity": 424242
       }
     },
     "setMessageRead": {
       "command": "set_message_read",
       "arguments": {
         "messageId": "message-01",
-        "read": false
+        "read": false,
+        "expectedUidValidity": 424242
       }
     },
     "applyMailboxAction": {
@@ -146,7 +315,9 @@
         "accountId": "0f452e8d-8d11-4643-944c-0e9f8f243311",
         "mailbox": "INBOX",
         "uid": 42,
-        "action": "archive"
+        "action": "archive",
+        "messageId": "message-π-42",
+        "expectedUidValidity": 424242
       }
     },
     "syncAccount": {
@@ -156,6 +327,122 @@
         "limit": 50,
         "full": false,
         "onProgress": "__TAURI_CHANNEL__"
+      }
+    },
+    "searchRemote": {
+      "command": "search_remote",
+      "arguments": {
+        "query": {
+          "text": "remote fixture query",
+          "account_ids": ["0f452e8d-8d11-4643-944c-0e9f8f243311"],
+          "mailbox": "INBOX",
+          "from": null,
+          "unread_only": false,
+          "flagged_only": false,
+          "limit": 500
+        }
+      }
+    },
+    "listSendRecoveries": {
+      "command": "list_send_recoveries",
+      "arguments": {
+        "accountIds": ["82cf74f6-0f0b-4cb4-9e32-7afed648a3cc"],
+        "cursor": null
+      }
+    },
+    "openSendRecoveryWindow": {
+      "command": "open_send_recovery_window",
+      "arguments": {
+        "accountId": "82cf74f6-0f0b-4cb4-9e32-7afed648a3cc",
+        "attemptId": "9ad7975d-2fd4-4332-968b-18d38f43a94b"
+      }
+    },
+    "readSendRecoverySeed": {
+      "command": "read_send_recovery_seed",
+      "arguments": {
+        "recoveryKey": "b5b3bdf7-11ca-49bf-9c9a-7a90d20cc30f"
+      }
+    },
+    "acknowledgeSendRecoverySeed": {
+      "command": "acknowledge_send_recovery_seed",
+      "arguments": {
+        "recoveryKey": "b5b3bdf7-11ca-49bf-9c9a-7a90d20cc30f"
+      }
+    }
+  },
+  "remoteSearch": {
+    "success": {
+      "messages": [
+        {
+          "id": "message-01",
+          "account_id": "0f452e8d-8d11-4643-944c-0e9f8f243311",
+          "mailbox": "INBOX",
+          "uid": 42,
+          "message_id": null,
+          "in_reply_to": null,
+          "reference_ids": null,
+          "thread_id": "thread-01",
+          "subject": "Quarterly update",
+          "from_name": "Mara Example",
+          "from_address": "mara@example.test",
+          "to_addresses": "alex@example.test",
+          "cc_addresses": "",
+          "bcc_addresses": "",
+          "reply_to_addresses": "",
+          "received_at": "2026-07-30T09:15:00Z",
+          "snippet": "Quarterly update is ready.",
+          "body_text": "Quarterly update is ready.",
+          "body_html": null,
+          "content_state": "headers_only",
+          "unsubscribe_kind": null,
+          "is_read": false,
+          "is_flagged": false,
+          "has_attachments": false,
+          "category": null,
+          "classification_confidence": null,
+          "classification_source": null,
+          "classification_signals": ""
+        }
+      ],
+      "limitReached": true
+    }
+  },
+  "sendRecovery": {
+    "summaryPage": {
+      "items": [
+        {
+          "account_id": "82cf74f6-0f0b-4cb4-9e32-7afed648a3cc",
+          "attempt_id": "9ad7975d-2fd4-4332-968b-18d38f43a94b",
+          "subject": "Fictional recovery draft",
+          "status": "not_submitted",
+          "updated_at": "2026-10-22T10:00:00Z"
+        }
+      ],
+      "next_cursor": null,
+      "total_count": 1
+    },
+    "seed": {
+      "accountId": "82cf74f6-0f0b-4cb4-9e32-7afed648a3cc",
+      "attemptId": "9ad7975d-2fd4-4332-968b-18d38f43a94b",
+      "status": "not_submitted",
+      "message": {
+        "accountId": "82cf74f6-0f0b-4cb4-9e32-7afed648a3cc",
+        "to": ["recipient@example.test"],
+        "cc": [],
+        "bcc": [],
+        "subject": "Fictional recovery draft",
+        "bodyText": "Fictional saved draft body.",
+        "bodyHtml": "<p>Fictional saved draft body.</p>",
+        "inReplyTo": "<fictional-parent@example.test>",
+        "references": "<fictional-root@example.test> <fictional-parent@example.test>",
+        "attachments": [
+          {
+            "filename": "recovery-猫.txt",
+            "mimeType": "text/plain",
+            "contentBase64": "Zml4dHVyZS1ieXRlcw==",
+            "sizeBytes": 13
+          }
+        ]
       }
     }
   }

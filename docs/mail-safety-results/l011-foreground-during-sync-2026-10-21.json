@@ -1,0 +1,132 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21",
+  "kind": "foreground-reading-compose-during-sync-evidence",
+  "status": "passed-source-native-proxy-prepared-wry-pending",
+  "scope": "L011 source tests prove that cached reading stays available while synchronization holds the same account lock, same-account sending waits, another account can submit independently, and the frontend keeps cached Reader and optimistic Compose work responsive while Sync is pending. A nonce-owned fictional IMAP proxy hold is ready for final Wry acceptance without process signals.",
+  "sourceTests": [
+    {
+      "name": "cached_reader_content_completes_while_the_same_account_sync_lock_is_held",
+      "boundary": "The actual cached message-content Tauri command completes while the same account synchronization helper holds its operation lock. The helper injects only the realtime restart callback because a Wry AppHandle cannot be constructed in the source test."
+    },
+    {
+      "name": "held_sync_blocks_only_that_accounts_send_and_each_account_submits_once",
+      "boundary": "Real loopback TLS SMTP and IMAP fixture connections prove that the held account send waits, another account submits once, then the held account submits once after release. Account locks and production send dispatch are used."
+    },
+    {
+      "name": "keeps cached Reader and optimistic Compose work responsive while sync is pending",
+      "boundary": "The React application opens cached Reader content and Compose while the Sync promise remains pending, persists the draft, publishes optimistic Outbox state, and fences duplicate Send interaction until the one send promise completes."
+    }
+  ],
+  "verification": [
+    {
+      "command": "cargo test -p dakia-desktop l011_sync_interaction_tests -- --nocapture",
+      "status": "passed",
+      "testsPassed": 2
+    },
+    {
+      "command": "focused App, foregroundDuringSync, mutationStateModel, and realtimeDelivery Vitest invocation",
+      "status": "passed",
+      "testsPassed": 136,
+      "qualification": "Related frontend source suite from the frozen L011 implementation checkpoint."
+    },
+    {
+      "command": "cargo clippy -p dakia-desktop --all-targets -- -D warnings",
+      "status": "passed"
+    },
+    {
+      "command": "npm run typecheck --workspace apps/desktop",
+      "status": "passed"
+    },
+    {
+      "command": "cargo fmt --all -- --check and Prettier checks for the owned files",
+      "status": "passed"
+    },
+    {
+      "command": "node --test scripts/native-fictional-imap-proxy.node-test.mjs",
+      "status": "passed",
+      "testsPassed": 9,
+      "qualification": "Final governed proxy source. The tests use loopback-only ephemeral sockets."
+    }
+  ],
+  "sensitivity": [
+    {
+      "mutation": "Use the wrong account lock inside the incremental synchronization helper.",
+      "status": "failed-as-expected",
+      "observed": "The queued same-account send ordering assertion failed. The exact lib.rs hash was restored before final verification."
+    },
+    {
+      "mutation": "Suppress Compose opening while Sync reports an active state.",
+      "status": "failed-as-expected",
+      "observed": "The frontend regression could not open Compose during pending synchronization. The exact App source hash was restored before final verification."
+    },
+    {
+      "mutation": "Delete the existing-connection socket pauses from the fictional IMAP hold implementation.",
+      "status": "failed-as-expected",
+      "observed": "The bidirectional hold regression received data during the hold and failed with expected false, received true.",
+      "privateMutant": "/private/tmp/dakia-l011-native-guard-2026-10-21/sensitivity-broken-proxy.mjs"
+    }
+  ],
+  "nativeProxyPreparation": {
+    "status": "passed-source-preparation-native-execution-pending",
+    "control": "The existing owner-root and 192-bit nonce control channel accepts action hold with an integer duration from 100 through 35000 milliseconds. The generated UUID, exact duration, held state, and parseable future deadline are acknowledged before use.",
+    "behavior": "Existing socket pairs pause both readable directions. New pairs are accepted but not piped until release. This keeps application buffering bounded by Node stream and operating-system socket backpressure. Automatic and explicit release use the same path. Repeated holds replace the timer. Disconnect and close clear the timer and destroy only proxy-owned sockets.",
+    "command": "node scripts/native-fictional-imap-proxy.mjs --control-root FICTIONAL_RUN_ROOT --action hold --duration-ms 35000",
+    "resumeCommand": "node scripts/native-fictional-imap-proxy.mjs --control-root FICTIONAL_RUN_ROOT --action resume",
+    "runtimeGuard": "Before clicking Sync, parse the returned holdDeadlineAt and require enough time to complete the bounded UI observations. Engage and acknowledge hold before Sync because bytes delivered before acknowledgement cannot be retracted.",
+    "signals": "Production proxy control performs no PID signal, process spawn, or external command execution. A private SIGSTOP design was independently rejected for PID-reuse and watchdog races and must not be used."
+  },
+  "pendingNativeProcedure": [
+    "Verify the exact fictional app executable, live Wry webview URL, profile, proxy root, and harness identity through the existing native fixture evidence.",
+    "Inject and verify G013 UID 5 before any compose send so the UIDNEXT guard remains intact.",
+    "Open and record one already cached message, then acknowledge a 35 second proxy hold before clicking visible Sync once.",
+    "While the hold remains active, reopen the cached Reader, open Compose, enter one uniquely identified fictional message, click Send exactly once, and verify optimistic Outbox state without a duplicate submission.",
+    "Resume before the deadline, verify Sync and realtime restart complete, then assert the single fictional send completes once and Outbox clears.",
+    "Preserve returned proxy states, deadline, visible Wry observations, final mailbox count, and application logs as native evidence."
+  ],
+  "independentReview": {
+    "reviewer": "/root/remaining_realtime/l011_final_review",
+    "status": "approved",
+    "findingsFixed": [
+      "The signal-based private guard was rejected and replaced with authenticated in-process proxy control.",
+      "A hold command while disconnected now records a command-scoped error without terminating the proxy.",
+      "Hold acknowledgement now binds the strict UUID, requested duration, and a parseable future deadline."
+    ],
+    "finalResult": "GO for the scoped cached Reader, Compose, and bounded shared-proxy native exercise."
+  },
+  "files": [
+    {
+      "path": "apps/desktop/src-tauri/src/lib.rs",
+      "sha256": "8acbc2887a088bb2f33caaf10baf3ae621148742898eba7c851620b207a3f05b"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/account_locks.rs",
+      "sha256": "dfc2ca75638fab8d5b4122e685c8c4e0bb5eb45795742e61c8b4ef7261637e9c"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/l011_sync_interaction_tests.rs",
+      "sha256": "7993d8a0378190af394cdde960d28c3cb19c37e36e72b2a16cd163550039d795"
+    },
+    {
+      "path": "apps/desktop/src/foregroundDuringSync.integration.test.tsx",
+      "sha256": "5c0fb99aa4845833fa9116f2756c56b5269abed1d8d45a31ea55c7cd7b107a57"
+    },
+    {
+      "path": "scripts/native-fictional-imap-proxy.mjs",
+      "sha256": "150a549459486c9ddace45f0cec034200273635eaff85d88389fb6f0e500264a"
+    },
+    {
+      "path": "scripts/native-fictional-imap-proxy.node-test.mjs",
+      "sha256": "48d41090fedfcddbe41c3529f2f7e0c8c4719a9961794b895a9dcd27f0b8779f"
+    }
+  ],
+  "limitations": [
+    "The final actual Wry held-Sync run is pending. Source and proxy preparation are not native acceptance.",
+    "The Reader source and planned native checks cover cached content only. Uncached body retrieval during held IMAP remains untested.",
+    "The native proxy is shared by both fictional accounts, so this run cannot prove account B progresses while account A is held. The deterministic source test covers cross-account lock isolation.",
+    "A send may wait for the same account operation lock. The native claim is optimistic Compose and Outbox responsiveness during hold, followed by exactly one completed send after release.",
+    "This bounded interaction is not a frame-latency or performance benchmark.",
+    "Physical sleep and wake remain an explicit user-declined waiver, not a pass.",
+    "The coordinated three-run full source baseline remains a separate pending gate."
+  ]
+}

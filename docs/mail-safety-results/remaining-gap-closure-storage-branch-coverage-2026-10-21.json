@@ -1,0 +1,253 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-21T14:32:10Z",
+  "lane": "remaining-gap-closure-focused-rust-storage-branch-coverage",
+  "status": "passed",
+  "sourceRunContext": {
+    "initialParentReportedDigest": "2742cade8090db0a5e1d861b8139bdbde045ed11ba40d5606f1d86a1f9a77bd0",
+    "initialParentReportedFileCount": 929,
+    "initialGlobalDigestInvalidated": true,
+    "invalidationRecord": "docs/mail-safety-results/remaining-gap-closure-source-invalidated-2026-10-21.json",
+    "revisedParentReportedDigest": "e9d99598cfa7d3adf3cba2fee4487a8fb61151f9bfd29950dd3bc50950dd74c4",
+    "revisedParentReportedFileCount": 929,
+    "globalDigestUnchangedClaimed": false,
+    "note": "The coordinating source lane stopped its first full-source attempt after a standards inventory script changed. That script was outside this coverage lane's measured Rust and vendored inputs. The byte-identical before-and-after input manifests below are the authoritative identity for these three coverage executions. This record does not count the invalidated full-source attempt or claim that the whole repository stayed unchanged."
+  },
+  "scope": {
+    "description": "Three named dakia-core storage test modules independently observed branches in crates/dakia-core/src/storage.rs using fresh, separate coverage executions.",
+    "notProductWide": true,
+    "cohortsAreNotAggregated": true,
+    "nativeProviderAndPerformanceExcluded": true,
+    "priorRecord": "docs/mail-safety-results/publication-detail-storage-branch-coverage-2026-10-21.json",
+    "priorRecordChanged": false
+  },
+  "toolEnvironment": {
+    "cargoLlvmCov": "cargo-llvm-cov 0.9.1",
+    "cargoNightly": "cargo 1.101.0-nightly (3960fa69b 2026-10-12)",
+    "rustcNightly": "rustc 1.101.0-nightly (5d8fec066 2026-10-16)",
+    "branchMode": "cargo llvm-cov --branch",
+    "orchestrator": {
+      "path": "/private/tmp/dakia-remaining-gap-storage-coverage-prepare.sh",
+      "sha256": "e570e24904ef99067f3d998dd8a48e60dbb86a56aa2e81ef0f11fbee615a3d2c"
+    },
+    "summaryHelper": {
+      "path": "/private/tmp/dakia-remaining-gap-storage-coverage-summary.mjs",
+      "sha256": "61d7ad270c6979e2ee3af931f72c4f5ee5890e4a89bafda201a02e69229ef4d4"
+    }
+  },
+  "cleanRefreshMethod": {
+    "description": "Before the first cohort, cargo clean targeted only dakia-core, mail-parser, and lettre in the private coverage target. It found no stale owned objects to remove. Each cohort then ran cargo-llvm-cov with its normal default cleanup behavior; no command used --no-clean.",
+    "sharedPrivateTarget": "/private/tmp/dakia-mail-safety-branch-coverage-2026-10-21/target",
+    "dependencyCache": "Retained where compatible. Registry dependencies were not broadly cleaned.",
+    "initialCleanupCommand": "PATH=/private/tmp/dakia-mail-safety-tools/bin:$PATH CARGO_TARGET_DIR=/private/tmp/dakia-mail-safety-branch-coverage-2026-10-21/target cargo +nightly clean --locked -p dakia-core -p mail-parser -p lettre",
+    "initialCleanupLog": {
+      "path": "/private/tmp/dakia-mail-safety-remaining-gap-storage-coverage-2026-10-21/initial-owned-package-clean.log",
+      "sha256": "0bdaeb2aa6a92a0fdfec2d2cc4d0ab71946de5d0654e08c526e4629130ae0f28",
+      "result": "Removed 0 files"
+    },
+    "postRunObjectEvidence": "Every cohort retained exactly one dakia-core build directory and 263 executable/object paths at report capture."
+  },
+  "inputManifest": {
+    "description": "The manifest covers root Cargo resolution, all dakia-core Rust source inputs, and every regular file in the local mail-parser and lettre vendor trees except target artifacts.",
+    "beforePath": "/private/tmp/dakia-mail-safety-remaining-gap-storage-coverage-2026-10-21/input-before.sha256",
+    "afterPath": "/private/tmp/dakia-mail-safety-remaining-gap-storage-coverage-2026-10-21/input-after.sha256",
+    "beforeSha256": "9fde6361fe8b0751ead8a5ad8401d96ac2a6570956ae8492444f1c86b36152dc",
+    "afterSha256": "9fde6361fe8b0751ead8a5ad8401d96ac2a6570956ae8492444f1c86b36152dc",
+    "fileCount": 538,
+    "unchanged": true,
+    "keyFiles": [
+      {
+        "path": "Cargo.toml",
+        "sha256": "a101a1b7d6ef9e1015f15d93fc722a927f38a60cf5fe85c0fc494d41d95561eb"
+      },
+      {
+        "path": "Cargo.lock",
+        "sha256": "78e7136d6ff7a477e2317feb99a976a75376b1283a331babaca26b83c27f58b2"
+      },
+      {
+        "path": "crates/dakia-core/Cargo.toml",
+        "sha256": "f69475dc8dd0741daa758a623a886d37431b7969ae6e87cc23e268ab136f0d13"
+      },
+      {
+        "path": "crates/dakia-core/src/lib.rs",
+        "sha256": "9d3b5ef30bbfcc373f11e03a9c3a3191100ac44aca04eaf6e3223943bec9807d"
+      },
+      {
+        "path": "crates/dakia-core/src/storage.rs",
+        "sha256": "6276106a9432cc6a927d92736e0e9ae66fec1451014f8cd669bb4f85834b23e2"
+      },
+      {
+        "path": "crates/dakia-core/src/storage_fault_tests.rs",
+        "sha256": "72b485b60c1924e5cf8334e742ac7518c2da885f33e17146cc9beb4feead9885"
+      },
+      {
+        "path": "crates/dakia-core/src/storage_open_lock_tests.rs",
+        "sha256": "faa222dcba187e78d3fb2987e51e8ef72c3974300797377991d02de3ae175e97"
+      },
+      {
+        "path": "crates/dakia-core/src/storage_realtime_publication_tests.rs",
+        "sha256": "0096a36780dd24b39a1d9ecd59551dc12014ddd031858fe9b73bca670da8bd78"
+      },
+      {
+        "path": "vendor/mail-parser/Cargo.toml",
+        "sha256": "d220b9e12b9b1cac2298ace5e5a4205a5d9928c687ff1bcb4668da4dfab0f57b"
+      },
+      {
+        "path": "vendor/mail-parser/src/lib.rs",
+        "sha256": "f11893d9fd6fcc04bb8b67e21bc1746ad538d6534e994e60cf145fc08f0ba415"
+      },
+      {
+        "path": "vendor/lettre/Cargo.toml",
+        "sha256": "b28c8327c3dc4a8b38eea9a3ad8a1e09972dbd18c059b3d4867284011317d7b4"
+      },
+      {
+        "path": "vendor/lettre/src/transport/smtp/client/async_connection.rs",
+        "sha256": "6f759ad5d6bd778574f1a02978d4ae1bc25e786edcfa5dc4955274d6022f3727"
+      }
+    ]
+  },
+  "combinedTestExecution": {
+    "passed": 40,
+    "failed": 0,
+    "ignored": 0,
+    "note": "This count sums three independent executions. Branch observations remain separate and are not combined into a workspace or product coverage percentage."
+  },
+  "cohorts": [
+    {
+      "id": "storage_open_lock",
+      "command": "PATH=/private/tmp/dakia-mail-safety-tools/bin:$PATH CARGO_TARGET_DIR=/private/tmp/dakia-mail-safety-branch-coverage-2026-10-21/target cargo +nightly llvm-cov --branch --locked --package dakia-core --lib --json --output-path /private/tmp/dakia-mail-safety-remaining-gap-storage-coverage-2026-10-21/storage-open-lock.json -- storage::storage_open_lock_tests",
+      "exitCode": 0,
+      "testResult": {
+        "passed": 9,
+        "failed": 0,
+        "ignored": 0,
+        "filteredOut": 721,
+        "durationSeconds": 0.21
+      },
+      "rawLog": {
+        "path": "/private/tmp/dakia-mail-safety-remaining-gap-storage-coverage-2026-10-21/storage-open-lock.raw.log",
+        "sha256": "f9881dea78c13fe1147d67244435a5b301d320dec46de2a17e5b25f48364175c",
+        "bytes": 1986
+      },
+      "coverageJson": {
+        "path": "/private/tmp/dakia-mail-safety-remaining-gap-storage-coverage-2026-10-21/storage-open-lock.json",
+        "sha256": "56ad2e6822873f7a1085cc5bfda742284595f8261709a2c916d7599bd72949e7",
+        "bytes": 5741117
+      },
+      "objectSelectionEvidence": {
+        "buildDirectoryListPath": "/private/tmp/dakia-mail-safety-remaining-gap-storage-coverage-2026-10-21/storage-open-lock-build-directories.txt",
+        "buildDirectoryListSha256": "aea72eb1a337f40df3c8c845084c4b18986f52b4b2d6a3228989bd27c77fbb7c",
+        "buildDirectoryCount": 1,
+        "onlyBuildDirectory": "fbc6031c0b385460",
+        "objectListPath": "/private/tmp/dakia-mail-safety-remaining-gap-storage-coverage-2026-10-21/storage-open-lock-object-list.txt",
+        "objectListSha256": "5abed968a8fa583056922cc0faf1a9c1d3994eb033b8eb73a820f754af77cd4d",
+        "objectPathCount": 263,
+        "reportMapPath": "/private/tmp/dakia-mail-safety-remaining-gap-storage-coverage-2026-10-21/storage-open-lock-report-map.json",
+        "reportMapSha256": "6d3ea1104cda29a0666a4db46e56a82c1a966a5a1c3522d310d42c0611cc5eb4",
+        "matchingStorageFileCount": 1
+      },
+      "productionSourceBranchObservation": {
+        "path": "crates/dakia-core/src/storage.rs",
+        "found": 728,
+        "covered": 89,
+        "notCovered": 639,
+        "percent": 12.225274725274724
+      }
+    },
+    {
+      "id": "storage_fault_recovery",
+      "command": "PATH=/private/tmp/dakia-mail-safety-tools/bin:$PATH CARGO_TARGET_DIR=/private/tmp/dakia-mail-safety-branch-coverage-2026-10-21/target cargo +nightly llvm-cov --branch --locked --package dakia-core --lib --json --output-path /private/tmp/dakia-mail-safety-remaining-gap-storage-coverage-2026-10-21/storage-fault-recovery.json -- storage::storage_fault_tests",
+      "exitCode": 0,
+      "testResult": {
+        "passed": 22,
+        "failed": 0,
+        "ignored": 0,
+        "filteredOut": 708,
+        "durationSeconds": 0.59
+      },
+      "rawLog": {
+        "path": "/private/tmp/dakia-mail-safety-remaining-gap-storage-coverage-2026-10-21/storage-fault-recovery.raw.log",
+        "sha256": "59ad04eec7404f5fa4b575f2af6d9e27877e6abc07656c8ae5a5dd8700314321",
+        "bytes": 3252
+      },
+      "coverageJson": {
+        "path": "/private/tmp/dakia-mail-safety-remaining-gap-storage-coverage-2026-10-21/storage-fault-recovery.json",
+        "sha256": "dcff379dffb7cc1840342abd94dc5042af5938b4bcf2c6e186ca87107b9acc1b",
+        "bytes": 5743033
+      },
+      "objectSelectionEvidence": {
+        "buildDirectoryListPath": "/private/tmp/dakia-mail-safety-remaining-gap-storage-coverage-2026-10-21/storage-fault-recovery-build-directories.txt",
+        "buildDirectoryListSha256": "aea72eb1a337f40df3c8c845084c4b18986f52b4b2d6a3228989bd27c77fbb7c",
+        "buildDirectoryCount": 1,
+        "onlyBuildDirectory": "fbc6031c0b385460",
+        "objectListPath": "/private/tmp/dakia-mail-safety-remaining-gap-storage-coverage-2026-10-21/storage-fault-recovery-object-list.txt",
+        "objectListSha256": "061d5775b4fc2c2883afc6d86399771b13f68964245144b7824b72f49a6187c9",
+        "objectPathCount": 263,
+        "reportMapPath": "/private/tmp/dakia-mail-safety-remaining-gap-storage-coverage-2026-10-21/storage-fault-recovery-report-map.json",
+        "reportMapSha256": "1a746e02b4916a482ce0cf003acc6e52884ee101548172ea0776d3b8e1ae37dc",
+        "matchingStorageFileCount": 1
+      },
+      "productionSourceBranchObservation": {
+        "path": "crates/dakia-core/src/storage.rs",
+        "found": 728,
+        "covered": 124,
+        "notCovered": 604,
+        "percent": 17.032967032967033
+      }
+    },
+    {
+      "id": "storage_realtime_publication",
+      "command": "PATH=/private/tmp/dakia-mail-safety-tools/bin:$PATH CARGO_TARGET_DIR=/private/tmp/dakia-mail-safety-branch-coverage-2026-10-21/target cargo +nightly llvm-cov --branch --locked --package dakia-core --lib --json --output-path /private/tmp/dakia-mail-safety-remaining-gap-storage-coverage-2026-10-21/storage-realtime-publication.json -- storage::storage_realtime_publication_tests",
+      "exitCode": 0,
+      "testResult": {
+        "passed": 9,
+        "failed": 0,
+        "ignored": 0,
+        "filteredOut": 721,
+        "durationSeconds": 0.26
+      },
+      "rawLog": {
+        "path": "/private/tmp/dakia-mail-safety-remaining-gap-storage-coverage-2026-10-21/storage-realtime-publication.raw.log",
+        "sha256": "06688f1b213c1c2b80e0e9a973663af1fd8039a6d7aa3c364ebd5101607ccbda",
+        "bytes": 1892
+      },
+      "coverageJson": {
+        "path": "/private/tmp/dakia-mail-safety-remaining-gap-storage-coverage-2026-10-21/storage-realtime-publication.json",
+        "sha256": "ba733996ba426047b0d5d34c51bcd6c338ba29a4026e4b771200098bc4a968b5",
+        "bytes": 5741719
+      },
+      "objectSelectionEvidence": {
+        "buildDirectoryListPath": "/private/tmp/dakia-mail-safety-remaining-gap-storage-coverage-2026-10-21/storage-realtime-publication-build-directories.txt",
+        "buildDirectoryListSha256": "aea72eb1a337f40df3c8c845084c4b18986f52b4b2d6a3228989bd27c77fbb7c",
+        "buildDirectoryCount": 1,
+        "onlyBuildDirectory": "fbc6031c0b385460",
+        "objectListPath": "/private/tmp/dakia-mail-safety-remaining-gap-storage-coverage-2026-10-21/storage-realtime-publication-object-list.txt",
+        "objectListSha256": "26c6cc2ad4e318a6a8554ba34096ecfa0d73e879cbf58ce515e294e3fcd227f8",
+        "objectPathCount": 263,
+        "reportMapPath": "/private/tmp/dakia-mail-safety-remaining-gap-storage-coverage-2026-10-21/storage-realtime-publication-report-map.json",
+        "reportMapSha256": "344980639b36b391374e26d4aca2f1e59ad874164871f05b496109c1b381634f",
+        "matchingStorageFileCount": 1
+      },
+      "productionSourceBranchObservation": {
+        "path": "crates/dakia-core/src/storage.rs",
+        "found": 728,
+        "covered": 130,
+        "notCovered": 598,
+        "percent": 17.857142857142858
+      }
+    }
+  ],
+  "artifactIndex": {
+    "path": "/private/tmp/dakia-mail-safety-remaining-gap-storage-coverage-2026-10-21/artifact-hashes.sha256",
+    "sha256": "5a406c162a3734b3fadafbfb358b2f6885410f5c76f0fdb1ab003e45e88047de"
+  },
+  "limitations": [
+    "These are focused module observations for one production source file, not whole-workspace or whole-product coverage.",
+    "The three coverage JSON reports came from separate normal-clean executions and are intentionally not merged or summed.",
+    "The global source digest changed during the run because of a standards inventory script outside the measured coverage inputs. This report relies on the byte-identical 538-file coverage manifest and explicitly does not claim global source identity.",
+    "The revised parent-reported global digest is context supplied by the coordinating source lane; it is not a replacement for this record's measured before-and-after manifest.",
+    "The branch mode is an unstable cargo-llvm-cov capability. Percentages are observations, not a coverage threshold or release gate.",
+    "Raw logs, object lists, and complete coverage JSON remain private temporary artifacts. This durable record retains their paths, sizes, and hashes.",
+    "No native app, provider account, packaged artifact, performance workload, or release path was exercised."
+  ]
+}

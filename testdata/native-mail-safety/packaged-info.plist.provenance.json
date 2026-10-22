@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-10-21",
+  "source": "Dakia fictional packaged native acceptance wrapper Info.plist",
+  "sourceSha256BeforeRedaction": "483e24a061da9136352f6c0e167e86a19fdaaf0841411506fefe846f3fcb35de",
+  "redactions": [
+    {
+      "field": "CFBundleIdentifier",
+      "replacement": "dev.dakia.fictional-provider-reader.run-REDACTED",
+      "reason": "Remove the machine-specific native fixture run suffix while preserving the exact plist structure."
+    }
+  ],
+  "preserved": [
+    "XML declaration",
+    "DOCTYPE",
+    "whitespace",
+    "key order",
+    "sibling values"
+  ],
+  "expected": {
+    "CFBundleIdentifier": "dev.dakia.fictional-provider-reader.run-REDACTED",
+    "CFBundleName": "Dakia Fictional Provider Reader"
+  },
+  "fixtureSha256": "cd9d1f83516904f288db94d99271f014023c9ce5625a4059ff5dcf83e7900746",
+  "privateMailCopied": false
+}

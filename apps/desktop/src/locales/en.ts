@@ -12,8 +12,10 @@ export const en = {
       starredCount_one: "{{count}} starred conversation",
       starredCount_other: "{{count}} starred conversations",
       outbox: "Outbox",
-      outboxCount_one: "{{count}} email sending",
-      outboxCount_other: "{{count}} emails sending",
+      outboxSendingCount_one: "{{count}} email sending",
+      outboxSendingCount_other: "{{count}} emails sending",
+      outboxRecoveryCount_one: "{{count}} email needs attention",
+      outboxRecoveryCount_other: "{{count}} emails need attention",
       sent: "Sent",
       drafts: "Drafts",
       archive: "Archive",
@@ -68,8 +70,13 @@ export const en = {
       placeholder: "Search every account…",
       emptyTitle: "No matching mail",
       emptyBody: "Try fewer words or search a different mailbox.",
+      localEmptyTitle: "No matches in synced mail",
+      localEmptyBody:
+        "Dakia could not check the mail server. Reconnect before treating this as a complete result.",
       hint: "Press / to search",
       localOnly: "Offline results are limited to synced metadata and snippets.",
+      serverLimit:
+        "Server search reached its limit. Narrow your search for more results.",
     },
     inbox: {
       title: "Inbox",
@@ -127,6 +134,7 @@ export const en = {
       hideRecipientDetails: "Hide full recipient details",
       showHistory: "Show history",
       hideHistory: "Hide history",
+      loadRemoteContent: "Load remote content",
       messageFrom: "Message from {{sender}}",
       expandMessage: "Expand message from {{sender}}",
       collapseMessage: "Collapse message from {{sender}}",
@@ -188,11 +196,14 @@ export const en = {
       downloadHint: "Saves directly to Downloads",
       saved_one: "Saved 1 attachment to Downloads",
       saved_other: "Saved {{count}} attachments to Downloads",
+      savePartial:
+        "Saved {{saved}} of {{total}} attachments. Could not save the remaining attachments.",
       saveError: "Could not save the attachment to Downloads",
       loadError:
         "Could not load the original attachments. You can still edit and send this message.",
       unsafe:
         "This file may run software. Only open it if you trust the sender.",
+      sizeUnavailable: "Size unavailable",
     },
     account: {
       title: "Connect an account",
@@ -262,11 +273,45 @@ export const en = {
       attachmentLimit:
         "Attachments are limited to 50 files, 25 MB each, and 50 MB per message.",
       attachmentReadError: "Could not read one of the selected files.",
+      invalidHeaderFields:
+        "Some address or subject fields contain line breaks. Remove them before sending.",
       loading: "Preparing a new message…",
       sending: "Sending…",
       sent: "Message sent",
       sendError: "Could not send message",
+      deliveryUncertain: "Delivery status unknown",
+      sentCopyFailed: "Message sent, but saving it to Sent failed",
+      deliveryUncertainDetail:
+        "Dakia did not receive confirmation from the mail server. Check Sent before sending again.",
+      sentCopyFailedDetail:
+        "The mail server accepted this message, but Dakia could not save a copy in Sent. Do not send it again.",
+      aiContextUnavailableTitle: "Could not prepare AI draft",
+      aiContextUnavailable:
+        "Dakia needs the current version of this email before it can share it with AI.",
+      draftSaveError:
+        "Dakia could not save this draft. Keep this window open while you check storage.",
+      deliveredDraftClearError:
+        "Dakia could not remove this delivered draft. Keep this window open.",
       noAccount: "Connect an account before composing.",
+    },
+    sendRecovery: {
+      title: "Needs attention",
+      notSubmitted: "Not sent. You can review and try again.",
+      pending:
+        "Delivery is uncertain. Review the message before taking further action.",
+      deliveryUncertain:
+        "Delivery is uncertain. Review the message before taking further action.",
+      sentCopyFailed:
+        "Sent, but the Sent copy couldn’t be saved. Do not send it again.",
+      open: "Review message",
+      loading: "Loading saved messages…",
+      loadError: "Saved messages couldn’t be loaded. Try again.",
+      retry: "Try again",
+      loadMore: "Load more",
+      noSubject: "(No subject)",
+      openErrorTitle: "Could not recover this message",
+      openError:
+        "The saved message is still available. Close this window and try again.",
     },
     feedback: {
       archiveSuccess_one: "Conversation archived",

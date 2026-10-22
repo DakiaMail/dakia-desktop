@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "lane": "full-rust-workspace-triage",
+  "recordedAt": "2026-10-21T07:07:31.286676+00:00",
+  "revision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "status": "failed",
+  "exitCode": 101,
+  "logPath": "/private/tmp/dakia-expanded-final-workspace-triage-2026-10-21.log",
+  "logSha256": "8c21a10c180fbe023ca2cd2c84f4e79b81e8db23e25a33282fc629b714f8d068",
+  "completedSuites": [
+    {
+      "name": "cli library",
+      "passed": 15,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "provider probe",
+      "passed": 11,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "CLI subprocess",
+      "passed": 14,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "core library",
+      "passed": 636,
+      "failed": 5,
+      "ignored": 11
+    }
+  ],
+  "failures": [
+    "mail::tests::imap_gap_matrix_tests::ms_b_014_idle_change_finishes_done_and_missing_idle_uses_poll_mode",
+    "mail::tests::sender_cleanup_counts_a_failed_move_and_continues_with_later_matches",
+    "mail::tests::sender_cleanup_skips_a_flagless_catalogued_sent_folder_but_discovers_custom_mail",
+    "mail::tests::sender_cleanup_verifies_from_after_server_filter_and_moves_only_after_discovery",
+    "storage::tests::looks_up_all_catalogue_states_by_provider_mailbox_case_insensitively"
+  ],
+  "limitations": [
+    "Workspace stopped after core failure; desktop and doc suites did not run.",
+    "Source fingerprint was not bracketed around this separate triage command; this is failure evidence, not an accepted source baseline.",
+    "Test-only fixture corrections are under review; no failure is counted as a pass."
+  ]
+}

@@ -1,6 +1,7 @@
 import { MantineProvider } from "@mantine/core";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import { format, isThisYear, isToday } from "date-fns";
 import "../i18n";
 import type { PendingMailActions } from "../mailActions";
 import type { MailSummary, SmartSection } from "../types";
@@ -102,6 +103,37 @@ function renderList(
 }
 
 describe("MailList action feedback", () => {
+  it("renders a valid RFC 3339 leap second without crashing the list", () => {
+    const receivedAt = "2016-12-31T23:59:60+00:00";
+    const displayDate = new Date("2016-12-31T23:59:59.999+00:00");
+    const expected = isToday(displayDate)
+      ? format(displayDate, "HH:mm")
+      : isThisYear(displayDate)
+        ? format(displayDate, "MMM d")
+        : format(displayDate, "MMM d, yy");
+
+    expect(() =>
+      renderList({}, false, "Inbox", {
+        messages: [{ ...messages[0], received_at: receivedAt }],
+      }),
+    ).not.toThrow();
+
+    expect(screen.getByText(expected)).toBeVisible();
+    expect(receivedAt).toBe("2016-12-31T23:59:60+00:00");
+  });
+
+  it("renders a useful fallback for malformed timestamps", () => {
+    expect(() =>
+      renderList({}, false, "Inbox", {
+        messages: [
+          { ...messages[0], received_at: "2016-02-30T23:59:60+00:00" },
+        ],
+      }),
+    ).not.toThrow();
+
+    expect(screen.getByText("Unknown date")).toBeVisible();
+  });
+
   it("keeps single-click selection and opens a dedicated reader on double-click", () => {
     const onOpen = vi.fn();
     const onDoubleOpen = vi.fn();
@@ -149,6 +181,85 @@ describe("MailList action feedback", () => {
     expect(row).toHaveAttribute("data-action-phase", "exiting");
     expect(row).toBeDisabled();
     expect(screen.getByLabelText("Archive")).toBeDisabled();
+  });
+
+  it("does not apply an ordinary Smart exit marker to Seen or Starred", () => {
+    const thread = groupMessages([{ ...messages[0], is_read: true }])[0];
+    const smartSections: SmartSection[] = [
+      {
+        id: "other",
+        threads: [thread],
+        nextCursor: null,
+        loadingMore: false,
+      },
+      {
+        id: "starred",
+        threads: [thread],
+        nextCursor: null,
+        loadingMore: false,
+      },
+      {
+        id: "seen",
+        threads: [thread],
+        nextCursor: null,
+        loadingMore: false,
+      },
+    ];
+    render(
+      <MantineProvider>
+        <MailList
+          threads={[]}
+          selected={new Set()}
+          query=""
+          loading={false}
+          loadingMore={false}
+          hasMore={false}
+          remoteSearchUnavailable={false}
+          classifying={false}
+          aiConnected={false}
+          mailboxTitle="Inbox"
+          view="smart"
+          smartInbox
+          smartSections={smartSections}
+          exitingThreadIds={new Set([thread.id])}
+          onViewChange={vi.fn()}
+          onCategorize={vi.fn()}
+          onToggleStar={vi.fn()}
+          onReplyThread={vi.fn()}
+          onForwardThread={vi.fn()}
+          onActionThread={vi.fn()}
+          onToggleReadThread={vi.fn()}
+          onToggleStarThread={vi.fn()}
+          onQuery={vi.fn()}
+          onOpen={vi.fn()}
+          onDoubleOpen={vi.fn()}
+          onSelect={vi.fn()}
+          onSync={vi.fn()}
+          onCompose={vi.fn()}
+          onArchive={vi.fn()}
+          onSpam={vi.fn()}
+          onSummarize={vi.fn()}
+          onLoadMore={vi.fn()}
+          pendingActions={{}}
+          actionsDisabled={false}
+          searchRef={{ current: null }}
+        />
+      </MantineProvider>,
+    );
+
+    const otherRow = within(screen.getByRole("region", { name: "Other" }))
+      .getByText("Subject 1")
+      .closest("button");
+    const starredRow = within(screen.getByRole("region", { name: "Starred" }))
+      .getByText("Subject 1")
+      .closest("button");
+    const seenRow = within(screen.getByRole("region", { name: "Seen" }))
+      .getByText("Subject 1")
+      .closest("button");
+
+    expect(otherRow).toHaveAttribute("data-smart-exiting", "true");
+    expect(starredRow).toHaveAttribute("data-smart-exiting", "false");
+    expect(seenRow).toHaveAttribute("data-smart-exiting", "false");
   });
 
   it("keeps global paging active outside an active Smart inbox", () => {

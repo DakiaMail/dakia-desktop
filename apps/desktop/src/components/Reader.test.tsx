@@ -9,6 +9,7 @@ import {
 } from "@testing-library/react";
 import { MantineProvider } from "@mantine/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { format } from "date-fns";
 import "../i18n";
 import { api, MessageContentError } from "../api";
 import freshdeskReplySection from "../test/fixtures/freshdesk-reply-section.html?raw";
@@ -75,6 +76,44 @@ const props = {
   onToggleStar: vi.fn(),
 };
 
+function emailRendererFrame(host: HTMLElement | null | undefined) {
+  return host?.shadowRoot?.querySelector("iframe") ?? null;
+}
+
+function emailRendererDocument(host: HTMLElement | null | undefined) {
+  const source = emailRendererFrame(host)?.getAttribute("srcdoc");
+  return source
+    ? new DOMParser().parseFromString(source, "text/html").documentElement
+    : null;
+}
+
+function emailRendererToken(host: HTMLElement | null | undefined) {
+  const token = emailRendererDocument(host)
+    ?.querySelector("script[data-dakia-renderer-token]")
+    ?.getAttribute("data-dakia-renderer-token");
+  if (!token) throw new Error("Expected sandbox renderer token");
+  return token;
+}
+
+function sendEmailRendererMessage(
+  host: HTMLElement | null | undefined,
+  data: Record<string, unknown>,
+) {
+  const frame = emailRendererFrame(host);
+  if (!frame) throw new Error("Expected sandbox renderer frame");
+  // jsdom does not create a browsing context for an iframe in a shadow tree.
+  // This stand-in preserves the production source check in component tests.
+  if (!frame.contentWindow) {
+    Object.defineProperty(frame, "contentWindow", {
+      configurable: true,
+      value: window,
+    });
+  }
+  window.dispatchEvent(
+    new MessageEvent("message", { data, source: frame.contentWindow }),
+  );
+}
+
 describe("Reader unsubscribe action", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -132,6 +171,43 @@ describe("Reader unsubscribe action", () => {
     expect(screen.queryByText("Hidden summary")).toBeNull();
   });
 
+  it("renders a valid RFC 3339 leap second at the final displayable instant", () => {
+    const receivedAt = "2016-12-31T23:59:60+00:00";
+    const expected = format(
+      new Date("2016-12-31T23:59:59.999+00:00"),
+      "EEEE d MMM 'at' HH:mm",
+    );
+
+    expect(() =>
+      render(
+        <MantineProvider>
+          <Reader
+            {...props}
+            message={{ ...message, received_at: receivedAt }}
+          />
+        </MantineProvider>,
+      ),
+    ).not.toThrow();
+
+    expect(screen.getByText(expected)).toBeVisible();
+    expect(receivedAt).toBe("2016-12-31T23:59:60+00:00");
+  });
+
+  it("shows an unknown-date label for malformed timestamps instead of crashing", () => {
+    expect(() =>
+      render(
+        <MantineProvider>
+          <Reader
+            {...props}
+            message={{ ...message, received_at: "2016-02-30T23:59:60+00:00" }}
+          />
+        </MantineProvider>,
+      ),
+    ).not.toThrow();
+
+    expect(screen.getByText("Unknown date")).toBeVisible();
+  });
+
   it("shows unsubscribe only for a supported message", () => {
     const { rerender } = render(
       <MantineProvider>
@@ -169,19 +245,250 @@ describe("Reader unsubscribe action", () => {
       name: "Weekly notes",
     });
     const anchor = await waitFor(() => {
-      const surface = documentRole.shadowRoot?.firstElementChild as
-        HTMLElement | undefined;
-      const nextAnchor = surface?.shadowRoot?.querySelector("a");
-      expect(nextAnchor).toBeInstanceOf(HTMLAnchorElement);
+      const nextAnchor =
+        emailRendererDocument(documentRole)?.querySelector("a");
+      expect(nextAnchor).toBeTruthy();
       return nextAnchor as HTMLAnchorElement;
     });
-    fireEvent.click(anchor);
+    sendEmailRendererMessage(documentRole, {
+      channel: "dakia-email-renderer",
+      token: emailRendererToken(documentRole),
+      type: "external-link",
+      href: anchor.getAttribute("data-dakia-external-href"),
+    });
 
     expect(props.onComposeLink).toHaveBeenCalledWith(message, {
       to: "juhan+tamm@example.com",
       subject: "Tere",
       body: "Kohtume homme",
     });
+  });
+
+  it("loads remote content only after a per-message Reader action and resets it when mailbox identity rolls over", async () => {
+    vi.mocked(api.content).mockResolvedValue({
+      body_text: "Newsletter",
+      body_html:
+        '<img src="https://images.example.test/tracker.png" alt="Tracking image"><style>.hero { background: url("https://images.example.test/hero.jpg") }</style><p class="hero">Newsletter</p>',
+      attachments: [],
+    });
+    const { rerender } = render(
+      <MantineProvider>
+        <Reader {...props} message={{ ...message, mailbox_uid_validity: 77 }} />
+      </MantineProvider>,
+    );
+    const emailRoot = () =>
+      emailRendererDocument(
+        screen.getByRole("document", { name: "Weekly notes" }),
+      );
+
+    await waitFor(() =>
+      expect(emailRoot()?.querySelector("img")?.hasAttribute("src")).toBe(
+        false,
+      ),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Load remote content" }),
+    );
+    await waitFor(() =>
+      expect(emailRoot()?.querySelector("img")?.getAttribute("src")).toBe(
+        "https://images.example.test/tracker.png",
+      ),
+    );
+
+    rerender(
+      <MantineProvider>
+        <Reader {...props} message={{ ...message, mailbox_uid_validity: 78 }} />
+      </MantineProvider>,
+    );
+
+    await waitFor(() =>
+      expect(emailRoot()?.querySelector("img")?.hasAttribute("src")).toBe(
+        false,
+      ),
+    );
+    expect(
+      screen.getByRole("button", { name: "Load remote content" }),
+    ).toBeVisible();
+  });
+
+  it("does not revive remote-content consent after switching between mounted thread messages", async () => {
+    const earlier = {
+      ...message,
+      id: "remote-earlier",
+      uid: 11,
+      subject: "Remote earlier",
+      from_name: "Earlier Sender",
+      received_at: "2026-07-19T08:00:00Z",
+    };
+    const latest = {
+      ...message,
+      id: "remote-latest",
+      uid: 12,
+      subject: "Remote latest",
+      from_name: "Latest Sender",
+      received_at: "2026-07-19T09:00:00Z",
+    };
+    vi.mocked(api.content).mockImplementation(async (id) => ({
+      body_text:
+        id === earlier.id ? "Earlier remote body" : "Latest remote body",
+      body_html:
+        id === earlier.id
+          ? '<img alt="Earlier remote image" src="https://images.example.test/earlier.png">'
+          : '<img alt="Latest remote image" src="https://images.example.test/latest.png">',
+      attachments: [],
+    }));
+    render(
+      <MantineProvider>
+        <Reader {...props} message={earlier} messages={[earlier, latest]} />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Expand message from Earlier Sender",
+      }),
+    );
+    const earlierDocument = await screen.findByRole("document", {
+      name: "Remote earlier",
+    });
+    await waitFor(() =>
+      expect(
+        emailRendererDocument(earlierDocument)
+          ?.querySelector("img")
+          ?.hasAttribute("src"),
+      ).toBe(false),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Load remote content" }),
+    );
+    await waitFor(() =>
+      expect(
+        emailRendererDocument(earlierDocument)
+          ?.querySelector("img")
+          ?.getAttribute("src"),
+      ).toBe("https://images.example.test/earlier.png"),
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Expand message from Latest Sender",
+      }),
+    );
+    await screen.findByRole("document", { name: "Remote latest" });
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Expand message from Earlier Sender",
+      }),
+    );
+    const reopenedEarlierDocument = await screen.findByRole("document", {
+      name: "Remote earlier",
+    });
+    await waitFor(() =>
+      expect(
+        emailRendererDocument(reopenedEarlierDocument)
+          ?.querySelector("img")
+          ?.hasAttribute("src"),
+      ).toBe(false),
+    );
+    expect(
+      screen.getByRole("button", { name: "Load remote content" }),
+    ).toBeVisible();
+  });
+
+  it("discards an old mailbox epoch response before it can replace a reused message", async () => {
+    let resolveOld: ((content: MessageContent) => void) | undefined;
+    let resolveNew: ((content: MessageContent) => void) | undefined;
+    vi.mocked(api.content).mockImplementation(
+      async (_messageId, expectedUidValidity) =>
+        new Promise<MessageContent>((resolve) => {
+          if (expectedUidValidity === 77) resolveOld = resolve;
+          if (expectedUidValidity === 78) resolveNew = resolve;
+        }),
+    );
+    const saveAttachment = vi
+      .spyOn(api, "saveAttachment")
+      .mockResolvedValue("/Users/alex/Downloads/new.pdf");
+    const oldMessage = {
+      ...message,
+      mailbox_uid_validity: 77,
+      subject: "Old mailbox headers",
+      has_attachments: true,
+    };
+    const newMessage = {
+      ...oldMessage,
+      mailbox_uid_validity: 78,
+      subject: "Replacement mailbox headers",
+    };
+    const { rerender } = render(
+      <MantineProvider>
+        <Reader {...props} message={oldMessage} />
+      </MantineProvider>,
+    );
+
+    await waitFor(() =>
+      expect(api.content).toHaveBeenCalledWith(oldMessage.id, 77),
+    );
+    rerender(
+      <MantineProvider>
+        <Reader {...props} message={newMessage} />
+      </MantineProvider>,
+    );
+
+    expect(screen.getByText("Replacement mailbox headers")).toBeVisible();
+    expect(screen.queryByText("Old mailbox headers")).toBeNull();
+    await waitFor(() =>
+      expect(api.content).toHaveBeenCalledWith(newMessage.id, 78),
+    );
+
+    await act(async () => {
+      resolveOld?.({
+        body_text: "Old mailbox body",
+        attachments: [
+          {
+            id: "old-attachment",
+            message_id: oldMessage.id,
+            filename: "old.pdf",
+            mime_type: "application/pdf",
+            size_bytes: 100,
+            is_inline: false,
+            presentation: "downloadable",
+            is_potentially_unsafe: false,
+          },
+        ],
+      });
+    });
+    expect(screen.queryByText("Old mailbox body")).toBeNull();
+    expect(screen.queryByText("old.pdf")).toBeNull();
+
+    await act(async () => {
+      resolveNew?.({
+        body_text: "Replacement mailbox body",
+        attachments: [
+          {
+            id: "new-attachment",
+            message_id: newMessage.id,
+            filename: "new.pdf",
+            mime_type: "application/pdf",
+            size_bytes: 100,
+            is_inline: false,
+            presentation: "downloadable",
+            is_potentially_unsafe: false,
+          },
+        ],
+      });
+    });
+    expect(await screen.findByText("Replacement mailbox body")).toBeVisible();
+    expect(screen.queryByText("Old mailbox body")).toBeNull();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Save new.pdf to Downloads" }),
+    );
+    await waitFor(() =>
+      expect(saveAttachment).toHaveBeenCalledWith(
+        newMessage.id,
+        "new-attachment",
+        78,
+      ),
+    );
   });
 
   it("disables unsubscribe while the request is in progress", () => {
@@ -223,7 +530,7 @@ describe("Reader unsubscribe action", () => {
 
     expect(await screen.findByText("Tere maailm")).toBeVisible();
     expect(api.content).toHaveBeenCalledTimes(1);
-    expect(api.content).toHaveBeenCalledWith(message.id);
+    expect(api.content).toHaveBeenCalledWith(message.id, null);
     expect(api.hydrateMessage).not.toHaveBeenCalled();
   });
 
@@ -241,7 +548,7 @@ describe("Reader unsubscribe action", () => {
     );
     expect(await screen.findByText("Tere maailm")).toBeVisible();
     expect(api.content).toHaveBeenCalledTimes(1);
-    expect(api.content).toHaveBeenCalledWith(message.id);
+    expect(api.content).toHaveBeenCalledWith(message.id, null);
     expect(api.hydrateMessage).not.toHaveBeenCalled();
   });
 
@@ -269,7 +576,7 @@ describe("Reader unsubscribe action", () => {
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByText("Recovered body")).toBeVisible();
     expect(api.content).toHaveBeenCalledTimes(2);
-    expect(api.content).toHaveBeenLastCalledWith(message.id);
+    expect(api.content).toHaveBeenLastCalledWith(message.id, null);
     expect(api.hydrateMessage).not.toHaveBeenCalled();
   });
 
@@ -352,7 +659,7 @@ describe("Reader unsubscribe action", () => {
     );
 
     await waitFor(() =>
-      expect(api.exportMessage).toHaveBeenCalledWith("message-1"),
+      expect(api.exportMessage).toHaveBeenCalledWith("message-1", null),
     );
     expect(
       await screen.findByText(
@@ -582,9 +889,7 @@ describe("Reader unsubscribe action", () => {
     const renderedMessage = await screen.findByRole("document", {
       name: "Weekly notes",
     });
-    const emailSurface = renderedMessage.shadowRoot
-      ?.firstElementChild as HTMLElement | null;
-    const emailRoot = emailSurface?.shadowRoot;
+    const emailRoot = emailRendererDocument(renderedMessage);
     expect(emailRoot?.querySelector("img")?.getAttribute("src")).toBe(
       "data:image/png;base64,iVBORw0KGgo=",
     );
@@ -667,6 +972,74 @@ describe("Reader unsubscribe action", () => {
     expect(screen.queryByRole("button", { name: "Save all" })).toBeNull();
   });
 
+  it("shows a numeric attachment size only after decoded bytes are available", async () => {
+    vi.mocked(api.content).mockResolvedValue({
+      body_text: "Attachment sizes",
+      attachments: [
+        {
+          id: "downloaded",
+          message_id: message.id,
+          filename: "downloaded.pdf",
+          mime_type: "application/pdf",
+          size_bytes: 12_000,
+          size_kind: "decoded",
+          is_inline: false,
+          presentation: "downloadable",
+          is_potentially_unsafe: false,
+        },
+        {
+          id: "metadata-only",
+          message_id: message.id,
+          filename: "metadata-only.pdf",
+          mime_type: "application/pdf",
+          // This is BODYSTRUCTURE's encoded transport length, not a file size.
+          size_bytes: 16_384,
+          size_kind: "encoded",
+          is_inline: false,
+          presentation: "downloadable",
+          is_potentially_unsafe: false,
+        },
+        {
+          id: "legacy",
+          message_id: message.id,
+          filename: "legacy.pdf",
+          mime_type: "application/pdf",
+          size_bytes: 4_096,
+          is_inline: false,
+          presentation: "downloadable",
+          is_potentially_unsafe: false,
+        },
+      ],
+    });
+    render(
+      <MantineProvider>
+        <Reader {...props} message={{ ...message, has_attachments: true }} />
+      </MantineProvider>,
+    );
+
+    expect(await screen.findByText("downloaded.pdf")).toBeVisible();
+    expect(screen.getByText(/12 KB · application\/pdf/)).toBeVisible();
+    expect(
+      screen.getAllByText(/Size unavailable · application\/pdf/),
+    ).toHaveLength(2);
+    expect(screen.queryByText(/16 KB/)).toBeNull();
+    expect(screen.queryByText(/4 KB/)).toBeNull();
+    const save = vi
+      .spyOn(api, "saveAttachment")
+      .mockResolvedValue("/fictional/metadata-only.pdf");
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Save metadata-only.pdf to Downloads",
+      }),
+    );
+    await waitFor(() => expect(save).toHaveBeenCalled());
+    // Saving returns a path, not refreshed size metadata. Do not promise that
+    // the encoded count has become a known file size after this action.
+    expect(
+      screen.getAllByText(/Size unavailable · application\/pdf/),
+    ).toHaveLength(2);
+  });
+
   it("opens a conversation on its final message and fetches earlier messages only when expanded", async () => {
     const earliest = {
       ...message,
@@ -731,14 +1104,14 @@ describe("Reader unsubscribe action", () => {
     ).toHaveAttribute("aria-expanded", "true");
     expect(await screen.findByText("Latest full body")).toBeVisible();
     expect(api.content).toHaveBeenCalledTimes(1);
-    expect(api.content).toHaveBeenCalledWith(latest.id);
+    expect(api.content).toHaveBeenCalledWith(latest.id, null);
 
     fireEvent.click(earliestDisclosure);
     expect(await screen.findByText("Earlier full body")).toBeVisible();
     expect(screen.queryByText("Latest full body")).not.toBeInTheDocument();
     expect(api.content).toHaveBeenCalledTimes(2);
-    expect(api.content).toHaveBeenCalledWith(earliest.id);
-    expect(api.content).not.toHaveBeenCalledWith(middle.id);
+    expect(api.content).toHaveBeenCalledWith(earliest.id, null);
+    expect(api.content).not.toHaveBeenCalledWith(middle.id, null);
 
     fireEvent.click(
       screen.getByRole("button", {
@@ -824,7 +1197,7 @@ describe("Reader unsubscribe action", () => {
     ).toHaveAttribute("aria-expanded", "false");
     expect(await screen.findByText("Latest full body")).toBeVisible();
     expect(api.content).toHaveBeenCalledTimes(3);
-    expect(api.content).toHaveBeenLastCalledWith(nextLatest.id);
+    expect(api.content).toHaveBeenLastCalledWith(nextLatest.id, null);
   });
 
   it("opens a dedicated reader on the explicitly focused thread message", async () => {
@@ -863,7 +1236,7 @@ describe("Reader unsubscribe action", () => {
       }),
     ).toHaveAttribute("aria-expanded", "true");
     expect(await screen.findByText("Focused body")).toBeVisible();
-    expect(api.content).not.toHaveBeenCalledWith(latest.id);
+    expect(api.content).not.toHaveBeenCalledWith(latest.id, null);
   });
 
   it("keeps the selected expanded message open when a newer message arrives", async () => {
@@ -921,7 +1294,7 @@ describe("Reader unsubscribe action", () => {
       }),
     ).toHaveAttribute("aria-expanded", "false");
     expect(api.content).toHaveBeenCalledTimes(2);
-    expect(api.content).not.toHaveBeenCalledWith(newer.id);
+    expect(api.content).not.toHaveBeenCalledWith(newer.id, null);
   });
 
   it("only collapses threaded messages through their collapse control", async () => {
@@ -1053,7 +1426,7 @@ describe("Reader unsubscribe action", () => {
       }),
     ).toHaveAttribute("aria-expanded", "false");
     await waitFor(() =>
-      expect(api.content).toHaveBeenCalledWith(secondAccountLatest.id),
+      expect(api.content).toHaveBeenCalledWith(secondAccountLatest.id, null),
     );
   });
 
@@ -1301,18 +1674,14 @@ describe("Reader unsubscribe action", () => {
       '[data-dakia-email-surface="history"]',
     );
     const currentDocument = await waitFor(() => {
-      const currentSurface = latestMessage.shadowRoot
-        ?.firstElementChild as HTMLElement | null;
-      const document = currentSurface?.shadowRoot;
-      expect(document).toBeInstanceOf(ShadowRoot);
-      return document as ShadowRoot;
+      const document = emailRendererDocument(latestMessage);
+      expect(document).not.toBeNull();
+      return document!;
     });
     const historyDocument = await waitFor(() => {
-      const historySurface = historyHost?.shadowRoot
-        ?.firstElementChild as HTMLElement | null;
-      const document = historySurface?.shadowRoot;
-      expect(document).toBeInstanceOf(ShadowRoot);
-      return document as ShadowRoot;
+      const document = emailRendererDocument(historyHost);
+      expect(document).not.toBeNull();
+      return document!;
     });
     const historyButton = screen.getByRole("button", { name: "Show history" });
 
@@ -1350,8 +1719,8 @@ describe("Reader unsubscribe action", () => {
         "Thank you for letting us know.",
       );
     }
-    expect(api.content).toHaveBeenCalledWith("message-latest");
-    expect(api.content).not.toHaveBeenCalledWith("message-older");
+    expect(api.content).toHaveBeenCalledWith("message-latest", null);
+    expect(api.content).not.toHaveBeenCalledWith("message-older", null);
   });
 
   it("keeps a CID-resolved image in the message body while listing named attachments separately", async () => {
@@ -1391,9 +1760,7 @@ describe("Reader unsubscribe action", () => {
     const renderedMessage = await screen.findByRole("document", {
       name: "Weekly notes",
     });
-    const emailSurface = renderedMessage.shadowRoot
-      ?.firstElementChild as HTMLElement | null;
-    const emailRoot = emailSurface?.shadowRoot;
+    const emailRoot = emailRendererDocument(renderedMessage);
     expect(emailRoot?.textContent).toContain("Your July statement is ready.");
     expect(emailRoot?.querySelector("img")?.getAttribute("src")).toBe(
       "data:image/png;base64,iVBORw0KGgo=",
@@ -1934,8 +2301,8 @@ describe("Reader unsubscribe action", () => {
 
     expect(await screen.findByText("EN: Teine kiri")).toBeVisible();
     expect(api.content).toHaveBeenCalledTimes(2);
-    expect(api.content).toHaveBeenCalledWith("message-0");
-    expect(api.content).toHaveBeenCalledWith("message-1");
+    expect(api.content).toHaveBeenCalledWith("message-0", null);
+    expect(api.content).toHaveBeenCalledWith("message-1", null);
     expect(translationMocks.translate).toHaveBeenCalledWith(
       "et",
       "Esimene kiri",
@@ -1954,15 +2321,20 @@ describe("Reader unsubscribe action", () => {
     expect(await screen.findByText("EN: Esimene kiri")).toBeVisible();
   });
 
-  it("translates HTML as HTML and renders it through the sanitized shadow tree", async () => {
+  it("translates the fictional native-arrival HTML through the sandboxed document", async () => {
+    const nativeArrivalHtml =
+      '<p>Tere, see on turvaline fiktiivne kiri. Palun kinnita, et Dakia tõlgib selle sõnumi kohapeal ilma sisu võrku saatmata.</p><img src="http://127.0.0.1:40123/remote-image.svg?via=translation-arrival" alt="remote content remains blocked">';
+    const translatedArrivalHtml =
+      '<p>Hello, this is a safe fictional message. Please confirm that Dakia translates this message locally without sending content over the network.</p><img src="http://127.0.0.1:40123/remote-image.svg?via=translation-arrival" alt="remote content remains blocked">';
     vi.mocked(api.content).mockResolvedValue({
-      body_text: "Tere",
-      body_html: "<p>Tere <strong>maailm</strong></p>",
+      body_text:
+        "Tere, see on turvaline fiktiivne kiri. Palun kinnita, et Dakia tõlgib selle sõnumi kohapeal ilma sisu võrku saatmata.",
+      body_html: nativeArrivalHtml,
       attachments: [],
     });
     translationMocks.translate
       .mockResolvedValueOnce("English subject")
-      .mockResolvedValueOnce("<p>Hello <strong>world</strong></p>");
+      .mockResolvedValueOnce(translatedArrivalHtml);
     render(
       <MantineProvider>
         <Reader {...props} message={message} />
@@ -1976,21 +2348,32 @@ describe("Reader unsubscribe action", () => {
     const renderedMessage = await screen.findByRole("document", {
       name: "Weekly notes",
     });
-    const currentEmailRoot = () =>
-      (renderedMessage.shadowRoot?.firstElementChild as HTMLElement | null)
-        ?.shadowRoot;
+    const currentEmailRoot = () => emailRendererDocument(renderedMessage);
     expect(translationMocks.translate).toHaveBeenLastCalledWith(
       "et",
-      "<p>Tere <strong>maailm</strong></p>",
+      nativeArrivalHtml,
       true,
     );
     await waitFor(() =>
-      expect(currentEmailRoot()?.querySelector("strong")?.textContent).toBe(
-        "world",
+      expect(currentEmailRoot()?.textContent).toContain(
+        "Hello, this is a safe fictional message.",
       ),
     );
+    expect(currentEmailRoot()?.querySelector("img")?.hasAttribute("src")).toBe(
+      false,
+    );
+    const scripts = currentEmailRoot()?.querySelectorAll("script");
+    expect(scripts).toHaveLength(1);
+    expect(scripts?.[0]?.getAttribute("data-dakia-renderer-token")).toMatch(
+      /^[a-f0-9]{48}$/,
+    );
+    expect(scripts?.[0]?.textContent).toContain(
+      "document.currentScript?.getAttribute",
+    );
     expect(
-      currentEmailRoot()?.querySelector("script, iframe, form"),
+      currentEmailRoot()?.querySelector(
+        "script:not([data-dakia-renderer-token]), iframe, form",
+      ),
     ).toBeNull();
   });
 

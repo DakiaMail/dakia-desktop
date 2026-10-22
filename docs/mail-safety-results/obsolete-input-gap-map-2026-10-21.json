@@ -1,0 +1,807 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T12:55:47.658113+00:00",
+  "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "sourceState": "modified-shared-worktree",
+  "kind": "read-only-gap-map-not-test-execution",
+  "requirementId": "MSR-5322-obsolete-input",
+  "requirementStatus": "gap-unchanged",
+  "scope": "Finite RFC 5322 section 4 syntax-family inventory and proposed fictional production-boundary vectors; not an exhaustive grammar or cross-product certificate.",
+  "primarySource": {
+    "title": "RFC 5322 section 4, Obsolete Syntax",
+    "url": "https://www.rfc-editor.org/rfc/rfc5322.html#section-4",
+    "receiverObligation": "Accept and reasonably interpret obsolete forms; do not generate them in newly constructed headers.",
+    "normativeDistinction": "MUST receiver acceptance differs from SHOULD route removal, zone interpretation and repeated-destination combination; field ambiguity can remain unspecified."
+  },
+  "execution": {
+    "newTestsRun": false,
+    "fullSuiteRun": false,
+    "nativeRun": false,
+    "providerRun": false,
+    "sourceAssertions": "Inspected exact checked-in test bodies. Presence is not a new passing execution claim.",
+    "productOrMatrixChanges": false
+  },
+  "sourceHashes": {
+    "crates/dakia-core/src/mail.rs": "f2e7edf2b9d528092aca60efdfe5e63fea8a7cf7ff40b517345dbf5efe266fe6",
+    "crates/dakia-core/src/mail/tests/received_header_conformance_tests.rs": "6a211fed740ef1f6955a432f859efe212710ebcbbec989a06656674e55bf8281",
+    "vendor/mail-parser/src/parsers/fields/address.rs": "ee8452925234c366910f44d5a1b78a9fb4cfdb9b5e1fdbf80443e57e7a7d9284",
+    "vendor/mail-parser/src/parsers/fields/date.rs": "0b829455590b8db8f3a3de58e1a7a63ade7f6cc826a95d8ebb8e25bb6ee68547",
+    "vendor/mail-parser/resources/date.json": "a41ff3e3678edfb75ecb0a2fcece6aeef39caf4b0eace27eaf1a21efc9283e40",
+    "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs": "1b47f9f630c92e99507cd09d6402b82fa6e1d088c917ea6e563cb8191abb03dd",
+    "crates/dakia-core/src/mail/tests/mime_tauri_artifact_export_tests.rs": "38b699e31693a3a6cb9b824baa53e133a6bd8c66c36ccf127ee23d8a039da7fc",
+    "testdata/mail-standards-requirements.json": "9344678eb53a3bff445eb2104c9d49ce1031b3bff4e53b8fb6314b918eb50927",
+    "docs/mail-safety-standards-profile.md": "7c6240a9bdcaa77e72c25799f32547a00982f56b56d363600c8e20b5c32442dd"
+  },
+  "fixtureBase": {
+    "provenance": "New fictional examples derived from RFC productions, not copied private mail or imported upstream corpus. Escapes in patch strings are JSON escapes representing intended octets; the build script never executes a fixture.",
+    "lineEnding": "CRLF unless the specific vector deliberately changes it",
+    "rawTemplate": "Date: Tue, 28 Jul 2026 12:01:00 +0000\r\nFrom: Sender <sender@example.test>\r\nTo: Reader <reader@example.test>\r\nSubject: Fictional obsolete syntax\r\nMessage-ID: <obs-{id}@example.test>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=us-ascii\r\n\r\nFictional body {id}.\r\n",
+    "patchRules": "Replace the matching header name case-insensitively, preserving intentional repeats and byte escapes; prepend/replace-body/replace-all are explicit. Date matrices replace Date only. Do not normalize away the syntax under test before production entry."
+  },
+  "contracts": {
+    "core-to-reader-v1": {
+      "completeAndMetadata": [
+        "parse_message",
+        "parse_header_message",
+        "parse_catalog_message",
+        "parse_threading_headers when applicable"
+      ],
+      "providerBoundary": "Use an isolated fictional TLS endpoint and MailService.hydrate_message_with_imap_endpoint_for_test for the actual selected header/body publication path. Respond only with requested HEADER.FIELDS; do not invent selective support for omitted optional fields.",
+      "storage": "Persist actual summaries and CachedMessageContent, drop connections, reopen Store, compare all exposed fields and neighbors. No hand-authored replacement payload may stand in for core output.",
+      "reader": "Extend the real core-profile -> message_content Tauri command -> Reader artifact lane; assert visible subject/sender/body, real reply targets and no unsolicited action. This is source/event acceptance; native WebKit remains separate.",
+      "rawSource": "When asserting retention of uninterpreted bytes, use MailService.fetch_raw_message_at_epoch_with_endpoint_for_test and exact fictional source bytes. Do not claim unknown raw headers are stored in a cache that has no such fields.",
+      "emission": "Inspect newly constructed reply/compose header bytes; obsolete route/trace must not be manufactured. Verbatim source export or an attached original message is not newly constructed header generation.",
+      "negativeAndIdentity": "Retain adversarial encoded-looking addr-spec and Message-ID tokens literally. Do not broaden parser decoding to make a fixture pass; ensure account/mailbox/UIDVALIDITY stay immutable."
+    }
+  },
+  "receiverFamilies": [
+    {
+      "id": "OBS-01",
+      "section": "4.1",
+      "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-4.1",
+      "productions": [
+        "obs-NO-WS-CTL",
+        "obs-ctext",
+        "obs-qtext",
+        "obs-utext",
+        "obs-qp"
+      ],
+      "receiverRule": "Interpret obsolete controls and quoted-pairs robustly.",
+      "applicability": "received-message interpretation",
+      "status": "gap-no-indexed-core-family-assertion",
+      "existingEvidence": [],
+      "remainingGap": "No indexed controls-in-header/quoted-pair acceptance, cache or Reader oracle. Controls are receive content, never permission to send command framing bytes.",
+      "proposedVectors": [
+        {
+          "id": "OBS-01-comment-qtext",
+          "patchKind": "replace-header-lines",
+          "patch": "From: \"A\\\u0001B\" (note\u0002) <sender@example.test>\r\n",
+          "expected": "Keep sender mailbox sender@example.test; no fabricated header or action; decide and document visible control normalization while retaining retrievable original bytes.",
+          "executionStatus": "not-run-proposed-only"
+        },
+        {
+          "id": "OBS-01-unstructured",
+          "patchKind": "replace-header-lines",
+          "patch": "Subject: alpha\u0000omega\r\n",
+          "expected": "Accept bounded historical input without native/HTML execution; preserve printable alpha/omega order. Exact display normalization needs an explicit oracle, not an inferred standard rendering rule.",
+          "executionStatus": "not-run-proposed-only"
+        }
+      ],
+      "acceptanceContract": "core-to-reader-v1"
+    },
+    {
+      "id": "OBS-02",
+      "section": "4.1",
+      "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-4.1",
+      "productions": ["obs-body", "obs-unstruct"],
+      "receiverRule": "Handle historical body and unstructured line endings.",
+      "applicability": "received-message interpretation",
+      "status": "partial-existing-assertions",
+      "existingEvidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "parses_the_checked_in_mime_regression_corpus",
+          "assertion": "CR-only plain text.",
+          "boundary": "complete parse",
+          "limit": "One CR-only MIME fixture; not arbitrary mixed CR/LF/NUL acceptance.",
+          "status": "source-assertion-inspected-not-executed-by-this-audit"
+        },
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "cr_only_normalization_preserves_unencoded_attachment_bytes",
+          "assertion": "assert_eq!(message.attachments[0].bytes, [b'A', b'\\r', b'B'])",
+          "boundary": "complete parse and attachment extraction",
+          "limit": "No obsolete controls or Reader/cache acceptance.",
+          "status": "source-assertion-inspected-not-executed-by-this-audit"
+        }
+      ],
+      "remainingGap": "CR-only normalization is partial evidence; mixed separators, NUL and control-as-content remain unproven. Reasonable interpretation does not require unsafe terminal control execution.",
+      "proposedVectors": [
+        {
+          "id": "OBS-02-body-controls",
+          "patchKind": "replace-body",
+          "patch": "alpha\rbeta\ngamma\u0000omega\r\n",
+          "expected": "Bounded body processing, printable tokens retained in order; exact chosen line-ending normalization documented; raw fetch/export must retain original octets.",
+          "executionStatus": "not-run-proposed-only"
+        },
+        {
+          "id": "OBS-02-mixed-header-separators",
+          "patchKind": "replace-header-lines",
+          "patch": "Subject: alpha\rbeta\r\n",
+          "expected": "Resolve the historical bare-CR ambiguity explicitly; no silent body-as-header promotion or injected recipient. This case requires a policy oracle before claiming exact display semantics.",
+          "executionStatus": "not-run-proposed-only"
+        }
+      ],
+      "acceptanceContract": "core-to-reader-v1"
+    },
+    {
+      "id": "OBS-03",
+      "section": "4.1",
+      "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-4.1",
+      "productions": ["obs-phrase", "obs-phrase-list"],
+      "receiverRule": "Interpret dotted phrases and empty phrase-list members.",
+      "applicability": "received-message interpretation",
+      "status": "gap-no-indexed-core-family-assertion",
+      "existingEvidence": [],
+      "remainingGap": "No exact dotted-display/empty Keywords family assertion indexed. Dotted or quoted modern display samples alone do not prove this production.",
+      "proposedVectors": [
+        {
+          "id": "OBS-03-dotted-display",
+          "patchKind": "replace-header-lines",
+          "patch": "From: Dr. A. Fictional <sender@example.test>\r\n",
+          "expected": "Sender address stays exact and display tokens do not become addr-spec segments.",
+          "executionStatus": "not-run-proposed-only"
+        },
+        {
+          "id": "OBS-03-keyword-nulls",
+          "patchKind": "replace-header-lines",
+          "patch": "Keywords: alpha,,beta,\r\n",
+          "expected": "Mail body remains readable and original header remains retrievable. No invented Keywords UI is required.",
+          "executionStatus": "not-run-proposed-only"
+        }
+      ],
+      "acceptanceContract": "core-to-reader-v1"
+    },
+    {
+      "id": "OBS-04",
+      "section": "4.2",
+      "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-4.2",
+      "productions": ["obs-FWS"],
+      "receiverRule": "Accept consecutive folds, including whitespace-only continuation lines.",
+      "applicability": "received-message interpretation",
+      "status": "partial-existing-assertions",
+      "existingEvidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "retains_decoded_recipient_headers_in_complete_catalogue_and_header_messages",
+          "assertion": "Primary <primary@example.test>, Team: second@example.test, Third <third@example.test>;",
+          "boundary": "complete/header/catalogue",
+          "limit": "Ordinary folded recipients and group; not whitespace-only continuation or null members.",
+          "status": "source-assertion-inspected-not-executed-by-this-audit"
+        }
+      ],
+      "remainingGap": "Existing normal folding lacks two consecutive folds and whitespace-only-line preservation through complete/header/catalogue/cache/Reader.",
+      "proposedVectors": [
+        {
+          "id": "OBS-04-whitespace-only-fold",
+          "patchKind": "replace-header-lines",
+          "patch": "Subject: alpha \r\n \t\r\n omega\r\n",
+          "expected": "Header does not end at the whitespace-only continuation; subject contains alpha then omega without exposing continuation as body.",
+          "executionStatus": "not-run-proposed-only"
+        }
+      ],
+      "acceptanceContract": "core-to-reader-v1"
+    },
+    {
+      "id": "OBS-05",
+      "section": "4.3",
+      "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-4.3",
+      "productions": [
+        "obs-day-of-week",
+        "obs-day",
+        "obs-year",
+        "obs-hour",
+        "obs-minute",
+        "obs-second"
+      ],
+      "receiverRule": "Interpret obsolete year widths and token comments.",
+      "applicability": "received-message interpretation",
+      "status": "partial-existing-assertions",
+      "existingEvidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "uses_the_message_date_when_it_is_valid",
+          "assertion": "2026-02-10T10:34:56+00:00",
+          "boundary": "complete parser plus timestamp extraction",
+          "limit": "Modern four-digit numeric-zone Date, not obsolete year/zone interpretation.",
+          "status": "source-assertion-inspected-not-executed-by-this-audit"
+        }
+      ],
+      "remainingGap": "Modern valid-date and missing/invalid-date fallback tests cannot prove these obsolete values. Vendor date corpus is adjacent only, not a core/Reader acceptance lane.",
+      "proposedVectors": [
+        {
+          "id": "OBS-05-year-thresholds",
+          "patchKind": "date-matrix",
+          "patch": {
+            "dateTemplate": "1 Jan {year} 00:00:00 GMT",
+            "years": {
+              "00": 2000,
+              "49": 2049,
+              "50": 1950,
+              "99": 1999,
+              "123": 2023
+            }
+          },
+          "expected": "Each Date yields its listed year at midnight UTC in all metadata/complete paths; a supplied conflicting IMAP INTERNALDATE must not hide incorrect Date interpretation.",
+          "executionStatus": "not-run-proposed-only"
+        },
+        {
+          "id": "OBS-05-date-token-comments",
+          "patchKind": "replace-header-lines",
+          "patch": "Date: (d) 1 (m) Jan (y) 26 (t) 00 (h) : (m) 00 (s) : 00 GMT\r\n",
+          "expected": "Interpret the intended 2026-01-01T00:00:00Z rather than silently using receipt time.",
+          "executionStatus": "not-run-proposed-only"
+        }
+      ],
+      "acceptanceContract": "core-to-reader-v1"
+    },
+    {
+      "id": "OBS-06",
+      "section": "4.3",
+      "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-4.3",
+      "productions": ["obs-zone"],
+      "receiverRule": "Interpret obsolete zones and unknown-zone recommendations.",
+      "applicability": "received-message interpretation",
+      "status": "partial-existing-assertions",
+      "existingEvidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "uses_the_message_date_when_it_is_valid",
+          "assertion": "2026-02-10T10:34:56+00:00",
+          "boundary": "complete parser plus timestamp extraction",
+          "limit": "Modern four-digit numeric-zone Date, not obsolete year/zone interpretation.",
+          "status": "source-assertion-inspected-not-executed-by-this-audit"
+        }
+      ],
+      "remainingGap": "No indexed core test covers US-zone alternatives, military-zone recommendation or unknown-zone policy. Do not turn provider fallback into a pass for valid obsolete dates.",
+      "proposedVectors": [
+        {
+          "id": "OBS-06-zone-matrix",
+          "patchKind": "date-matrix",
+          "patch": {
+            "dateTemplate": "1 Jan 26 12:00:00 {zone}",
+            "utcHour": {
+              "UT": 12,
+              "GMT": 12,
+              "EST": 17,
+              "EDT": 16,
+              "CST": 18,
+              "CDT": 17,
+              "MST": 19,
+              "MDT": 18,
+              "PST": 20,
+              "PDT": 19,
+              "A": 12
+            }
+          },
+          "expected": "Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed.",
+          "executionStatus": "not-run-proposed-only"
+        }
+      ],
+      "acceptanceContract": "core-to-reader-v1"
+    },
+    {
+      "id": "OBS-07",
+      "section": "4.4",
+      "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-4.4",
+      "productions": ["obs-angle-addr", "obs-route", "obs-domain-list"],
+      "receiverRule": "Interpret routed addresses without using obsolete routing.",
+      "applicability": "received-message interpretation",
+      "status": "partial-existing-assertions",
+      "existingEvidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/received_header_conformance_tests.rs",
+          "test": "rfc5322_obs_route_and_folded_received_are_receive_only",
+          "assertion": "the user-visible time comes from Date, not an obsolete Received route",
+          "boundary": "header/complete plus compose serialization",
+          "limit": "Route appears in Received, not a direct From/To route or cache/Reader acceptance.",
+          "status": "source-assertion-inspected-not-executed-by-this-audit"
+        }
+      ],
+      "remainingGap": "Existing Received route acceptance does not prove direct originator/destination routes, null route-list entries or Reply All targets.",
+      "proposedVectors": [
+        {
+          "id": "OBS-07-direct-route",
+          "patchKind": "replace-header-lines",
+          "patch": "From: <@relay-a.example,@relay-b.example:sender@example.test>\r\nTo: <,@relay-a.example,,@relay-b.example:reader@example.test>\r\n",
+          "expected": "The terminal sender/reader mailboxes remain exact; route domains are not recipients, identities or destinations. Reply preparation must not reintroduce route syntax.",
+          "executionStatus": "not-run-proposed-only"
+        }
+      ],
+      "acceptanceContract": "core-to-reader-v1"
+    },
+    {
+      "id": "OBS-08",
+      "section": "4.4",
+      "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-4.4",
+      "productions": ["obs-local-part", "obs-domain"],
+      "receiverRule": "Interpret comments and quoted words within obsolete addresses.",
+      "applicability": "received-message interpretation",
+      "status": "partial-existing-assertions",
+      "existingEvidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/received_header_conformance_tests.rs",
+          "test": "rfc2047_obsolete_cfws_before_at_remains_a_literal_sender_identity",
+          "assertion": "the receive-only obsolete local part must be detected before tolerant parsing",
+          "boundary": "header/catalogue/complete",
+          "limit": "One encoded-looking local-part with CFWS; not all obsolete local/domain grammar.",
+          "status": "source-assertion-inspected-not-executed-by-this-audit"
+        }
+      ],
+      "remainingGap": "One CFWS-before-@ guard is partial. General quoted-word/dot/comment combinations remain untested. The separate modern quoted-local-part gap is not obsolete-only.",
+      "proposedVectors": [
+        {
+          "id": "OBS-08-cfws-dot",
+          "patchKind": "replace-header-lines",
+          "patch": "From: sender (a) . part @ example (b) . test\r\n",
+          "expected": "Interpret sender.part@example.test without changing meaningful local-part bytes; no encoded-word decoding inside identity.",
+          "executionStatus": "not-run-proposed-only"
+        },
+        {
+          "id": "OBS-08-quoted-word-dot",
+          "patchKind": "replace-header-lines",
+          "patch": "From: \"left word\" . part @ example . test\r\n",
+          "expected": "Preserve the literal quoted local-part identity and produce a valid reply target; never collapse it into another mailbox. Exact serialization oracle must account for meaningful quoted whitespace.",
+          "executionStatus": "not-run-proposed-only"
+        }
+      ],
+      "acceptanceContract": "core-to-reader-v1"
+    },
+    {
+      "id": "OBS-09",
+      "section": "4.4",
+      "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-4.4",
+      "productions": ["obs-mbox-list", "obs-addr-list", "obs-group-list"],
+      "receiverRule": "Interpret null members in address and group lists.",
+      "applicability": "received-message interpretation",
+      "status": "partial-existing-assertions",
+      "existingEvidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "retains_decoded_recipient_headers_in_complete_catalogue_and_header_messages",
+          "assertion": "Primary <primary@example.test>, Team: second@example.test, Third <third@example.test>;",
+          "boundary": "complete/header/catalogue",
+          "limit": "Ordinary folded recipients and group; not whitespace-only continuation or null members.",
+          "status": "source-assertion-inspected-not-executed-by-this-audit"
+        }
+      ],
+      "remainingGap": "Existing valid group/folded recipients do not include leading, adjacent and trailing null members or comma-only group lists.",
+      "proposedVectors": [
+        {
+          "id": "OBS-09-null-recipients",
+          "patchKind": "replace-header-lines",
+          "patch": "To: ,first@example.test,, second@example.test,\r\nCc: Empty: , , ;\r\n",
+          "expected": "Keep exactly the two real To mailboxes and an empty group; no phantom recipient or parse failure. Reader Reply All retains the real recipients only.",
+          "executionStatus": "not-run-proposed-only"
+        }
+      ],
+      "acceptanceContract": "core-to-reader-v1"
+    },
+    {
+      "id": "OBS-10",
+      "section": "4.4",
+      "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-4.4",
+      "productions": ["obs-dtext"],
+      "receiverRule": "Interpret historical domain-literal escapes and controls.",
+      "applicability": "received-message interpretation",
+      "status": "gap-no-indexed-core-family-assertion",
+      "existingEvidence": [],
+      "remainingGap": "No indexed core domain-literal obsolete escape/control oracle. SMTP envelope policy is separate from safe received-message interpretation.",
+      "proposedVectors": [
+        {
+          "id": "OBS-10-domain-escape",
+          "patchKind": "replace-header-lines",
+          "patch": "From: sender@[192\\.0.2.10]\r\n",
+          "expected": "Keep the domain-literal address distinct and literal; do not reinterpret it as an application URL, local-file path or command.",
+          "executionStatus": "not-run-proposed-only"
+        },
+        {
+          "id": "OBS-10-domain-control",
+          "patchKind": "replace-header-lines",
+          "patch": "From: sender@[192.0.2.10\u0001]\r\n",
+          "expected": "Bounded receive interpretation without retargeting; define safe reply behavior for the control-bearing domain rather than silently inventing a routable address.",
+          "executionStatus": "not-run-proposed-only"
+        }
+      ],
+      "acceptanceContract": "core-to-reader-v1"
+    },
+    {
+      "id": "OBS-11",
+      "section": "4.5",
+      "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-4.5",
+      "productions": ["obs-fields"],
+      "receiverRule": "Accept historical field order, repetition and pre-colon whitespace.",
+      "applicability": "received-message interpretation",
+      "status": "partial-existing-assertions",
+      "existingEvidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "duplicate_singleton_headers_use_the_first_value_in_every_parse_path",
+          "assertion": "assert_eq!(message.subject, \"First subject\")",
+          "boundary": "complete/header/catalogue",
+          "limit": "First Date/From/Subject policy only; does not prove repeated destination concatenation.",
+          "status": "source-assertion-inspected-not-executed-by-this-audit"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/received_header_conformance_tests.rs",
+          "test": "rfc5322_duplicate_message_id_uses_only_the_first_structured_header",
+          "assertion": "Some(\"<first@example.test>\")",
+          "boundary": "threading parser",
+          "limit": "Duplicate Message-ID/References policy; not destination fields or full pipeline.",
+          "status": "source-assertion-inspected-not-executed-by-this-audit"
+        }
+      ],
+      "remainingGap": "Existing duplicate singleton policy is exact but does not prove whitespace before colon, all field families or alternate ordering. Non-destination duplicate interpretation is not specified by this RFC.",
+      "proposedVectors": [
+        {
+          "id": "OBS-11-reorder-and-wsp",
+          "patchKind": "replace-all-base-headers",
+          "patch": "Subject \t: reordered\r\nTo : reader@example.test\r\nFrom\t: sender@example.test\r\nDate : 28 Jul 2026 12:01:00 +0000\r\n",
+          "expected": "Same exposed metadata/body across full/header/catalogue and reopen despite order and whitespace. Singleton ambiguity uses the documented deterministic policy.",
+          "executionStatus": "not-run-proposed-only"
+        }
+      ],
+      "acceptanceContract": "core-to-reader-v1"
+    },
+    {
+      "id": "OBS-12",
+      "section": "4.5.1",
+      "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-4.5.1",
+      "productions": ["obs-orig-date"],
+      "receiverRule": "Accept pre-colon whitespace in origination dates.",
+      "applicability": "received-message interpretation",
+      "status": "partial-existing-assertions",
+      "existingEvidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "uses_the_message_date_when_it_is_valid",
+          "assertion": "2026-02-10T10:34:56+00:00",
+          "boundary": "complete parser plus timestamp extraction",
+          "limit": "Modern four-digit numeric-zone Date, not obsolete year/zone interpretation.",
+          "status": "source-assertion-inspected-not-executed-by-this-audit"
+        }
+      ],
+      "remainingGap": "The combined whitespace/year/zone receive case is absent at core and Reader boundaries.",
+      "proposedVectors": [
+        {
+          "id": "OBS-12-date-wsp",
+          "patchKind": "replace-header-lines",
+          "patch": "Date \t: 28 Jul 26 12:01:00 GMT\r\n",
+          "expected": "Use the valid historical message date, even with a conflicting provider INTERNALDATE; no invented now().",
+          "executionStatus": "not-run-proposed-only"
+        }
+      ],
+      "acceptanceContract": "core-to-reader-v1"
+    },
+    {
+      "id": "OBS-13",
+      "section": "4.5.2",
+      "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-4.5.2",
+      "productions": ["obs-from", "obs-sender", "obs-reply-to"],
+      "receiverRule": "Interpret obsolete originator field forms.",
+      "applicability": "received-message interpretation",
+      "status": "partial-existing-assertions",
+      "existingEvidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "duplicate_singleton_headers_use_the_first_value_in_every_parse_path",
+          "assertion": "assert_eq!(message.subject, \"First subject\")",
+          "boundary": "complete/header/catalogue",
+          "limit": "First Date/From/Subject policy only; does not prove repeated destination concatenation.",
+          "status": "source-assertion-inspected-not-executed-by-this-audit"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/received_header_conformance_tests.rs",
+          "test": "rfc2047_obsolete_cfws_before_at_remains_a_literal_sender_identity",
+          "assertion": "the receive-only obsolete local part must be detected before tolerant parsing",
+          "boundary": "header/catalogue/complete",
+          "limit": "One encoded-looking local-part with CFWS; not all obsolete local/domain grammar.",
+          "status": "source-assertion-inspected-not-executed-by-this-audit"
+        }
+      ],
+      "remainingGap": "No complete originator family oracle for spaced field names/Sender delegation/Reply-To; first-singleton and encoded-looking identity regressions are narrower.",
+      "proposedVectors": [
+        {
+          "id": "OBS-13-originator-fields",
+          "patchKind": "replace-header-lines",
+          "patch": "From \t: sender@example.test\r\nSender : delegate@example.test\r\nReply-To\t: replies@example.test\r\n",
+          "expected": "Expose original sender and explicit Reply-To correctly. Sender/delegate must not replace From or silently retarget reply. Raw unknown fields remain retrievable.",
+          "executionStatus": "not-run-proposed-only"
+        }
+      ],
+      "acceptanceContract": "core-to-reader-v1"
+    },
+    {
+      "id": "OBS-14",
+      "section": "4.5.3",
+      "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-4.5.3",
+      "productions": ["obs-to", "obs-cc", "obs-bcc"],
+      "receiverRule": "Interpret repeated destination fields as combined address lists.",
+      "applicability": "received-message interpretation",
+      "status": "gap-no-indexed-core-family-assertion",
+      "existingEvidence": [],
+      "remainingGap": "High-value untested recommendation: current first-singleton evidence does not cover To/Cc/Bcc combination. This audit did not run the vector and does not assert that production fails.",
+      "proposedVectors": [
+        {
+          "id": "OBS-14-repeat-destinations",
+          "patchKind": "replace-header-lines",
+          "patch": "To: first@example.test\r\nTo : second@example.test\r\nCc: copy-one@example.test\r\nCc\t: copy-two@example.test\r\nBcc : , ,\r\n",
+          "expected": "Preserve both To and both Cc mailboxes in order for Reader/Reply All; empty Bcc members add nobody. If deviating from the concatenation recommendation, document and test the deviation explicitly.",
+          "executionStatus": "not-run-proposed-only"
+        }
+      ],
+      "acceptanceContract": "core-to-reader-v1"
+    },
+    {
+      "id": "OBS-15",
+      "section": "4.5.4",
+      "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-4.5.4",
+      "productions": [
+        "obs-message-id",
+        "obs-in-reply-to",
+        "obs-references",
+        "obs-id-left",
+        "obs-id-right"
+      ],
+      "receiverRule": "Ignore surrounding phrases and identity CFWS when interpreting IDs.",
+      "applicability": "received-message interpretation",
+      "status": "partial-existing-assertions",
+      "existingEvidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/received_header_conformance_tests.rs",
+          "test": "rfc2047_forbidden_structured_words_cannot_rewrite_mailbox_or_thread_identity",
+          "assertion": "assert_eq!(threading.reference_ids.as_deref(), expected_references)",
+          "boundary": "header/catalogue/complete/threading",
+          "limit": "Encoded-looking identifiers stay literal; no phrase/CFWS obsolete identifier oracle.",
+          "status": "source-assertion-inspected-not-executed-by-this-audit"
+        },
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "parses_header_only_threading_backfill_payloads",
+          "assertion": "Some(\"<root@example.com> <parent@example.com>\")",
+          "boundary": "threading parser",
+          "limit": "Modern contiguous message IDs only.",
+          "status": "source-assertion-inspected-not-executed-by-this-audit"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/received_header_conformance_tests.rs",
+          "test": "rfc5322_duplicate_message_id_uses_only_the_first_structured_header",
+          "assertion": "Some(\"<first@example.test>\")",
+          "boundary": "threading parser",
+          "limit": "Duplicate Message-ID/References policy; not destination fields or full pipeline.",
+          "status": "source-assertion-inspected-not-executed-by-this-audit"
+        }
+      ],
+      "remainingGap": "Modern canonical ID lists and literal encoded-looking IDs do not prove these obsolete phrase/CFWS forms or cache/thread/Reader convergence.",
+      "proposedVectors": [
+        {
+          "id": "OBS-15-thread-phrases",
+          "patchKind": "replace-header-lines",
+          "patch": "In-Reply-To : old discussion <parent@example.test>\r\nReferences\t: intro <root@example.test> trailing <parent@example.test>\r\n",
+          "expected": "Only the two real identifiers contribute to threading; words are ignored, with account isolation and no cycles.",
+          "executionStatus": "not-run-proposed-only"
+        },
+        {
+          "id": "OBS-15-thread-cfws",
+          "patchKind": "replace-header-lines",
+          "patch": "Message-ID: <left (note) . part @ example . test>\r\n",
+          "expected": "Compare the semantic ID left.part@example.test without treating comments as identity bytes. Preserve original source, and never apply encoded-word decoding while normalizing CFWS.",
+          "executionStatus": "not-run-proposed-only"
+        }
+      ],
+      "acceptanceContract": "core-to-reader-v1"
+    },
+    {
+      "id": "OBS-16",
+      "section": "4.5.5",
+      "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-4.5.5",
+      "productions": ["obs-subject", "obs-comments", "obs-keywords"],
+      "receiverRule": "Interpret obsolete informational fields.",
+      "applicability": "received-message interpretation",
+      "status": "partial-existing-assertions",
+      "existingEvidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "duplicate_singleton_headers_use_the_first_value_in_every_parse_path",
+          "assertion": "assert_eq!(message.subject, \"First subject\")",
+          "boundary": "complete/header/catalogue",
+          "limit": "First Date/From/Subject policy only; does not prove repeated destination concatenation.",
+          "status": "source-assertion-inspected-not-executed-by-this-audit"
+        }
+      ],
+      "remainingGap": "No exact pre-colon informational/empty phrase-list family acceptance; adding a Comments/Keywords UI is not required by this map.",
+      "proposedVectors": [
+        {
+          "id": "OBS-16-info-wsp",
+          "patchKind": "replace-header-lines",
+          "patch": "Subject \t: visible subject\r\nComments : fictional comment\r\nKeywords\t: alpha,,beta,\r\n",
+          "expected": "Reader displays the correct Subject/body; optional informational headers neither override identity nor trigger actions. Original fields remain available via raw fetch.",
+          "executionStatus": "not-run-proposed-only"
+        }
+      ],
+      "acceptanceContract": "core-to-reader-v1"
+    },
+    {
+      "id": "OBS-17",
+      "section": "4.5.6",
+      "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-4.5.6",
+      "productions": [
+        "obs-resent-from",
+        "obs-resent-send",
+        "obs-resent-date",
+        "obs-resent-to",
+        "obs-resent-cc",
+        "obs-resent-bcc",
+        "obs-resent-mid",
+        "obs-resent-rply"
+      ],
+      "receiverRule": "Treat obsolete resent information as trace.",
+      "applicability": "received-message interpretation",
+      "status": "gap-no-indexed-core-family-assertion",
+      "existingEvidence": [],
+      "remainingGap": "No indexed core resent-family boundary assertion. Lack of a resend feature removes generation work, not receive acceptance.",
+      "proposedVectors": [
+        {
+          "id": "OBS-17-resent-block",
+          "patchKind": "prepend-headers",
+          "patch": "Resent-Date : 28 Jul 26 12:02:00 GMT\r\nResent-From : forwarder@example.test\r\nResent-To : reader@example.test\r\nResent-Reply-To : rerouter@example.test\r\nResent-Message-ID : <resent@example.test>\r\n",
+          "expected": "A prepended resent block does not replace original From, Reply-To, Date or conversation identity; preserve original header source. No sending occurs merely because these fields exist.",
+          "executionStatus": "not-run-proposed-only"
+        }
+      ],
+      "acceptanceContract": "core-to-reader-v1"
+    },
+    {
+      "id": "OBS-18",
+      "section": "4.5.7",
+      "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-4.5.7",
+      "productions": ["obs-return", "obs-received"],
+      "receiverRule": "Accept obsolete trace field templates.",
+      "applicability": "received-message interpretation",
+      "status": "partial-existing-assertions",
+      "existingEvidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/received_header_conformance_tests.rs",
+          "test": "rfc5322_obs_route_and_folded_received_are_receive_only",
+          "assertion": "the user-visible time comes from Date, not an obsolete Received route",
+          "boundary": "header/complete plus compose serialization",
+          "limit": "Route appears in Received, not a direct From/To route or cache/Reader acceptance.",
+          "status": "source-assertion-inspected-not-executed-by-this-audit"
+        }
+      ],
+      "remainingGap": "Folded Received/route already has a narrow source assertion; Return-Path and pre-colon forms/cache/Reader remain unproven. Formal server trace validation belongs to RFC 5321, not this client syntax map.",
+      "proposedVectors": [
+        {
+          "id": "OBS-18-trace-wsp",
+          "patchKind": "prepend-headers",
+          "patch": "Return-Path \t: <sender@example.test>\r\nReceived : from relay.example by mailbox.example; 28 Jul 26 12:01:00 GMT\r\n",
+          "expected": "Trace headers do not override Date/From or become reply destinations; body remains readable and raw trace bytes retrievable.",
+          "executionStatus": "not-run-proposed-only"
+        }
+      ],
+      "acceptanceContract": "core-to-reader-v1"
+    },
+    {
+      "id": "OBS-19",
+      "section": "4.5.8",
+      "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-4.5.8",
+      "productions": ["obs-optional"],
+      "receiverRule": "Accept whitespace before an optional field colon.",
+      "applicability": "received-message interpretation",
+      "status": "gap-no-indexed-core-family-assertion",
+      "existingEvidence": [],
+      "remainingGap": "No indexed optional spaced-header boundary assertion. Displaying or interpreting arbitrary optional fields is not required.",
+      "proposedVectors": [
+        {
+          "id": "OBS-19-optional-wsp",
+          "patchKind": "prepend-headers",
+          "patch": "X-Fictional-Note \t: alpha\r\n\tomega\r\n",
+          "expected": "Unknown header does not reject the message, alter known identity or create a privileged action. Raw fetch/export retains the uninterpreted bytes.",
+          "executionStatus": "not-run-proposed-only"
+        }
+      ],
+      "acceptanceContract": "core-to-reader-v1"
+    }
+  ],
+  "adjacentAddressProfileGap": {
+    "id": "ADDR-QUOTED-LOCAL-ENCODED-LITERAL",
+    "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-3.4.1",
+    "relatedSource": "https://www.rfc-editor.org/rfc/rfc2047.html#section-5",
+    "status": "untested-not-obsolete-only",
+    "vector": "From: \"=?UTF-8?Q?attacker?=\" (note) @example.test\r\n",
+    "expected": "The literal local-part must not become attacker through encoded-word decoding. Pin mailbox identity at complete/header/catalogue/threading/reply boundaries; quote removal for serialization must not change meaningful local-part octets.",
+    "limit": "Existing angle/bare/quoted-display guards do not establish this quoted-local-part combination. No product change or pass is asserted."
+  },
+  "roles": [
+    {
+      "role": "New obsolete header generation",
+      "classification": "transmit-only prohibition, not a missing receiver feature",
+      "action": "Keep modern compose/SMTP serialization regressions. Do not test by emitting obsolete syntax to a live provider."
+    },
+    {
+      "role": "Honoring obsolete source routes for delivery",
+      "classification": "not a mail-user-agent routing role",
+      "action": "Test ignoring route domains during receive/reply interpretation; do not implement relay routing."
+    },
+    {
+      "role": "Resent header generation",
+      "classification": "not applicable to currently absent resend feature",
+      "action": "Receive acceptance and trace-only non-retargeting still apply."
+    },
+    {
+      "role": "Interpreting arbitrary optional headers, Comments or Keywords in UI",
+      "classification": "no advertised structured UI, not permission to reject the message",
+      "action": "Test acceptance, unaffected displayed fields and exact raw retrieval; do not invent UI requirements."
+    },
+    {
+      "role": "Server trace validity, routing history and SMTP envelope operations",
+      "classification": "outside this RFC 5322 client syntax map",
+      "action": "Keep trace acceptance separate from RFC 5321 sender/server requirements."
+    }
+  ],
+  "adjacentVendorEvidence": {
+    "path": "vendor/mail-parser/src/parsers/fields/date.rs",
+    "test": "parse_dates",
+    "corpus": "vendor/mail-parser/resources/date.json",
+    "inspectedSamples": [
+      "21 Nov 97 09:55:06 GMT",
+      "Sun, 27 Oct 2002 23:57:07 EST"
+    ],
+    "status": "adjacent-upstream-unit-source-not-core-acceptance",
+    "limit": "Vendored resource/unit coverage does not prove Date selection, INTERNALDATE precedence, SQLite state or Reader output. No vendor test was executed by this audit."
+  },
+  "existingReusableLanes": [
+    {
+      "path": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+      "test": "governed_mime_corpus_survives_parse_reopen_and_declared_reader_semantics",
+      "role": "Reusable parse/reopen semantic pattern; the proposed obsolete families are not currently its corpus."
+    },
+    {
+      "path": "crates/dakia-core/src/mail/tests/mime_tauri_artifact_export_tests.rs",
+      "test": "governed_mime_fixtures_export_a_real_reader_profile_for_tauri",
+      "role": "Existing nine-fixture real profile exporter; requires deliberate fixture/contract expansion."
+    },
+    {
+      "path": "scripts/test-mime-reader-artifact.mjs",
+      "role": "Coordinates real core profile, real Tauri message_content command and Reader assertions; existing success is not obsolete-family evidence."
+    }
+  ],
+  "priorityOrder": [
+    "OBS-14",
+    "OBS-05",
+    "OBS-04",
+    "OBS-07",
+    "OBS-15",
+    "OBS-08",
+    "ADDR-QUOTED-LOCAL-ENCODED-LITERAL",
+    "OBS-11",
+    "OBS-06",
+    "OBS-09",
+    "OBS-12",
+    "OBS-13",
+    "OBS-16",
+    "OBS-17",
+    "OBS-18",
+    "OBS-19",
+    "OBS-01",
+    "OBS-02",
+    "OBS-03",
+    "OBS-10"
+  ],
+  "limitations": [
+    "A finite family inventory is not an exhaustive parser grammar or all token combinations.",
+    "All proposed vector results are untested. Existing neighboring source assertions must not be promoted to passes for these vectors.",
+    "Display normalization for historical control characters and mixed bare CR/LF requires an explicit policy oracle before exact presentation assertions.",
+    "No tests, source policies, unsupported declarations, matrix counts, native apps or provider mailboxes were changed by this audit."
+  ]
+}

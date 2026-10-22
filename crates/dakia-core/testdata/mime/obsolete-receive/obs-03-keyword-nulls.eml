@@ -1,0 +1,12 @@
+X-Dakia-Corpus-Case: obs-03-keyword-nulls
+X-Dakia-Corpus-Source: RFC 5322 section 4.1; fictional
+Date: Tue, 28 Jul 2026 12:01:00 +0000
+From: Sender <sender@example.test>
+To: Reader <reader@example.test>
+Subject: Fictional obsolete syntax
+Message-ID: <obs-obs-03-keyword-nulls@example.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Keywords: alpha,,beta,
+
+Fictional body obs-03-keyword-nulls.

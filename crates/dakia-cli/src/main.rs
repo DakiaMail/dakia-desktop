@@ -113,6 +113,10 @@ struct SearchArgs {
 struct ShowArgs {
     /// The stable Dakia message ID returned by `search`.
     message_id: String,
+    /// The mailbox UIDVALIDITY returned with the message by `dakia --json search`.
+    /// Dakia refuses to fetch if the message has moved to a newer mailbox generation.
+    #[arg(long)]
+    expected_uid_validity: Option<u32>,
 }
 
 #[derive(Subcommand)]
@@ -125,6 +129,10 @@ enum AttachmentCommand {
 struct DownloadAttachmentArgs {
     /// The stable Dakia message ID returned by `search`.
     message_id: String,
+    /// The mailbox UIDVALIDITY returned with the message by `dakia --json search`.
+    /// Dakia refuses to download when the message has moved to a newer mailbox generation.
+    #[arg(long)]
+    expected_uid_validity: Option<u32>,
     /// The attachment ID returned by `attachment list`.
     attachment_id: String,
     /// A new output file. Existing files are never overwritten.
@@ -137,6 +145,10 @@ struct MailboxActionArgs {
     /// One or more stable Dakia message IDs returned by `search`.
     #[arg(required = true)]
     message_id: Vec<String>,
+    /// UIDVALIDITY values from `dakia --json search`, in the same order as
+    /// message_id. Dakia refuses an action if a mailbox generation changed.
+    #[arg(long)]
+    expected_uid_validity: Vec<u32>,
 }
 
 #[derive(Args)]
@@ -187,6 +199,10 @@ enum AiCommand {
 struct AiMessagesArgs {
     #[arg(required = true)]
     message_id: Vec<String>,
+    /// UIDVALIDITY values from `dakia --json search`, in the same order as
+    /// message_id. Required before email content can be sent to an AI provider.
+    #[arg(long)]
+    expected_uid_validity: Vec<u32>,
 }
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -291,12 +307,14 @@ async fn main() -> Result<()> {
             }
         }
         Command::Show(args) => {
-            let message = fetch_message(&store, &args.message_id).await?;
+            let message =
+                fetch_message(&store, &args.message_id, args.expected_uid_validity).await?;
             print_value(&message, cli.json)?;
         }
         Command::Attachment { command } => match command {
             AttachmentCommand::List(args) => {
-                let message = fetch_message(&store, &args.message_id).await?;
+                let message =
+                    fetch_message(&store, &args.message_id, args.expected_uid_validity).await?;
                 let attachments = message
                     .attachments
                     .iter()
@@ -309,16 +327,31 @@ async fn main() -> Result<()> {
             }
         },
         Command::Archive(args) => {
-            apply_mailbox_action(&store, &args.message_id, MailboxAction::Archive, cli.json).await?
+            apply_mailbox_action(
+                &store,
+                &message_receipts(&args.message_id, &args.expected_uid_validity)?,
+                MailboxAction::Archive,
+                cli.json,
+            )
+            .await?
         }
         Command::Spam(args) => {
-            apply_mailbox_action(&store, &args.message_id, MailboxAction::Spam, cli.json).await?
+            apply_mailbox_action(
+                &store,
+                &message_receipts(&args.message_id, &args.expected_uid_validity)?,
+                MailboxAction::Spam,
+                cli.json,
+            )
+            .await?
         }
         Command::Trash(args) => {
             require_confirmation(args.yes, "trash")?;
             apply_mailbox_action(
                 &store,
-                &args.messages.message_id,
+                &message_receipts(
+                    &args.messages.message_id,
+                    &args.messages.expected_uid_validity,
+                )?,
                 MailboxAction::Trash,
                 cli.json,
             )
@@ -328,7 +361,10 @@ async fn main() -> Result<()> {
             require_confirmation(args.yes, "permanently delete")?;
             apply_mailbox_action(
                 &store,
-                &args.messages.message_id,
+                &message_receipts(
+                    &args.messages.message_id,
+                    &args.messages.expected_uid_validity,
+                )?,
                 MailboxAction::Delete,
                 cli.json,
             )
@@ -373,16 +409,17 @@ async fn main() -> Result<()> {
                 println!("Sent: {response}");
             }
         }
-        Command::Ai { command } => {
-            let ai = ai_from_env()?;
-            match command {
-                AiCommand::Summarize(args) => println!(
-                    "{}",
-                    ai.summarize(&store.messages_by_ids(&args.message_id).await?)
-                        .await?
-                ),
+        Command::Ai { command } => match command {
+            AiCommand::Summarize(args) => {
+                let messages = ai_messages_at_receipts(
+                    &store,
+                    &message_receipts(&args.message_id, &args.expected_uid_validity)?,
+                )
+                .await?;
+                let ai = ai_from_env()?;
+                println!("{}", ai.summarize(&messages).await?);
             }
-        }
+        },
     }
     Ok(())
 }
@@ -613,66 +650,155 @@ async fn search_local_and_remote(
     Ok(results)
 }
 
-async fn fetch_message(store: &Store, message_id: &str) -> Result<dakia_core::MailSummary> {
-    let summary = store
-        .message(message_id)
-        .await?
-        .context("message not found")?;
+async fn fetch_message(
+    store: &Store,
+    message_id: &str,
+    expected_uid_validity: Option<u32>,
+) -> Result<dakia_core::MailSummary> {
+    let expected_uid_validity = expected_uid_validity
+        .context("reading a message requires --expected-uid-validity from dakia --json search")?;
+    let receipt = message_receipts(
+        &[message_id.to_owned()],
+        std::slice::from_ref(&expected_uid_validity),
+    )?
+    .into_iter()
+    .next()
+    .expect("one message receipt");
+    let summary = message_at_receipt(store, &receipt).await?;
     let account_id =
         Uuid::parse_str(&summary.account_id).context("stored message has an invalid account ID")?;
     let account = store
         .account(account_id)
         .await?
         .context("account not found")?;
-    MailService::new(store.clone())
-        .fetch_message(
+    let fetched = MailService::new(store.clone())
+        .fetch_message_at_epoch(
             &account,
             // `fetch_message` resolves the stored local mailbox through the
             // shared catalogue state. Passing a provider name here bypasses
             // that state for Gmail's special folders (for example Sent).
             &summary.mailbox,
             u32::try_from(summary.uid).context("stored message has an invalid UID")?,
+            receipt.expected_uid_validity,
         )
-        .await
+        .await?;
+    let current = message_at_receipt(store, &receipt).await?;
+    if !same_message_target(&summary, &current) {
+        bail!("message changed while reading it; no content was displayed");
+    }
+    Ok(fetched)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MessageReceipt {
+    message_id: String,
+    expected_uid_validity: i64,
+}
+
+fn message_receipts(
+    message_ids: &[String],
+    expected_uid_validities: &[u32],
+) -> Result<Vec<MessageReceipt>> {
+    if message_ids.len() != expected_uid_validities.len() {
+        bail!("provide --expected-uid-validity once for each message_id, in the same order");
+    }
+    message_ids
+        .iter()
+        .zip(expected_uid_validities)
+        .map(|(message_id, uid_validity)| {
+            if *uid_validity == 0 {
+                bail!("--expected-uid-validity must be greater than zero");
+            }
+            Ok(MessageReceipt {
+                message_id: message_id.clone(),
+                expected_uid_validity: i64::from(*uid_validity),
+            })
+        })
+        .collect()
+}
+
+async fn message_at_receipt(
+    store: &Store,
+    receipt: &MessageReceipt,
+) -> Result<dakia_core::MailSummary> {
+    let summary = store
+        .message(&receipt.message_id)
+        .await?
+        .with_context(|| format!("message not found: {}", receipt.message_id))?;
+    let current_uid_validity = summary
+        .mailbox_uid_validity
+        .context("message mailbox identity is unavailable; rerun search and try again")?;
+    if current_uid_validity != receipt.expected_uid_validity {
+        bail!("message changed since it was selected; rerun search and try again");
+    }
+    Ok(summary)
+}
+
+fn same_message_target(
+    captured: &dakia_core::MailSummary,
+    current: &dakia_core::MailSummary,
+) -> bool {
+    captured.id == current.id
+        && captured.account_id == current.account_id
+        && captured.mailbox == current.mailbox
+        && captured.uid == current.uid
+        && captured.mailbox_uid_validity == current.mailbox_uid_validity
+}
+
+async fn ai_messages_at_receipts(
+    store: &Store,
+    receipts: &[MessageReceipt],
+) -> Result<Vec<dakia_core::MailSummary>> {
+    // This read happens immediately before constructing the provider request.
+    // Stable local IDs alone may refer to a message that replaced an older IMAP
+    // UIDVALIDITY generation, so do not release any content without a receipt.
+    let mut messages = Vec::with_capacity(receipts.len());
+    for receipt in receipts {
+        messages.push(message_at_receipt(store, receipt).await?);
+    }
+    Ok(messages)
 }
 
 async fn apply_mailbox_action(
     store: &Store,
-    message_ids: &[String],
+    receipts: &[MessageReceipt],
     action: MailboxAction,
     json: bool,
 ) -> Result<()> {
-    let mut completed = Vec::with_capacity(message_ids.len());
-    for message_id in message_ids {
-        let summary = store
-            .message(message_id)
-            .await?
-            .with_context(|| format!("message not found: {message_id}"))?;
+    let mut completed = Vec::with_capacity(receipts.len());
+    for receipt_target in receipts {
+        let summary = message_at_receipt(store, receipt_target).await?;
+        let message_id = &receipt_target.message_id;
         let account_id = Uuid::parse_str(&summary.account_id)
             .with_context(|| format!("invalid account ID for message {message_id}"))?;
         let account = store
             .account(account_id)
             .await?
             .with_context(|| format!("account not found for message {message_id}"))?;
-        let destination_uid = MailService::new(store.clone())
-            .apply_action(
+        let service = MailService::new(store.clone());
+        let remote_receipt = service
+            .apply_action_at_epoch_with_receipt(
                 &account,
                 &summary.mailbox,
                 u32::try_from(summary.uid).context("stored message has an invalid UID")?,
                 action,
+                receipt_target.expected_uid_validity,
             )
             .await
             .with_context(|| format!("mailbox action failed for {message_id}"))?;
-        store
-            .move_message(
-                account.id,
-                &summary.mailbox,
-                u32::try_from(summary.uid).context("stored message has an invalid UID")?,
-                mailbox_action_destination(action).unwrap_or_default(),
-                destination_uid,
-            )
+        let destination = mailbox_action_destination(action).unwrap_or_default();
+        let publication = store
+            .move_message_at_epoch(&summary, destination, &remote_receipt)
             .await?;
-        completed.push(message_id);
+        if !publication.source_published {
+            bail!("message changed while the mailbox action completed; sync before trying another action");
+        }
+        if mailbox_action_destination(action).is_some() && !publication.destination_mapped {
+            service.sync_all(&account, 250).await.context(
+                "mailbox action completed, but Dakia could not reconcile its destination",
+            )?;
+        }
+        completed.push(message_id.clone());
     }
     if json {
         print_value(
@@ -695,10 +821,17 @@ async fn download_attachment(
     args: DownloadAttachmentArgs,
     json: bool,
 ) -> Result<()> {
-    let summary = store
-        .message(&args.message_id)
-        .await?
-        .context("message not found")?;
+    let expected_uid_validity = args
+        .expected_uid_validity
+        .context("attachment download requires --expected-uid-validity from dakia --json search")?;
+    let receipt = message_receipts(
+        std::slice::from_ref(&args.message_id),
+        std::slice::from_ref(&expected_uid_validity),
+    )?
+    .into_iter()
+    .next()
+    .expect("one attachment receipt");
+    let summary = message_at_receipt(store, &receipt).await?;
     let account_id =
         Uuid::parse_str(&summary.account_id).context("stored message has an invalid account ID")?;
     let account = store
@@ -706,14 +839,22 @@ async fn download_attachment(
         .await?
         .context("account not found")?;
     let attachment = MailService::new(store.clone())
-        .fetch_attachment(
+        .fetch_attachment_at_epoch(
             &account,
             &summary.mailbox,
             u32::try_from(summary.uid).context("stored message has an invalid UID")?,
             &args.attachment_id,
+            receipt.expected_uid_validity,
         )
         .await
         .context("attachment not found")?;
+    // The provider request above may take long enough for another process to
+    // replace this mailbox generation. Never create a user-visible file for a
+    // stale attachment response.
+    let current = message_at_receipt(store, &receipt).await?;
+    if !same_message_target(&summary, &current) {
+        bail!("message changed while downloading the attachment; no file was created");
+    }
     let mut output = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -869,13 +1010,80 @@ fn print_value(value: &impl serde::Serialize, _json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use clap::error::ErrorKind;
-    use dakia_core::classification::ModelClassification;
+    use dakia_core::{classification::ModelClassification, provider, AccountDraft, MailSummary};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
     use std::time::Duration;
+
+    async fn store_with_reused_message_generation() -> (Store, String) {
+        let store = Store::in_memory().await.unwrap();
+        let account = AccountDraft {
+            email: "receipt-test@example.test".into(),
+            display_name: "Receipt test".into(),
+            provider_id: Some("fastmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("fastmail").unwrap());
+        store.save_account(&account).await.unwrap();
+        store
+            .save_mailbox_catalog_state(account.id, "INBOX", "INBOX", 78, 1, true)
+            .await
+            .unwrap();
+
+        let id = "same-local-id-after-uidvalidity-rollover".to_owned();
+        let message = MailSummary {
+            id: id.clone(),
+            account_id: account.id.to_string(),
+            mailbox: "INBOX".into(),
+            uid: 42,
+            mailbox_uid_validity: Some(78),
+            message_id: Some("replacement@example.test".into()),
+            gmail_message_id: None,
+            in_reply_to: None,
+            reference_ids: None,
+            thread_id: "receipt-test-thread".into(),
+            subject: "replacement message".into(),
+            from_name: Some("Receipt test".into()),
+            from_address: "sender@example.test".into(),
+            to_addresses: "receipt-test@example.test".into(),
+            cc_addresses: String::new(),
+            bcc_addresses: String::new(),
+            reply_to_addresses: String::new(),
+            received_at: Utc::now(),
+            snippet: "replacement".into(),
+            body_text: "replacement body".into(),
+            body_html: None,
+            content_state: "complete".into(),
+            unsubscribe_kind: None,
+            unsubscribe_url: None,
+            is_read: false,
+            is_flagged: false,
+            has_attachments: true,
+            category: None,
+            classification_confidence: None,
+            classification_source: None,
+            classification_signals: String::new(),
+            attachments: Vec::new(),
+        };
+        store.upsert_messages(&[message]).await.unwrap();
+        (store, id)
+    }
+
+    fn old_generation_receipt(message_id: &str) -> Vec<MessageReceipt> {
+        message_receipts(&[message_id.to_owned()], &[77]).unwrap()
+    }
 
     #[test]
     fn ai_cli_keeps_summarization_but_rejects_llm_translation() {
@@ -884,6 +1092,125 @@ mod tests {
             .err()
             .expect("translate must not be an AI subcommand");
         assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
+    }
+
+    #[test]
+    fn message_receipts_require_one_positive_epoch_per_message() {
+        let ids = vec!["message-1".to_owned(), "message-2".to_owned()];
+        assert_eq!(
+            message_receipts(&ids, &[77]).unwrap_err().to_string(),
+            "provide --expected-uid-validity once for each message_id, in the same order"
+        );
+        assert_eq!(
+            message_receipts(&ids[..1], &[0]).unwrap_err().to_string(),
+            "--expected-uid-validity must be greater than zero"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_cli_action_receipt_does_not_mutate_a_reused_message() {
+        let (store, id) = store_with_reused_message_generation().await;
+        let error = apply_mailbox_action(
+            &store,
+            &old_generation_receipt(&id),
+            MailboxAction::Archive,
+            false,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "message changed since it was selected; rerun search and try again"
+        );
+        let current = store.message(&id).await.unwrap().unwrap();
+        assert_eq!(current.mailbox, "INBOX");
+        assert_eq!(current.mailbox_uid_validity, Some(78));
+    }
+
+    #[tokio::test]
+    async fn stale_cli_read_receipt_does_not_fetch_a_reused_message() {
+        let (store, id) = store_with_reused_message_generation().await;
+        let error = fetch_message(&store, &id, Some(77)).await.unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "message changed since it was selected; rerun search and try again"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_cli_read_receipt_fails_before_finding_a_message() {
+        let store = Store::in_memory().await.unwrap();
+        let error = fetch_message(&store, "message-id", None).await.unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "reading a message requires --expected-uid-validity from dakia --json search"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_cli_attachment_receipt_creates_no_file_or_provider_request() {
+        let (store, id) = store_with_reused_message_generation().await;
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("must-not-exist.bin");
+        let error = download_attachment(
+            &store,
+            DownloadAttachmentArgs {
+                message_id: id,
+                expected_uid_validity: Some(77),
+                attachment_id: "old-attachment".into(),
+                output: output.clone(),
+            },
+            false,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "message changed since it was selected; rerun search and try again"
+        );
+        assert!(!output.exists());
+    }
+
+    #[tokio::test]
+    async fn missing_cli_attachment_receipt_fails_before_creating_a_file() {
+        let store = Store::in_memory().await.unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("must-not-exist.bin");
+        let error = download_attachment(
+            &store,
+            DownloadAttachmentArgs {
+                message_id: "message-id".into(),
+                expected_uid_validity: None,
+                attachment_id: "attachment-id".into(),
+                output: output.clone(),
+            },
+            false,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "attachment download requires --expected-uid-validity from dakia --json search"
+        );
+        assert!(!output.exists());
+    }
+
+    #[tokio::test]
+    async fn stale_cli_ai_receipt_releases_no_replaced_message_content() {
+        let (store, id) = store_with_reused_message_generation().await;
+        let error = ai_messages_at_receipts(&store, &old_generation_receipt(&id))
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "message changed since it was selected; rerun search and try again"
+        );
     }
 
     #[test]

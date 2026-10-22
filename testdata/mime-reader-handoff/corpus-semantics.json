@@ -1,0 +1,86 @@
+{
+  "scenarios": {
+    "competing-nested-alternatives": {
+      "bodyTextIncludes": ["Visible plain body."],
+      "bodyTextExcludes": ["redacted-notes"],
+      "bodyHtmlIncludes": [
+        "Visible <strong>HTML</strong> body.",
+        "data:image/png;base64,iVBORw0KGgo="
+      ],
+      "downloadableFilenames": ["redacted-notes.txt"],
+      "readerText": "Visible HTML body.",
+      "readerBodyHtml": "<p>Visible <strong>HTML</strong> body.</p><img src=\"data:image/png;base64,iVBORw0KGgo=\">"
+    },
+    "attached-message-rfc822": {
+      "bodyTextIncludes": [
+        "The attached message is synthetic and fully redacted."
+      ],
+      "bodyTextExcludes": ["Original plain text."],
+      "downloadableFilenames": ["forwarded-message.eml"],
+      "readerText": "The attached message is synthetic and fully redacted."
+    },
+    "multipart-attachment-container": {
+      "bodyTextIncludes": ["Visible parent body."],
+      "bodyTextExcludes": ["Secret child text"],
+      "downloadableFilenames": ["bundle.mime"],
+      "readerText": "Visible parent body."
+    },
+    "empty-alternative-leaf": {
+      "bodyTextIncludes": ["Visible HTML after an empty plain part."],
+      "downloadableFilenames": [],
+      "readerText": "Visible HTML after an empty plain part.",
+      "readerBodyHtml": "<p>Visible HTML after an empty plain part.</p>"
+    },
+    "truncated-multipart-lf": {
+      "bodyTextIncludes": [
+        "The second leaf and closing boundary are deliberately missing."
+      ],
+      "bodyTextExcludes": ["--truncated"],
+      "downloadableFilenames": [],
+      "readerText": "The second leaf and closing boundary are deliberately missing."
+    },
+    "charset-matrix": {
+      "bodyTextIncludes": ["Zażółć"],
+      "bodyTextExcludes": ["Unknown charset must not become invented text"],
+      "downloadableFilenames": [],
+      "readerText": "Zażółć"
+    },
+    "format-flowed-delsp": {
+      "bodyTextIncludes": [
+        "soft spacethat continues",
+        "> Quoted flowed textcontinues too."
+      ],
+      "bodyHtmlIncludes": ["This is the HTML alternative."],
+      "downloadableFilenames": [],
+      "readerText": "This is the HTML alternative.",
+      "readerBodyHtml": "<p>This is the HTML alternative.</p>"
+    },
+    "international-reader-semantics": {
+      "bodyTextIncludes": [
+        "Tere, maailma 👋jätkub samal real.",
+        "مرحبا بالعالم",
+        "שלום עולם",
+        "Fictional signature"
+      ],
+      "bodyHtmlIncludes": [
+        "Tere, maailma 👋",
+        "dir=\"rtl\"",
+        "مرحبا بالعالم",
+        "שלום עולם",
+        "Fictional signature"
+      ],
+      "downloadableFilenames": [],
+      "readerText": "مرحبا بالعالم",
+      "readerBodyHtml": "<p>Tere, maailma 👋</p><p dir=\"rtl\">مرحبا بالعالم</p><p>שלום עולם</p><p>--<br>Fictional signature</p>",
+      "headers": {
+        "subject": "Fictional 🌍 reader message",
+        "fromName": "Fictional Šender",
+        "toAddressesInclude": "second@example.test"
+      }
+    }
+  },
+  "invalidTransfer": {
+    "fixtureId": "invalid-transfer-encodings",
+    "completeError": "mime_content_undecodable"
+  }
+}

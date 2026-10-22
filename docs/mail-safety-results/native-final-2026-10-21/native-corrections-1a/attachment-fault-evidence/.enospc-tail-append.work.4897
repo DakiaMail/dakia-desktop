@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "operation": "bounded-tail-fill",
+  "chunkBytes": 4096,
+  "maximumAppendBytes": 2097152,
+  "appendedBytes": 1007616,
+  "enospcObserved": true,
+  "enospcStage": "write-or-fsync",
+  "directoryDevice": "16777244",
+  "directoryInode": "2",
+  "fillerDevice": "16777244",
+  "fillerInode": "20",
+  "fillerBytesAfter": 64970752,
+  "fillerOwner": "501",
+  "fillerMode": "600",
+  "availableBytes": 0
+}

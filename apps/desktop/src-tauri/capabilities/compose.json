@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "compose-mail",
+  "description": "Compose windows can only recover draft inputs and submit their draft.",
+  "windows": ["compose-*"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "dialog:default",
+    "allow-compose-mail"
+  ]
+}

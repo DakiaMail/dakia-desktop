@@ -1,0 +1,215 @@
+{
+  "schemaVersion": 1,
+  "status": "passed",
+  "requirement": "MS-H-015",
+  "generatedAt": "2026-10-21T12:26:10.207Z",
+  "source": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "1a27848c0142d4b2f51439fc77caeae076acc9fd7a640b66569aa0b4d67376e6",
+    "fileCount": 761
+  },
+  "runtime": {
+    "appPid": 994,
+    "appExecutable": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/Dakia Fictional Provider Reader.app/Contents/MacOS/dakia-desktop",
+    "appSha256": "2cc898a0691f8f9f3b015b33f841fca2847b7afca99b8a2c267c42a2e74c12f1",
+    "cli": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/Dakia Fictional Provider Reader.app/Contents/MacOS/dakia",
+    "cliSha256": "6b72b2de4f89f6910b01f0b7fc6198f42f3d54ccb5708c20aaea6d955e5ea0cd",
+    "cliVersion": "dakia 0.4.4",
+    "profile": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/profile",
+    "imapPort": 57265,
+    "architecture": "arm64",
+    "signatureScope": "ad-hoc fictional acceptance wrapper"
+  },
+  "desktopRealtime": {
+    "proxy": {
+      "pid": 254,
+      "port": 57265,
+      "backendPort": 32898
+    },
+    "before": {
+      "established": true,
+      "attempts": 1,
+      "exactLoopbackConnections": 2
+    },
+    "after": {
+      "established": true,
+      "attempts": 1,
+      "exactLoopbackConnections": 2
+    }
+  },
+  "database": {
+    "before": {
+      "integrity": "ok",
+      "foreignKeyViolations": 0,
+      "digest": "5608c9c8675dbb99bc480314e8a8e944d9423c35321e459d0f5ccbc342b50728",
+      "tableCounts": {
+        "accounts": 2,
+        "attachments": 0,
+        "credentials": 2,
+        "deleted_account_tombstones": 0,
+        "mail_rebuild_jobs": 0,
+        "mailbox_action_tombstones": 0,
+        "message_content_cache": 6,
+        "messages": 7,
+        "send_attempts": 0,
+        "sent_correspondents": 0,
+        "starred_attachment_metadata": 0,
+        "starred_message_bodies": 0
+      }
+    },
+    "after": {
+      "integrity": "ok",
+      "foreignKeyViolations": 0,
+      "digest": "5608c9c8675dbb99bc480314e8a8e944d9423c35321e459d0f5ccbc342b50728",
+      "tableCounts": {
+        "accounts": 2,
+        "attachments": 0,
+        "credentials": 2,
+        "deleted_account_tombstones": 0,
+        "mail_rebuild_jobs": 0,
+        "mailbox_action_tombstones": 0,
+        "message_content_cache": 6,
+        "messages": 7,
+        "send_attempts": 0,
+        "sent_correspondents": 0,
+        "starred_attachment_metadata": 0,
+        "starred_message_bodies": 0
+      }
+    },
+    "unchanged": true
+  },
+  "cliReaders": {
+    "parallelCount": 8,
+    "allCommandsUserReadOnly": true,
+    "providerContactRequested": false,
+    "logicalSnapshotTables": [
+      "accounts",
+      "attachments",
+      "credentials",
+      "deleted_account_tombstones",
+      "mail_rebuild_jobs",
+      "mailbox_action_tombstones",
+      "message_content_cache",
+      "messages",
+      "send_attempts",
+      "sent_correspondents",
+      "starred_attachment_metadata",
+      "starred_message_bodies"
+    ],
+    "wave": [
+      {
+        "kind": "accounts",
+        "args": [
+          "--data-dir",
+          "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/profile",
+          "--json",
+          "account",
+          "list"
+        ],
+        "stdoutSha256": "6f87c995b902e265205d76980e8997666cf0d82a0b257a174c030ea3d9f58409",
+        "resultCount": 2
+      },
+      {
+        "kind": "accounts",
+        "args": [
+          "--data-dir",
+          "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/profile",
+          "--json",
+          "account",
+          "list"
+        ],
+        "stdoutSha256": "6f87c995b902e265205d76980e8997666cf0d82a0b257a174c030ea3d9f58409",
+        "resultCount": 2
+      },
+      {
+        "kind": "primary-positive",
+        "args": [
+          "--data-dir",
+          "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/profile",
+          "--json",
+          "search",
+          "Remote content safety check",
+          "--account",
+          "62a9320c-04f5-47c2-b4fa-d4952f0b6121"
+        ],
+        "stdoutSha256": "42b3c38d37986a6a246176841a678b4b72a4e7fe644c56392d22b8fd377504b7",
+        "resultCount": 1
+      },
+      {
+        "kind": "primary-positive",
+        "args": [
+          "--data-dir",
+          "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/profile",
+          "--json",
+          "search",
+          "Remote content safety check",
+          "--account",
+          "62a9320c-04f5-47c2-b4fa-d4952f0b6121"
+        ],
+        "stdoutSha256": "42b3c38d37986a6a246176841a678b4b72a4e7fe644c56392d22b8fd377504b7",
+        "resultCount": 1
+      },
+      {
+        "kind": "secondary-positive",
+        "args": [
+          "--data-dir",
+          "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/profile",
+          "--json",
+          "search",
+          "Account two collision safety check",
+          "--account",
+          "62a9320c-04f5-47c2-b4fa-d4952f0b6122"
+        ],
+        "stdoutSha256": "d36e00585e9d44c8f4f9c7dd6dbaf76cbb9e100d31341270719768e0b355be15",
+        "resultCount": 1
+      },
+      {
+        "kind": "secondary-positive",
+        "args": [
+          "--data-dir",
+          "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/profile",
+          "--json",
+          "search",
+          "Account two collision safety check",
+          "--account",
+          "62a9320c-04f5-47c2-b4fa-d4952f0b6122"
+        ],
+        "stdoutSha256": "d36e00585e9d44c8f4f9c7dd6dbaf76cbb9e100d31341270719768e0b355be15",
+        "resultCount": 1
+      },
+      {
+        "kind": "primary-negative",
+        "args": [
+          "--data-dir",
+          "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/profile",
+          "--json",
+          "search",
+          "Account two collision safety check",
+          "--account",
+          "62a9320c-04f5-47c2-b4fa-d4952f0b6121"
+        ],
+        "stdoutSha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+        "resultCount": 0
+      },
+      {
+        "kind": "secondary-negative",
+        "args": [
+          "--data-dir",
+          "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/profile",
+          "--json",
+          "search",
+          "Remote content safety check",
+          "--account",
+          "62a9320c-04f5-47c2-b4fa-d4952f0b6122"
+        ],
+        "stdoutSha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+        "resultCount": 0
+      }
+    ]
+  },
+  "limitations": [
+    "The wrapper is ad-hoc signed and is not a Developer ID signed, notarized, stapled, or distributed release candidate.",
+    "The CLI opens the current Store and may rewrite current-schema coordination markers. The unchanged assertion covers durable account, credential, message, cache, attachment, action, tombstone, rebuild, and correspondence state rather than live database and WAL bytes.",
+    "This helper proves local read-only CLI access while the fictional desktop Store and realtime IMAP connections remain active. Native webview identity and visible post-run Reader state are recorded separately by CUA."
+  ]
+}

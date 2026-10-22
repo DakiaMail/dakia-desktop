@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "lane": "native-WebKit",
+  "status": "passed-for-window-handoff-scope",
+  "scope": "Fictional native Compose seed handoff and detached Reader account-target continuity",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "8218b1f3621ee3cba9b2cb697275f0d85c0cac6abc39b5b90a817ed876abe605",
+    "fileCount": 940,
+    "unchangedBeforeAfterBuild": true
+  },
+  "runtime": {
+    "appPid": 75728,
+    "desktopSha256": "c81cb106b0a70c45c2969b219dad6cb981124c458feaf0b04f01c75dee65021c",
+    "cliSha256": "80513a5081d5f7051a736243ce2187ef0a389a600b82543b7c47ba01240732fb",
+    "webviewUrl": "tauri://localhost",
+    "bundle": "ad-hoc fixture-enabled debug app",
+    "releaseBoundary": "Not Developer ID signed, notarized, stapled, updater-signed, installed, or published."
+  },
+  "passed": [
+    {
+      "id": "native-compose-cr-mailto",
+      "result": "The first physical CR-injected mailto opened a new Compose child with an opaque seedDbKey and opener=main. The visible To value retained the literal line-break input, Subject was Fictional report, the line-break warning was visible, and Send was disabled. The child and original window were closed without sending."
+    },
+    {
+      "id": "native-compose-mailto-matrix",
+      "result": "All eleven physical mailto cases opened the expected Compose state and closed unsent. CR and LF recipient, Cc, and subject cases showed warning plus disabled Send. Double-encoded values remained literal and sendable. The CRLF body case retained a multiline body and remained sendable."
+    },
+    {
+      "id": "native-detached-reader-cycles",
+      "result": "Ten detached Reader open and close cycles rendered the expected fictional account and message body. One cycle was interrupted by the computer-use guard after open; a refreshed state was captured and the window then closed, followed by complete cycles five through ten. This is recorded as an interruption, not a product flake."
+    },
+    {
+      "id": "native-account-collision-reader",
+      "result": "A detached Reader for account two rendered its distinct cached body and account-two attachment. Its Reply used Fictional Reader Two as From, preserved the quoted account-two body, and its Forward retained the 39 B account-two attachment. Both Compose children and the Reader closed unsent."
+    }
+  ],
+  "excluded": [
+    {
+      "artifact": "005-mailto-cr-to-reload.txt",
+      "reason": "Despite its filename, Cmd-R was not used. It records a different Reply seed and provider-derived subject, then both windows were closed. It is not reload evidence."
+    }
+  ],
+  "retainedPriorFailure": {
+    "artifact": "docs/mail-safety-results/native-provider-reader-window-handoff-recovery-2026-10-21.json",
+    "result": "The previous physical blank Compose seed failure remains historical trigger evidence. This replay validates the later token-bound event handoff; it does not erase the earlier failure."
+  },
+  "notCoveredByThisReceipt": [
+    "Native Compose or Reader reload after an accepted handoff.",
+    "Other native acceptance gates still running under the broader fictional fixture.",
+    "Developer ID signing, notarization, updater, installation, release distribution, or live-provider acceptance."
+  ],
+  "artifactHashes": {
+    "sourceBeforeBuild": "e417ac91cefd7a3a5aa15ad56f33178f29a29b03482c8f7fda87deb95cbdb987",
+    "sourceAfterBuild": "becba69d3dd7ffa7179aa454a68751812032797ae9ed0146fb90eb2b963db8a5",
+    "approvedRuntimeIdentity": "b0ca3921e194571617e8add554160b9bba7697cf129905687fe3a57cb00c114a",
+    "runtimeInventory": "80570cddc60706dc4bb28e7dcf3521c2658e40bdfded21eba467f80f4938c2ea",
+    "mailtoContract": "7d6177e12bddadd5dda8f16ad18889606bee91022cc7a8243be1233fb3aebe11",
+    "mailtoResults": "dee11f58bdc6b5737199aa9d7b7f2465c2f5e5a974ff2cbb2ee80680b7a4dbc8",
+    "initialIdentity": "307860da307bf95d6221d2a29cedd8f0040f85199c7187f34677a2562f4f5b4e",
+    "firstPhysicalCrMailto": "5ceaef73fa7a4f481ee886c40eabdad328a8e0366a35e60300d2cec7bda9a5d9",
+    "excludedReloadNamedArtifact": "bb8a50b7fb6067ed3f59d4e91742304dcaea73e2f3c7090c5718044ae6b0a239",
+    "firstDetachedReader": "fb0f89afc7bbd913817ca1ea3413c7cc623cbd54d3e81d45900fdc382ba386ac",
+    "accountTwoDetachedReader": "95fd4adc2b29adde08c689867e115e737c46b7178e542d2b160dccca2c23e87d",
+    "accountTwoReply": "59f165af80ab6fbb5a7da2286bb9f800fb1126ed879b5397e433946deba804dc",
+    "accountTwoForward": "321fab2703ab79619810e170f4e5587207bde9c44b6c060dd35a4f014596dfdb",
+    "interruptedReaderCycle": "891a8e0c96a5904fc69ae59c89e3d0ec1867da3dca10e03dc495c41d771a8658"
+  }
+}

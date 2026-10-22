@@ -1,0 +1,154 @@
+{
+  "schemaVersion": 1,
+  "status": "partial-failed",
+  "recordedAtUtc": "2026-10-22T04:35:01.332Z",
+  "sourceTree": {
+    "digest": "04b1368f7a758b2ad77d95442a2d5a0d3b7ce74f1f100bb59967aeef8b9ad471",
+    "fileCount": 952,
+    "applicationReceipt": "docs/mail-safety-results/source-application-04b-2026-10-22.json"
+  },
+  "scope": "Same-identity fictional packaged native checkpoint. It records only the listed executed interactions and closes no aggregate catalogue scenario.",
+  "run": {
+    "root": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.tdadMZ",
+    "mainPid": 63144,
+    "mainExit": "normal-0",
+    "outerHarnessPid": 75723,
+    "outerHarnessState": "held after the checkpoint",
+    "desktopSha256": "ab4ec8052fd398b8433119e36edb331089c4e8d4673499fd2ec164c2cc7b373d",
+    "cliSha256": "a3e358035e9503b9ce1416f6480ff010c4acb2129f643b76869b51cd7edbb359",
+    "identityEvidence": {
+      "path": "approved-identity-begin.json",
+      "sha256": "e511fe53d51b1d21200e5f95b7d0d5d9c1d83d16c89826d05ddab7a26be8b897"
+    }
+  },
+  "verifiedSlices": [
+    {
+      "name": "Remote-content permission",
+      "result": "No controlled HTTP or TLS contact occurred before consent or after permission reset. The reset check intentionally opened UID 2 and restored it to unread before the post-reset receipt. Explicit consent produced five HTTP requests and four expected TLS contact attempts, with no unexpected contact.",
+      "evidence": [
+        {
+          "path": "native-ui-evidence/02-network-after-prefetch-and-uid4-arrival.json",
+          "sha256": "0dec40b471db68b6c990b9a1da356ab027fdadcdd6d4c49d6f2d6e0979629262"
+        },
+        {
+          "path": "native-ui-evidence/14-network-before-consent-after-history.json",
+          "sha256": "9730c35d22bb68b3cf79ecb7ee3ed71ea22d54e6483bf9e209de563a82fa016a"
+        },
+        {
+          "path": "native-ui-evidence/16-network-after-consent.json",
+          "sha256": "36163ab133616802d059cfa86cb906023dbece44ce255d8037bca12201905fdf"
+        },
+        {
+          "path": "native-ui-evidence/20-network-after-permission-reset.json",
+          "sha256": "7d70c7b5b4eb850f3069f8be8b811d5316d973b6d598619749044b2f497773d6"
+        },
+        {
+          "path": "native-ui-evidence/18-permission-reset-second-message-opened.txt",
+          "sha256": "47a380ec6bbe04984d5182274d23401cbf8378ade1efca0ff86000f3b6143c07"
+        },
+        {
+          "path": "native-ui-evidence/19-permission-reset-second-message-restored-unread.txt",
+          "sha256": "593b4498fa298a549658dc1f7aedf51aac059fbb1262bd2c7a95adccf100124b"
+        }
+      ]
+    },
+    {
+      "name": "Reader, translation and flags",
+      "result": "Corrected history states 09 through 13 were visually captured. UID 4 local translation made zero controlled network contacts and restored its original Estonian content after translation to English. External star and unstar converged in Smart views; four receipts preserve read-neutral prefetch and background behavior.",
+      "evidence": [
+        {
+          "path": "native-ui-evidence/21-network-offline-translation.json",
+          "sha256": "f124c1919499c6e73eee97dcc7e9cbf36fa62d9b6db93c3c8ac64f3ff3add69f"
+        },
+        {
+          "path": "native-ui-evidence/uid4-reader-restored.txt",
+          "sha256": "811c17016573fe5235045f56dfcb9fff0c0d5c8d38a657e6b7e671e44ddb3658"
+        }
+      ]
+    },
+    {
+      "name": "Provider watcher and native attachments",
+      "result": "The production watcher published UID 5 through raw fetch, MIME cache/reopen and Reader attachment presentation. The Reader showed 32 B text and a 28 B unsafe attachment warning. Visible EACCES and real ENOSPC failures left no partial file, then restored and retried safely; collision partial bulk save reported one of two files, a later positive bulk save wrote two exact files with quarantine and non-executable mode, and the leaf-symlink canary remained outside the save target.",
+      "evidence": [
+        {
+          "path": "g013-watcher-publication-04b1368-mailservice-artifact.json",
+          "sha256": "03086b1341d8cbf5cf394f94df8c3aad72d7e21caf467e41bfbda638e5259a26"
+        },
+        {
+          "path": ".dakia-g013-watcher-publication-04b1368-journal.json",
+          "sha256": "92e5467261a73bfa5a2cc589a8729c9bdcf1724306e1dc29336da66fd629616d"
+        }
+      ]
+    },
+    {
+      "name": "Account and bridge boundaries",
+      "result": "The packaged ACL probe rejected unauthorized command routes. Eleven mailto cases remained unsent, detached reply/reply-all/forward retained the intended account, ten account A/B cycles completed, held-sync Reader and Compose states remained usable, and the bundled CLI shared-profile check passed.",
+      "evidence": [
+        {
+          "path": "native-acl-acceptance.json",
+          "sha256": "94239c00fecd5c35a104d739430e8664ba42055b316766541c3db85ebfd3d731"
+        },
+        {
+          "path": "native-mailto-regressions.json",
+          "sha256": "7d6177e12bddadd5dda8f16ad18889606bee91022cc7a8243be1233fb3aebe11"
+        },
+        {
+          "path": "native-shared-profile-acceptance.json",
+          "sha256": "0c0f1e47cfc6f37865604f66fb7f0b5ce151090444d63786637aca65af64e8e2"
+        }
+      ]
+    }
+  ],
+  "resourceSampling": {
+    "status": "partial-unavailable",
+    "resourceSummary": {
+      "path": "/private/tmp/dakia-l013-native-resource-run-GifWMW/evidence/resource-summary.json",
+      "sha256": "80337862e4cd81af6867a368d0972ac0532fb86e0f8a4dd698858a129ee15b6b"
+    },
+    "mainProcessPeak": {
+      "rssBytes": 783253504,
+      "openFileDescriptors": 17,
+      "absoluteLimitStatus": "passed"
+    },
+    "limitations": [
+      "The mapped WebKit/XPC cohort is unavailable, not zero.",
+      "This was the first compatible baseline, so it makes no 20 percent regression claim."
+    ]
+  },
+  "failures": [
+    {
+      "name": "Terminal send recovery wording and sidebar accessibility",
+      "result": "The terminal sent-copy-failed state rendered correctly, keyboard repetition stayed suppressed, and the Needs attention entry reopened an account-locked view-only draft with Send disabled. Two presentation defects remain: the alert conditionally permits resending when the Sent copy is missing, even though that absence is expected after this failure; the Outbox sidebar announces the terminal recovery item as one email sending. The private wording and accessibility fixes are outside this source checkpoint.",
+      "evidence": [
+        {
+          "path": "native-ui-evidence/38-compose-after-single-send-action.txt",
+          "sha256": "2d7a0c264a4e1fd869fec719ed9547a4874a0abb886b8f7c549c7b29616fe895"
+        },
+        {
+          "path": "native-ui-evidence/41-outbox-terminal-recovery-row.txt",
+          "sha256": "995049ddad63a240396d12465ae06fb16e9475665b1b291d3cb494524cba036c"
+        },
+        {
+          "path": "native-ui-evidence/42-terminal-recovery-reopened-before-restart.txt",
+          "sha256": "3729175979abd87c3d42a1f138adc63b71504b0c40afb54a1e52593b6001ff30"
+        }
+      ],
+      "nextStep": "Apply and validate the combined unconditional no-resend warning and truthful sidebar-label fix; finish same-profile restart and wire/cache watermark acceptance separately."
+    }
+  ],
+  "excludedAutomationIncident": {
+    "status": "preserved-excluded-from-acceptance",
+    "result": "A stale accessibility index after history controls renumbered saved three fictional safe attachments. Frames 06 through 08 are excluded; the archived intent and cleanup evidence are retained.",
+    "productDefectClaimed": false,
+    "evidence": {
+      "path": "native-ui-evidence/automation-stale-index-incident.json",
+      "sha256": "30306d98dda833b79db7d6f35612794b0e4b068cdadeb62a0d543dbc2c8b0578"
+    }
+  },
+  "notExecutedOrNotAccepted": [
+    "Same-profile restart did not launch because its helper refused a wrong-build unsigned path.",
+    "The planned UID 7 leap-second replay did not run.",
+    "The final schema-v2 upgrade, corrupt-profile alert, notification delivery, physical sleep/wake, a complete WebKit resource cohort and release acceptance did not run.",
+    "This checkpoint does not establish all native interactions, provider compatibility, package signing or release readiness."
+  ]
+}

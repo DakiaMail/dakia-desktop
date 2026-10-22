@@ -1,0 +1,13 @@
+X-Dakia-Corpus-Case: obs-04-whitespace-only-fold
+X-Dakia-Corpus-Source: RFC 5322 section 4.2; fictional
+Date: Tue, 28 Jul 2026 12:01:00 +0000
+From: Sender <sender@example.test>
+To: Reader <reader@example.test>
+Message-ID: <obs-obs-04-whitespace-only-fold@example.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Subject: alpha 
+ 	
+ omega
+
+Fictional body obs-04-whitespace-only-fold.

@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "lane": "fictional-tls-tauri-mail-commands",
+  "status": "passed",
+  "evidenceRoot": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-mail-command-tls-IFiL5R",
+  "artifact": {
+    "accountId": "62a9320c-04f5-47c2-b4fa-d4952f0b6121",
+    "completed": [
+      "read",
+      "star",
+      "archive",
+      "spam",
+      "not_spam",
+      "trash",
+      "delete"
+    ],
+    "epoch": 77,
+    "nonce": "e55945f1-9e62-420a-8c84-53978a552d8d",
+    "providerFailureRetainedSource": true,
+    "schemaVersion": 1,
+    "staleRejected": true,
+    "staleSessionsAfter": 8,
+    "staleSessionsBefore": 8
+  },
+  "transcriptEvents": 55,
+  "transcriptSha256": "926f08a469f1f40e5d9524f37c011968bcf7547dbda60f4a5b2879d2d84c0602",
+  "limitations": [
+    "Focused command-boundary evidence; full repeated source runs still required for later edits.",
+    "Does not prove bulk optimistic UI concurrency, native WebKit, or live-provider mutations."
+  ]
+}

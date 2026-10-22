@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "status": "source-deep-performance-bounded-provider-passed-native-waiting",
+  "recordedAtUtc": "2026-10-22T01:14:11.864118+00:00",
+  "revision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "primary": {
+    "sourceDigest": "a86feeae88ffe172c8697a84f1d29afa123856661ee3765ca3307562c410193c",
+    "sourceFileCount": 940
+  },
+  "staged": {
+    "root": "/private/tmp/dakia-next-safety-fixes-a86-staging-20261022",
+    "sourceDigest": "04b1368f7a758b2ad77d95442a2d5a0d3b7ce74f1f100bb59967aeef8b9ad471",
+    "sourceFileCount": 952,
+    "appliedToPrimary": false,
+    "manifest": "/private/tmp/staged-frozen-source-logout-and-full-list-20261022.json",
+    "manifestSha256": "4028c01725dc2a6f13cb29127be4cefa19aafff59c6a854f319adf52f1144bc9",
+    "archive": "/private/tmp/staged-frozen-source-logout-and-full-list-20261022.zip",
+    "archiveSha256": "f88f277037ee337e27f7898e79d5b56e17e9826b78bebfd5f3cbdc1e895240d6"
+  },
+  "receipts": [
+    {
+      "path": "docs/mail-safety-results/staged-logout-full-list-three-run-source-2026-10-22.json",
+      "sha256": "0c9af14b05b2c63c7afa6a7f592ec1620012053a08ad8fc2ae6a7c5e3da52f47"
+    },
+    {
+      "path": "docs/mail-safety-results/staged-logout-full-list-deep-2026-10-22.json",
+      "sha256": "8b2bbf5e66efc42faeaa5cf1179e6f13fe8a837897e8c13cdbd2c1e460e9096b"
+    },
+    {
+      "path": "docs/mail-safety-results/staged-logout-full-list-performance-2026-10-22.json",
+      "sha256": "98327a3ae63cefdd1e4851754df389fa9daf300fbcef50c2e360553d4ae86e5b"
+    },
+    {
+      "path": "docs/mail-safety-results/gmail-full-list-production-proof-04b-2026-10-22.json",
+      "sha256": "bc5bbdafc8083744a142ba934c2f50cdbfeb82872d55dc7cb72d52f04bd16481"
+    },
+    {
+      "path": "docs/mail-safety-results/staged-logout-full-list-dependency-input-equivalence-2026-10-22.json",
+      "sha256": "16f265ebd5d3a7c30d481d1c1be7ae17e08628a1d199571f5ae9da907596ca0e"
+    }
+  ],
+  "native": {
+    "status": "not accepted on current staged source",
+    "approvedAppName": "Dakia Fictional Provider Reader",
+    "bundleId": "dev.dakia.fictional-provider-reader.run-OTAMH2",
+    "sameApplicationIdentityRetained": true,
+    "oldAlertPid": 65924,
+    "exactOldAlertPidStillRunningAtLastHostCheck": true,
+    "humanInspectionAndQuitPending": true,
+    "helperDidNotSignalApp": true,
+    "evidenceRoot": "/private/tmp/dakia-startup-exit1.33c02ae4-046b-48a3-b897-3c2c965b4b2e",
+    "privateFinalHelperPreparation": "/private/tmp/dakia-04b1368-native-restart-watermark-chain-preparation-final.json"
+  },
+  "programmeComplete": false,
+  "original69GapsDeclaredClosed": false,
+  "remainingIndex": "docs/mail-safety-remaining-gaps.md",
+  "noNewGmailSendOrMutation": true,
+  "releasePublicationPerformed": false,
+  "physicalSleepWakePerformed": false
+}

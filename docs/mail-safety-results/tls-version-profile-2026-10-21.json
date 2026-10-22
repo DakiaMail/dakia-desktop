@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T06:58:37Z",
+  "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "sourceState": "modified",
+  "scope": "synthetic localhost IMAP plus SMTP implicit TLS and STARTTLS",
+  "environment": {
+    "os": "Darwin 25.6.0 arm64",
+    "rustc": "1.89.0 (29483883e 2025-08-04)",
+    "cargo": "1.89.0 (c24e10642 2025-06-23)",
+    "openssl": "OpenSSL 3.6.4 25 Aug 2026"
+  },
+  "sourceHashes": {
+    "crates/dakia-core/src/mail/tests/tls_version_profile_tests.rs": "7887ef63a6b2c0c9b721c77f3f14302a9caf1d8980a895b3ef08612f1848faad",
+    "crates/dakia-core/src/mail.rs": "5b2d8209acfc904858bd3f986ed48765d848a4272017f79e08baba588cb802fa",
+    "Cargo.lock": "15488306522bcb4858723a227675ebe592360bc8786c6f8950a800550c267c92"
+  },
+  "sourceLane": {
+    "command": "CARGO_TARGET_DIR=/private/tmp/dakia-tls-profile cargo test --offline --manifest-path crates/dakia-core/Cargo.toml tls_version_profile_tests --lib -- --nocapture",
+    "exitCode": 0,
+    "passed": 6,
+    "failed": 0,
+    "ignored": 2,
+    "results": [
+      "TLS 1.2-only trusted server negotiated TLSv1.2 through the production IMAP connector profile",
+      "TLS 1.3-only trusted server negotiated TLSv1.3 through the production IMAP connector profile",
+      "TLS 1.2-only and TLS 1.3-only trusted servers negotiated their exact versions through the production SMTP implicit-TLS auth probe",
+      "TLS 1.2-only and TLS 1.3-only trusted servers negotiated their exact versions through the production SMTP STARTTLS auth probe",
+      "Each successful SMTP probe authenticated and then sent QUIT as the exact next command, with no MAIL, RCPT, DATA, or message body"
+    ],
+    "ignoredReason": "the two legacy refusal controls require an OpenSSL CLI with proven TLS 1.1 server support"
+  },
+  "manualLegacyLanes": [
+    {
+      "mode": "IMAP implicit TLS",
+      "command": "CARGO_TARGET_DIR=/private/tmp/dakia-tls-profile cargo test --offline --manifest-path crates/dakia-core/Cargo.toml production_imap_connector_rejects_openssl_tls11_before_credentials --lib -- --ignored --nocapture",
+      "exitCode": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "sourceHashes": {
+        "test": "7887ef63a6b2c0c9b721c77f3f14302a9caf1d8980a895b3ef08612f1848faad",
+        "production": "5b2d8209acfc904858bd3f986ed48765d848a4272017f79e08baba588cb802fa",
+        "lock": "15488306522bcb4858723a227675ebe592360bc8786c6f8950a800550c267c92"
+      },
+      "positiveControl": "A forced OpenSSL client negotiated TLSv1.1 with the same bounded server certificate and ECDHE-ECDSA-AES128-SHA cipher at security level 0",
+      "dakiaResult": "The production IMAP connector rejected the fresh TLS 1.1-only server during TLS handshake before authentication",
+      "credentialOracle": "The fictional password was absent from the returned error and decrypted OpenSSL server output"
+    },
+    {
+      "mode": "SMTP implicit TLS",
+      "command": "CARGO_TARGET_DIR=/private/tmp/dakia-tls-profile cargo test --offline --manifest-path crates/dakia-core/Cargo.toml production_smtp_connector_rejects_openssl_tls11_before_credentials_or_envelope --lib -- --ignored --nocapture",
+      "exitCode": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "sourceHashes": {
+        "test": "7887ef63a6b2c0c9b721c77f3f14302a9caf1d8980a895b3ef08612f1848faad",
+        "production": "5b2d8209acfc904858bd3f986ed48765d848a4272017f79e08baba588cb802fa",
+        "lock": "15488306522bcb4858723a227675ebe592360bc8786c6f8950a800550c267c92"
+      },
+      "positiveControl": "A forced OpenSSL client negotiated TLSv1.1 with the same bounded server certificate and ECDHE-ECDSA-AES128-SHA cipher at security level 0",
+      "dakiaResult": "The production SMTP implicit-TLS auth probe rejected the fresh TLS 1.1-only server with a ProtocolVersion alert",
+      "credentialOracle": "The fictional password, AUTH, MAIL FROM, RCPT TO, and DATA were absent from decrypted OpenSSL server output"
+    }
+  ],
+  "limitations": [
+    "The TLS 1.1 tests are deliberately ignored in default runs and must not be counted unless their explicit manual lanes execute successfully.",
+    "TLS 1.1 refusal was exercised through implicit TLS. STARTTLS uses the same production TLS-parameter factory and has positive TLS 1.2 and TLS 1.3 negotiation evidence, but no separate OpenSSL TLS 1.1 STARTTLS refusal fixture.",
+    "No external provider or non-loopback endpoint was contacted."
+  ]
+}

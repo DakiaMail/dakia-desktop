@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T16:17:39.574803+00:00",
+  "lane": "native-bundle-identity-plist-repair",
+  "status": "passed-focused-source-baseline-pending",
+  "sourceTree": {
+    "digest": "f8209887faad2ed25f965c55ef7a3680f7663852bfa33674406dc02da5b6063c",
+    "fileCount": 935
+  },
+  "failureRetained": "packaged-native-plist-identity-failure-2026-10-21.json",
+  "change": "Parse bounded owned canonical regular plist bytes with fixed Python plistlib and duplicate-rejecting dictionaries. Validate exact top-level string identity fields. Native identity transactions, shared-profile CLI approval, and resource approval now accept faithful pretty XML and binary plists without weakening identity checks.",
+  "tests": {
+    "governedHarnessPassed": 1,
+    "governedSharedProfilePassed": 12,
+    "privateResourceCollectorPassed": 20,
+    "independentReview": "approved"
+  },
+  "sensitivity": [
+    "Old contiguous XML substring oracle fails the faithful Tauri-generated fixture.",
+    "Removing duplicate-key rejection makes the adversarial regression fail."
+  ],
+  "fixture": {
+    "path": "testdata/native-mail-safety/packaged-info.plist",
+    "sha256": "cd9d1f83516904f288db94d99271f014023c9ce5625a4059ff5dcf83e7900746",
+    "provenance": "testdata/native-mail-safety/packaged-info.plist.provenance.json",
+    "redaction": "Only the run-specific bundle identifier changed; whitespace, DOCTYPE, key order and siblings remain."
+  },
+  "negativeCases": [
+    "wrong identity or name",
+    "non-string values",
+    "root and nested duplicate keys",
+    "nested/comment forgeries",
+    "malformed",
+    "empty",
+    "oversized",
+    "symlink"
+  ],
+  "privateResourceRunner": {
+    "path": "/private/tmp/dakia-l013-native-resource-runner-plist-safe.mjs",
+    "sha256": "efc75500f48a692c5fe65fbb3c7375e1a05b2e2cdae05839a2d0305051ab0816",
+    "receipt": "/private/tmp/dakia-l013-native-resource-runner-plist-safe-receipt.json",
+    "receiptSha256": "5d734db0b37659431ac8b6ed46d3c3764a3125ade11f6b2215fedc26c3d1a23f"
+  },
+  "limitations": [
+    "New three-run whole-source baseline is in progress and is separate from these focused checks.",
+    "No app launched, native UI controlled, resource samples collected, or provider/upgrade/release acceptance established."
+  ]
+}

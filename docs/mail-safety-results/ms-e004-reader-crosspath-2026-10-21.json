@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T13:09:13Z",
+  "status": "passed-scoped-with-explicit-limits",
+  "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "scope": "MS-E-004 finite Reader cross-path closure for governed MIME fixtures. This is scoped evidence, not a current full-source, native WebKit, provider, or complete RFC grammar claim.",
+  "fixtureIds": [
+    "competing-nested-alternatives",
+    "attached-message-rfc822",
+    "multipart-attachment-container",
+    "empty-alternative-leaf",
+    "truncated-multipart-lf",
+    "charset-matrix",
+    "format-flowed-delsp",
+    "international-reader-semantics",
+    "ambiguous-inline-identities"
+  ],
+  "entryPoints": {
+    "publicFullFetch": "MailService::fetch_full_message via the endpoint-aware test seam and production inner path",
+    "selectiveFetch": "MailService::fetch_message_at_epoch_with_imap_endpoint_for_test",
+    "persistence": "Store::cached_message_content after Reader hydration and SQLite reopen",
+    "ipc": "Tauri message_content command exercised from an exported real core profile",
+    "reader": "apps/desktop/src/components/Reader rendered from the command payload artifact"
+  },
+  "checks": [
+    {
+      "command": "cargo test --locked -p dakia-core --lib mail::tests::mime_reader_handoff_tests -- --nocapture",
+      "result": "19 passed, 0 failed, 0 ignored",
+      "coverage": "Public fictional TLS IMAP full and selective fetches, valid-fixture exact visible parity, read-neutral command assertions, Store reopen, attachment identity, and retained malformed-seed recovery."
+    },
+    {
+      "command": "npx vitest run apps/desktop/src/components/mimeCorpusHandoff.test.tsx --maxWorkers=1 --reporter=dot",
+      "result": "11 passed, 0 failed",
+      "coverage": "Reader component rendering for the governed corpus and both allowed truncated-boundary representations."
+    },
+    {
+      "command": "node scripts/test-mime-reader-artifact.mjs",
+      "result": "core export 1 passed; Tauri message_content 1 passed; Reader artifact fixtures 9 passed",
+      "coverage": "Real core profile to production Tauri command to Reader payload handoff."
+    },
+    {
+      "command": "cargo clippy --locked -p dakia-core --lib --tests -- -D warnings",
+      "result": "passed",
+      "coverage": "Core mail and test lint gate."
+    }
+  ],
+  "malformedTruncatedMultipartLf": {
+    "policyFile": "testdata/mime-reader-handoff/truncated-multipart-lf-representation-tolerance.json",
+    "policy": "This deliberately malformed LF-only multipart may have the documented different complete and selective representations. Both must retain the declared second leaf, must not expose --truncated, and must have no attachment metadata in either production projection or reopened cache.",
+    "validFixtureRule": "All other listed governed fixtures retain exact user-visible full/selective parity."
+  },
+  "diagnosticCorrection": "An initial blank-body report was a test-oracle error: hydration returns the canonical catalogue row while selected Reader content is persisted in the cache. A controlled public full-fetch trace parsed the governed body correctly. The final test asserts the cached selected content after hydration and reopen rather than treating the catalogue row as a second content payload.",
+  "independentReview": {
+    "reviewer": "native_fixes_review",
+    "result": "approved",
+    "reviewedRequirements": [
+      "attachment metadata cannot leak through the malformed-boundary tolerance",
+      "SMTP final 354 maps to DeliveryUncertain before Sent append",
+      "public Reader cross-path assertions retain exact valid-fixture parity"
+    ]
+  },
+  "relatedSmtpGuard": {
+    "test": "mail::standards_safety_tests::smtp_intermediate_reply_after_data_terminator_is_uncertain_without_retry_or_sent_append",
+    "result": "1 passed, 0 failed",
+    "behavior": "A final SMTP 354 response after DATA is DeliveryUncertain; no retry and no IMAP Sent append occur."
+  },
+  "files": [
+    {
+      "path": "crates/dakia-core/src/mail.rs",
+      "sha256": "b8b27fa587c1c0befcfb4ede11cec734ab09a99b24ffb60829b63fc2cdc7b3b0"
+    },
+    {
+      "path": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+      "sha256": "d4704be08a14110afcdac9454ccdd8192b304fdfca49c3e4ca7c96c6e4f7ba69"
+    },
+    {
+      "path": "crates/dakia-core/src/standards_safety_tests.rs",
+      "sha256": "970d5493027ca25ed1c51e259176309517dc0959ff0c53ce63607be8fbc747f1"
+    },
+    {
+      "path": "apps/desktop/src/components/mimeCorpusHandoff.test.tsx",
+      "sha256": "77909ef828ef61dfde37ad8608b6d9fb64d9c5f2a83d899e25c998d6fe929e4d"
+    },
+    {
+      "path": "testdata/mime-reader-handoff/truncated-multipart-lf-representation-tolerance.json",
+      "sha256": "90b1a2824a5f692ec6df95c54935851158227bcf9cf37c1fd8c035bec5268f9c"
+    }
+  ],
+  "limits": [
+    "No current full-source baseline is established by this report.",
+    "No native WebKit, live provider, packaged application, or release claim is established by this report.",
+    "Quoted local-part and broad obsolete-address grammar remain outside this finite scenario closure."
+  ]
+}

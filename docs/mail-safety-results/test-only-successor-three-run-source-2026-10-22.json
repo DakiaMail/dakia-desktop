@@ -1,0 +1,727 @@
+{
+  "schemaVersion": 1,
+  "lane": "source",
+  "revision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "workingTree": "modified or unavailable",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "0e1a6829efb3c3e8620d68b0e9d8864f39f12d7b844ed2f792c8abd0474fb953",
+    "fileCount": 961
+  },
+  "environment": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "node": "v22.23.2"
+  },
+  "startedAt": "2026-10-22T09:04:09.512Z",
+  "finishedAt": "2026-10-22T09:18:55.070Z",
+  "status": "passed",
+  "runs": [
+    {
+      "iteration": 1,
+      "status": "passed",
+      "commands": [
+        {
+          "command": "node",
+          "args": [
+            "scripts/validate-mail-safety-catalogue.mjs"
+          ],
+          "startedAt": "2026-10-22T09:04:09.513Z",
+          "finishedAt": "2026-10-22T09:04:09.933Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/validate-mail-standards-requirements.mjs"
+          ],
+          "startedAt": "2026-10-22T09:04:09.933Z",
+          "finishedAt": "2026-10-22T09:04:10.233Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/validate-realistic-fixtures.mjs"
+          ],
+          "startedAt": "2026-10-22T09:04:10.233Z",
+          "finishedAt": "2026-10-22T09:04:10.397Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/tauri-contract-inventory.mjs"
+          ],
+          "startedAt": "2026-10-22T09:04:10.397Z",
+          "finishedAt": "2026-10-22T09:04:10.563Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "npm",
+          "args": [
+            "run",
+            "typecheck"
+          ],
+          "startedAt": "2026-10-22T09:04:10.563Z",
+          "finishedAt": "2026-10-22T09:04:14.182Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "npm",
+          "args": [
+            "run",
+            "format:check"
+          ],
+          "startedAt": "2026-10-22T09:04:14.182Z",
+          "finishedAt": "2026-10-22T09:04:16.399Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "cargo",
+          "args": [
+            "fmt",
+            "--all",
+            "--",
+            "--check"
+          ],
+          "startedAt": "2026-10-22T09:04:16.399Z",
+          "finishedAt": "2026-10-22T09:04:17.189Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "cargo",
+          "args": [
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--locked",
+            "--",
+            "-D",
+            "warnings"
+          ],
+          "startedAt": "2026-10-22T09:04:17.189Z",
+          "finishedAt": "2026-10-22T09:04:17.622Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "npm",
+          "args": [
+            "test",
+            "--",
+            "--maxWorkers=1"
+          ],
+          "startedAt": "2026-10-22T09:04:17.622Z",
+          "finishedAt": "2026-10-22T09:06:05.621Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "cargo",
+          "args": [
+            "test",
+            "--workspace",
+            "--locked"
+          ],
+          "startedAt": "2026-10-22T09:06:05.621Z",
+          "finishedAt": "2026-10-22T09:08:00.313Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "cargo",
+          "args": [
+            "test",
+            "--locked",
+            "-p",
+            "dakia-desktop",
+            "--features",
+            "native-mail-safety-fixture",
+            "--lib"
+          ],
+          "startedAt": "2026-10-22T09:08:00.313Z",
+          "finishedAt": "2026-10-22T09:08:26.220Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/test-realtime-delivery.mjs"
+          ],
+          "startedAt": "2026-10-22T09:08:26.220Z",
+          "finishedAt": "2026-10-22T09:09:00.935Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/test-mime-reader-artifact.mjs"
+          ],
+          "startedAt": "2026-10-22T09:09:00.935Z",
+          "finishedAt": "2026-10-22T09:09:04.756Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/test-attachment-command-artifact.mjs"
+          ],
+          "startedAt": "2026-10-22T09:09:04.756Z",
+          "finishedAt": "2026-10-22T09:09:08.030Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/test-mail-command-tls.mjs"
+          ],
+          "startedAt": "2026-10-22T09:09:08.030Z",
+          "finishedAt": "2026-10-22T09:09:08.991Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "npm",
+          "args": [
+            "run",
+            "test:release-scripts"
+          ],
+          "startedAt": "2026-10-22T09:09:08.991Z",
+          "finishedAt": "2026-10-22T09:10:17.361Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "npm",
+          "args": [
+            "run",
+            "build:web"
+          ],
+          "startedAt": "2026-10-22T09:10:17.361Z",
+          "finishedAt": "2026-10-22T09:10:21.165Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        }
+      ]
+    },
+    {
+      "iteration": 2,
+      "status": "passed",
+      "commands": [
+        {
+          "command": "node",
+          "args": [
+            "scripts/validate-mail-safety-catalogue.mjs"
+          ],
+          "startedAt": "2026-10-22T09:10:21.165Z",
+          "finishedAt": "2026-10-22T09:10:21.601Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/validate-mail-standards-requirements.mjs"
+          ],
+          "startedAt": "2026-10-22T09:10:21.601Z",
+          "finishedAt": "2026-10-22T09:10:21.904Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/validate-realistic-fixtures.mjs"
+          ],
+          "startedAt": "2026-10-22T09:10:21.904Z",
+          "finishedAt": "2026-10-22T09:10:22.071Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/tauri-contract-inventory.mjs"
+          ],
+          "startedAt": "2026-10-22T09:10:22.071Z",
+          "finishedAt": "2026-10-22T09:10:22.245Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "npm",
+          "args": [
+            "run",
+            "typecheck"
+          ],
+          "startedAt": "2026-10-22T09:10:22.245Z",
+          "finishedAt": "2026-10-22T09:10:25.999Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "npm",
+          "args": [
+            "run",
+            "format:check"
+          ],
+          "startedAt": "2026-10-22T09:10:25.999Z",
+          "finishedAt": "2026-10-22T09:10:28.060Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "cargo",
+          "args": [
+            "fmt",
+            "--all",
+            "--",
+            "--check"
+          ],
+          "startedAt": "2026-10-22T09:10:28.060Z",
+          "finishedAt": "2026-10-22T09:10:28.874Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "cargo",
+          "args": [
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--locked",
+            "--",
+            "-D",
+            "warnings"
+          ],
+          "startedAt": "2026-10-22T09:10:28.874Z",
+          "finishedAt": "2026-10-22T09:10:29.352Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "npm",
+          "args": [
+            "test",
+            "--",
+            "--maxWorkers=1"
+          ],
+          "startedAt": "2026-10-22T09:10:29.352Z",
+          "finishedAt": "2026-10-22T09:12:14.056Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "cargo",
+          "args": [
+            "test",
+            "--workspace",
+            "--locked"
+          ],
+          "startedAt": "2026-10-22T09:12:14.056Z",
+          "finishedAt": "2026-10-22T09:13:11.727Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "cargo",
+          "args": [
+            "test",
+            "--locked",
+            "-p",
+            "dakia-desktop",
+            "--features",
+            "native-mail-safety-fixture",
+            "--lib"
+          ],
+          "startedAt": "2026-10-22T09:13:11.727Z",
+          "finishedAt": "2026-10-22T09:13:15.331Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/test-realtime-delivery.mjs"
+          ],
+          "startedAt": "2026-10-22T09:13:15.331Z",
+          "finishedAt": "2026-10-22T09:13:18.634Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/test-mime-reader-artifact.mjs"
+          ],
+          "startedAt": "2026-10-22T09:13:18.634Z",
+          "finishedAt": "2026-10-22T09:13:21.929Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/test-attachment-command-artifact.mjs"
+          ],
+          "startedAt": "2026-10-22T09:13:21.929Z",
+          "finishedAt": "2026-10-22T09:13:25.238Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/test-mail-command-tls.mjs"
+          ],
+          "startedAt": "2026-10-22T09:13:25.238Z",
+          "finishedAt": "2026-10-22T09:13:26.140Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "npm",
+          "args": [
+            "run",
+            "test:release-scripts"
+          ],
+          "startedAt": "2026-10-22T09:13:26.140Z",
+          "finishedAt": "2026-10-22T09:14:34.189Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "npm",
+          "args": [
+            "run",
+            "build:web"
+          ],
+          "startedAt": "2026-10-22T09:14:34.189Z",
+          "finishedAt": "2026-10-22T09:14:37.679Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        }
+      ]
+    },
+    {
+      "iteration": 3,
+      "status": "passed",
+      "commands": [
+        {
+          "command": "node",
+          "args": [
+            "scripts/validate-mail-safety-catalogue.mjs"
+          ],
+          "startedAt": "2026-10-22T09:14:37.679Z",
+          "finishedAt": "2026-10-22T09:14:38.095Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/validate-mail-standards-requirements.mjs"
+          ],
+          "startedAt": "2026-10-22T09:14:38.095Z",
+          "finishedAt": "2026-10-22T09:14:38.395Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/validate-realistic-fixtures.mjs"
+          ],
+          "startedAt": "2026-10-22T09:14:38.395Z",
+          "finishedAt": "2026-10-22T09:14:38.559Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/tauri-contract-inventory.mjs"
+          ],
+          "startedAt": "2026-10-22T09:14:38.559Z",
+          "finishedAt": "2026-10-22T09:14:38.724Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "npm",
+          "args": [
+            "run",
+            "typecheck"
+          ],
+          "startedAt": "2026-10-22T09:14:38.724Z",
+          "finishedAt": "2026-10-22T09:14:42.294Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "npm",
+          "args": [
+            "run",
+            "format:check"
+          ],
+          "startedAt": "2026-10-22T09:14:42.294Z",
+          "finishedAt": "2026-10-22T09:14:44.354Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "cargo",
+          "args": [
+            "fmt",
+            "--all",
+            "--",
+            "--check"
+          ],
+          "startedAt": "2026-10-22T09:14:44.354Z",
+          "finishedAt": "2026-10-22T09:14:45.147Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "cargo",
+          "args": [
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--locked",
+            "--",
+            "-D",
+            "warnings"
+          ],
+          "startedAt": "2026-10-22T09:14:45.147Z",
+          "finishedAt": "2026-10-22T09:14:45.640Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "npm",
+          "args": [
+            "test",
+            "--",
+            "--maxWorkers=1"
+          ],
+          "startedAt": "2026-10-22T09:14:45.641Z",
+          "finishedAt": "2026-10-22T09:16:29.984Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "cargo",
+          "args": [
+            "test",
+            "--workspace",
+            "--locked"
+          ],
+          "startedAt": "2026-10-22T09:16:29.984Z",
+          "finishedAt": "2026-10-22T09:17:27.911Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "cargo",
+          "args": [
+            "test",
+            "--locked",
+            "-p",
+            "dakia-desktop",
+            "--features",
+            "native-mail-safety-fixture",
+            "--lib"
+          ],
+          "startedAt": "2026-10-22T09:17:27.911Z",
+          "finishedAt": "2026-10-22T09:17:31.806Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/test-realtime-delivery.mjs"
+          ],
+          "startedAt": "2026-10-22T09:17:31.806Z",
+          "finishedAt": "2026-10-22T09:17:35.033Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/test-mime-reader-artifact.mjs"
+          ],
+          "startedAt": "2026-10-22T09:17:35.033Z",
+          "finishedAt": "2026-10-22T09:17:38.301Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/test-attachment-command-artifact.mjs"
+          ],
+          "startedAt": "2026-10-22T09:17:38.301Z",
+          "finishedAt": "2026-10-22T09:17:41.502Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/test-mail-command-tls.mjs"
+          ],
+          "startedAt": "2026-10-22T09:17:41.502Z",
+          "finishedAt": "2026-10-22T09:17:42.365Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "npm",
+          "args": [
+            "run",
+            "test:release-scripts"
+          ],
+          "startedAt": "2026-10-22T09:17:42.365Z",
+          "finishedAt": "2026-10-22T09:18:51.634Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "npm",
+          "args": [
+            "run",
+            "build:web"
+          ],
+          "startedAt": "2026-10-22T09:18:51.634Z",
+          "finishedAt": "2026-10-22T09:18:55.070Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "Ignored credentialed/independent-server tests are separate evidence.",
+    "Native WebKit, packaged upgrades, live providers, audits, performance, and fuzzing are not established by this source run."
+  ],
+  "sourceTreeAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "0e1a6829efb3c3e8620d68b0e9d8864f39f12d7b844ed2f792c8abd0474fb953",
+    "fileCount": 961
+  },
+  "evidenceSummary": {
+    "kind": "test-only-successor-source-baseline",
+    "sourceManifestSha256": "f5674652e76918feaf220e49a0a5c6fad910f327dcd5d4fb2f66fce43227f10e",
+    "rawRunnerReportSha256": "f5bf34533cb17c8f2e8f2009f177529540c8e893a0c2af98eeee6fa9583501a3",
+    "rawLogSha256": "ecba3e25b7aacceb36a07fc3ff387defc0e7ad40a314e8eef8ad0e4f90ec57cb",
+    "gatesPassed": 51,
+    "failures": 0,
+    "retries": 0,
+    "observedFlakes": 0,
+    "frontendPerRun": {
+      "passed": 652,
+      "skipped": 2,
+      "passedFiles": 66,
+      "skippedFiles": 3
+    },
+    "coreLibraryPerWorkspaceRun": {
+      "passed": 761,
+      "ignored": 13
+    },
+    "fixtureEnabledDesktopPerRun": {
+      "passed": 244,
+      "failed": 0
+    },
+    "releaseScriptTestsPerRun": {
+      "passed": 282,
+      "failed": 0,
+      "skipped": 0
+    },
+    "environment": {
+      "stdin": "/dev/null",
+      "gmailVariables": "unset",
+      "NODE_OPTIONS": "--no-experimental-webstorage"
+    },
+    "buildWarningsPerRun": [
+      "Five Bergamot Node-module browser externalization warnings."
+    ],
+    "historicalAttempts": [
+      {
+        "exitCode": 130,
+        "status": "interrupted-not-pass",
+        "reason": "Root stopped the preceding run to exclude generated Python bytecode from the source manifest."
+      }
+    ],
+    "limitations": [
+      "No native, provider, independent-server, performance or release result is inferred from this source pass.",
+      "Skipped and ignored cases are not passes.",
+      "No global Rust branch coverage is established."
+    ]
+  }
+}

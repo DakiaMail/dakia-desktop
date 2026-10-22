@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "lane": "optional-credentialed-provider-read-only-observation",
+  "status": "passed",
+  "recordedAtUtc": "2026-10-21T19:32:54.387043+00:00",
+  "provider": "gmail",
+  "authenticationMethod": "app_password",
+  "accountScope": "one explicit disposable allowlisted account",
+  "execution": {
+    "exitCode": 0,
+    "stage": "inbox_observation",
+    "remoteMutationRequested": false,
+    "credentialsFileUnchanged": true,
+    "evidenceContentCheck": "passed"
+  },
+  "observedOperations": [
+    "IMAP read-neutral authentication and discovery",
+    "SMTP authentication and QUIT",
+    "read-only exact INBOX UUID search and body observation"
+  ],
+  "limits": {
+    "readNeutralImapMessageFetchLimit": 0,
+    "roundtripInboxSyncLimit": 1,
+    "roundtripRemoteSearchLimit": 10,
+    "roundtripMessageLimit": 0
+  },
+  "observation": {
+    "roundtripId": "45bacd384f0c4a74893f14e4fea23d9a",
+    "result": "exact_message_verified",
+    "operationsClamped": false,
+    "completedOperationCount": 22,
+    "largestRecordedOperation": {
+      "name": "hydrate",
+      "elapsedMs": 3987
+    },
+    "selectedRecordedOperations": {
+      "headerSyncMs": 1074,
+      "exactSearchMs": 317,
+      "fullFetchMs": 231,
+      "cacheReadMs": 13
+    }
+  },
+  "testedExecutable": {
+    "path": "/private/tmp/dakia-provider-progress-7570497e-20261021/dakia-provider-smoke",
+    "sha256": "896c4e2aafe4fe15fa6d35f6793f2b0b114d467858c06f75b79623595ca75e9b",
+    "reviewedBuildIdentity": "757 files / 939 source inputs"
+  },
+  "evidence": {
+    "providerSmokeEvidence": {
+      "path": "/private/tmp/dakia-gmail-recovery-progress-0utth4l1/provider-smoke-evidence.json",
+      "sha256": "474bfbcf30e2bb0b05c6c056921abc24b5cc6a18834fc68d72e1c2e12ee80ac0"
+    },
+    "wrapperResult": {
+      "path": "/private/tmp/dakia-gmail-recovery-progress-0utth4l1/wrapper-result.json",
+      "sha256": "9629d3fc217721ad12733d5a688024c5238d09525919aab757fc93945d3bbe30"
+    },
+    "wrapperSha256": "3f51d93ff6b283956fc6107b45c653b36f13da3ab9e9273292897d2e0e731bf5"
+  },
+  "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "limitations": [
+    "This is one completed, disposable-account observation. It does not establish reliable behavior across providers, Gmail multi-label semantics, or native desktop behavior.",
+    "The earlier approximately 45-second Gmail timeouts remain retained as unresolved historical evidence; this observation does not identify or prove a root-cause fix for them.",
+    "The current c56 source validation was still running when this receipt was recorded. This receipt does not claim a current source-suite result.",
+    "No outbound email submission, mailbox mutation, or credential-file change was requested by this observation. SMTP authentication ended with QUIT."
+  ]
+}

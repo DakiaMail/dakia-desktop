@@ -1,0 +1,172 @@
+{
+  "schemaVersion": 1,
+  "kind": "provider-hydrated-same-profile-reader-primary-focused-result",
+  "status": "passed",
+  "recordedAtUtc": "2026-10-22T10:54:21Z",
+  "scope": "One focused current-primary run of nine existing fictional MIME fixtures through production MailService full fetch, selective fetch, hydration into one shared SQLite profile, profile reopen, the Tauri message_content command, and the React Reader artifact consumer. This is not a full source, native WebKit, live-provider, package, release, or Phase 2 result.",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "before": "33d287b001bcc45b1a0521360d1925c073fdbfcc01e01eb3b42a73a19f1e95e1",
+    "after": "33d287b001bcc45b1a0521360d1925c073fdbfcc01e01eb3b42a73a19f1e95e1",
+    "fileCount": 990,
+    "bindingArtifact": {
+      "path": "/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-mime-reader-artifact-xt9dFb/source-binding.json",
+      "sha256": "beef05dbd44429f461fe484083da83b45a661cb8b64b4c9de2b3bdac6d08bc3c"
+    },
+    "laterPrimaryStateExcluded": "The primary source continued changing after this focused run. Later source snapshots do not expand this result's scope."
+  },
+  "application": {
+    "phase1Patch": {
+      "path": "/private/tmp/dakia-phase1-provider-reader-artifact-20261022/phase1-provider-reader-artifact.patch",
+      "sha256": "87ba6abea6bb257c4c705b74be3dda12953b7b49f25a447f6a2f1a2b0d68a625"
+    },
+    "runnerAssertionPatch": {
+      "path": "/private/tmp/dakia-phase1-runner-assertion-followup-20261022/runner-assertion-followup.patch",
+      "sha256": "993aad3accd2a7bccbccf0dcedbe3e4e60e1490f2ee1d2628b753f4fec4a94f5"
+    },
+    "applicationJournal": {
+      "path": "/private/tmp/dakia-mime-phase1-primary-application-20261022/application-journal.json",
+      "sha256": "ab37c6d43eaa1b5c2318591a66a5aadf2f5d70347095d38029608144e3f066ff",
+      "note": "Its pending execution field records the state at patch application time. The bound execution logs and pipeline receipt below supersede that pending field."
+    },
+    "assertionFollowupJournal": {
+      "path": "/private/tmp/dakia-mime-phase1-primary-application-20261022/assertion-followup.json",
+      "sha256": "8e6f2e98331cb9a618693ef7caff032869d462690b86a8bc3db784b340e0eace",
+      "note": "Its pending rerun field records the state before the focused Node rerun."
+    }
+  },
+  "execution": {
+    "command": "DAKIA_KEEP_MIME_READER_ARTIFACTS=1 node scripts/test-mime-reader-artifact.mjs",
+    "attempts": [
+      {
+        "session": 92414,
+        "status": "environment-blocked",
+        "log": {
+          "path": "/private/tmp/dakia-mime-phase1-primary-application-20261022/focused-pipeline.log",
+          "sha256": "11911ca0ce267e298c59de7af197cef49a8ba80b2a0e5e6d8ad5f282c0b6a6aa"
+        },
+        "failure": "The sandbox denied the first loopback listener bind with EPERM before a fixture connection was accepted.",
+        "classification": "Environment restriction. It is not counted as a product failure, pass, retry-masked flake, or protocol observation."
+      },
+      {
+        "session": 14348,
+        "status": "passed",
+        "networkScope": "Escalated loopback-only fictional IMAP listeners; no external provider or user mailbox access.",
+        "log": {
+          "path": "/private/tmp/dakia-mime-phase1-primary-application-20261022/focused-pipeline-loopback.log",
+          "sha256": "05b3a0b2df624291efbc250a6bf0f63483a7a29421f23020909f9010e82b4ab1"
+        },
+        "retainedArtifactRoot": "/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-mime-reader-artifact-xt9dFb"
+      }
+    ],
+    "toolchain": {
+      "platform": "darwin",
+      "architecture": "arm64",
+      "node": "v22.23.2",
+      "cargo": "cargo 1.89.0 (c24e10642 2025-06-23)",
+      "rustc": "rustc 1.89.0 (29483883e 2025-08-04)"
+    }
+  },
+  "pipeline": {
+    "receipt": {
+      "path": "/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-mime-reader-artifact-xt9dFb/pipeline-receipt.json",
+      "sha256": "3993d786f9254c0d9e648a46d5573636b31dabb9c2f90685666a4e4b573c4655"
+    },
+    "results": {
+      "coreProductionMailService": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "filteredOut": 770,
+        "fixtures": 9,
+        "boundaries": [
+          "read-neutral full fetch",
+          "selective fetch without full-raw fallback",
+          "provider hydration",
+          "stale UIDVALIDITY rejection before provider access",
+          "unhydrated cache absence",
+          "exact body, HTML, and complete attachment metadata after SQLite reopen",
+          "shared mailbox remote_total of nine"
+        ]
+      },
+      "tauriMessageContent": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "filteredOut": 226,
+        "runtime": "Tauri mock runtime"
+      },
+      "reactReader": {
+        "passed": 9,
+        "failed": 0,
+        "skipped": 0,
+        "runtime": "Vitest jsdom"
+      }
+    },
+    "sameProfileEvidence": {
+      "databasePath": "mime-reader-profile.sqlite",
+      "device": "16777231",
+      "inode": "145630752",
+      "beforeTauriDurableSha256": "496601daa6d0a0fdf74af5e67b4be2cf50fef98ffa6355519038a4064a26bbb8",
+      "beforeTauriWalBytes": 0,
+      "afterTauriDurableSha256": "10902b86bb294d14de24ffd56ca314b85d68c59c3e0bd0973975dfdd2251de1e",
+      "afterTauriWalBytes": 90672,
+      "afterReactDurableSha256": "10902b86bb294d14de24ffd56ca314b85d68c59c3e0bd0973975dfdd2251de1e",
+      "expectedTauriWrite": "message_content may update cache last_accessed in the same profile",
+      "interpretation": "The core stage checkpointed one coherent hydrated profile. Tauri consumed the same device and inode, and React did not change the post-Tauri durable database, WAL, and vault set."
+    },
+    "artifacts": {
+      "coreManifest": {
+        "path": "/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-mime-reader-artifact-xt9dFb/core-manifest.json",
+        "sha256": "f34a1d47a00242599e8d1b95d17c3e0896d87fee521ac8344d9ce2135425577e"
+      },
+      "tauriPayload": {
+        "path": "/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-mime-reader-artifact-xt9dFb/tauri-message-content.json",
+        "sha256": "186114c972c1f69cabcfee32ce33a81a482ff535c436004463a9b1f8b751cf1d"
+      },
+      "frontendResults": {
+        "path": "/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-mime-reader-artifact-xt9dFb/frontend-results.json",
+        "sha256": "2d478bfab25f4201bdc491ed81dfa529c1dcf8591414be6d647aa2b7939bf791"
+      }
+    }
+  },
+  "focusedNodeChecks": {
+    "earlierAttempt": {
+      "status": "failed",
+      "passed": 10,
+      "failed": 1,
+      "cause": "The inventory assertion still named the retired mime_tauri_artifact_export_tests producer after the runner moved to mime_reader_handoff_tests.",
+      "classification": "A real stale test-inventory failure, corrected by the bound runner assertion patch. It is not counted as a flaky run."
+    },
+    "repairedRun": {
+      "status": "passed",
+      "total": 13,
+      "passed": 13,
+      "failed": 0,
+      "skipped": 0,
+      "components": [
+        {
+          "command": "node --test scripts/run-mail-safety.node-test.mjs",
+          "passed": 11
+        },
+        {
+          "command": "node --test scripts/test-unsubscribe-command-tls.node-test.mjs",
+          "passed": 2
+        }
+      ],
+      "evidence": "Root terminal output for the focused rerun; no standalone combined Node log was retained.",
+      "scope": "Focused script-contract validation only. This is not a full source-lane result."
+    }
+  },
+  "review": {
+    "status": "go",
+    "scope": "Private independent review of the Phase 1 patch and the separate runner assertion repair found no remaining material correctness or evidence-integrity issue before primary application."
+  },
+  "limitations": [
+    "The Tauri stage uses the mock runtime and the React stage uses jsdom. This result is not native WebKit evidence.",
+    "The orchestrated subprocesses do not have an explicit wall-clock timeout.",
+    "No full source lane was run or claimed by this focused result.",
+    "No live provider, user mailbox, native app, package, release, performance, fuzz, dependency-audit, or Phase 2 result is claimed.",
+    "The first sandbox-blocked attempt and the earlier stale-inventory Node failure are retained separately and are not rewritten as passes."
+  ]
+}

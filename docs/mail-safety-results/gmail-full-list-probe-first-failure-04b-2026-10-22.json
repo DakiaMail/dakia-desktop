@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "status": "probe-failed-cause-unconfirmed",
+  "provider": "gmail",
+  "authenticationMethod": "app_password",
+  "recordedAtUtc": "2026-10-22T00:56:16.495021+00:00",
+  "sourceDigest": "04b1368f7a758b2ad77d95442a2d5a0d3b7ce74f1f100bb59967aeef8b9ad471",
+  "sourceFileCount": 952,
+  "evidence": "/private/tmp/dakia-gmail-full-list-final-20261022/evidence/actual-readonly-full-list-20261022.json",
+  "evidenceSha256": "be3a543f9ad81b2de0ab820b1c415dd75c8361354f2830fd023f61efbb298ca8",
+  "rootReceipt": "/private/tmp/dakia-gmail-full-list-final-20261022/evidence/actual-readonly-full-list-root-receipt-20261022.json",
+  "rootReceiptSha256": "72ad7dd74a31eb7cc70a59d6876cd8dfd7a45122d5de530d65b72bfa0b665652",
+  "credentialsFileUnchanged": true,
+  "smtpRequested": false,
+  "remoteMailboxMutationRequested": false,
+  "fixedFailure": "test_failed",
+  "offlineFinding": "Rust libtest may prefix the fixed evidence marker on the same line with its test name; the original startswith parser rejects that valid output. A tiny offline libtest reproduced the wrapper defect.",
+  "limitations": [
+    "The original generic status conflates a nonzero test exit with output parsing failure. Original raw output was discarded. The cause of this actual failure is unconfirmed.",
+    "A separately reviewed corrected wrapper may be run read-only, preserving this failed observation.",
+    "No Gmail LIST success, full labels, native Reader, sending or broad provider-reliability claim from this failed probe."
+  ]
+}

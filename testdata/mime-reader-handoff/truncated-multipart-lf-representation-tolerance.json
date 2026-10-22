@@ -1,0 +1,16 @@
+{
+  "fixtureId": "truncated-multipart-lf",
+  "policy": "A malformed LF-only multipart whose closing boundary is missing may retain different complete and selective representations only when both Reader projections retain the declared second leaf and neither exposes malformed boundary text or attachment metadata.",
+  "readerText": "The second leaf and closing boundary are deliberately missing.",
+  "forbiddenText": "--truncated",
+  "full": {
+    "bodyText": "<p>The second leaf and closing boundary are deliberately missing.\n",
+    "bodyHtml": null,
+    "downloadableFilenames": []
+  },
+  "selective": {
+    "bodyText": "The first leaf is complete and is a candidate for a safe partial preview.",
+    "bodyHtml": "<p>The second leaf and closing boundary are deliberately missing.\n",
+    "downloadableFilenames": []
+  }
+}

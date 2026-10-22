@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 2,
+  "date": "2026-10-21",
+  "scope": {
+    "governedPath": "apps/desktop/src-tauri/src/updater_acceptance_tests.rs",
+    "governedPathStatusBeforeAndAfter": "untracked programme-owned file",
+    "otherGovernedPathsEdited": 0,
+    "network": "loopback only",
+    "mailboxes": "none"
+  },
+  "observedFullRunFailure": {
+    "log": "/private/tmp/dakia-three-run-source-registration-safe-20261021.log",
+    "iteration": 2,
+    "result": "195 passed; 1 failed",
+    "failedTest": "updater_acceptance_tests::tampered_updater_artifact_is_rejected_before_the_old_app_is_changed",
+    "serverFailure": "accepted-stream read returned OS 35 WouldBlock and the server thread panicked",
+    "clientFailure": "the production updater check received reqwest/hyper IncompleteMessage",
+    "causalityLimit": "The captured run does not identify why that accepted socket had not supplied a complete request header."
+  },
+  "sensitivity": {
+    "test": "updater_acceptance_tests::fictional_update_server_does_not_let_an_idle_preconnection_block_a_fragmented_request",
+    "beforeRepair": {
+      "command": "cargo test -p dakia-desktop fictional_update_server_does_not_let_an_idle_preconnection_block_a_fragmented_request -- --nocapture",
+      "exitCode": 101,
+      "result": "0 passed; 1 failed; 196 filtered out",
+      "durationSeconds": 0.52,
+      "failure": "the old serial server accepted the idle connection, panicked on WouldBlock, and never accepted the second connection before the barrier deadline"
+    },
+    "coveredInput": [
+      "an accepted idle preconnection held open while the valid request completes",
+      "an empty connection that must not count as an updater request",
+      "a request exceeding the 16 KiB header cap that must not count",
+      "one valid GET whose header is written in two fragments"
+    ]
+  },
+  "repair": {
+    "summary": "The listener now accepts each bounded connection into an independently progressing worker under one 10 second server deadline.",
+    "bounds": {
+      "maximumAcceptedWorkers": 32,
+      "maximumRequestHeaderBytes": 16384,
+      "serverDeadlineSeconds": 10,
+      "workerStopAndJoin": true
+    },
+    "framing": "Only a complete UTF-8 origin-form GET request line with an HTTP/1.x version and a CRLF-CRLF header terminator is recorded or served.",
+    "invalidInputs": "Empty, incomplete, oversized, malformed, timed-out, and stopped connections do not satisfy expected request counts.",
+    "workerErrors": "Every unexpected connection I/O error is retained, workers are joined, and finish fails with the captured errors instead of allowing a security test to pass for an unintended transport failure.",
+    "securityAssertions": "The existing signature-tamper, wrong-key, interrupted-download, incompatible-package, malformed-manifest, exact replacement, and byte-unchanged old-app assertions were retained."
+  },
+  "independentReviewRepair": {
+    "finding": "The first concurrent implementation discarded handle_request I/O errors. A generic interrupted-download rejection could therefore have passed because of an unintended response write failure rather than the scripted partial body.",
+    "resolution": "Soft invalid request framing still returns success without counting a request. Actual socket and response I/O failures are captured and make FictionalUpdateServer.finish fail.",
+    "sensitivityTest": "updater_acceptance_tests::fictional_update_server_fails_closed_when_a_response_write_fails",
+    "sensitivity": "The injected response write failure returns an I/O error after a complete request. The test requires finish to panic with that exact error; it fails if the worker error is discarded."
+  },
+  "focusedValidation": {
+    "command": "cargo test -p dakia-desktop updater_acceptance_tests:: -- --nocapture",
+    "execution": "outside sandbox because the tests bind loopback sockets; all data and artifacts were fictional and disposable",
+    "parallelRuns": [
+      { "run": 1, "result": "8 passed; 0 failed", "durationSeconds": 0.66 },
+      { "run": 2, "result": "8 passed; 0 failed", "durationSeconds": 0.65 },
+      { "run": 3, "result": "8 passed; 0 failed", "durationSeconds": 0.66 }
+    ],
+    "retriesUsedToMaskFailures": 0,
+    "broaderSuite": "not run by this bounded workstream; root owns the new full three-run baseline"
+  },
+  "finalArtifact": {
+    "path": "apps/desktop/src-tauri/src/updater_acceptance_tests.rs",
+    "sha256": "1c6b3dd2265590248ffcb34e8ba497c0b4d354c6608c0d7fd58fa63b795adcc6",
+    "lines": 840
+  }
+}

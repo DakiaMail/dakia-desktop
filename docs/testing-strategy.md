@@ -1,10 +1,12 @@
 # Testing and Fixture Strategy
 
-Status: deterministic source lanes and required scoped pull-request validation
-activated; three-run coverage baseline approved; credentialed provider and
-release evidence pending
+Status: deterministic source lanes and scoped pull-request validation are implemented.
+Current programme execution and remaining acceptance are tracked in
+[mail safety remaining gaps](mail-safety-remaining-gaps.md). Source, native,
+provider, performance, dependency, and release results retain separate identities.
 
-Baseline reviewed: `origin/main` at `fdb4d29` on 2026-07-31
+Historical CI baseline reviewed: `origin/main` at `fdb4d29` on 2026-07-31.
+That hosted baseline does not establish results for later working-tree changes.
 
 This document defines how Dakia prevents repeats of production issues without
 returning to slow, expensive GitHub Actions. The activated source-controlled
@@ -38,9 +40,9 @@ testing remains an owner-authorized waiver, not acceptance evidence.
 - Report skipped, unavailable, or environment-blocked validation accurately;
   none of those states counts as a pass.
 
-## Current baseline and lessons
+## Historical baseline and continuing lessons
 
-Latest `main` already contains a substantial regression foundation:
+The July baseline contained a substantial regression foundation:
 
 - 13 checked-in raw `.eml` fixtures and four realistic HTML fixtures;
 - MIME limits for raw message size, aggregate headers, part count, and nesting;
@@ -58,9 +60,11 @@ The recent issue-driven changes show the remaining systemic weaknesses:
   serialization, frontend decoding, Reader state, or WebKit rendering.
 - Cache, refresh, reply provenance, flags, moves, deletion, and account removal
   have important asynchronous orderings that ordinary happy-path tests miss.
-- Current IMAP/SMTP tests mostly construct commands and responses; they do not
-  exercise real socket framing, TLS/STARTTLS, cancellation, reconnect, delivery
-  uncertainty, or the complete provider-to-UI event path.
+- The original IMAP/SMTP helper coverage did not establish real socket framing,
+  TLS/STARTTLS, cancellation, reconnect, delivery uncertainty, or provider-to-UI
+  delivery. The programme now has production-boundary tests and bounded native
+  evidence for these paths. Their exact results and remaining aggregate gaps
+  are recorded in the current catalogue and execution reports.
 - The comprehensive local verification script is not an automatic merge gate.
   A test that is never run cannot prevent a regression.
 
@@ -159,13 +163,18 @@ Core protocol tests assert exact conversations and final SQLite outcomes;
 Tauri-targeted tests assert the event-state contracts they own.
 
 Current deterministic coverage uses the internal injected-client sync seam and
-the injected SMTP transport seam. It covers a file-backed two-pass sync and
-the Gmail-specific rule that skips a duplicate IMAP `APPEND` after successful
-SMTP submission. It does not construct the public IMAP connector, run the
-Tauri realtime loop through its event sink, or exercise a generic (non-Gmail)
-SMTP success followed by an IMAP `APPEND` failure. Those remain future
-connector/event-path scenarios; the latter must prove that the returned error
-preserves the distinction between successful delivery and an unsaved Sent copy.
+the injected SMTP transport seam. It covers a file-backed two-pass sync, the
+Gmail-specific rule that skips a duplicate IMAP `APPEND` after successful SMTP
+submission, loopback public IMAP implicit-TLS and STARTTLS construction, and a
+generic SMTP acceptance followed by a rejected Sent `APPEND`. The generic test
+proves that the error preserves successful delivery separately from an unsaved
+Sent copy. The production realtime watcher also has concrete supervisor tests over real
+loopback TLS, and the mounted native fixture exercises provider arrival and flag
+changes through Tauri into Reader. Public connector and generic Sent-copy cases
+must retain their exact protocol and outcome assertions. Source tests alone do
+not establish a live Webview result; native reports and provider reports remain
+separate. See the current catalogue for timeout, missing-folder, recovery, and
+provider-specific limits.
 
 ### State, persistence, and process boundaries
 
@@ -205,7 +214,17 @@ the production inventory explicitly.
   trees, MIME parameters, IMAP framing, CID rewriting, quoted-history markers,
   filenames, thread graphs, and state interleavings.
 - Run longer fuzzing only manually or in a separately approved schedule. Every
-  discovered failure becomes a checked-in blocking seed or fixture.
+  reproducing input failure becomes a checked-in blocking seed or fixture.
+  Preserve tool-startup and whole-process resource failures as diagnostic
+  evidence; an empty global-OOM marker is not a useful MIME regression seed.
+- `scripts/run-mail-safety-fuzz.sh 30` runs both coverage-guided targets with
+  recursively governed MIME seeds, a ten-second per-input timeout, a 512 MiB
+  process limit, and a 1 MiB input limit. It defaults an unset or empty
+  `ASAN_OPTIONS` to a 64 MiB quarantine and 64 KiB thread-local quarantine.
+  Explicit caller options remain unchanged. This bounds sanitizer overhead
+  while reducing temporal use-after-free sensitivity relative to a larger
+  quarantine. The retained original OOM and the clean bounded-policy campaign
+  are separate evidence; the policy does not establish absence of leaks.
 - Use representative mutation/sensitivity evidence for high-risk boundaries;
   do not require an expensive mutation run for every generated case.
 - Use native Apple-Silicon WebKit verification only for layout, iframe sizing,
@@ -272,6 +291,34 @@ an environment error must fail the required status rather than appear green.
 for high-risk mail, storage, Tauri, native, and release changes. Pull requests
 record its result and focused sensitivity evidence.
 
+Storage or migration changes also run the dedicated SQLite recovery lane after
+the ordinary source gate:
+
+```sh
+bash scripts/run-sqlite-fault-injection.sh
+```
+
+The script builds bundled SQLite with `SQLITE_TEST` in an isolated Cargo target
+directory and runs only the opt-in recovery binary. It fails when the feature,
+test target, locked dependencies, macOS ONNX Runtime, or exact SQLite error
+observations are unavailable. This remains a local/manual lane because the
+SQLite fault controls are process-global and must not enter ordinary Dakia or
+pull-request builds.
+
+This lane proves that the default SQLite VFS can report exact
+`SQLITE_IOERR_WRITE` and `SQLITE_IOERR_FSYNC` results without losing previously
+committed mail, credentials, or send attempts. Since SQLite's test hooks report
+these errors after the underlying operating-system call, the candidate send
+attempt may recover as either a complete matching row or a complete absence
+that can be claimed safely on retry. A separate intact-WAL control proves a
+single final send-attempt transaction is recoverable before the copied WAL is
+manually truncated; the torn copy must discard that transaction while keeping
+the earlier state readable.
+
+This is not evidence of a physical partial write, disk exhaustion, an fsync
+failure before durability, or process termination during a commit. SQLite-full
+and migration-process termination remain separate tests.
+
 Manually dispatched GitHub workflows may provide reproducible remote evidence
 for:
 
@@ -333,7 +380,10 @@ most of the suite for little additional defect-detection value.
 Instead:
 
 1. Pin Rust and frontend coverage tools and normalize exact covered/uncovered
-   line, function, and branch counts per package.
+   line, function, and branch counts per package. A metric with zero observed
+   LCOV items is reported as unavailable evidence, never as 100 percent
+   coverage. The current Rust baseline has no observed branch records, so it
+   does not establish Rust branch coverage.
 2. Generate candidate baselines locally or with a manual Linux dispatch.
 3. Require three repeat green runs before committing a baseline.
 4. Compare the baseline during explicitly requested coverage runs and before a
@@ -347,6 +397,29 @@ Semantic fixture inventory and contract completeness remain blocking on every
 relevant pull request; coverage is a periodic non-regression guard, not a
 substitute for those gates.
 
+### Mail safety traceability
+
+The [mail safety catalogue](mail-safety-test-catalogue.md) is a blocking,
+machine-validated map of the assurance programme. The [supported standards profile](mail-safety-standards-profile.md) states the bounded IMAP, TLS, SMTP, MIME, unsubscribe, and mailto behavior tied to those IDs. Its JSON source records a
+stable ID for each A through L scenario, priority, standards reference and
+status, production entry point, evidence lane, and either exact source-test
+symbols or an explicit limitation. The validator fails when an `implemented`
+entry loses a referenced file or symbol. It does not run the referenced tests,
+and it never turns a `gap`, `manual-required`, or `unsupported` entry into a
+pass.
+
+Changes to the catalogue, its documentation, or validator select the
+`mail-boundary` pull-request scope. `npm run report:mail-safety-catalogue --
+--lane pull-request` reports the revision and execution environment with the
+selected-lane evidence and outstanding P0 work. It is a declaration report,
+not test execution evidence.
+
+Lockfile changes also select a dependency-audit step. That step installs the
+pinned `cargo-audit` tool with Rust 1.89, refreshes the RustSec advisory database, checks the
+supported-target exceptions, and runs `npm audit --package-lock-only` without
+lifecycle scripts. It has no credentials or schedule and is restricted to
+dependency diffs so ordinary pull requests retain the Linux-runner budget.
+
 ## Delivery state
 
 1. The tested change classifier and one-job Linux workflow are checked in.
@@ -356,11 +429,12 @@ substitute for those gates.
 3. Suitable raw fixtures cross complete, selective, storage, Tauri, TypeScript,
    and Reader boundaries, with intentional path differences declared.
 4. Scripted IMAP and SMTP harnesses cover framing, cancellation, TLS/STARTTLS,
-   failures, uncertainty, and a two-pass `MailService` persistence path via
-   internal injectable transport seams. Gmail duplicate-Sent `APPEND` skipping
-   is covered; public connector construction, the Tauri realtime event sink,
-   and generic-provider `APPEND` failure after SMTP acceptance remain future
-   integration scenarios.
+   failures, uncertainty, a two-pass `MailService` persistence path via
+   internal injectable transport seams, public loopback IMAP connector setup,
+   generic Sent `APPEND` rejection after SMTP acceptance, and the realtime
+   watcher event-sink boundary. Live Webview delivery, public authenticated
+   probe, and generic Sent-copy timeout or missing-folder recovery remain
+   distinct integration scenarios.
 5. Mechanical Tauri command/event inventory and shared Rust/TypeScript payload
    contracts are blocking checks.
 6. Deterministic locking, restart, late-completion, account-isolation, CLI

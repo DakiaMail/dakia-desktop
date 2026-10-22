@@ -1,0 +1,2408 @@
+{
+  "schemaVersion": 1,
+  "profileVersion": "2026-10-20",
+  "scope": "Clause-indexed selected mail user agent profile. No complete RFC certification. Every gap remains unproven. Source assertions are declarations, not fresh execution evidence.",
+  "standards": [
+    3501, 9051, 5321, 5322, 6531, 2045, 2047, 2231, 3676, 8058, 6068, 8997,
+    2046, 1870
+  ],
+  "requirements": [
+    {
+      "id": "MSR-3501-tag",
+      "rfc": 3501,
+      "section": "2.2.1",
+      "source": "https://www.rfc-editor.org/rfc/rfc3501.html#section-2.2.1",
+      "requirement": "Match tagged command completions.",
+      "applicability": "Dakia mail user agent client; IMAP4rev1",
+      "profile": "imap4rev1",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-B-003", "MS-B-011", "MS-B-014", "MS-B-017"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/public_imap_recovery_tests.rs",
+          "test": "ms_b_003_b_011_public_tls_sync_malformed_responses_preserve_state_then_retry",
+          "assertion": "WrongTag",
+          "assertionHelper": "assert_failed_sync_survives_reopen",
+          "helperAssertion": "assert_eq!"
+        }
+      ]
+    },
+    {
+      "id": "MSR-3501-epoch",
+      "rfc": 3501,
+      "section": "2.3.1.1",
+      "source": "https://www.rfc-editor.org/rfc/rfc3501.html#section-2.3.1.1",
+      "requirement": "Reject attachment fetch when remote UIDVALIDITY differs from its cached identity.",
+      "applicability": "Dakia mail user agent client; IMAP4rev1",
+      "profile": "imap4rev1",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-B-003", "MS-B-011", "MS-B-014", "MS-B-017"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "attachment_fetch_rejects_remote_uidvalidity_change_before_any_uid_fetch",
+          "assertion": "UID FETCH"
+        }
+      ]
+    },
+    {
+      "id": "MSR-3501-sequence",
+      "rfc": 3501,
+      "section": "2.3.1.2",
+      "source": "https://www.rfc-editor.org/rfc/rfc3501.html#section-2.3.1.2",
+      "requirement": "Do not treat shifting sequence numbers as durable UIDs.",
+      "applicability": "Dakia mail user agent client; IMAP4rev1",
+      "profile": "imap4rev1",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-B-003", "MS-B-011", "MS-B-014", "MS-B-017"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "mailbox_snapshot_page_parses_mixed_case_uid_and_flags_in_either_order",
+          "assertion": "uid: 401"
+        }
+      ]
+    },
+    {
+      "id": "MSR-3501-seen",
+      "rfc": 3501,
+      "section": "2.3.2",
+      "source": "https://www.rfc-editor.org/rfc/rfc3501.html#section-2.3.2",
+      "requirement": "Use Seen for explicit read changes.",
+      "applicability": "Dakia mail user agent client; IMAP4rev1",
+      "profile": "imap4rev1",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-B-003", "MS-B-011", "MS-B-014", "MS-B-017"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "explicit_read_changes_still_update_the_seen_flag",
+          "assertion": "Seen"
+        }
+      ]
+    },
+    {
+      "id": "MSR-3501-literals",
+      "rfc": 3501,
+      "section": "4.1.2",
+      "source": "https://www.rfc-editor.org/rfc/rfc3501.html#section-4.1.2",
+      "requirement": "Consume literal octet counts across fragmented reads.",
+      "applicability": "Dakia mail user agent client; IMAP4rev1",
+      "profile": "imap4rev1",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-B-003", "MS-B-011", "MS-B-014", "MS-B-017"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "scripted_imap_transcript_handles_fragmented_literals_and_unsolicited_fetches",
+          "assertion": "Some(b\"right\".as_slice())"
+        }
+      ]
+    },
+    {
+      "id": "MSR-3501-nil",
+      "rfc": 3501,
+      "section": "4.3",
+      "source": "https://www.rfc-editor.org/rfc/rfc3501.html#section-4.3",
+      "requirement": "Accept NIL fields in the tested attachment BODYSTRUCTURE shape.",
+      "applicability": "Dakia mail user agent client; IMAP4rev1",
+      "profile": "imap4rev1",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-B-003", "MS-B-011", "MS-B-014", "MS-B-017"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "selective_bodystructure_decodes_extended_rfc2231_filenames",
+          "assertion": "Some(\"caf\u00e9.pdf\")"
+        }
+      ]
+    },
+    {
+      "id": "MSR-3501-posttls",
+      "rfc": 3501,
+      "section": "6.2.1",
+      "source": "https://www.rfc-editor.org/rfc/rfc3501.html#section-6.2.1",
+      "requirement": "Discard pre-TLS capabilities before authentication.",
+      "applicability": "Dakia mail user agent client; IMAP4rev1",
+      "profile": "imap4rev1",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-B-003", "MS-B-011", "MS-B-014", "MS-B-017"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "production_imap_connector_uses_only_post_tls_capabilities_before_login",
+          "assertion": "D0001 CAPABILITY"
+        }
+      ]
+    },
+    {
+      "id": "MSR-3501-failure",
+      "rfc": 3501,
+      "section": "6.2.1",
+      "source": "https://www.rfc-editor.org/rfc/rfc3501.html#section-6.2.1",
+      "requirement": "Do not authenticate after STARTTLS refusal.",
+      "applicability": "Dakia mail user agent client; IMAP4rev1",
+      "profile": "imap4rev1",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-B-003", "MS-B-011", "MS-B-014", "MS-B-017"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "production_imap_connector_rejects_starttls_refusal_without_tls_fallback",
+          "assertion": "rejected STARTTLS"
+        }
+      ]
+    },
+    {
+      "id": "MSR-3501-logindisabled",
+      "rfc": 3501,
+      "section": "6.2.3",
+      "source": "https://www.rfc-editor.org/rfc/rfc3501.html#section-6.2.3",
+      "requirement": "Respect LOGINDISABLED; do not issue LOGIN.",
+      "applicability": "Dakia mail user agent client; IMAP4rev1",
+      "profile": "imap4rev1",
+      "status": "tested",
+      "reason": "The public production STARTTLS connector receives a final TLS-protected capability response with LOGINDISABLED, returns the password-LOGIN refusal, and the fictional server asserts that no authentication command follows.",
+      "catalogueIds": ["MS-B-003", "MS-B-011", "MS-B-014", "MS-B-017"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/protocol_gap_tests.rs",
+          "test": "starttls_imap_probe_uses_only_post_tls_capabilities_for_authentication",
+          "assertion": "authentication ignored post-TLS capabilities"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/protocol_gap_tests.rs",
+          "test": "starttls_imap_probe_uses_only_post_tls_capabilities_for_authentication",
+          "assertion": "does not permit password LOGIN"
+        }
+      ]
+    },
+    {
+      "id": "MSR-3501-sasl",
+      "rfc": 3501,
+      "section": "6.2.2",
+      "source": "https://www.rfc-editor.org/rfc/rfc3501.html#section-6.2.2",
+      "requirement": "General SASL mechanism negotiation.",
+      "applicability": "Dakia mail user agent client; IMAP4rev1",
+      "profile": "imap4rev1",
+      "status": "unsupported",
+      "reason": "Password profile uses LOGIN and existing OAuth uses XOAUTH2 with SASL-IR; it does not implement a general SASL selector.",
+      "catalogueIds": ["MS-B-003", "MS-B-011", "MS-B-014", "MS-B-017"],
+      "evidence": []
+    },
+    {
+      "id": "MSR-3501-utf7",
+      "rfc": 3501,
+      "section": "5.1.3",
+      "source": "https://www.rfc-editor.org/rfc/rfc3501.html#section-5.1.3",
+      "requirement": "Decode modified UTF-7 mailbox names.",
+      "applicability": "Dakia mail user agent client; IMAP4rev1",
+      "profile": "imap4rev1",
+      "status": "tested",
+      "reason": "Canonical modified UTF-7 codec vectors include Japanese, mixed ASCII/non-ASCII hierarchy names, ampersands, quotes/backslashes and non-BMP characters, while malformed/noncanonical shifts and invalid UTF-16 are rejected. Production TLS sync, MOVE and Sent APPEND preserve exact discovered wire names and reopened mailbox state without double encoding; malformed LIST names fail before SELECT and preserve prior state. Previous-stable canonical-looking ASCII configuration is deliberately treated as legacy wire: this tested dual-format ambiguity requires a future representation marker for removal. This is the IMAP4rev1 profile, not full IMAP4rev2 or UTF8 ENABLE support.",
+      "catalogueIds": ["MS-B-003", "MS-B-011", "MS-B-014", "MS-B-017"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/imap_mailbox.rs",
+          "test": "strict_decode_round_trips_canonical_vectors",
+          "assertion": "assert_eq!(decode_modified_utf7(wire).unwrap(), logical)"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/imap_mailbox_wire_tests.rs",
+          "test": "generic_unicode_archive_sync_selects_modified_utf7_and_reopens_exact_wire_name",
+          "assertion": "assert_eq!(state.remote_name, wire_archive)"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/imap_mailbox_wire_tests.rs",
+          "test": "discovered_unicode_special_use_destination_overrides_missing_configured_folder_for_move",
+          "assertion": "assert!(publication.destination_mapped)"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/imap_mailbox_wire_tests.rs",
+          "test": "discovered_unicode_sent_wire_name_is_appended_byte_exact_without_double_encoding",
+          "assertion": "the full APPEND transcript must contain the exact discovered wire name"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/imap_mailbox_wire_tests.rs",
+          "test": "noncanonical_modified_utf7_list_is_refused_before_select_and_preserves_reopened_state",
+          "assertion": "assert_eq!(message, baseline_message)"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/imap_mailbox_wire_tests.rs",
+          "test": "configured_mailbox_dual_format_preserves_legacy_wire_and_encodes_logical_names_once",
+          "assertion": "canonical-looking ASCII is intentionally treated as legacy wire"
+        },
+        {
+          "path": "crates/dakia-core/src/imap_mailbox.rs",
+          "test": "encodes_rfc_3501_vectors_and_protocol_safe_ascii",
+          "assertion": "assert_eq!(encode_modified_utf7(\"\ud83d\ude00\").unwrap(), \"&2D3eAA-\")"
+        },
+        {
+          "path": "crates/dakia-core/src/imap_mailbox.rs",
+          "test": "rejects_malformed_noncanonical_and_invalid_utf16_shifts",
+          "assertion": "assert!(decode_modified_utf7(value).is_err()"
+        }
+      ]
+    },
+    {
+      "id": "MSR-3501-list",
+      "rfc": 3501,
+      "section": "6.3.6",
+      "source": "https://www.rfc-editor.org/rfc/rfc3501.html#section-6.3.6",
+      "requirement": "Respect LIST hierarchy delimiters and mailbox attributes.",
+      "applicability": "Dakia mail user agent client; IMAP4rev1",
+      "profile": "imap4rev1",
+      "status": "tested",
+      "reason": "The finite IMAP4rev1 LIST profile accepts mixed-case responses, NIL or one quoted printable 7-bit hierarchy delimiter, quoted/atom mailbox names and bounded literal mailbox names; escaped quote/backslash delimiters and canonical modified UTF-7 wire identity have exact source assertions. Unknown attributes are retained and ignored for selectability, while NoSelect is case-insensitively authoritative. Actual TLS sync selects the literal wire name and preserves it after Store reopen; malformed discovery and known NoSelect targets cannot reach SELECT, APPEND, MOVE or delete. Declared mailbox literals above 8 KiB are rejected before reading their payload. This tests parsing, identity and safe target use, not hierarchy-path derivation, NAMESPACE, IMAP4rev2/UTF8 mode, arbitrary response-literal support, independent servers, providers or native UI.",
+      "catalogueIds": ["MS-B-003", "MS-B-011", "MS-B-014", "MS-B-017"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/imap_gap_matrix_tests.rs",
+          "test": "ms_b_010_list_grammar_handles_case_escaping_nil_delimiters_and_unicode",
+          "assertion": "assert_eq!(mailbox, expected_mailbox, \"{line}\")"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/list_literal_tests.rs",
+          "test": "list_literals_bind_only_to_their_own_list_line_and_preserve_delimiter",
+          "assertion": "assert_eq!(listing[0].hierarchy_delimiter.as_deref(), Some(\"/\"))"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/list_literal_tests.rs",
+          "test": "list_literal_parser_rejects_missing_extra_noncanonical_and_nonselect_targets",
+          "assertion": "assert!(!unknown_with_noselect.is_selectable())"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/list_literal_tests.rs",
+          "test": "list_literal_parser_rejects_missing_extra_noncanonical_and_nonselect_targets",
+          "assertion": "assert!(unknown_attribute.is_selectable())"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/list_literal_tests.rs",
+          "test": "list_literal_limit_rejects_before_reading_the_declared_mailbox_bytes",
+          "assertion": "per-message safety limit"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/list_literal_tests.rs",
+          "test": "tls_list_literal_sync_selects_and_reopens_the_exact_wire_identity",
+          "assertion": "D0005 SELECT {}"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/list_literal_tests.rs",
+          "test": "known_noselect_source_never_reaches_select_or_move",
+          "assertion": "Noselect"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/list_literal_tests.rs",
+          "test": "known_noselect_source_never_reaches_select_or_delete",
+          "assertion": "Noselect"
+        }
+      ]
+    },
+    {
+      "id": "MSR-3501-peek",
+      "rfc": 3501,
+      "section": "6.4.5",
+      "source": "https://www.rfc-editor.org/rfc/rfc3501.html#section-6.4.5",
+      "requirement": "Preview and raw export must not implicitly set Seen.",
+      "applicability": "Dakia mail user agent client; IMAP4rev1",
+      "profile": "imap4rev1",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-B-003", "MS-B-011", "MS-B-014", "MS-B-017"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "raw_export_fetch_is_read_neutral_and_requests_only_the_original_bytes",
+          "assertion": "PEEK"
+        }
+      ]
+    },
+    {
+      "id": "MSR-3501-section",
+      "rfc": 3501,
+      "section": "6.4.5",
+      "source": "https://www.rfc-editor.org/rfc/rfc3501.html#section-6.4.5",
+      "requirement": "Associate FETCH literals with the requested UID and section.",
+      "applicability": "Dakia mail user agent client; IMAP4rev1",
+      "profile": "imap4rev1",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-B-003", "MS-B-011", "MS-B-014", "MS-B-017"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "literal_selection_requires_the_requested_fetch_uid_and_body_section",
+          "assertion": "Some(b\"requested\".as_slice())"
+        }
+      ]
+    },
+    {
+      "id": "MSR-3501-store",
+      "rfc": 3501,
+      "section": "6.4.6",
+      "source": "https://www.rfc-editor.org/rfc/rfc3501.html#section-6.4.6",
+      "requirement": "Apply explicit flags to immutable UID targets.",
+      "applicability": "Dakia mail user agent client; IMAP4rev1",
+      "profile": "imap4rev1",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-B-003", "MS-B-011", "MS-B-014", "MS-B-017"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "explicit_read_changes_still_update_the_seen_flag",
+          "assertion": "Seen"
+        }
+      ]
+    },
+    {
+      "id": "MSR-3501-bye",
+      "rfc": 3501,
+      "section": "7.1.5",
+      "source": "https://www.rfc-editor.org/rfc/rfc3501.html#section-7.1.5",
+      "requirement": "Terminate failed sessions on BYE without spinning.",
+      "applicability": "Dakia mail user agent client; IMAP4rev1",
+      "profile": "imap4rev1",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-B-003", "MS-B-011", "MS-B-014", "MS-B-017"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "scripted_imap_idle_eof_and_bye_termination_fail_without_spinning",
+          "assertion": "IMAP server closed the connection during IDLE termination"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/imap_gap_matrix_tests.rs",
+          "test": "ms_b_018_logout_bye_rejects_missing_or_wrong_completion_and_bye_remains_fatal_for_noop",
+          "assertion": "a failed command must not issue a follow-up command"
+        }
+      ]
+    },
+    {
+      "id": "MSR-3501-logout-drain",
+      "rfc": 3501,
+      "section": "3.4",
+      "source": "https://www.rfc-editor.org/rfc/rfc3501.html#section-3.4",
+      "requirement": "After LOGOUT receives BYE, read the matching tagged OK before accepting session closure.",
+      "applicability": "Dakia mail user agent client; IMAP4rev1 LOGOUT response handling",
+      "profile": "imap4rev1",
+      "status": "tested",
+      "reason": "The selected transcript accepts the fragmented BYE only with its matching tagged completion and sends no further command.",
+      "catalogueIds": ["MS-B-003", "MS-B-011"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/imap_gap_matrix_tests.rs",
+          "test": "ms_b_018_logout_bye_requires_the_matching_tagged_ok_and_never_treats_bye_text_as_a_literal",
+          "assertion": "D0001 OK logout complete"
+        }
+      ]
+    },
+    {
+      "id": "MSR-3501-logout",
+      "rfc": 3501,
+      "section": "6.1.3",
+      "source": "https://www.rfc-editor.org/rfc/rfc3501.html#section-6.1.3",
+      "requirement": "Handle the LOGOUT BYE and matching tagged completion as one command response.",
+      "applicability": "Dakia mail user agent client; IMAP4rev1 LOGOUT command",
+      "profile": "imap4rev1",
+      "status": "tested",
+      "reason": "The selected production parser transcript retains BYE text as text and requires the matching tagged completion.",
+      "catalogueIds": ["MS-B-003", "MS-B-011"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/imap_gap_matrix_tests.rs",
+          "test": "ms_b_018_logout_bye_requires_the_matching_tagged_ok_and_never_treats_bye_text_as_a_literal",
+          "assertion": "fictional shutdown {4}"
+        }
+      ]
+    },
+    {
+      "id": "MSR-3501-logout-ok-only",
+      "rfc": 3501,
+      "section": "6.1.3",
+      "source": "https://www.rfc-editor.org/rfc/rfc3501.html#section-6.1.3",
+      "requirement": "Tolerate an exact matching tagged OK-only LOGOUT completion for deployed-server compatibility.",
+      "applicability": "Dakia mail user agent client; IMAP4rev1 LOGOUT command",
+      "profile": "imap4rev1-compatible-server-tolerance",
+      "status": "intentionally_tolerated",
+      "reason": "Dakia accepts this bounded compatibility response, while EOF, a wrong tag, and BYE for ordinary commands remain failures.",
+      "catalogueIds": ["MS-B-003", "MS-B-011"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/imap_gap_matrix_tests.rs",
+          "test": "ms_b_018_logout_tagged_ok_without_bye_remains_compatible",
+          "assertion": "D0001 OK logout complete"
+        }
+      ]
+    },
+    {
+      "id": "MSR-3501-expunge",
+      "rfc": 3501,
+      "section": "7.4.1",
+      "source": "https://www.rfc-editor.org/rfc/rfc3501.html#section-7.4.1",
+      "requirement": "Reconcile unsolicited EXPUNGE after IDLE reconnect.",
+      "applicability": "Dakia mail user agent client; IMAP4rev1",
+      "profile": "imap4rev1",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-B-003", "MS-B-011", "MS-B-014", "MS-B-017"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/public_realtime_recovery_tests.rs",
+          "test": "ms_b_014_public_tls_idle_disconnect_reconnect_arrival_flag_and_expunge",
+          "assertion": "expunge"
+        }
+      ]
+    },
+    {
+      "id": "MSR-3501-search",
+      "rfc": 3501,
+      "section": "6.4.4",
+      "source": "https://www.rfc-editor.org/rfc/rfc3501.html#section-6.4.4",
+      "requirement": "Preserve SEARCH charset and server failure semantics.",
+      "applicability": "Dakia mail user agent client; IMAP4rev1",
+      "profile": "imap4rev1",
+      "status": "tested",
+      "reason": "Production TLS remote SEARCH sends CHARSET UTF-8 with an exact octet-counted synchronizing literal for Unicode, quotes and backslashes, waiting for continuation before sending literal bytes. Scoped account/mailbox/limit results remain exact. BADCHARSET before or after continuation produces a bounded actionable error without followup fetches or changed cache/catalogue state after reopen; SELECT refusal and framing controls also fail safely. The IMAP4rev1 profile refuses UTF8=ONLY before LOGIN rather than claiming RFC 6855/IMAP4rev2 support; UTF8=ACCEPT remains compatible with the legacy path. These are source assertion declarations; run results belong to the separately recorded source lane.",
+      "catalogueIds": ["MS-B-003", "MS-B-011", "MS-B-014", "MS-B-017"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/remote_search_safety_tests.rs",
+          "test": "remote_search_rejects_query_command_controls_without_writing_or_losing_state",
+          "assertion": "prohibited framing bytes"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/remote_search_safety_tests.rs",
+          "test": "remote_search_rejects_configured_mailbox_controls_without_writing_or_losing_state",
+          "assertion": "assert!(!rendered.contains(unsafe_mailbox))"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/remote_search_safety_tests.rs",
+          "test": "remote_search_rejects_requested_mailbox_controls_without_connecting_or_losing_state",
+          "assertion": "assert_eq!(preserved.uid, 45)"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/remote_search_safety_tests.rs",
+          "test": "remote_search_reports_scoped_and_unified_select_refusal_without_searching_or_losing_state",
+          "assertion": "assert_remote_search_select_refusal(Some(\"Archive\"), \"Archive\")",
+          "assertionHelper": "assert_remote_search_select_refusal",
+          "helperAssertion": "assert!(!rendered.contains(\"private-provider-diagnostic\"))"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/imap_command_construction_tests.rs",
+          "test": "generic_command_rejections_do_not_retain_provider_echoes",
+          "assertion": "assert!(!format!(\"{error:?}\").contains(\"private-command-input\"))"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/remote_search_safety_tests.rs",
+          "test": "remote_search_escapes_unicode_and_respects_account_mailbox_and_limit",
+          "assertion": "accept_utf8_search_literal(&mut connection, \"D0005\", \"\u96ea \\\"t\u00f6\u00f6\\\" \\\\ path\")",
+          "assertionHelper": "accept_utf8_search_literal",
+          "helperAssertion": "the client sent UTF-8 literal bytes before the server continuation"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/remote_search_safety_tests.rs",
+          "test": "remote_search_badcharset_before_or_after_continuation_preserves_reopened_cache_without_fetching",
+          "assertion": "IMAP server does not support UTF-8 remote search"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/remote_search_safety_tests.rs",
+          "test": "remote_search_badcharset_before_or_after_continuation_preserves_reopened_cache_without_fetching",
+          "assertion": "assert_eq!(cached.body_text, \"durable cached body\")"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/remote_search_safety_tests.rs",
+          "test": "production_imap_connector_rejects_utf8_only_before_login_and_keeps_utf8_accept_compatible",
+          "assertion": "IMAP UTF8=ONLY mode is not supported"
+        }
+      ]
+    },
+    {
+      "id": "MSR-9051-logout-drain",
+      "rfc": 9051,
+      "section": "3.4",
+      "source": "https://www.rfc-editor.org/rfc/rfc9051.html#section-3.4",
+      "requirement": "After LOGOUT receives BYE, read the matching tagged OK before accepting session closure.",
+      "applicability": "Dakia IMAP4rev1 client behavior compared to RFC 9051 as a modern response reference",
+      "profile": "modern-reference-only",
+      "status": "tested",
+      "reason": "The selected transcript accepts the fragmented BYE only with its matching tagged completion; this is not a complete IMAP4rev2 support claim.",
+      "catalogueIds": ["MS-B-003", "MS-B-011"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/imap_gap_matrix_tests.rs",
+          "test": "ms_b_018_logout_bye_requires_the_matching_tagged_ok_and_never_treats_bye_text_as_a_literal",
+          "assertion": "D0001 OK logout complete"
+        }
+      ]
+    },
+    {
+      "id": "MSR-9051-logout",
+      "rfc": 9051,
+      "section": "6.1.3",
+      "source": "https://www.rfc-editor.org/rfc/rfc9051.html#section-6.1.3",
+      "requirement": "Handle the LOGOUT BYE and matching tagged completion as one command response.",
+      "applicability": "Dakia IMAP4rev1 client behavior compared to RFC 9051 as a modern response reference",
+      "profile": "modern-reference-only",
+      "status": "tested",
+      "reason": "The selected response parser behavior is checked against this modern reference without claiming full IMAP4rev2 support.",
+      "catalogueIds": ["MS-B-003", "MS-B-011"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/imap_gap_matrix_tests.rs",
+          "test": "ms_b_018_logout_bye_requires_the_matching_tagged_ok_and_never_treats_bye_text_as_a_literal",
+          "assertion": "fictional shutdown {4}"
+        }
+      ]
+    },
+    {
+      "id": "MSR-9051-idle-done",
+      "rfc": 9051,
+      "section": "6.3.13",
+      "source": "https://www.rfc-editor.org/rfc/rfc9051.html#section-6.3.13",
+      "requirement": "Complete the IDLE continuation and DONE exchange.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "selected-imap-extensions",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-B-014", "MS-D-011"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "scripted_imap_idle_honours_cancellation_and_completes_the_done_exchange",
+          "assertion": "DONE"
+        }
+      ]
+    },
+    {
+      "id": "MSR-9051-idle-renew",
+      "rfc": 9051,
+      "section": "6.3.13",
+      "source": "https://www.rfc-editor.org/rfc/rfc9051.html#section-6.3.13",
+      "requirement": "Refresh IDLE before server inactivity timeout.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "selected-imap-extensions",
+      "status": "tested",
+      "reason": "The production TLS realtime state machine renews multiple IDLE polls on one authenticated connection under an injected 65 ms maintenance schedule, matching every IDLE with DONE before LOGOUT. The same test separately asserts the shipped maintenance policy is 15 minutes and below 29 minutes, then verifies a fresh authenticated cycle resubscribes. It does not wait 15 minutes or a real server-enforced inactivity timeout; physical sleep/wake and native supervisor acceptance remain separate.",
+      "catalogueIds": ["MS-B-014", "MS-D-011"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/public_realtime_recovery_tests.rs",
+          "test": "ms_b_014_public_tls_idle_renews_on_one_connection_with_production_policy",
+          "assertion": "one TLS/auth session must serve multiple polls"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/public_realtime_recovery_tests.rs",
+          "test": "ms_b_014_public_tls_idle_renews_on_one_connection_with_production_policy",
+          "assertion": "IMAP_REALTIME_MAINTENANCE_INTERVAL < Duration::from_secs(29 * 60)"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/public_realtime_recovery_tests.rs",
+          "test": "ms_b_014_public_tls_idle_renews_on_one_connection_with_production_policy",
+          "assertion": "assert_eq!(done_count, idle_count)"
+        }
+      ]
+    },
+    {
+      "id": "MSR-9051-move-policy",
+      "rfc": 9051,
+      "section": "6.4.8",
+      "source": "https://www.rfc-editor.org/rfc/rfc9051.html#section-6.4.8",
+      "requirement": "Do not silently substitute non-atomic COPY/STORE for MOVE.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "selected-imap-extensions",
+      "status": "tested",
+      "reason": "Dakia safety policy is stricter than base rev1 compatibility: absent MOVE fails closed. This asserts the refusal only.",
+      "catalogueIds": ["MS-B-014", "MS-D-011"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "missing_uid_move_refuses_non_atomic_copy_fallback_before_any_mutation",
+          "assertion": "UID MOVE"
+        }
+      ]
+    },
+    {
+      "id": "MSR-9051-uid-expunge",
+      "rfc": 9051,
+      "section": "6.4.9",
+      "source": "https://www.rfc-editor.org/rfc/rfc9051.html#section-6.4.9",
+      "requirement": "Expunge only selected UIDs when UIDPLUS permits it.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "selected-imap-extensions",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-B-014", "MS-D-011"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "scripted_permanent_delete_uses_uidplus_and_expunge_for_the_exact_uid",
+          "assertion": "UID EXPUNGE"
+        }
+      ]
+    },
+    {
+      "id": "MSR-9051-no-uidplus",
+      "rfc": 9051,
+      "section": "6.4.9",
+      "source": "https://www.rfc-editor.org/rfc/rfc9051.html#section-6.4.9",
+      "requirement": "Refuse permanent deletion without safe targeted expunge.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "selected-imap-extensions",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-B-014", "MS-D-011"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "scripted_permanent_delete_without_uidplus_makes_no_mutation",
+          "assertion": "requires IMAP UIDPLUS support"
+        }
+      ]
+    },
+    {
+      "id": "MSR-9051-rev2-enable",
+      "rfc": 9051,
+      "section": "6.3.1",
+      "source": "https://www.rfc-editor.org/rfc/rfc9051.html#section-6.3.1",
+      "requirement": "Full IMAP4rev2 ENABLE and required extension profile.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "selected-imap-extensions",
+      "status": "unsupported",
+      "reason": "Dakia is an IMAP4rev1 client with selected extensions; it does not implement the complete rev2 required profile. The production connector refuses rev2-only servers before LOGIN and accepts dual-profile servers through IMAP4rev1 rather than claiming rev2 support.",
+      "catalogueIds": ["MS-B-014", "MS-D-011"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/remote_search_safety_tests.rs",
+          "test": "production_imap_connector_rejects_rev2_only_before_login_but_allows_dual_profile_servers",
+          "assertion": "IMAP server did not advertise a supported IMAP profile after TLS"
+        }
+      ]
+    },
+    {
+      "id": "MSR-5321-multiline",
+      "rfc": 5321,
+      "section": "4.2",
+      "source": "https://www.rfc-editor.org/rfc/rfc5321.html#section-4.2",
+      "requirement": "Read complete multiline replies before advancing.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "submission",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-C-004", "MS-C-014", "MS-C-015"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "smtp_declares_utf8_and_eight_bit_body_and_dot_stuffs_the_wire_message",
+          "assertion": "queued fixture-utf8"
+        }
+      ]
+    },
+    {
+      "id": "MSR-5321-recipients",
+      "rfc": 5321,
+      "section": "4.1.1.3",
+      "source": "https://www.rfc-editor.org/rfc/rfc5321.html#section-4.1.1.3",
+      "requirement": "Use RCPT envelope recipients independent of visible headers.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "submission",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-C-004", "MS-C-014", "MS-C-015"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "bcc_is_only_an_envelope_recipient_in_the_transmitted_message",
+          "assertion": "RCPT TO"
+        }
+      ]
+    },
+    {
+      "id": "MSR-5321-data",
+      "rfc": 5321,
+      "section": "4.1.1.4",
+      "source": "https://www.rfc-editor.org/rfc/rfc5321.html#section-4.1.1.4",
+      "requirement": "Wait for DATA permission before uploading message bytes.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "submission",
+      "status": "tested",
+      "reason": "The real TLS server asserts an empty buffered/socket input before delayed DATA permission and no body after explicit refusal; successful permission then permits upload.",
+      "catalogueIds": ["MS-C-004", "MS-C-014", "MS-C-015"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "smtp_waits_for_data_permission_before_uploading_any_message_bytes",
+          "assertion": "message bytes arrived before DATA permission"
+        }
+      ]
+    },
+    {
+      "id": "MSR-5321-transparency",
+      "rfc": 5321,
+      "section": "4.5.2",
+      "source": "https://www.rfc-editor.org/rfc/rfc5321.html#section-4.5.2",
+      "requirement": "Dot-stuff leading dots and terminate DATA correctly.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "submission",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-C-004", "MS-C-014", "MS-C-015"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "smtp_declares_utf8_and_eight_bit_body_and_dot_stuffs_the_wire_message",
+          "assertion": "..leading dot"
+        }
+      ]
+    },
+    {
+      "id": "MSR-5321-uncertain",
+      "rfc": 5321,
+      "section": "4.1.1.4",
+      "source": "https://www.rfc-editor.org/rfc/rfc5321.html#section-4.1.1.4",
+      "requirement": "Missing final acceptance cannot prove non-delivery.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "submission",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-C-004", "MS-C-014", "MS-C-015"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "scripted_smtp_starttls_eof_after_data_reports_uncertain_delivery",
+          "assertion": "SendFailureKind::DeliveryUncertain"
+        }
+      ]
+    },
+    {
+      "id": "MSR-5321-path-length",
+      "rfc": 5321,
+      "section": "4.5.3.1.3",
+      "source": "https://www.rfc-editor.org/rfc/rfc5321.html#section-4.5.3.1.3",
+      "requirement": "Observe SMTP path length limits.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "submission",
+      "status": "tested",
+      "reason": "Production compose and submission tests cover exact and over-limit ASCII and UTF-8 sender and To/Cc/Bcc paths, count path octets rather than display names, and assert invalid paths fail as NotSubmitted before opening the SMTP transport. OAuth refresh may occur earlier in public send, so this is not a zero-network-action claim. The regression failed before validate_smtp_path was added.",
+      "catalogueIds": ["MS-C-004", "MS-C-014", "MS-C-015"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "outbound_smtp_paths_observe_the_256_octet_limit",
+          "assertion": "forward-path longer than 256 octets"
+        },
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "invalid_smtp_path_fails_before_opening_the_smtp_transport",
+          "assertion": "invalid SMTP path opened an SMTP transport connection"
+        }
+      ]
+    },
+    {
+      "id": "MSR-5321-command-length",
+      "rfc": 5321,
+      "section": "4.5.3.1.4",
+      "source": "https://www.rfc-editor.org/rfc/rfc5321.html#section-4.5.3.1.4",
+      "requirement": "Observe SMTP command line octet limits.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "submission",
+      "status": "tested",
+      "reason": "The actual TLS transcript submits the exact maximum supported forward-path and asserts MAIL and RCPT command lengths including CRLF stay within 512 octets before DATA. This is the supported envelope-command slice, not every future SMTP extension or authentication mechanism.",
+      "catalogueIds": ["MS-C-004", "MS-C-014", "MS-C-015"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "smtp_exact_maximum_path_stays_within_the_command_line_limit",
+          "assertion": "rcpt.len() <= 512"
+        },
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "smtp_exact_maximum_path_stays_within_the_command_line_limit",
+          "assertion": "mail.len() <= 512"
+        }
+      ]
+    },
+    {
+      "id": "MSR-5321-reply-length",
+      "rfc": 5321,
+      "section": "4.5.3.1.5",
+      "source": "https://www.rfc-editor.org/rfc/rfc5321.html#section-4.5.3.1.5",
+      "requirement": "Handle maximum SMTP reply lines without unbounded input.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "submission",
+      "status": "intentionally_tolerated",
+      "reason": "RFC 5321 section 4.5.3.1.5 limits server reply lines to 512 octets. The production Lettre client deliberately tolerates a 1000-octet greeting and rejects 1001 before EHLO. This proves the selected client resource boundary, not a 1000-octet RFC limit.",
+      "catalogueIds": ["MS-C-004", "MS-C-014", "MS-C-015"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "smtp_reply_input_is_bounded_while_the_supported_boundary_remains_usable",
+          "assertion": "over-limit SMTP reply advanced the protocol"
+        }
+      ]
+    },
+    {
+      "id": "MSR-5321-text-line",
+      "rfc": 5321,
+      "section": "4.5.3.1.6",
+      "source": "https://www.rfc-editor.org/rfc/rfc5321.html#section-4.5.3.1.6",
+      "requirement": "Keep transmitted message text lines within allowed limits.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "submission",
+      "status": "tested",
+      "reason": "Production MIME serialization of the long-body fixture asserts every generated line plus its CRLF is at most 1000 octets. This is the tested message-construction boundary, not a blanket claim for arbitrary externally supplied raw SMTP bytes.",
+      "catalogueIds": ["MS-C-004", "MS-C-014", "MS-C-015"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "generated_mime_keeps_every_transmitted_text_line_within_1000_octets",
+          "assertion": "line.len() <= 999"
+        }
+      ]
+    },
+    {
+      "id": "MSR-5321-timeouts",
+      "rfc": 5321,
+      "section": "4.5.3.2",
+      "source": "https://www.rfc-editor.org/rfc/rfc5321.html#section-4.5.3.2",
+      "requirement": "Apply bounded SMTP command and DATA timeouts.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "submission",
+      "status": "intentionally_tolerated",
+      "reason": "The production submission path uses separate budgets for connect, greeting, TLS, EHLO, STARTTLS, AUTH, MAIL, every RCPT, DATA initiation, successful DATA progress, terminator and final reply; no aggregate transaction ceiling is imposed. Source tests pin the recommended delivery defaults: greeting/MAIL/RCPT 5 minutes, DATA initiation 2 minutes, successful DATA write progress 3 minutes (16 KiB codec input chunks), and final acknowledgement 10 minutes. A separate 3-minute terminator budget preserves delivery uncertainty if its completion is unknown. Real TLS submission tests exercise production policy and fresh per-recipient budgets; transport tests exercise stalled progress and final replies. Runtime configurability remains an explicit tolerated SHOULD deviation: these intervals are internal constants. The distinct auth-only probe uses one 20-second deadline and never reaches MAIL/RCPT/DATA. These source tests do not prove real external DNS stalls, providers or native UI.",
+      "catalogueIds": ["MS-C-004", "MS-C-014", "MS-C-015"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "smtp_production_phase_timeouts_follow_rfc_recommended_intervals",
+          "assertion": "assert_eq!(timeouts.final_response, Duration::from_secs(10 * 60))"
+        },
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "smtp_production_send_path_uses_the_production_phase_policy_once",
+          "assertion": "assert_eq!(response, \"queued once\")"
+        },
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "smtp_each_recipient_receives_a_fresh_command_budget",
+          "assertion": "RCPT TO:<recipient-{index}@example.test>"
+        },
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "smtp_final_ack_timeout_remains_delivery_uncertain",
+          "assertion": "SendFailureKind::DeliveryUncertain"
+        },
+        {
+          "path": "vendor/lettre/src/transport/smtp/client/async_connection.rs",
+          "test": "data_progress_restarts_the_timer_instead_of_using_an_aggregate_deadline",
+          "assertion": "assert!(response.is_positive())"
+        },
+        {
+          "path": "vendor/lettre/src/transport/smtp/client/async_connection.rs",
+          "test": "final_reply_stall_is_reported_after_the_terminator",
+          "assertion": "AsyncSmtpDataPhase::FinalResponse"
+        }
+      ]
+    },
+    {
+      "id": "MSR-5321-ehlo-fallback",
+      "rfc": 5321,
+      "section": "4.1.4",
+      "source": "https://www.rfc-editor.org/rfc/rfc5321.html#section-4.1.4",
+      "requirement": "Handle non-ESMTP HELO-only servers.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "submission",
+      "status": "unsupported",
+      "reason": "Authenticated encrypted submission profile requires ESMTP capabilities; no HELO-only interoperability claim.",
+      "catalogueIds": ["MS-C-004", "MS-C-014", "MS-C-015"],
+      "evidence": []
+    },
+    {
+      "id": "MSR-5322-header-injection",
+      "rfc": 5322,
+      "section": "2.2",
+      "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-2.2",
+      "requirement": "Reject CRLF in tested recipients, subject and reply headers; encode the attachment filename.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "submission",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-C-012", "MS-E-014", "MS-E-015"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "outbound_headers_reject_injection_and_encode_untrusted_filenames",
+          "assertion": "formatted.matches"
+        }
+      ]
+    },
+    {
+      "id": "MSR-5322-bcc",
+      "rfc": 5322,
+      "section": "3.6.3",
+      "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-3.6.3",
+      "requirement": "Remove Bcc fields from the transmitted copy.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "submission",
+      "status": "tested",
+      "reason": "Existing envelope/header tests and actual MailService SMTP DATA capture keep Bcc recipients out of transmitted headers and parsed address lists while preserving visible To/Cc. This declares the named source assertions, not live-provider acceptance.",
+      "catalogueIds": ["MS-C-012", "MS-E-014", "MS-E-015"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "bcc_is_only_an_envelope_recipient_in_the_transmitted_message",
+          "assertion": "Bcc:"
+        },
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "production_send_serializes_nested_boundaries_and_unicode_filename_safely",
+          "assertion": "assert!(parsed.bcc().is_none())"
+        }
+      ]
+    },
+    {
+      "id": "MSR-5322-unfold",
+      "rfc": 5322,
+      "section": "2.2.3",
+      "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-2.2.3",
+      "requirement": "Unfold received recipient headers.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "submission",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-C-012", "MS-E-014", "MS-E-015"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "mime_conformance_headers_charsets_and_transfer_failures",
+          "assertion": "second-recipient@example.test"
+        }
+      ]
+    },
+    {
+      "id": "MSR-5322-duplicate-singletons",
+      "rfc": 5322,
+      "section": "3.6",
+      "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-3.6",
+      "requirement": "Choose the first duplicate singleton value.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "submission",
+      "status": "intentionally_tolerated",
+      "reason": "Malformed duplicate singleton input is intentionally tolerated with deterministic first-value selection; this does not authorize emitting duplicates.",
+      "catalogueIds": ["MS-C-012", "MS-E-014", "MS-E-015"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "duplicate_singleton_headers_use_the_first_value_in_every_parse_path",
+          "assertion": "message.subject, \"First subject\""
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/received_header_conformance_tests.rs",
+          "test": "rfc5322_duplicate_message_id_uses_only_the_first_structured_header",
+          "assertion": "Some(\"<first@example.test>\")"
+        }
+      ]
+    },
+    {
+      "id": "MSR-5322-date",
+      "rfc": 5322,
+      "section": "3.6.1",
+      "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-3.6.1",
+      "requirement": "Use valid message date without inventing a receipt time.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "submission",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-C-012", "MS-E-014", "MS-E-015"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "catalogue_dates_use_provider_evidence_and_never_the_local_clock",
+          "assertion": "None => assert!(result.is_err(), \"{name} invented a local timestamp\")"
+        }
+      ]
+    },
+    {
+      "id": "MSR-5322-reply-headers",
+      "rfc": 5322,
+      "section": "3.6.4",
+      "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-3.6.4",
+      "requirement": "Canonicalize identification and reply threading fields.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "submission",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-C-012", "MS-E-014", "MS-E-015"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "canonicalizes_threading_headers",
+          "assertion": "canonical_message_ids(\"not-a-message-id\"), None"
+        }
+      ]
+    },
+    {
+      "id": "MSR-5322-line-limits",
+      "rfc": 5322,
+      "section": "2.1.1",
+      "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-2.1.1",
+      "requirement": "Enforce 998-character hard line limits and folding recommendations on generated headers.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "submission",
+      "status": "intentionally_tolerated",
+      "reason": "Actual MailService SMTP DATA capture asserts CRLF-only serialization and every generated header line is at most 998 octets. The mandatory hard limit is tested. In the governed Unicode fixture, exactly two encoded address-header lines (To and Cc, observed 91-101 octets) exceed the recommended 78-character width; the assertion limits this deliberate compatibility tolerance to those fields and at most 110 octets. This does not claim universal preferred 78-character folding. RFC 5322 section 2.1.1 states that width as SHOULD rather than the mandatory 998-character limit.",
+      "catalogueIds": ["MS-C-012", "MS-E-014", "MS-E-015"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "production_send_serializes_nested_boundaries_and_unicode_filename_safely",
+          "assertion": "generated header line exceeded the RFC 5322 hard limit"
+        },
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "production_send_serializes_nested_boundaries_and_unicode_filename_safely",
+          "assertion": "assert_eq!(over_recommended_length.len(), 2)"
+        },
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "production_send_serializes_nested_boundaries_and_unicode_filename_safely",
+          "assertion": "line.starts_with(\"To:\") || line.starts_with(\"Cc:\")"
+        },
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "production_send_serializes_nested_boundaries_and_unicode_filename_safely",
+          "assertion": "over_recommended_length.iter().all(|line| line.len() <= 110)"
+        }
+      ]
+    },
+    {
+      "id": "MSR-5322-required-fields",
+      "rfc": 5322,
+      "section": "3.6",
+      "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-3.6",
+      "requirement": "Emit exactly one Date and From in newly constructed messages.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "submission",
+      "status": "tested",
+      "reason": "RFC 5322 section 3.6 requires exactly one origination date and originator field; production compose serialization counts exactly one Date and From in the named fixture.",
+      "catalogueIds": ["MS-C-012", "MS-E-014", "MS-E-015"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "generated_mime_has_single_required_fields_and_bounded_encoded_words",
+          "assertion": "generated message must contain exactly one {field} field"
+        }
+      ]
+    },
+    {
+      "id": "MSR-5322-obsolete-input",
+      "rfc": 5322,
+      "section": "4",
+      "source": "https://www.rfc-editor.org/rfc/rfc5322.html#section-4",
+      "requirement": "Handle obsolete received syntax without emitting it.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "submission",
+      "status": "intentionally_tolerated",
+      "reason": "The finite receive profile covers 19 obsolete syntax families in 48 governed fictional fixtures through complete/header/catalogue parsing, Store/cache reopen and exact raw MailService TLS export. The 51-test source lane also checks modern regenerated reply headers and exact CTL-bearing recipient rejection before SMTP, with a positive control for the same endpoint and trust configuration. Intentional compatibility policies preserve literal control-bearing source text, interpret military letters using the existing -0000-equivalent UTC instant without representing unknown-offset provenance, and retain ambiguous quoted-local source routes literally rather than risk changing identity. Quoted-local routes prove literal preservation only; the exact send refusal applies to the CTL-bearing domain target. The source-text policies prescribe no visible glyphs or frontend escaping. This is a bounded tested/tolerated profile, not exhaustive RFC grammar, all grammar combinations, frontend Reader/Tauri/WebKit, native, provider, clipboard or search acceptance; broader programme gaps remain separate.",
+      "catalogueIds": ["MS-C-012", "MS-E-014", "MS-E-015"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "test": "obsolete_receive_identity_regenerates_modern_reply_headers_without_copying_source_syntax",
+          "assertion": "generator must emit four year digits"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "test": "obsolete_control_bearing_reply_target_is_rejected_before_smtp_without_cleaning_identity",
+          "assertion": "recipient contains an invalid header character"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/received_header_conformance_tests.rs",
+          "test": "rfc5322_obs_route_and_folded_received_are_receive_only",
+          "assertion": "the user-visible time comes from Date, not an obsolete Received route"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/received_header_conformance_tests.rs",
+          "test": "rfc5322_obs_route_and_folded_received_are_receive_only",
+          "assertion": "assert!(!source.contains(\"@route-a.example,\"))"
+        }
+      ]
+    },
+    {
+      "id": "MSR-6531-capability",
+      "rfc": 6531,
+      "section": "3.2",
+      "source": "https://www.rfc-editor.org/rfc/rfc6531.html#section-3.2",
+      "requirement": "Do not submit internationalized mail without SMTPUTF8.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "submission",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-C-011"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "smtp_extensions_are_required_before_non_ascii_mail_is_submitted",
+          "assertion": "SMTPUTF8"
+        }
+      ]
+    },
+    {
+      "id": "MSR-6531-parameter",
+      "rfc": 6531,
+      "section": "3.4",
+      "source": "https://www.rfc-editor.org/rfc/rfc6531.html#section-3.4",
+      "requirement": "Declare SMTPUTF8 for the tested internationalized envelope.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "submission",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-C-011"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "smtp_declares_utf8_and_eight_bit_body_and_dot_stuffs_the_wire_message",
+          "assertion": "mail.contains(\"SMTPUTF8\")"
+        }
+      ]
+    },
+    {
+      "id": "MSR-6531-idna",
+      "rfc": 6531,
+      "section": "3.2",
+      "source": "https://www.rfc-editor.org/rfc/rfc6531.html#section-3.2",
+      "requirement": "Use IDNA-compatible processing for internationalized domain lookup.",
+      "applicability": "Conditional recipient-domain DNS lookup obligation for direct delivery or MX routing; not applicable to the shipped authenticated submission client.",
+      "profile": "excluded-direct-mx-routing",
+      "status": "unsupported",
+      "reason": "Dakia submits to the configured SMTP server and does not resolve recipient domains or perform direct MX delivery. RFC 6531 recipient-domain lookup obligations belong to that unimplemented role. This is a profile exclusion, not a successful IDNA interoperability test; configured submission-host IDNA behavior is not certified.",
+      "catalogueIds": ["MS-C-011"],
+      "evidence": []
+    },
+    {
+      "id": "MSR-6531-utf8-replies",
+      "rfc": 6531,
+      "section": "3.7.4.1",
+      "source": "https://www.rfc-editor.org/rfc/rfc6531.html#section-3.7.4.1",
+      "requirement": "Handle UTF-8 reply strings and internationalized address rejection codes.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "submission",
+      "status": "tested",
+      "reason": "Actual TLS transcripts use SMTPUTF8 and valid ASCII prose with a non-ASCII forwarding mailbox: 251 proceeds directly to DATA without retargeting, while 551 stops as NotSubmitted with no later command. A separate malformed-server UTF-8-prose 553 fixture also fails safely; it is tolerance evidence, not permitted RFC reply prose.",
+      "catalogueIds": ["MS-C-011"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "smtp_utf8_forwarding_reply_forms_preserve_submission_state",
+          "assertion": "551 rejection was followed by DATA"
+        },
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "smtp_utf8_forwarding_reply_forms_preserve_submission_state",
+          "assertion": "assert_eq!(read_line(&mut connection).await, \"DATA\\r\\n\")"
+        },
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "smtp_utf8_recipient_rejection_is_bounded_and_stops_before_data",
+          "assertion": "SendFailureKind::NotSubmitted"
+        }
+      ]
+    },
+    {
+      "id": "MSR-2045-quoted-printable",
+      "rfc": 2045,
+      "section": "6.7",
+      "source": "https://www.rfc-editor.org/rfc/rfc2045.html#section-6.7",
+      "requirement": "Decode valid quoted-printable text and charset.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "mime-reader",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-E-011", "MS-E-017"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "selective_text_decoding_uses_hardened_charset_transfer_and_flowed_rules",
+          "assertion": "caf\u00e9"
+        }
+      ]
+    },
+    {
+      "id": "MSR-2045-base64",
+      "rfc": 2045,
+      "section": "6.8",
+      "source": "https://www.rfc-editor.org/rfc/rfc2045.html#section-6.8",
+      "requirement": "Decode valid base64 bodies into original content.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "mime-reader",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-E-011", "MS-E-017"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "selective_text_decoding_uses_hardened_charset_transfer_and_flowed_rules",
+          "assertion": "<p>hello</p>"
+        }
+      ]
+    },
+    {
+      "id": "MSR-2045-unknown-transfer",
+      "rfc": 2045,
+      "section": "6.4",
+      "source": "https://www.rfc-editor.org/rfc/rfc2045.html#section-6.4",
+      "requirement": "Do not display undecodable transfer syntax as message content.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "mime-reader",
+      "status": "tested",
+      "reason": "Known malformed transfer bodies retain the tested bounded decoding error; unknown transfer names are now separately published as opaque binary attachments with no HTML body. Error handling does not substitute for opaque publication.",
+      "catalogueIds": ["MS-E-011", "MS-E-017"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "mime_conformance_headers_charsets_and_transfer_failures",
+          "assertion": "MIME_CONTENT_UNDECODABLE"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "test": "rfc2045_unknown_transfer_encoding_is_published_as_opaque_binary",
+          "assertion": "assert!(parsed.body_html.is_none())"
+        }
+      ]
+    },
+    {
+      "id": "MSR-2045-unknown-as-binary",
+      "rfc": 2045,
+      "section": "6.4",
+      "source": "https://www.rfc-editor.org/rfc/rfc2045.html#section-6.4",
+      "requirement": "Treat unrecognized transfer encodings as opaque application/octet-stream.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "mime-reader",
+      "status": "tested",
+      "reason": "Named and unnamed unknown-encoding parts retain exact opaque bytes as application/octet-stream and never render as HTML. Public production TLS selective fetch leaves attachment bytes unfetched until targeted download, which preserves identity, bytes, size kind and unsafe metadata. Helper-only over-limit checks are not evidence for the production fetch boundary.",
+      "catalogueIds": ["MS-E-011", "MS-E-017"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "test": "rfc2045_unknown_transfer_encoding_is_published_as_opaque_binary",
+          "assertion": "assert_eq!(opaque.attachment.mime_type, \"application/octet-stream\")"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "test": "rfc2045_unknown_transfer_encoding_is_published_as_opaque_binary",
+          "assertion": "assert_eq!(downloaded.bytes, opaque.bytes)"
+        }
+      ]
+    },
+    {
+      "id": "MSR-2045-default-type",
+      "rfc": 2045,
+      "section": "5.2",
+      "source": "https://www.rfc-editor.org/rfc/rfc2045.html#section-5.2",
+      "requirement": "Apply default text/plain US-ASCII when Content-Type is absent.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "mime-reader",
+      "status": "tested",
+      "reason": "The governed absent-Content-Type leaf is published as text/plain with exact valid ASCII content, across complete parse, header/catalogue metadata and reopened Reader payload. Strict handling of non-ASCII input without a charset remains separately unproven.",
+      "catalogueIds": ["MS-E-011", "MS-E-017"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "test": "rfc2045_defaults_case_and_transfer_boundaries_survive_all_reader_publication_paths",
+          "assertion": "assert_eq!(mime_type(defaulted), \"text/plain\")"
+        }
+      ]
+    },
+    {
+      "id": "MSR-2045-default-transfer",
+      "rfc": 2045,
+      "section": "6.1",
+      "source": "https://www.rfc-editor.org/rfc/rfc2045.html#section-6.1",
+      "requirement": "Apply 7bit default when Content-Transfer-Encoding is absent.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "mime-reader",
+      "status": "tested",
+      "reason": "The governed leaf has no Content-Transfer-Encoding and its original ASCII bytes appear as identity text through complete publication and reopened Reader payload. No base64 inference occurs for this valid absent-header vector.",
+      "catalogueIds": ["MS-E-011", "MS-E-017"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "test": "rfc2045_defaults_case_and_transfer_boundaries_survive_all_reader_publication_paths",
+          "assertion": "defaulted.content_transfer_encoding().is_none()"
+        }
+      ]
+    },
+    {
+      "id": "MSR-2045-parameter-case",
+      "rfc": 2045,
+      "section": "5.1",
+      "source": "https://www.rfc-editor.org/rfc/rfc2045.html#section-5.1",
+      "requirement": "Treat media type tokens and parameter names case-insensitively.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "mime-reader",
+      "status": "tested",
+      "reason": "The governed mixed-case type, boundary parameter name, charset name and transfer-encoding tokens decode to the exact expected plain content. The original boundary value is preserved in the fixture; this is not an exhaustive MIME token matrix.",
+      "catalogueIds": ["MS-E-011", "MS-E-017"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "test": "rfc2045_defaults_case_and_transfer_boundaries_survive_all_reader_publication_paths",
+          "assertion": "Some(\"QuOtEd-PrInTaBlE\")"
+        }
+      ]
+    },
+    {
+      "id": "MSR-2045-mime-version",
+      "rfc": 2045,
+      "section": "4",
+      "source": "https://www.rfc-editor.org/rfc/rfc2045.html#section-4",
+      "requirement": "Generate MIME-Version 1.0 for MIME messages.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "mime-reader",
+      "status": "tested",
+      "reason": "Production compose serialization has exactly one MIME-Version field with value 1.0 in the long internationalized message fixture.",
+      "catalogueIds": ["MS-E-011", "MS-E-017"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "generated_mime_has_single_required_fields_and_bounded_encoded_words",
+          "assertion": "MIME-Version: 1.0"
+        }
+      ]
+    },
+    {
+      "id": "MSR-2045-qp-boundaries",
+      "rfc": 2045,
+      "section": "6.7",
+      "source": "https://www.rfc-editor.org/rfc/rfc2045.html#section-6.7",
+      "requirement": "Handle soft breaks, trailing whitespace and malformed QP at every parse path.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "mime-reader",
+      "status": "tested",
+      "reason": "Governed valid quoted-printable proves exact soft-break joining, encoded spaces, discarded literal trailing spaces and a surviving hard break through complete parsing, selective publication and SQLite reopen. Standalone illegal =QZ is rejected by complete parsing and production TLS hydration without publishing partial Reader content or disturbing neighboring cached mail after reopen. Bounded rejection of illegal QP is Dakia policy, not a rejection mandated by RFC 2045.",
+      "catalogueIds": ["MS-E-011", "MS-E-017"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "test": "rfc2045_defaults_case_and_transfer_boundaries_survive_all_reader_publication_paths",
+          "assertion": "valid quoted-printable soft breaks and trailing whitespace must agree across complete and selective publication"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "test": "malformed_quoted_printable_is_bounded_rejection_across_complete_selective_and_reopen",
+          "assertion": "production hydration rejects malformed quoted-printable"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "test": "malformed_quoted_printable_is_bounded_rejection_across_complete_selective_and_reopen",
+          "assertion": "failed hydration must not publish partial Reader content"
+        }
+      ]
+    },
+    {
+      "id": "MSR-2045-base64-boundaries",
+      "rfc": 2045,
+      "section": "6.8",
+      "source": "https://www.rfc-editor.org/rfc/rfc2045.html#section-6.8",
+      "requirement": "Handle padding, whitespace and invalid base64 consistently across parse paths.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "mime-reader",
+      "status": "tested",
+      "reason": "Governed valid fixtures prove transport whitespace and canonical one-, two- and three-byte final quanta through complete parsing, selective publication and SQLite reopen. Derived malformed vectors exercise complete parsing and production MailService TLS hydration: invalid characters, truncated quanta, missing required padding and misplaced padding reject with mime_content_undecodable, publish no partial cache, preserve every recoverable target catalogue field and leave neighboring message summary/content fields unchanged after reopen. Rejecting suspected transmission errors and missing padding is an explicit Dakia policy, not an RFC-mandated rejection rule. Excess terminal padding (QQ=== and QUI==) is an intentionally tested receive tolerance only: complete and TLS-selective decoding must preserve exact A/AB bytes after reopen; it is not canonical RFC 2045 output. This declaration does not replace separately recorded execution evidence.",
+      "catalogueIds": ["MS-E-011", "MS-E-017"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "test": "rfc2045_defaults_case_and_transfer_boundaries_survive_all_reader_publication_paths",
+          "assertion": "Ok(\"Base64 boundary.\")"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "test": "malformed_selective_body_does_not_disturb_cached_or_later_valid_reader_messages",
+          "assertion": "invalid transfer bytes must reject Reader hydration"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "test": "rfc2045_base64_final_quanta_and_transport_whitespace_survive_selective_reopen",
+          "assertion": "complete and selective decoding must agree for every canonical final quantum"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/base64_recovery_tests.rs",
+          "test": "base64_invalid_character_is_bounded_rejection_without_partial_cache",
+          "assertion": "assert_base64_receive_policy(b\"Q@Q==\", None)",
+          "assertionHelper": "assert_base64_receive_policy",
+          "helperAssertion": "malformed Base64 must not publish a partial Reader cache"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/base64_recovery_tests.rs",
+          "test": "base64_truncated_final_quartet_never_publishes_only_the_complete_prefix",
+          "assertion": "assert_base64_receive_policy(b\"QUJDQ\", None)",
+          "assertionHelper": "assert_base64_receive_policy",
+          "helperAssertion": "malformed Base64 cache remains absent after reopen"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/base64_recovery_tests.rs",
+          "test": "base64_missing_padding_never_silently_discards_a_final_octet",
+          "assertion": "assert_base64_receive_policy(b\"QUJDQQ\", None)",
+          "assertionHelper": "assert_base64_receive_policy",
+          "helperAssertion": "rejected transfer leaves every recoverable catalogue field unchanged"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/base64_recovery_tests.rs",
+          "test": "base64_misplaced_padding_never_invents_or_joins_decoded_octets",
+          "assertion": "assert_base64_receive_policy(b\"QQ==QQ==\", None)",
+          "assertionHelper": "assert_base64_receive_policy",
+          "helperAssertion": "production TLS hydration must reject malformed Base64"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/base64_recovery_tests.rs",
+          "test": "base64_excess_terminal_padding_is_an_explicit_exact_byte_tolerance",
+          "assertion": "assert_base64_receive_policy(b\"QQ===\", Some(\"A\"))",
+          "assertionHelper": "assert_base64_receive_policy",
+          "helperAssertion": "complete and production TLS selective decoding must publish the same exact text"
+        }
+      ]
+    },
+    {
+      "id": "MSR-2047-q-header",
+      "rfc": 2047,
+      "section": "6.2",
+      "source": "https://www.rfc-editor.org/rfc/rfc2047.html#section-6.2",
+      "requirement": "Decode Q-encoded header display text.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "mime-reader",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-E-011"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "mime_conformance_headers_charsets_and_transfer_failures",
+          "assertion": "Fictional \ud83d\udce8"
+        }
+      ]
+    },
+    {
+      "id": "MSR-2047-b-filename",
+      "rfc": 2047,
+      "section": "4.1",
+      "source": "https://www.rfc-editor.org/rfc/rfc2047.html#section-4.1",
+      "requirement": "Decode governed encoded-word filename samples.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "mime-reader",
+      "status": "intentionally_tolerated",
+      "reason": "Encoded words in filename parameters are interoperable malformed input, not RFC 2047 compliant parameter syntax; tested tolerance only.",
+      "catalogueIds": ["MS-E-011"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "selective_bodystructure_decodes_rfc2047_filenames_and_keeps_valid_fallbacks",
+          "assertion": "Some(\"report-test.txt\")"
+        }
+      ]
+    },
+    {
+      "id": "MSR-2047-placement",
+      "rfc": 2047,
+      "section": "5",
+      "source": "https://www.rfc-editor.org/rfc/rfc2047.html#section-5",
+      "requirement": "Restrict encoded-word interpretation to permitted header locations.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "mime-reader",
+      "status": "intentionally_tolerated",
+      "reason": "The bounded identity guard preserves encoded-looking raw addr-specs in From/To/Cc/Bcc/Reply-To and raw Message-ID/In-Reply-To/References across header, catalogue, complete and threading paths; allowed unstructured/display words still decode. First-angle/first-bare and quoted-display bracket cases cannot retarget the actual sender, and mixed recipient/obsolete-CFWS cases remain literal. Strict placement compliance is not claimed: the existing encoded-word filename decoder is a tested interoperability tolerance, and vendor display parsing remains tolerant of quoted display syntax. This records protected-identity assertions and compatibility behavior, not universal RFC 2047 section 5 enforcement. Untested quoted-local-part address combinations are not covered by these bounded identity assertions.",
+      "catalogueIds": ["MS-E-011"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/received_header_conformance_tests.rs",
+          "test": "rfc2047_forbidden_structured_words_cannot_rewrite_mailbox_or_thread_identity",
+          "assertion": "A syntactically valid raw token must remain exact rather than become a different identity"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/received_header_conformance_tests.rs",
+          "test": "rfc2047_forbidden_structured_words_cannot_rewrite_mailbox_or_thread_identity",
+          "assertion": "assert_eq!(threading.reference_ids.as_deref(), expected_references)"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/received_header_conformance_tests.rs",
+          "test": "rfc2047_decodes_only_allowed_display_and_unstructured_words",
+          "assertion": "assert_eq!(headers.subject, \"caf\u00e9\")"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/received_header_conformance_tests.rs",
+          "test": "rfc5322_quoted_display_brackets_never_override_the_actual_from_addr_spec",
+          "assertion": "assert_eq!(summary.from_address, \"real@example.test\", \"{path}\")"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/received_header_conformance_tests.rs",
+          "test": "rfc5322_first_bare_mailbox_cannot_be_replaced_by_a_later_malformed_sender",
+          "assertion": "assert_eq!(summary.from_address, \"first@example.test\", \"{path}\")"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/received_header_conformance_tests.rs",
+          "test": "rfc2047_mixed_angle_and_bare_recipients_remain_literal",
+          "assertion": "assert_eq!(summary.to_addresses, expected, \"{path}\")"
+        },
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "selective_bodystructure_decodes_rfc2047_filenames_and_keeps_valid_fallbacks",
+          "assertion": "Some(\"report-test.txt\")"
+        }
+      ]
+    },
+    {
+      "id": "MSR-2047-adjacent-words",
+      "rfc": 2047,
+      "section": "6.2",
+      "source": "https://www.rfc-editor.org/rfc/rfc2047.html#section-6.2",
+      "requirement": "Suppress separator whitespace between adjacent encoded words correctly.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "mime-reader",
+      "status": "tested",
+      "reason": "Two valid encoded words separated by SP/HT decode without separator whitespace while their encoded internal space survives. Header/catalogue and reopened Reader payload agree for this governed fixture; not every malformed or folded header form is claimed.",
+      "catalogueIds": ["MS-E-011"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "test": "rfc2045_defaults_case_and_transfer_boundaries_survive_all_reader_publication_paths",
+          "assertion": "assert_eq!(complete.subject, \"Adjacent words\")"
+        }
+      ]
+    },
+    {
+      "id": "MSR-2047-encoded-word-length",
+      "rfc": 2047,
+      "section": "2",
+      "source": "https://www.rfc-editor.org/rfc/rfc2047.html#section-2",
+      "requirement": "Generate encoded words no longer than 75 characters.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "mime-reader",
+      "status": "tested",
+      "reason": "Production compose serialization asserts generated encoded words are present and each is at most 75 characters in the long subject/display-name fixture.",
+      "catalogueIds": ["MS-E-011"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "generated_mime_has_single_required_fields_and_bounded_encoded_words",
+          "assertion": "word.len() <= 75"
+        }
+      ]
+    },
+    {
+      "id": "MSR-2231-continuations",
+      "rfc": 2231,
+      "section": "3",
+      "source": "https://www.rfc-editor.org/rfc/rfc2231.html#section-3",
+      "requirement": "Decode the governed two-segment filename continuation.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "mime-reader",
+      "status": "tested",
+      "reason": "The governed original two-segment fixture and the new out-of-order 2/0/1 fixture assert combined filenames. The new complete/selective publication parity covers numeric segment ordering without depending on parameter arrival order.",
+      "catalogueIds": ["MS-E-012"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "mime_conformance_filenames_content_ids_locations_and_inline_presentation",
+          "assertion": "quarterly report final.pdf"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "test": "rfc2231_language_and_malformed_continuations_have_exact_complete_selective_parity",
+          "assertion": "\"ordered-middle-tail.txt\""
+        }
+      ]
+    },
+    {
+      "id": "MSR-2231-extended",
+      "rfc": 2231,
+      "section": "4",
+      "source": "https://www.rfc-editor.org/rfc/rfc2231.html#section-4",
+      "requirement": "Decode extended filename charset and percent octets.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "mime-reader",
+      "status": "tested",
+      "reason": "Selective received BODYSTRUCTURE decodes the governed extended filename. Actual MailService SMTP DATA capture also requires an RFC 2231 filename parameter, then production reparsing preserves the exact long Unicode filename and attachment bytes. This does not claim all RFC 2231 malformed-input cases; their selected policies have separate rows.",
+      "catalogueIds": ["MS-E-012"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "selective_bodystructure_decodes_extended_rfc2231_filenames",
+          "assertion": "Some(\"caf\u00e9.pdf\")"
+        },
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "production_send_serializes_nested_boundaries_and_unicode_filename_safely",
+          "assertion": "long Unicode filename was not emitted with RFC 2231 parameters"
+        },
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "production_send_serializes_nested_boundaries_and_unicode_filename_safely",
+          "assertion": "assert_eq!(attachment.attachment.filename, filename)"
+        },
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "production_send_serializes_nested_boundaries_and_unicode_filename_safely",
+          "assertion": "assert_eq!(attachment.bytes, b\"fictional attachment bytes\")"
+        }
+      ]
+    },
+    {
+      "id": "MSR-2231-language",
+      "rfc": 2231,
+      "section": "4",
+      "source": "https://www.rfc-editor.org/rfc/rfc2231.html#section-4",
+      "requirement": "Accept language metadata without changing decoded filename bytes.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "mime-reader",
+      "status": "tested",
+      "reason": "A valid language-tagged UTF-8 extended filename decodes to caf\u00e9.pdf in complete and selective publication. An unsupported charset selects the explicit plain fallback without invented decoding; exact nine-filename semantics agree across both paths.",
+      "catalogueIds": ["MS-E-012"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "test": "rfc2231_language_and_malformed_continuations_have_exact_complete_selective_parity",
+          "assertion": "\"unsupported-fallback.bin\""
+        }
+      ]
+    },
+    {
+      "id": "MSR-2231-invalid-continuations",
+      "rfc": 2231,
+      "section": "3",
+      "source": "https://www.rfc-editor.org/rfc/rfc2231.html#section-3",
+      "requirement": "Define missing, duplicate and mixed continuation segment behavior.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "mime-reader",
+      "status": "intentionally_tolerated",
+      "reason": "The governed shuffled valid segments join numerically, while missing and duplicate segments select explicit safe fallbacks. Mixed quoted/unquoted and encoded/unencoded segments preserve exact complete/selective parity. Missing/duplicate recovery is a tested Dakia policy, not an RFC-mandated output.",
+      "catalogueIds": ["MS-E-012"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "test": "rfc2231_language_and_malformed_continuations_have_exact_complete_selective_parity",
+          "assertion": "complete and selective RFC 2231 recovery policy must agree"
+        }
+      ]
+    },
+    {
+      "id": "MSR-3676-delsp",
+      "rfc": 3676,
+      "section": "4.2",
+      "source": "https://www.rfc-editor.org/rfc/rfc3676.html#section-4.2",
+      "requirement": "Join flowed lines with DelSp=yes.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "mime-reader",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-E-013"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "selective_text_decoding_uses_hardened_charset_transfer_and_flowed_rules",
+          "assertion": "flowedline"
+        }
+      ]
+    },
+    {
+      "id": "MSR-3676-delsp-default",
+      "rfc": 3676,
+      "section": "4.2",
+      "source": "https://www.rfc-editor.org/rfc/rfc3676.html#section-4.2",
+      "requirement": "Keep the joining space when DelSp is absent or no.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "mime-reader",
+      "status": "tested",
+      "reason": "Direct production flowed decoder assertion only. It proves this text transformation; MIME-to-Reader integration and WebKit visual behavior remain separate.",
+      "catalogueIds": ["MS-E-013"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/flowed.rs",
+          "test": "joins_soft_lines_and_preserves_the_separator_without_delsp",
+          "assertion": "A soft line continues."
+        }
+      ]
+    },
+    {
+      "id": "MSR-3676-signature",
+      "rfc": 3676,
+      "section": "4.3",
+      "source": "https://www.rfc-editor.org/rfc/rfc3676.html#section-4.3",
+      "requirement": "Preserve signature separator as a fixed line.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "mime-reader",
+      "status": "tested",
+      "reason": "Direct production flowed decoder assertion only. It proves this text transformation; MIME-to-Reader integration and WebKit visual behavior remain separate.",
+      "catalogueIds": ["MS-E-013"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/flowed.rs",
+          "test": "signature_delimiter_is_not_a_soft_break",
+          "assertion": "-- \\nSignature text"
+        }
+      ]
+    },
+    {
+      "id": "MSR-3676-unstuff",
+      "rfc": 3676,
+      "section": "4.4",
+      "source": "https://www.rfc-editor.org/rfc/rfc3676.html#section-4.4",
+      "requirement": "Remove one stuffing space after quote-depth recognition.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "mime-reader",
+      "status": "tested",
+      "reason": "Direct production flowed decoder assertion only. It proves this text transformation; MIME-to-Reader integration and WebKit visual behavior remain separate.",
+      "catalogueIds": ["MS-E-013"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/flowed.rs",
+          "test": "removes_space_stuffing_before_processing_quotes",
+          "assertion": "From the beginning\\n> Quoted soft line continuation"
+        }
+      ]
+    },
+    {
+      "id": "MSR-3676-quotes",
+      "rfc": 3676,
+      "section": "4.5",
+      "source": "https://www.rfc-editor.org/rfc/rfc3676.html#section-4.5",
+      "requirement": "Do not join flowed lines across different quote depths.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "mime-reader",
+      "status": "tested",
+      "reason": "Direct production flowed decoder assertion only. It proves this text transformation; MIME-to-Reader integration and WebKit visual behavior remain separate.",
+      "catalogueIds": ["MS-E-013"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/flowed.rs",
+          "test": "only_joins_lines_at_the_same_quote_depth",
+          "assertion": "> First level \\n>> Second level\\n> Back at first continued"
+        }
+      ]
+    },
+    {
+      "id": "MSR-8058-post",
+      "rfc": 8058,
+      "section": "3.2",
+      "source": "https://www.rfc-editor.org/rfc/rfc8058.html#section-3.2",
+      "requirement": "Send only the one-click form key/value by HTTPS POST.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "privacy-actions",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-J-014", "MS-J-018"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/unsubscribe_safety_tests.rs",
+          "test": "signed_one_click_authorization_reaches_the_pinned_post_pipeline_with_only_rfc8058_data",
+          "assertion": "application/x-www-form-urlencoded"
+        }
+      ]
+    },
+    {
+      "id": "MSR-8058-consent",
+      "rfc": 8058,
+      "section": "3.2",
+      "source": "https://www.rfc-editor.org/rfc/rfc8058.html#section-3.2",
+      "requirement": "Do not POST before explicit user action.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "privacy-actions",
+      "status": "tested",
+      "reason": "Core explicit-action boundary now asserts zero resolver and sender calls before invoking unsubscribe. Native Reader-to-network consent acceptance remains separate.",
+      "catalogueIds": ["MS-J-014", "MS-J-018"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/unsubscribe_safety_tests.rs",
+          "test": "signed_raw_message_persists_and_only_its_explicit_action_reaches_the_pinned_post",
+          "assertion": "sender.requests().is_empty()"
+        }
+      ]
+    },
+    {
+      "id": "MSR-8058-dkim",
+      "rfc": 8058,
+      "section": "4",
+      "source": "https://www.rfc-editor.org/rfc/rfc8058.html#section-4",
+      "requirement": "Require valid DKIM coverage of both unsubscribe fields.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "privacy-actions",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-J-014", "MS-J-018"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/unsubscribe_safety_tests.rs",
+          "test": "signed_message_that_omits_either_required_header_cannot_enable_one_click",
+          "assertion": "!dkim_covers_unsubscribe_headers_with_txt_cache"
+        },
+        {
+          "path": "crates/dakia-core/src/unsubscribe_safety_tests.rs",
+          "test": "signed_rfc8058_headers_pass_and_tampering_fails",
+          "assertion": "!dkim_covers_unsubscribe_headers_with_txt_cache(&tampered"
+        }
+      ]
+    },
+    {
+      "id": "MSR-8058-redirect",
+      "rfc": 8058,
+      "section": "3.1",
+      "source": "https://www.rfc-editor.org/rfc/rfc8058.html#section-3.1",
+      "requirement": "Do not follow an unsubscribe redirect.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "privacy-actions",
+      "status": "tested",
+      "reason": "RFC sender-side prohibition is enforced defensively by this receiver; a single request only is asserted.",
+      "catalogueIds": ["MS-J-014", "MS-J-018"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/unsubscribe_safety_tests.rs",
+          "test": "redirects_and_non_success_responses_are_failures_without_a_followup_request",
+          "assertion": "sender.requests()"
+        }
+      ]
+    },
+    {
+      "id": "MSR-8058-no-cookies",
+      "rfc": 8058,
+      "section": "3.1",
+      "source": "https://www.rfc-editor.org/rfc/rfc8058.html#section-3.1",
+      "requirement": "Do not include cookies or contextual authorization in one-click requests.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "privacy-actions",
+      "status": "tested",
+      "reason": "Actual production Reqwest request is captured by a fictional trusted TLS server and the called helper asserts absent contextual headers. Execution must be recorded in the source lane.",
+      "catalogueIds": ["MS-J-014", "MS-J-018"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/unsubscribe_safety_tests.rs",
+          "test": "reqwest_sender_posts_exact_rfc8058_body_without_context_headers",
+          "assertion": "assert_exact_rfc8058_wire_request(&request)",
+          "assertionHelper": "assert_exact_rfc8058_wire_request",
+          "helperAssertion": "header(forbidden).is_none()"
+        }
+      ]
+    },
+    {
+      "id": "MSR-6068-percent",
+      "rfc": 6068,
+      "section": "2",
+      "source": "https://www.rfc-editor.org/rfc/rfc6068.html#section-2",
+      "requirement": "Percent-decode mailto fields without treating plus as a space.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "privacy-actions",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-I-001", "MS-C-012"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "parses_mailto_subject_body_and_literal_plus_signs",
+          "assertion": "unsubscribe+weekly"
+        }
+      ]
+    },
+    {
+      "id": "MSR-6068-fields",
+      "rfc": 6068,
+      "section": "2",
+      "source": "https://www.rfc-editor.org/rfc/rfc6068.html#section-2",
+      "requirement": "Parse supported to/cc/subject/body compose fields.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "privacy-actions",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-I-001", "MS-C-012"],
+      "evidence": [
+        {
+          "path": "apps/desktop/src/mailto.test.ts",
+          "test": "preserves standard mailto compose fields",
+          "assertion": "juhan+tamm@example.com"
+        }
+      ]
+    },
+    {
+      "id": "MSR-6068-unsafe-headers",
+      "rfc": 6068,
+      "section": "3",
+      "source": "https://www.rfc-editor.org/rfc/rfc6068.html#section-3",
+      "requirement": "Reject header-injection attempts in backend mailto actions.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "privacy-actions",
+      "status": "tested",
+      "reason": "The named test asserts this selected behavior; execution evidence belongs to its source lane, not to this declaration.",
+      "catalogueIds": ["MS-I-001", "MS-C-012"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "rejects_ambiguous_or_dangerous_mailto_actions",
+          "assertion": "parse_mailto_action(&url).is_err()"
+        }
+      ]
+    },
+    {
+      "id": "MSR-6068-frontend-injection",
+      "rfc": 6068,
+      "section": "2",
+      "source": "https://www.rfc-editor.org/rfc/rfc6068.html#section-2",
+      "requirement": "Reject CR/LF header injection from every frontend compose mailto path.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "privacy-actions",
+      "status": "tested",
+      "reason": "The shipped frontend mailto entrypoint is Reader email-body link handling; there is no OS mailto protocol registration in this profile. Actual App search to detached Reader, authenticated renderer message, opaque native compose seed and ComposeApp tests independently inject CR and LF into To, Cc and Subject. The shared compose validator disables Send, rejects click and shortcut submission, never calls api.send and never opens the URL externally. These are frontend production-component assertions, not physical WebKit activation evidence or a claim about a future OS URI handler.",
+      "catalogueIds": ["MS-I-001", "MS-C-012"],
+      "evidence": [
+        {
+          "path": "apps/desktop/src/mailIdentityContinuity.integration.test.tsx",
+          "test": "rejects $lineBreak injection in $field routed through the detached Reader",
+          "assertion": "expect(sendButton).toBeDisabled()"
+        },
+        {
+          "path": "apps/desktop/src/mailIdentityContinuity.integration.test.tsx",
+          "test": "rejects $lineBreak injection in $field routed through the detached Reader",
+          "assertion": "expect(mocks.api.send).not.toHaveBeenCalled()"
+        },
+        {
+          "path": "apps/desktop/src/mailIdentityContinuity.integration.test.tsx",
+          "test": "decodes a double-encoded $field value only once",
+          "assertion": "expect(storedSeed[field.toLowerCase()]).not.toMatch(/[\\r\\n]/)"
+        }
+      ]
+    },
+    {
+      "id": "MSR-6068-body-crlf",
+      "rfc": 6068,
+      "section": "2",
+      "source": "https://www.rfc-editor.org/rfc/rfc6068.html#section-2",
+      "requirement": "Convert percent-encoded body line endings consistently without double decoding.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "privacy-actions",
+      "status": "tested",
+      "reason": "The complete Reader mailto to opaque compose seed and ComposeApp path decodes percent escapes once: seed body retains actual CRLF while double-encoded %0D%0A remains literal text. The rich-text compose payload deliberately normalizes actual line endings to LF without decoding that literal text again; the exact subject, body and intended account reach the explicit send call. Outbound wire CRLF serialization is asserted separately. Physical native link activation remains a separate lane.",
+      "catalogueIds": ["MS-I-001", "MS-C-012"],
+      "evidence": [
+        {
+          "path": "apps/desktop/src/mailIdentityContinuity.integration.test.tsx",
+          "test": "decodes a Reader mailto body once while preserving body line breaks",
+          "assertion": "body: \"First line\\r\\nSecond line keeps %0D%0Atext\""
+        },
+        {
+          "path": "apps/desktop/src/mailIdentityContinuity.integration.test.tsx",
+          "test": "decodes a Reader mailto body once while preserving body line breaks",
+          "assertion": "body_text: \"First line\\nSecond line keeps %0D%0Atext\""
+        }
+      ]
+    },
+    {
+      "id": "MSR-6068-no-send",
+      "rfc": 6068,
+      "section": "3",
+      "source": "https://www.rfc-editor.org/rfc/rfc6068.html#section-3",
+      "requirement": "Opening mailto requires review before sending.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "privacy-actions",
+      "status": "tested",
+      "reason": "The currently shipped Reader mailto path mounts ComposeApp through the actual authenticated renderer event and opaque native compose seed. Before any Send interaction, its named shared helper explicitly asserts no api.send or external-open call. The ordinary body-flow test subsequently requires one explicit Send click before the exact account/content submission. This is source-level component/event coverage; no OS-wide mailto protocol is registered, and physical WebKit activation evidence remains separate.",
+      "catalogueIds": ["MS-I-001", "MS-C-012"],
+      "evidence": [
+        {
+          "path": "apps/desktop/src/mailIdentityContinuity.integration.test.tsx",
+          "test": "decodes a Reader mailto body once while preserving body line breaks",
+          "assertion": "const { storedSeed } = await openMailtoThroughDetachedReader(href)",
+          "assertionHelper": "openMailtoThroughDetachedReader",
+          "helperAssertion": "expect(mocks.api.send).not.toHaveBeenCalled()"
+        }
+      ]
+    },
+    {
+      "id": "MSR-8997-min-version",
+      "rfc": 8997,
+      "section": "3",
+      "source": "https://www.rfc-editor.org/rfc/rfc8997.html#section-3",
+      "requirement": "Require TLS 1.2 or later for protected email access and submission.",
+      "applicability": "Dakia mail user agent client; selected feature profile",
+      "profile": "tls",
+      "status": "tested",
+      "reason": "Constrained real servers establish exact negotiated TLS 1.2 and TLS 1.3 through the shared production IMAP factory and the separate shared production Lettre SMTP factory. SMTP implicit TLS and STARTTLS both authenticate and quit over the observed version. Explicit manual IMAP and SMTP tests first prove an actual OpenSSL TLS 1.1 positive control, then reject identical TLS 1.1-only implicit-TLS servers before credentials; SMTP also proves no AUTH/envelope/DATA. Default source execution is six passed and two ignored, with each ignored legacy test separately invoked and passed, never counted as a default pass. Direct legacy-version refusal is implicit TLS only: STARTTLS has positive 1.2/1.3 negotiation using the same production parameters plus separate certificate-refusal evidence, not a direct TLS 1.1 downgrade transcript. Durable reviewed execution evidence: docs/mail-safety-results/tls-version-profile-2026-10-21.json. No general cipher-suite, revocation or client-certificate certification is claimed.",
+      "catalogueIds": ["MS-A-001", "MS-A-002"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/tls_version_profile_tests.rs",
+          "test": "production_imap_connector_negotiates_with_tls12_only_server",
+          "assertion": "assert_production_connector_negotiates(&TLS12, ProtocolVersion::TLSv1_2)",
+          "assertionHelper": "assert_production_connector_negotiates",
+          "helperAssertion": "assert_eq!(observed, Some(expected))"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/tls_version_profile_tests.rs",
+          "test": "production_imap_connector_negotiates_with_tls13_only_server",
+          "assertion": "assert_production_connector_negotiates(&TLS13, ProtocolVersion::TLSv1_3)",
+          "assertionHelper": "assert_production_connector_negotiates",
+          "helperAssertion": "assert_eq!(observed, Some(expected))"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/tls_version_profile_tests.rs",
+          "test": "production_imap_connector_rejects_openssl_tls11_before_credentials",
+          "assertion": "assert_openssl_tls11_control(directory.path(), &certificate_path, &key_path)",
+          "assertionHelper": "assert_openssl_tls11_control",
+          "helperAssertion": "Protocol version: TLSv1.1"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/tls_version_profile_tests.rs",
+          "test": "production_imap_connector_rejects_openssl_tls11_before_credentials",
+          "assertion": "TLS 1.1 unexpectedly reached IMAP authentication"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/tls_version_profile_tests.rs",
+          "test": "production_smtp_implicit_tls_negotiates_with_tls12_only_server",
+          "assertion": "ProtocolVersion::TLSv1_2",
+          "assertionHelper": "assert_production_smtp_connector_negotiates",
+          "helperAssertion": "assert_eq!(observed, Some(expected))"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/tls_version_profile_tests.rs",
+          "test": "production_smtp_implicit_tls_negotiates_with_tls13_only_server",
+          "assertion": "ProtocolVersion::TLSv1_3",
+          "assertionHelper": "assert_production_smtp_connector_negotiates",
+          "helperAssertion": "assert_eq!(observed, Some(expected))"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/tls_version_profile_tests.rs",
+          "test": "production_smtp_starttls_negotiates_with_tls12_only_server",
+          "assertion": "ProtocolVersion::TLSv1_2",
+          "assertionHelper": "assert_production_smtp_connector_negotiates",
+          "helperAssertion": "assert_eq!(observed, Some(expected))"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/tls_version_profile_tests.rs",
+          "test": "production_smtp_starttls_negotiates_with_tls13_only_server",
+          "assertion": "ProtocolVersion::TLSv1_3",
+          "assertionHelper": "assert_production_smtp_connector_negotiates",
+          "helperAssertion": "assert_eq!(observed, Some(expected))"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/tls_version_profile_tests.rs",
+          "test": "production_smtp_connector_rejects_openssl_tls11_before_credentials_or_envelope",
+          "assertion": "assert_openssl_tls11_control(directory.path(), &certificate_path, &key_path)",
+          "assertionHelper": "assert_openssl_tls11_control",
+          "helperAssertion": "Protocol version: TLSv1.1"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/tls_version_profile_tests.rs",
+          "test": "production_smtp_connector_rejects_openssl_tls11_before_credentials_or_envelope",
+          "assertion": "assert!(!observed_upper.contains(\"AUTH \"))"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/tls_version_profile_tests.rs",
+          "test": "production_smtp_connector_rejects_openssl_tls11_before_credentials_or_envelope",
+          "assertion": "assert!(!observed_upper.contains(\"MAIL FROM\"))"
+        }
+      ]
+    },
+    {
+      "id": "MSR-8997-confidentiality-ui",
+      "rfc": 8997,
+      "section": "3",
+      "source": "https://www.rfc-editor.org/rfc/rfc8997.html#section-3",
+      "requirement": "Do not indicate confidentiality without TLS 1.2 and verified certificates.",
+      "applicability": "Conditional obligation if a live connection confidentiality indicator is provided; no such indicator is shipped.",
+      "profile": "excluded-live-confidentiality-indicator",
+      "status": "unsupported",
+      "reason": "The shipped UI has account TLS configuration labels but no live connection confidentiality indicator. The conditional indicator requirement is not applicable to that absent feature. Configuration labels are not evidence of an authenticated secure connection, and a future live indicator needs new acceptance tests.",
+      "catalogueIds": ["MS-A-001", "MS-A-002"],
+      "evidence": []
+    },
+    {
+      "id": "MSR-2046-nested",
+      "rfc": 2046,
+      "section": "5.1.2",
+      "source": "https://www.rfc-editor.org/rfc/rfc2046.html#section-5.1.2",
+      "requirement": "Keep nested multipart boundaries out of visible content.",
+      "applicability": "Dakia received MIME and composed-message client paths",
+      "profile": "mime-reader",
+      "status": "tested",
+      "reason": "The named source assertion establishes only this selected behavior; native and provider evidence remain separate.",
+      "catalogueIds": ["MS-E-010"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "mime_conformance_nested_forwarded_empty_and_malformed_boundaries",
+          "assertion": "Visible plain body."
+        }
+      ]
+    },
+    {
+      "id": "MSR-2046-alternative",
+      "rfc": 2046,
+      "section": "5.1.4",
+      "source": "https://www.rfc-editor.org/rfc/rfc2046.html#section-5.1.4",
+      "requirement": "Prefer a supported alternative while retaining a valid fallback.",
+      "applicability": "Dakia received MIME and composed-message client paths",
+      "profile": "mime-reader",
+      "status": "tested",
+      "reason": "The named source assertion establishes only this selected behavior; native and provider evidence remain separate.",
+      "catalogueIds": ["MS-E-010"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "selective_alternative_keeps_plain_fallback_when_html_is_undecodable",
+          "assertion": "alternative_branch_is_eligible("
+        },
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "production_send_serializes_nested_boundaries_and_unicode_filename_safely",
+          "assertion": "Some(\"Plain fallback for the nested production fixture.\")"
+        }
+      ]
+    },
+    {
+      "id": "MSR-2046-mixed",
+      "rfc": 2046,
+      "section": "5.1.3",
+      "source": "https://www.rfc-editor.org/rfc/rfc2046.html#section-5.1.3",
+      "requirement": "Retain distinct mixed-branch bodies and attachments.",
+      "applicability": "Dakia received MIME and composed-message client paths",
+      "profile": "mime-reader",
+      "status": "tested",
+      "reason": "Existing received/selective tests retain mixed-branch bodies and attachments. Actual MailService SMTP DATA capture additionally reparses the exact mixed/alternative/related nesting, an outer PDF and inline PNG with exact bytes and child cardinalities. The HTML cid URL matches the parsed image Content-ID; this selected tree check is not general RFC 2387 certification.",
+      "catalogueIds": ["MS-E-010"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "selective_alternative_keeps_all_mixed_html_siblings_in_its_selected_branch",
+          "assertion": "plan.attachments.len(), 1"
+        },
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "production_send_serializes_nested_boundaries_and_unicode_filename_safely",
+          "assertion": "assert_eq!(mixed_children.len(), 2)"
+        },
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "production_send_serializes_nested_boundaries_and_unicode_filename_safely",
+          "assertion": "assert_eq!(related_children.len(), 2)"
+        },
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "production_send_serializes_nested_boundaries_and_unicode_filename_safely",
+          "assertion": "assert_eq!(inline_image.contents(), b\"image\")"
+        }
+      ]
+    },
+    {
+      "id": "MSR-2046-forwarded",
+      "rfc": 2046,
+      "section": "5.2.1",
+      "source": "https://www.rfc-editor.org/rfc/rfc2046.html#section-5.2.1",
+      "requirement": "Keep an attached message separate from its enclosing body.",
+      "applicability": "Dakia received MIME and composed-message client paths",
+      "profile": "mime-reader",
+      "status": "tested",
+      "reason": "The named source assertion establishes only this selected behavior; native and provider evidence remain separate.",
+      "catalogueIds": ["MS-E-010"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "mime_conformance_nested_forwarded_empty_and_malformed_boundaries",
+          "assertion": "!forwarded.body_text.contains(\"Original plain text.\")"
+        }
+      ]
+    },
+    {
+      "id": "MSR-2046-truncated",
+      "rfc": 2046,
+      "section": "5.1.1",
+      "source": "https://www.rfc-editor.org/rfc/rfc2046.html#section-5.1.1",
+      "requirement": "Render a bounded decoded leaf from a truncated multipart.",
+      "applicability": "Dakia received MIME and composed-message client paths",
+      "profile": "mime-reader",
+      "status": "intentionally_tolerated",
+      "reason": "Malformed missing-closing-boundary input is deliberately tolerated; no claim that this input satisfies MIME syntax.",
+      "catalogueIds": ["MS-E-010"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "test": "mime_conformance_nested_forwarded_empty_and_malformed_boundaries",
+          "assertion": "malformed.body_text.len() < 240"
+        }
+      ]
+    },
+    {
+      "id": "MSR-2046-boundary-limit",
+      "rfc": 2046,
+      "section": "5.1.1",
+      "source": "https://www.rfc-editor.org/rfc/rfc2046.html#section-5.1.1",
+      "requirement": "Validate multipart boundary syntax, quoting and maximum length.",
+      "applicability": "Dakia received MIME and composed-message client paths",
+      "profile": "mime-reader",
+      "status": "tested",
+      "reason": "Received MIME tests preserve quoted boundary punctuation and exact 69- and 70-character boundaries through complete parsing, selective publication and SQLite reopen; 71-character received boundaries are explicitly tolerated, not conforming input. Actual MailService SMTP DATA capture now asserts three generated nested mixed/alternative/related boundaries are nonempty ASCII, unique, quoted, use RFC 2046 grammar, have no trailing space, remain at most 70 characters and have opening delimiters plus exactly one matching close. Missing-close sensitivity failed the exact close assertion. Source declarations do not replace the separately recorded source, native or provider execution lanes.",
+      "catalogueIds": ["MS-E-010"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "test": "rfc2046_quoted_boundary_punctuation_and_69_70_lengths_survive_selective_reopen",
+          "assertion": "assert_eq!(lengths, [69, 70, 71]);"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "test": "rfc2046_quoted_boundary_punctuation_and_69_70_lengths_survive_selective_reopen",
+          "assertion": "Boundary length 71 is accepted as a documented parser tolerance."
+        },
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "production_send_serializes_nested_boundaries_and_unicode_filename_safely",
+          "assertion": "boundary exceeds RFC 2046 limit"
+        },
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "production_send_serializes_nested_boundaries_and_unicode_filename_safely",
+          "assertion": "generated boundary parameter was not quoted"
+        },
+        {
+          "path": "crates/dakia-core/src/standards_safety_tests.rs",
+          "test": "production_send_serializes_nested_boundaries_and_unicode_filename_safely",
+          "assertion": "boundary must have exactly one matching closing delimiter"
+        }
+      ]
+    },
+    {
+      "id": "MSR-2046-digest",
+      "rfc": 2046,
+      "section": "5.1.5",
+      "source": "https://www.rfc-editor.org/rfc/rfc2046.html#section-5.1.5",
+      "requirement": "Apply message/rfc822 default inside multipart/digest.",
+      "applicability": "Dakia received MIME and composed-message client paths",
+      "profile": "mime-reader",
+      "status": "tested",
+      "reason": "Both implicit and explicit digest children are message/rfc822 attachments with distinct identity and exact encapsulated bytes. Complete publication, header/catalogue semantics and reopened SQLite attachment metadata are asserted; native Reader rendering is separate.",
+      "catalogueIds": ["MS-E-010"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "test": "rfc2046_digest_children_default_to_message_rfc822",
+          "assertion": "assert_eq!(mime_type(part), \"message/rfc822\")"
+        }
+      ]
+    },
+    {
+      "id": "MSR-2046-unknown-multipart",
+      "rfc": 2046,
+      "section": "5.1.7",
+      "source": "https://www.rfc-editor.org/rfc/rfc2046.html#section-5.1.7",
+      "requirement": "Treat unrecognized multipart subtypes as mixed.",
+      "applicability": "Dakia received MIME and composed-message client paths",
+      "profile": "mime-reader",
+      "status": "tested",
+      "reason": "An unrecognized governed multipart subtype publishes all three decoded children in original order through the complete production parser, rather than selecting one alternative. Other malformed multipart syntax remains open.",
+      "catalogueIds": ["MS-E-010"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "test": "rfc2046_unknown_multipart_subtype_preserves_mixed_child_order",
+          "assertion": "assert!(defaulted < quoted && quoted < base64)"
+        }
+      ]
+    },
+    {
+      "id": "MSR-2046-default-charset",
+      "rfc": 2046,
+      "section": "4.1.2",
+      "source": "https://www.rfc-editor.org/rfc/rfc2046.html#section-4.1.2",
+      "requirement": "Use US-ASCII as the default text charset.",
+      "applicability": "Dakia received MIME and composed-message client paths",
+      "profile": "mime-reader",
+      "status": "intentionally_tolerated",
+      "reason": "Absent-charset ASCII remains exact through complete parsing and the production selective MIME decoding function. Valid unlabeled UTF-8 is deliberately accepted as a compatibility tolerance with exact complete/selective text parity after 8bit, quoted-printable and base64 transport decoding; invalid bytes reject without replacement on those same paths. This is not strict US-ASCII-only default enforcement. The named boundary is complete parsing plus decode_mime_part_body, not a public TLS hydration, SQLite-reopen or native rendering claim.",
+      "catalogueIds": ["MS-E-010"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/received_header_conformance_tests.rs",
+          "test": "rfc2046_absent_charset_is_consistent_and_bounded_across_complete_and_selective_decoding",
+          "assertion": "assert_eq!(ascii_complete.body_text, \"plain ASCII\\r\\n\")"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/received_header_conformance_tests.rs",
+          "test": "rfc2046_absent_charset_is_consistent_and_bounded_across_complete_and_selective_decoding",
+          "assertion": "complete and selective paths must publish the same user-visible text"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/received_header_conformance_tests.rs",
+          "test": "rfc2046_absent_charset_is_consistent_and_bounded_across_complete_and_selective_decoding",
+          "assertion": "invalid {encoding} bytes must fail without replacement"
+        }
+      ]
+    },
+    {
+      "id": "MSR-1870-octets",
+      "rfc": 1870,
+      "section": "5",
+      "source": "https://www.rfc-editor.org/rfc/rfc1870.html#section-5",
+      "requirement": "Declare exact message octets including CRLF for the named fixture.",
+      "applicability": "Dakia authenticated ESMTP submission",
+      "profile": "smtp-size-extension",
+      "status": "tested",
+      "reason": "The named fixture asserts exact declared size and transmitted bytes; a dot-leading SIZE fixture remains an additional useful vector.",
+      "catalogueIds": ["MS-C-019"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/smtp_size_tests.rs",
+          "test": "rfc1870_below_and_exact_limits_submit_one_size_annotated_transaction",
+          "assertion": "[RAW, b\"\\r\\n\"].concat()"
+        }
+      ]
+    },
+    {
+      "id": "MSR-1870-maximum",
+      "rfc": 1870,
+      "section": "6",
+      "source": "https://www.rfc-editor.org/rfc/rfc1870.html#section-6",
+      "requirement": "Refuse a message above the advertised fixed maximum.",
+      "applicability": "Dakia authenticated ESMTP submission",
+      "profile": "smtp-size-extension",
+      "status": "tested",
+      "reason": "The named source assertion establishes only this selected behavior; native and provider evidence remain separate.",
+      "catalogueIds": ["MS-C-019"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/smtp_size_tests.rs",
+          "test": "rfc1870_above_limit_fails_before_credentials_or_envelope",
+          "assertion": "SendFailureKind::NotSubmitted"
+        }
+      ]
+    },
+    {
+      "id": "MSR-1870-zero",
+      "rfc": 1870,
+      "section": "3",
+      "source": "https://www.rfc-editor.org/rfc/rfc1870.html#section-3",
+      "requirement": "Interpret SIZE zero as no fixed maximum.",
+      "applicability": "Dakia authenticated ESMTP submission",
+      "profile": "smtp-size-extension",
+      "status": "tested",
+      "reason": "The named source assertion establishes only this selected behavior; native and provider evidence remain separate.",
+      "catalogueIds": ["MS-C-019"],
+      "evidence": [
+        {
+          "path": "crates/dakia-core/src/mail/tests/smtp_size_tests.rs",
+          "test": "rfc1870_zero_size_means_no_fixed_maximum",
+          "assertion": "SIZE 0000"
+        }
+      ]
+    }
+  ],
+  "excludedRoles": [
+    "SMTP relay/MTA routing, DNS MX selection, queue retry and delivery status notification generation are not client submission features.",
+    "IMAP server-only obligations and server load/conformance certification are excluded.",
+    "List sender endpoint operation and creation of signed mailing-list headers are excluded; receiver-side safety checks remain included.",
+    "Full IMAP4rev2 support is not advertised. Selected modern requirements are explicitly indexed."
+  ],
+  "evidencePolicy": "tested means a reviewed assertion is declared at the source boundary; an unchanged source execution report is separately required. gap is unproven, not a product defect or a pass. unsupported describes an actual bounded product profile exclusion, never a missing test."
+}

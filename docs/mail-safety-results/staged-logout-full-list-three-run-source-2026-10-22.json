@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "status": "passed-three-consecutive-unchanged-source-runs",
+  "recordedAtUtc": "2026-10-22T01:06:09.842043+00:00",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "04b1368f7a758b2ad77d95442a2d5a0d3b7ce74f1f100bb59967aeef8b9ad471",
+    "fileCount": 952
+  },
+  "sourceTreeAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "04b1368f7a758b2ad77d95442a2d5a0d3b7ce74f1f100bb59967aeef8b9ad471",
+    "fileCount": 952
+  },
+  "environment": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "node": "v26.5.0"
+  },
+  "nodeOptions": "--no-experimental-webstorage",
+  "startedAt": "2026-10-22T00:48:23.523Z",
+  "finishedAt": "2026-10-22T01:05:19.230Z",
+  "iterations": 3,
+  "gatesPerIteration": 17,
+  "passingGates": 51,
+  "scheduledRetries": 0,
+  "observedFlakes": 0,
+  "perIteration": {
+    "workspaceRustRuntimePassed": 1052,
+    "workspaceRustDoctestsPassed": 2,
+    "workspaceRustIgnored": 13,
+    "fixtureEnabledTauriLibraryPassed": 236,
+    "ordinaryFrontendPassed": 642,
+    "ordinaryFrontendSkippedTests": 2,
+    "artifactGatedFrontendFiles": 3,
+    "scriptTestsPassed": 254,
+    "coupledRustPassed": 6,
+    "coupledArtifactFrontendPassed": 11
+  },
+  "report": "/private/tmp/dakia-staged-three-run-source-logout-and-full-list-20261022.json",
+  "reportSha256": "aa260d4806af16592c1668a93ffa8ee035c73feb6f5be47d004e3d1b47dc48f5",
+  "log": "/private/tmp/dakia-staged-three-run-source-logout-and-full-list-20261022.log",
+  "logSha256": "e715fe1b6fd771f1072644393301741dd96297cb0cc7611e57b41b21c65f5075",
+  "sourceAppliedToPrimary": false,
+  "limitations": [
+    "Fixture-enabled and coupled Rust tests overlap workspace tests and are not summed as unique tests.",
+    "Ignored tests and separately gated frontend files remain distinct; the separately executed Gmail proof is its own lane.",
+    "Native WebKit, attachments, same-profile restart, upgrades and release acceptance are not established by source tests.",
+    "Earlier source failures and repaired flaky test oracles remain retained; these runs do not erase them.",
+    "Hosted Linux PR cost and warm-cache timing are unmeasured."
+  ]
+}

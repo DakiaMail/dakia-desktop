@@ -1,0 +1,11 @@
+X-Dakia-Corpus-Case: obs-route-control-comments
+X-Dakia-Corpus-Source: RFC 5322 section 4.4; fictional boundary control
+Date: Tue, 28 Jul 2026 12:01:00 +0000
+From: Sender <sender@example.test>
+To: <(route) @relay-a.example, (hop) @relay-b.example:reader@example.test>
+Subject: Fictional route boundary control
+Message-ID: <obs-route-control-comments@example.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+Fictional body obs-route-control-comments.

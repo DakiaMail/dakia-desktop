@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T15:21:33.051345+00:00",
+  "lane": "credentialed-gmail-read-only-exact-message-recovery",
+  "status": "failed",
+  "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "evidence": {
+    "binarySha256": "bf38c4af2975f25cc9656b0290340dbd11ec70ee6a77f2f6ba0db5a4b977e276",
+    "childReaped": true,
+    "cleanupIncomplete": false,
+    "elapsedMs": 48390,
+    "fixedRecoveryId": "redacted-fixed-id",
+    "forcedKillRequested": false,
+    "implementation": {
+      "focusedProviderSmokeTests": "20 passed",
+      "independentReview": "approved"
+    },
+    "innerTimeoutSeconds": 45,
+    "kind": "private-provider-smoke-ci-read-only-recovery",
+    "mailSubmissionRequested": false,
+    "operations": [
+      "read-only exact recovery"
+    ],
+    "outerTimeout": false,
+    "outerTimeoutSeconds": 70,
+    "ownedChildTempDirRemoved": true,
+    "processExitCode": 1,
+    "providerSourceSha256": "fc67c93e35e6507d3ae84f98c38239994ad9eeda18199444d0df3f55de4287db",
+    "rawEvidence": {
+      "bytes": 1007,
+      "schemaValid": true,
+      "sha256": "f54777a2bdee8bed93af346e47fd6dfa22bab2fac0e115c7b6da1800e561d699"
+    },
+    "recoveryEvidence": {
+      "outcome": "failed",
+      "stage": "timeout",
+      "stageHistory": [
+        "prepared",
+        "recovery_store_open",
+        "recovery_account_persist",
+        "recovery_credential_persist",
+        "recovery_smoke",
+        "recovery_header_sync",
+        "recovery_exact_search",
+        "timeout"
+      ]
+    },
+    "recoveryEvidenceRemoved": true,
+    "remoteMutationRequested": false,
+    "roundtripRequested": false,
+    "schemaVersion": 1,
+    "sourceBindingSha256": "e2eedf003489cf42c4fb5e9e2bf76ef7a96de6b43c39e020e78fb2fb88a1a814",
+    "terminationRequested": false,
+    "workspaceSourceSha256": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c"
+  },
+  "sanitizedReportSha256": "8446e77d9fcbfb112a547e6d59ae293dffb264f1a52a434e710e99c9e8ac0a91",
+  "observations": [
+    "The new diagnostic build reached exact remote search but timed out before first body fetch, unlike the preceding build which reached second hydration/cache verification.",
+    "The 45-second deadline covers the complete recovery operation; the last stage alone does not identify a single blocked IMAP command or cause.",
+    "No retry, send, flag/label change, deletion or other remote mutation was requested.",
+    "Child exited 1, was reaped normally, and owned temporary encrypted credentials/key were removed."
+  ],
+  "limitations": [
+    "This is failed live-provider evidence on current source, not Gmail acceptance.",
+    "The earlier one-pass recovery and both later timeouts remain separate evidence.",
+    "Provider latency, a global test budget, and a product defect are not distinguished by these observations."
+  ]
+}

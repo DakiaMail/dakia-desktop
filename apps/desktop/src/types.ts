@@ -44,6 +44,7 @@ export type MailSummary = {
   account_id: string;
   mailbox: string;
   uid: number;
+  mailbox_uid_validity?: number | null;
   message_id?: string | null;
   in_reply_to?: string | null;
   reference_ids?: string | null;
@@ -118,12 +119,21 @@ export type SmartInboxPage = {
     nextCursor: MailCursor | null;
   }>;
 };
+export type RemoteSearchResult = {
+  messages: MailSummary[];
+  limitReached: boolean;
+};
 export type Attachment = {
   id: string;
   message_id: string;
   filename: string;
   mime_type: string;
   size_bytes: number;
+  /**
+   * A numeric size is only a decoded file size once the attachment has been
+   * downloaded. Older payloads omit this and are treated as unknown.
+   */
+  size_kind?: "decoded" | "encoded" | "unknown";
   is_inline: boolean;
   /**
    * Whether this MIME part is embedded in the rendered message, available for
@@ -141,11 +151,54 @@ export type MessageContent = {
 };
 export type MessageContentErrorKind =
   "resource_limit" | "malformed" | "undecodable" | "unsupported" | "transient";
+/**
+ * A send failure is intentionally explicit about what happened after Dakia
+ * began SMTP submission. Consumers must never turn an uncertain or
+ * Sent-copy failure into an ordinary retry.
+ */
+export type SendFailureKind =
+  "not_submitted" | "delivery_uncertain" | "sent_copy_failed";
 export type ComposeAttachment = {
   filename: string;
   mime_type: string;
   content_base64: string;
   size_bytes: number;
+};
+export type SendRecoveryStatus =
+  "not_submitted" | "pending" | "delivery_uncertain" | "sent_copy_failed";
+export type SendRecoverySummary = {
+  account_id: string;
+  attempt_id: string;
+  subject: string;
+  status: SendRecoveryStatus;
+  updated_at: string;
+};
+export type SendRecoveryPage = {
+  items: SendRecoverySummary[];
+  next_cursor: string | null;
+  total_count: number;
+};
+export type SendRecoverySeed = {
+  accountId: string;
+  attemptId: string;
+  status: SendRecoveryStatus;
+  message: {
+    accountId: string;
+    to: string[];
+    cc: string[];
+    bcc: string[];
+    subject: string;
+    bodyText: string;
+    bodyHtml: string | null;
+    inReplyTo: string | null;
+    references: string | null;
+    attachments: Array<{
+      filename: string;
+      mimeType: string;
+      contentBase64: string;
+      sizeBytes: number;
+    }>;
+  };
 };
 export type MailCategory =
   "people" | "transactions" | "notifications" | "newsletters" | "other";
@@ -207,6 +260,23 @@ export type AiSettings = {
   apiKey: string;
   executable: string;
   modelPath: string;
+};
+export type AiMessageTarget = {
+  messageId: string;
+  expectedUidValidity: number | null;
+};
+export type AiInput = {
+  provider: AiSettings["provider"];
+  baseUrl: string | null;
+  model: string;
+  apiKey: string | null;
+  executable: string | null;
+  modelPath: string | null;
+  /** Kept for native command compatibility. */
+  messageIds: string[];
+  /** Immutable identities required whenever messageIds is non-empty. */
+  messageTargets: AiMessageTarget[];
+  instruction: string | null;
 };
 export type TranslationModelStatus = {
   source: string;

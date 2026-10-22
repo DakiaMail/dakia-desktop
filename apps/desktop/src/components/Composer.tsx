@@ -14,7 +14,7 @@ import { useTranslation } from "react-i18next";
 import { AI_FEATURES_VISIBLE } from "../features";
 import { api } from "../api";
 import type { ComposeSeed } from "../composeWindow";
-import type { Account, ComposeAttachment } from "../types";
+import type { Account, ComposeAttachment, SendFailureKind } from "../types";
 import { splitAddressValues } from "../recipients";
 import { RichTextEditor } from "./RichTextEditor";
 import {
@@ -28,12 +28,16 @@ const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 const MAX_ATTACHMENT_TOTAL_BYTES = 50 * 1024 * 1024;
 const MAX_ATTACHMENTS = 50;
 
+export type ComposeSendState =
+  "idle" | "sending" | "sent" | Exclude<SendFailureKind, "not_submitted">;
+
 type Props = {
   accounts: Account[];
   seed?: ComposeSeed;
-  sendState: "idle" | "sending" | "sent";
+  sendState: ComposeSendState;
   aiConnected: boolean;
   onSend: (draft: Record<string, unknown>) => void;
+  onDraftChange?: (draft: Record<string, unknown>) => void;
   onAiDraft: (instruction: string) => Promise<string>;
 };
 
@@ -43,18 +47,24 @@ export function Composer({
   sendState,
   aiConnected,
   onSend,
+  onDraftChange,
   onAiDraft,
 }: Props) {
   const { t } = useTranslation();
-  const [accountId, setAccountId] = useState(
-    seed?.accountId ?? accounts[0]?.id,
+  const [accountId, setAccountId] = useState(() =>
+    seed?.accountId
+      ? accounts.some((account) => account.id === seed.accountId)
+        ? seed.accountId
+        : undefined
+      : accounts.find((account) => account.enabled)?.id,
   );
   const [to, setTo] = useState(seed?.to ?? "");
   const [cc, setCc] = useState(seed?.cc ?? "");
   const [bcc, setBcc] = useState(seed?.bcc ?? "");
   const [subject, setSubject] = useState(seed?.subject ?? "");
+  const preservePlainTextOnly = useRef(seed?.bodyHtml === null);
   const [bodyHtml, setBodyHtml] = useState(() => {
-    if (seed?.bodyHtml === undefined) {
+    if (seed?.bodyHtml === undefined || seed.bodyHtml === null) {
       return richTextFromPlainText(seed?.body ?? "");
     }
     const sanitizedHtml = sanitizeRichText(seed.bodyHtml, {
@@ -74,10 +84,24 @@ export function Composer({
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const attachmentsRef = useRef<ComposeAttachment[]>(seed?.attachments ?? []);
   const browserDropHandledRef = useRef(false);
+  const recipientEdits = useRef({ to: false, cc: false, bcc: false });
+  const subjectEdited = useRef(false);
+  const bodyEdited = useRef(false);
+  const attachmentsEdited = useRef(false);
 
   useEffect(() => {
-    if (!accountId && accounts[0]) setAccountId(accounts[0].id);
-  }, [accountId, accounts]);
+    if (seed?.accountId) {
+      setAccountId(
+        accounts.some((account) => account.id === seed.accountId)
+          ? seed.accountId
+          : undefined,
+      );
+      return;
+    }
+    if (!accountId && accounts.find((account) => account.enabled)) {
+      setAccountId(accounts.find((account) => account.enabled)?.id);
+    }
+  }, [accountId, accounts, seed?.accountId]);
 
   useEffect(() => {
     attachmentsRef.current = attachments;
@@ -87,29 +111,82 @@ export function Composer({
     () => accounts.find((account) => account.id === accountId),
     [accountId, accounts],
   );
+  const requestedAccountMissing = Boolean(
+    seed?.accountId && (!selectedAccount || !selectedAccount.enabled),
+  );
+  // A recovery grant belongs to the account that created its idempotent send
+  // attempt. It cannot be reused through another account.
+  const recoveryAccountLocked = Boolean(seed?.recoveryMessage);
   const sending = sendState !== "idle";
-  const canSend = Boolean(accountId && to.trim() && !sending);
-  const send = () => {
-    if (!accountId || !to.trim()) return;
-    onSend({
+  const unsafeHeaderFields = containsHeaderLineBreak([
+    to,
+    cc,
+    bcc,
+    subject,
+    seed?.inReplyTo,
+    seed?.references,
+  ]);
+  const canSend = Boolean(
+    accountId &&
+    selectedAccount?.enabled &&
+    to.trim() &&
+    !sending &&
+    !unsafeHeaderFields &&
+    (!recoveryAccountLocked || accountId === seed?.accountId),
+  );
+  const draft = useCallback(() => {
+    const recovered = seed?.recoveryMessage;
+    const derivedAttachments = attachments.map(
+      ({ filename, mime_type, content_base64, size_bytes }) => ({
+        filename,
+        mime_type,
+        content_base64,
+        size_bytes,
+      }),
+    );
+    const derivedBodyHtml = preservePlainTextOnly.current
+      ? null
+      : isRichTextEmpty(bodyHtml)
+        ? null
+        : bodyHtml;
+    return {
       account_id: accountId,
-      to: splitAddresses(to),
-      cc: splitAddresses(cc),
-      bcc: splitAddresses(bcc),
-      subject,
-      body_text: plainTextFromRichText(bodyHtml),
-      body_html: isRichTextEmpty(bodyHtml) ? null : bodyHtml,
-      in_reply_to: seed?.inReplyTo ?? null,
-      references: seed?.references ?? null,
-      attachments: attachments.map(
-        ({ filename, mime_type, content_base64 }) => ({
-          filename,
-          mime_type,
-          content_base64,
-        }),
-      ),
-    });
+      to:
+        recovered && !recipientEdits.current.to
+          ? [...recovered.to]
+          : splitAddresses(to),
+      cc:
+        recovered && !recipientEdits.current.cc
+          ? [...recovered.cc]
+          : splitAddresses(cc),
+      bcc:
+        recovered && !recipientEdits.current.bcc
+          ? [...recovered.bcc]
+          : splitAddresses(bcc),
+      subject:
+        recovered && !subjectEdited.current ? recovered.subject : subject,
+      body_text:
+        recovered && !bodyEdited.current
+          ? recovered.bodyText
+          : plainTextFromRichText(bodyHtml),
+      body_html:
+        recovered && !bodyEdited.current ? recovered.bodyHtml : derivedBodyHtml,
+      in_reply_to: recovered?.inReplyTo ?? seed?.inReplyTo ?? null,
+      references: recovered?.references ?? seed?.references ?? null,
+      attachments:
+        recovered && !attachmentsEdited.current
+          ? recovered.attachments.map((attachment) => ({ ...attachment }))
+          : derivedAttachments,
+    };
+  }, [accountId, attachments, bcc, bodyHtml, cc, seed, subject, to]);
+  const send = () => {
+    if (!canSend) return;
+    onSend(draft());
   };
+
+  useEffect(() => {
+    onDraftChange?.(draft());
+  }, [draft, onDraftChange]);
 
   const addAttachments = useCallback(
     (incoming: ComposeAttachment[]) => {
@@ -137,6 +214,7 @@ export function Composer({
       }
       const next = [...attachmentsRef.current, ...additions];
       attachmentsRef.current = next;
+      attachmentsEdited.current = true;
       setAttachments(next);
       setAttachmentError(undefined);
     },
@@ -250,15 +328,20 @@ export function Composer({
       (_, currentIndex) => currentIndex !== index,
     );
     attachmentsRef.current = next;
+    attachmentsEdited.current = true;
     setAttachments(next);
   };
 
   const aiDraft = async () => {
     setAiLoading(true);
     try {
+      preservePlainTextOnly.current = false;
+      bodyEdited.current = true;
       setBodyHtml(
         richTextFromPlainText(await onAiDraft(t("ai.draftInstruction"))),
       );
+    } catch {
+      // The caller presents a safe, actionable error. Keep the user's draft.
     } finally {
       setAiLoading(false);
     }
@@ -302,7 +385,10 @@ export function Composer({
           <input
             id="compose-to"
             value={to}
-            onChange={(event) => setTo(event.currentTarget.value)}
+            onChange={(event) => {
+              recipientEdits.current.to = true;
+              setTo(event.currentTarget.value);
+            }}
             autoFocus
             autoComplete="off"
             spellCheck={false}
@@ -325,7 +411,10 @@ export function Composer({
               <input
                 id="compose-cc"
                 value={cc}
-                onChange={(event) => setCc(event.currentTarget.value)}
+                onChange={(event) => {
+                  recipientEdits.current.cc = true;
+                  setCc(event.currentTarget.value);
+                }}
                 autoComplete="off"
                 spellCheck={false}
                 disabled={sending}
@@ -336,7 +425,10 @@ export function Composer({
               <input
                 id="compose-bcc"
                 value={bcc}
-                onChange={(event) => setBcc(event.currentTarget.value)}
+                onChange={(event) => {
+                  recipientEdits.current.bcc = true;
+                  setBcc(event.currentTarget.value);
+                }}
                 autoComplete="off"
                 spellCheck={false}
                 disabled={sending}
@@ -350,10 +442,19 @@ export function Composer({
             <select
               id="compose-from"
               value={accountId ?? ""}
-              onChange={(event) => setAccountId(event.currentTarget.value)}
+              onChange={(event) => {
+                if (!recoveryAccountLocked) {
+                  setAccountId(event.currentTarget.value);
+                }
+              }}
               aria-label={t("composer.from")}
-              disabled={sending}
+              disabled={
+                sending || requestedAccountMissing || recoveryAccountLocked
+              }
             >
+              {requestedAccountMissing && (
+                <option value="">{t("composer.noAccount")}</option>
+              )}
               {accounts.map((account) => (
                 <option key={account.id} value={account.id}>
                   {account.display_name
@@ -366,12 +467,17 @@ export function Composer({
               <IconChevronDown size={14} stroke={1.8} />
             </span>
           </div>
-          {selectedAccount && (
+          {selectedAccount?.enabled && (
             <span
               className="compose-account-ready"
               title={selectedAccount.email}
             >
               <IconCheck size={13} stroke={2.2} />
+            </span>
+          )}
+          {requestedAccountMissing && (
+            <span className="compose-account-error" role="alert">
+              {t("composer.noAccount")}
             </span>
           )}
         </div>
@@ -380,7 +486,10 @@ export function Composer({
           <input
             id="compose-subject"
             value={subject}
-            onChange={(event) => setSubject(event.currentTarget.value)}
+            onChange={(event) => {
+              subjectEdited.current = true;
+              setSubject(event.currentTarget.value);
+            }}
             disabled={sending}
           />
         </div>
@@ -388,9 +497,19 @@ export function Composer({
 
       <RichTextEditor
         value={bodyHtml}
-        onChange={setBodyHtml}
+        onChange={(html) => {
+          preservePlainTextOnly.current = false;
+          bodyEdited.current = true;
+          setBodyHtml(html);
+        }}
         disabled={sending}
       />
+
+      {unsafeHeaderFields ? (
+        <p className="compose-attachment-error" role="alert">
+          <IconAlertTriangle size={14} /> {t("composer.invalidHeaderFields")}
+        </p>
+      ) : null}
 
       {isDraggingFiles ? (
         <section
@@ -458,7 +577,11 @@ export function Composer({
               ? t("composer.sent")
               : sendState === "sending"
                 ? t("composer.sending")
-                : t("actions.send")}
+                : sendState === "delivery_uncertain"
+                  ? t("composer.deliveryUncertain")
+                  : sendState === "sent_copy_failed"
+                    ? t("composer.sentCopyFailed")
+                    : t("actions.send")}
           </span>
           <kbd>⌘↵</kbd>
         </button>
@@ -500,6 +623,10 @@ export function Composer({
 }
 
 const splitAddresses = (value: string) => splitAddressValues(value);
+
+function containsHeaderLineBreak(values: Array<string | undefined>) {
+  return values.some((value) => value !== undefined && /[\r\n]/.test(value));
+}
 
 async function fileToAttachment(file: File): Promise<ComposeAttachment> {
   const bytes = new Uint8Array(await file.arrayBuffer());

@@ -1,0 +1,168 @@
+{
+  "schemaVersion": 3,
+  "startedAt": "2026-10-21T12:10:25.141Z",
+  "capturedAt": "2026-10-21T12:24:51.760Z",
+  "listeners": {
+    "http": {
+      "host": "127.0.0.1",
+      "port": 48731
+    },
+    "tlsProbe": {
+      "host": "127.0.0.1",
+      "port": 48732
+    }
+  },
+  "totalRequests": 5,
+  "tlsContactAttempts": 4,
+  "unexpectedHttpTlsContactAttempts": 0,
+  "totalContacts": 9,
+  "counts": {
+    "/remote-image.svg": 4,
+    "/redirect-image": 1
+  },
+  "requests": [
+    {
+      "sequence": 1,
+      "at": "2026-10-21T12:23:34.144Z",
+      "listener": "http",
+      "method": "GET",
+      "path": "/remote-image.svg",
+      "query": "?via=direct",
+      "destination": "image",
+      "referer": null,
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)"
+    },
+    {
+      "sequence": 2,
+      "at": "2026-10-21T12:23:34.150Z",
+      "listener": "http",
+      "method": "GET",
+      "path": "/redirect-image",
+      "query": "",
+      "destination": "image",
+      "referer": null,
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)"
+    },
+    {
+      "sequence": 3,
+      "at": "2026-10-21T12:23:34.152Z",
+      "listener": "http",
+      "method": "GET",
+      "path": "/remote-image.svg",
+      "query": "?via=encoded-html",
+      "destination": "image",
+      "referer": null,
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)"
+    },
+    {
+      "sequence": 4,
+      "at": "2026-10-21T12:23:34.153Z",
+      "listener": "http",
+      "method": "GET",
+      "path": "/remote-image.svg",
+      "query": "?via=event-handler",
+      "destination": "image",
+      "referer": null,
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)"
+    },
+    {
+      "sequence": 5,
+      "at": "2026-10-21T12:23:34.156Z",
+      "listener": "http",
+      "method": "GET",
+      "path": "/remote-image.svg",
+      "query": "?via=redirect",
+      "destination": "image",
+      "referer": null,
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)"
+    }
+  ],
+  "responseObservations": [
+    {
+      "requestSequence": 1,
+      "listener": "http",
+      "path": "/remote-image.svg",
+      "query": "?via=direct",
+      "startedAt": "2026-10-21T12:23:34.144Z",
+      "status": 200,
+      "finishedAt": "2026-10-21T12:23:34.144Z",
+      "closedAt": "2026-10-21T12:23:34.144Z",
+      "finished": true,
+      "closedBeforeFinish": false
+    },
+    {
+      "requestSequence": 2,
+      "listener": "http",
+      "path": "/redirect-image",
+      "query": "",
+      "startedAt": "2026-10-21T12:23:34.150Z",
+      "status": 302,
+      "finishedAt": "2026-10-21T12:23:34.152Z",
+      "closedAt": "2026-10-21T12:23:34.152Z",
+      "finished": true,
+      "closedBeforeFinish": false
+    },
+    {
+      "requestSequence": 3,
+      "listener": "http",
+      "path": "/remote-image.svg",
+      "query": "?via=encoded-html",
+      "startedAt": "2026-10-21T12:23:34.152Z",
+      "status": 200,
+      "finishedAt": "2026-10-21T12:23:34.153Z",
+      "closedAt": "2026-10-21T12:23:34.153Z",
+      "finished": true,
+      "closedBeforeFinish": false
+    },
+    {
+      "requestSequence": 4,
+      "listener": "http",
+      "path": "/remote-image.svg",
+      "query": "?via=event-handler",
+      "startedAt": "2026-10-21T12:23:34.153Z",
+      "status": 200,
+      "finishedAt": "2026-10-21T12:23:34.154Z",
+      "closedAt": "2026-10-21T12:23:34.154Z",
+      "finished": true,
+      "closedBeforeFinish": false
+    },
+    {
+      "requestSequence": 5,
+      "listener": "http",
+      "path": "/remote-image.svg",
+      "query": "?via=redirect",
+      "startedAt": "2026-10-21T12:23:34.156Z",
+      "status": 200,
+      "finishedAt": "2026-10-21T12:23:34.157Z",
+      "closedAt": "2026-10-21T12:23:34.157Z",
+      "finished": true,
+      "closedBeforeFinish": false
+    }
+  ],
+  "transportEvents": [
+    {
+      "sequence": 1,
+      "at": "2026-10-21T12:23:34.145Z",
+      "kind": "tls-client-hello",
+      "listener": "tls-probe"
+    },
+    {
+      "sequence": 2,
+      "at": "2026-10-21T12:23:34.155Z",
+      "kind": "tls-client-hello",
+      "listener": "tls-probe"
+    },
+    {
+      "sequence": 3,
+      "at": "2026-10-21T12:23:34.158Z",
+      "kind": "tls-client-hello",
+      "listener": "tls-probe"
+    },
+    {
+      "sequence": 4,
+      "at": "2026-10-21T12:23:34.161Z",
+      "kind": "tls-client-hello",
+      "listener": "tls-probe"
+    }
+  ]
+}

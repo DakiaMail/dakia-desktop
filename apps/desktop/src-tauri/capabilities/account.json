@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "account-setup",
+  "description": "The account window can set up one account without mail or terminal authority.",
+  "windows": ["account"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "dialog:default",
+    "allow-account-setup"
+  ]
+}

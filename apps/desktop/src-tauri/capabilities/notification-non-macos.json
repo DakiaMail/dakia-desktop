@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "notification-non-macos",
+  "description": "Main and settings windows retain the notification plugin on Linux and Windows.",
+  "windows": ["main", "settings"],
+  "platforms": ["linux", "windows"],
+  "permissions": ["notification:default"]
+}

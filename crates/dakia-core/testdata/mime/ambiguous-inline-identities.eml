@@ -1,0 +1,29 @@
+Date: Tue, 28 Jul 2026 12:04:00 +0000
+From: sender@example.test
+To: recipient@example.test
+Subject: Synthetic ambiguous inline identities
+MIME-Version: 1.0
+Content-Type: multipart/related; boundary=resources
+
+--resources
+Content-Type: text/html; charset=utf-8
+Content-ID: <shared@example.test>
+Content-Location: body.html
+
+<p>Fictional resources</p><img src="cid:shared@example.test"><img src="assets/shared.png">
+--resources
+Content-Type: image/png; name=logo.png
+Content-ID: <shared@example.test>
+Content-Location: assets/shared.png
+Content-Disposition: inline; filename=logo.png
+Content-Transfer-Encoding: base64
+
+aW1hZ2U=
+--resources
+Content-Type: application/pdf; name=source.pdf
+Content-Location: assets/shared.png
+Content-Disposition: attachment; filename=source.pdf
+Content-Transfer-Encoding: base64
+
+cGRm
+--resources--

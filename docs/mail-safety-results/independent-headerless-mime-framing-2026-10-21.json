@@ -1,0 +1,129 @@
+{
+  "schemaVersion": 1,
+  "status": "completed-server-comparison",
+  "scope": "Independent IMAP section framing on fictional messages; this is not a full Dakia client, native UI, or server conformance certificate.",
+  "standard": "https://www.rfc-editor.org/rfc/rfc3501.html#section-6.4.5",
+  "findings": [
+    "Dovecot returns one CRLF for a zero-header MIME section and exact body bytes; a genuine authored leading CRLF remains in BODY[1].",
+    "GreenMail returns body text for BODY[1.MIME] and an empty BODY[1] for this fixture; whole-message bytes remain exact. This incompatible server behavior is not emulated by the fictional transcript or the client.",
+    "Dakia regressions reject malformed nonempty MIME headers and preserve exact display and raw attachment leading bytes."
+  ],
+  "servers": [
+    {
+      "implementation": "GreenMail 2.1.14",
+      "imageId": "sha256:1ef95a966418cd09b7ea91d504d8c0826bbe7a2f6e679a75c601a831587c1626",
+      "rawReport": "/private/tmp/dakia-greenmail-body-probe-j_h05c5k/result.json",
+      "rawReportSha256": "f4fd68b4955f556d4201c1345dd00d31383f518cf891d5b5b8636825007b501d",
+      "source": {
+        "length": 710,
+        "sha256": "2502bdd30e7803357e7f089f5808970a582692f02064e0e8bc4c42e4694f330f"
+      },
+      "canonicalCrlf": {
+        "length": 735,
+        "sha256": "841d67a9d0f3ea141c1b915381813b8d649a3e33ff6c2a9fb258456541c82c94"
+      },
+      "observations": {
+        "fullReturned": {
+          "length": 735,
+          "sha256": "841d67a9d0f3ea141c1b915381813b8d649a3e33ff6c2a9fb258456541c82c94",
+          "equalsCanonical": true
+        },
+        "body1Mime": {
+          "length": 47,
+          "sha256": "9031ade8a1143cea67db8208c6adf528d08b38460de4cf5693cd0184a395efbc",
+          "hex": "44656661756c7420415343494920626f6479207769746820616273656e7420636f6e74656e7420686561646572732e",
+          "repr": "b'Default ASCII body with absent content headers.'"
+        },
+        "body1": {
+          "length": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "hex": "",
+          "repr": "b''",
+          "equalsExpectedNoLeadingNewline": false,
+          "startsWithCrlf": false,
+          "startsWithLf": false
+        },
+        "body2Control": {
+          "mimeLength": 87,
+          "mimeSha256": "28387aff2ed85cdc9f4b7a583ff4b55d114cbfc7a2396206454a5a3311b44b0d",
+          "mimeRepr": "b'CoNtEnT-TyPe: TeXt/PlAiN; ChArSeT=Us-AsCiI\\r\\nCoNtEnT-TrAnSfEr-EnCoDiNg: QuOtEd-PrInTaBlE'",
+          "bodyLength": 81,
+          "bodySha256": "7ba544b254231e85070a23a05e4e43bf4e15267286e6816ed9c277b4ca912c2c",
+          "bodyRepr": "b'Quoted printable soft=\\r\\nbreak=20keeps=20encoded=20spaces.   \\r\\nHard line survives.'"
+        }
+      }
+    },
+    {
+      "implementation": "Dovecot 2.4.5",
+      "imageId": "sha256:43c14def08a57f25107593cbcf64a0a6fbae84a7b9de7aa038513c9b21e91914",
+      "rawReport": "/private/tmp/dakia-dovecot-body-probe-igcsv62_/result.json",
+      "rawReportSha256": "0d9ac14fb90e728193fd4b3bb97e629cc8f5f414c738faefa4fdac0cef21068d",
+      "source": {
+        "length": 710,
+        "sha256": "2502bdd30e7803357e7f089f5808970a582692f02064e0e8bc4c42e4694f330f"
+      },
+      "canonicalCrlf": {
+        "length": 735,
+        "sha256": "841d67a9d0f3ea141c1b915381813b8d649a3e33ff6c2a9fb258456541c82c94"
+      },
+      "observations": {
+        "message1": {
+          "full": {
+            "length": 735,
+            "sha256": "841d67a9d0f3ea141c1b915381813b8d649a3e33ff6c2a9fb258456541c82c94",
+            "equalsAppend": true
+          },
+          "child1Mime": {
+            "length": 2,
+            "sha256": "7eb70257593da06f682a3ddda54a9d260d4fc514f645237f5ca74b08f8da61a6",
+            "hex": "0d0a",
+            "repr": "b'\\r\\n'"
+          },
+          "child1Body": {
+            "length": 47,
+            "sha256": "9031ade8a1143cea67db8208c6adf528d08b38460de4cf5693cd0184a395efbc",
+            "hex": "44656661756c7420415343494920626f6479207769746820616273656e7420636f6e74656e7420686561646572732e",
+            "repr": "b'Default ASCII body with absent content headers.'",
+            "equalsExpected": true
+          },
+          "child2Control": {
+            "mimeLength": 91,
+            "mimeSha256": "b37fae2d7956998db84e65c02cd60243af308773d9723e8f06b56ce7fd2d7dc0",
+            "mimeRepr": "b'CoNtEnT-TyPe: TeXt/PlAiN; ChArSeT=Us-AsCiI\\r\\nCoNtEnT-TrAnSfEr-EnCoDiNg: QuOtEd-PrInTaBlE\\r\\n\\r\\n'",
+            "bodyLength": 81,
+            "bodySha256": "7ba544b254231e85070a23a05e4e43bf4e15267286e6816ed9c277b4ca912c2c",
+            "bodyRepr": "b'Quoted printable soft=\\r\\nbreak=20keeps=20encoded=20spaces.   \\r\\nHard line survives.'"
+          },
+          "bodystructureWireAscii": "* 1 FETCH (BODYSTRUCTURE ((\"text\" \"plain\" (\"charset\" \"us-ascii\") NIL NIL \"7bit\" 47 0 NIL NIL NIL NIL)(\"TeXt\" \"PlAiN\" (\"ChArSeT\" \"Us-AsCiI\") NIL NIL \"QuOtEd-PrInTaBlE\" 81 2 NIL NIL NIL NIL)(\"text\" \"plain\" (\"charset\" \"US-ASCII\") NIL NIL \"BaSe64\" 27 1 NIL NIL NIL NIL) \"X-Dakia-Unknown\" (\"BoUnDaRy\" \"CaseSensitiveBoundary\") NIL NIL NIL))\r\na10 OK Fetch completed (0.001 + 0.000 secs).\r\n"
+        },
+        "message2LeadingBodyCrlf": {
+          "full": {
+            "length": 737,
+            "sha256": "31e4f25d30cf57ad3bdcbc7d1f46935616466f9986c2047e90fa17d38ab8ce45",
+            "equalsAppend": true
+          },
+          "child1Mime": {
+            "length": 2,
+            "sha256": "7eb70257593da06f682a3ddda54a9d260d4fc514f645237f5ca74b08f8da61a6",
+            "hex": "0d0a",
+            "repr": "b'\\r\\n'"
+          },
+          "child1Body": {
+            "length": 49,
+            "sha256": "2a55885f8d264a6bc94cc2db9b05fa1b4306417e291c8a2a4e18d755a7a8fb92",
+            "hex": "0d0a44656661756c7420415343494920626f6479207769746820616273656e7420636f6e74656e7420686561646572732e",
+            "repr": "b'\\r\\nDefault ASCII body with absent content headers.'",
+            "equalsExpectedLeadingCrlf": true
+          },
+          "bodystructureWireAscii": "* 2 FETCH (BODYSTRUCTURE ((\"text\" \"plain\" (\"charset\" \"us-ascii\") NIL NIL \"7bit\" 49 1 NIL NIL NIL NIL)(\"TeXt\" \"PlAiN\" (\"ChArSeT\" \"Us-AsCiI\") NIL NIL \"QuOtEd-PrInTaBlE\" 81 2 NIL NIL NIL NIL)(\"text\" \"plain\" (\"charset\" \"US-ASCII\") NIL NIL \"BaSe64\" 27 1 NIL NIL NIL NIL) \"X-Dakia-Unknown\" (\"BoUnDaRy\" \"CaseSensitiveBoundary\") NIL NIL NIL))\r\na14 OK Fetch completed (0.001 + 0.000 secs).\r\n"
+        }
+      }
+    }
+  ],
+  "cleanup": "Each exact owned container was removed, with namespace rechecks showing no probe containers left.",
+  "failedSetupAttempts": "Three GreenMail attempts failed before APPEND during greeting/authentication readiness; all owned containers were removed. They are not accepted test passes.",
+  "remainingLimitations": [
+    "GreenMail headerless-child interoperability is not fixed by the client changes.",
+    "These raw protocol probes do not establish native Reader behavior or a long-lived provider session."
+  ]
+}

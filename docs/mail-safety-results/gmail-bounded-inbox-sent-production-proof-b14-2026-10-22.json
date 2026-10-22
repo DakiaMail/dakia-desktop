@@ -1,0 +1,189 @@
+{
+  "schemaVersion": 1,
+  "lane": "optional-credentialed-provider-bounded-production-proof",
+  "status": "passed-for-exact-bounded-inbox-sent-path",
+  "recordedAt": "2026-10-22",
+  "provider": "gmail",
+  "authenticationMethod": "app_password",
+  "accountScope": "one explicit disposable allowlisted account",
+  "roundtripId": "45bacd384f0c4a74893f14e4fea23d9a",
+  "execution": {
+    "rootSession": 37182,
+    "processExitCode": 0,
+    "elapsedSeconds": 4.431,
+    "outcome": "passed",
+    "resultCode": "b004_provider_proof_wrapper_passed",
+    "remoteMutationRequested": false,
+    "credentialsFileUnchanged": true,
+    "rawProviderObservationsRetained": false
+  },
+  "productionBoundaryProof": {
+    "scope": "one known existing message represented by one physical INBOX copy and one physical Sent copy",
+    "imapTls": "certificate_verified_tls_1_2_or_newer",
+    "wrapperListResolutionVerified": true,
+    "wrapperModifiedUtf7Validated": true,
+    "targetedHeaderSearchOnly": true,
+    "initialMailboxSyncPerformed": false,
+    "exactMessageIdCopies": 2,
+    "rfcMessageIdMatchedAcrossCopies": true,
+    "gmailMessageIdMatchedAcrossCopies": true,
+    "preRunnerInvarianceVerified": true,
+    "postRunnerInvarianceVerified": true,
+    "productionFullFetch": true,
+    "parserVerified": true,
+    "epochFencedStore": true,
+    "cachePublished": true,
+    "storeReopenVerified": true,
+    "physicalCopies": 2,
+    "distinctPhysicalLocators": true,
+    "displayRepresentatives": 1,
+    "expectedSubjectSha256": "13fd2499ca784a799eab087ec855ec10fbf08f998a42eb20ff775b52ef666f49",
+    "expectedBodySha256": "13fd2499ca784a799eab087ec855ec10fbf08f998a42eb20ff775b52ef666f49",
+    "runnerResultCode": "b004_narrow_provider_identity_parser_store_display"
+  },
+  "executionIdentity": {
+    "wrapper": {
+      "artifact": "/private/tmp/dakia-b14-gmail-readonly-preparation-v3-20261022/run-b14-gmail-readonly.py",
+      "sha256": "00f91a119eccfb91ee40f1263835b9824cded7d347d6880a7418edbb25132a2d",
+      "mode": "0500",
+      "operationDeadlineSeconds": 210,
+      "cleanupAndReceiptDeadlineSeconds": 15
+    },
+    "runner": {
+      "artifact": "/private/tmp/dakia-b14-gmail-readonly-preparation-v3-20261022/dakia-b14-gmail-readonly-runner",
+      "sha256": "00f6847b977282230c571b5be2731902db27216376a06a9b9187cc80ad8a70e6",
+      "mode": "0500",
+      "sourceDigest": "b14fca648f7d0862f439fbb08890cef8085d025687e35d75322814d2f8dcca0e",
+      "buildBindingSha256": "0c49f39aee17229c6298128cd8ebe0a2df2f9ce0ffe995359da6a6d079e7d016",
+      "embeddedBuildPathVerified": true
+    },
+    "finalFrozenSource": {
+      "digest": "b14fca648f7d0862f439fbb08890cef8085d025687e35d75322814d2f8dcca0e",
+      "fileCount": 961,
+      "manifestSha256": "5728448b1f79241dffbd132b71642bb2df9e7bcba1c0311bfe724611df42cbbc",
+      "liveManifestMismatchesAfterRun": 0
+    },
+    "compiledInputBinding": {
+      "verified": true,
+      "fileCount": 660,
+      "scope": [
+        "root Cargo.toml and Cargo.lock",
+        ".cargo",
+        "crates/dakia-core",
+        "crates/dakia-cli",
+        "vendor"
+      ],
+      "relationship": "The runner was built directly from the final b14 compiled inputs and embeds the same b14 source digest."
+    },
+    "pythonRuntime": {
+      "implementation": "CPython",
+      "version": "3.14.5",
+      "executableRealpath": "/opt/homebrew/Cellar/python@3.14/3.14.5/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+      "opensslVersion": "OpenSSL 3.6.4 25 Aug 2026"
+    }
+  },
+  "evidence": {
+    "publicReceipt": {
+      "path": "/private/tmp/dakia-b004-public-receipt-xqvd9sbg/b004-provider-proof-receipt.json",
+      "sha256": "98d6d1273a0fa21ba0c63b19a6504e1cca41aff180cb5e81993d514d21934c7d",
+      "mode": "0600"
+    },
+    "sanitizedExecutionLog": {
+      "path": "/private/tmp/dakia-b14-gmail-readonly-v3-execution-20261022.log",
+      "sha256": "55ae2d6dad09e4bd70aecd6a06e44c4d13df3eb275bd54f69f356dcb5b17625c",
+      "mode": "0600"
+    },
+    "preparationReceipt": {
+      "path": "/private/tmp/dakia-b14-gmail-readonly-preparation-v3-20261022/provenance/preparation-receipt.json",
+      "sha256": "fc11678f7be4fc35abddfec0c401658cd8dfa4058e445d7872a5126486a0067b",
+      "mode": "0400"
+    },
+    "receiptSchemaVersion": 1,
+    "providerScope": "dedicated_disposable_gmail"
+  },
+  "privacyAndMutationChecks": {
+    "newMessageSubmitted": false,
+    "smtpOperationInvoked": false,
+    "mailboxMutationRequested": false,
+    "remoteMutationRequested": false,
+    "credentialsFileUnchanged": true,
+    "rawProviderObservationsRetained": false,
+    "accountIdentifierRecordedInThisReport": false,
+    "roundtripTestIdRecorded": true,
+    "rfcMessageIdRecordedInThisReport": false,
+    "gmailMessageIdRecordedInThisReport": false,
+    "providerErrorRecordedInThisReport": false,
+    "messageContentRecordedInThisReport": false,
+    "publicArtifactAccountCredentialProtocolScan": "clear"
+  },
+  "harnessPreparationHistory": [
+    {
+      "candidate": "b14 preparation v1",
+      "path": "/private/tmp/dakia-b14-gmail-readonly-preparation-20261022",
+      "status": "superseded-before-live-execution",
+      "classification": "private harness preparation issue, not a Dakia product or provider failure",
+      "detail": "Independent review began while privacy hardening and provenance work were still in progress. Credential persistence, serialized-secret rejection, account redaction, and binary-to-source binding were not yet in a final self-consistent state. The mutable intermediate candidate was retired without reading credentials or contacting Gmail."
+    },
+    {
+      "candidate": "b14 preparation v2",
+      "path": "/private/tmp/dakia-b14-gmail-readonly-preparation-v2-20261022",
+      "preparationReceiptSha256": "096db7f5df544835b5c0af835c01010d6335a3c6f7ba36bcac49dd9443fafa54",
+      "status": "independent-review-no-go-before-live-execution",
+      "classification": "private harness timeout and provenance issues, not a Dakia product or provider failure",
+      "detail": "The wrapper could swallow its overall timeout during IMAP LOGOUT, cleanup and receipt writing were outside the claimed deadline, and the rebuilt binary path did not match the path asserted by the v2 binding. V2 was never run with credentials or Gmail."
+    },
+    {
+      "candidate": "b14 preparation v3",
+      "path": "/private/tmp/dakia-b14-gmail-readonly-preparation-v3-20261022",
+      "preparationReceiptSha256": "fc11678f7be4fc35abddfec0c401658cd8dfa4058e445d7872a5126486a0067b",
+      "status": "offline-review-go-and-one-live-pass",
+      "detail": "V3 rethrows the overall timeout across relevant broad catches, uses a separate 15-second cleanup and receipt deadline, binds the runner to its actual build path, passed three fictional loopback TLS wrapper runs, and was then executed once against the authorized disposable Gmail account."
+    }
+  ],
+  "retainedHistoricalEvidence": [
+    {
+      "path": "docs/mail-safety-results/gmail-bounded-inbox-sent-production-proof-a86-2026-10-22.json",
+      "sha256": "1a238ce29af51c2764401b557c7f380ed1dc70d268e29e351303af37af2c4ba7",
+      "status": "earlier bounded production proof passed against the a86 freeze",
+      "superseded": false
+    },
+    {
+      "path": "docs/mail-safety-results/gmail-bounded-inbox-sent-production-proof-2026-10-21.json",
+      "sha256": "b7e23309419d2e20eaf285f949b5dcf6ab92eedb1235ff440e8954ed58a011fa",
+      "status": "earlier bounded production proof passed against the 8218 freeze",
+      "superseded": false
+    },
+    {
+      "path": "docs/mail-safety-results/b004-private-provider-proof-harness-diagnostic-2026-10-21.json",
+      "sha256": "78662d59c2eb7c40f51415e3f8204ee5ab98d51261b70f9c6fe7ac3ee032acb1",
+      "status": "two earlier harness failures retained",
+      "detail": "The original wrapper returned imap_connection_failed without enough evidence to attribute a cause. V2 returned imap_capability_invalid because it decoded CPython tuple[str] capability values before LOGIN."
+    },
+    {
+      "path": "docs/mail-safety-results/gmail-read-only-recovery-frozen-timeout-2026-10-21.json",
+      "sha256": "1205fe6da6dcac68ef57c0645724c20ca0af2a9ab6d5054648a8554a08ea1e69",
+      "status": "earlier provider timeout retained"
+    },
+    {
+      "path": "docs/mail-safety-results/gmail-readonly-final-build-timeout-2026-10-21.json",
+      "sha256": "9b1c08f56731154cf9ba39e7bcf745a9bb80b64603169578e050fd38d035c58c",
+      "status": "earlier provider timeout retained"
+    },
+    {
+      "path": "docs/mail-safety-results/gmail-three-readonly-recovery-observations-2026-10-21.json",
+      "sha256": "7be1021e1bee184a6daadecbf02697e3960f6bad717b97bfc80b8d3fce4bb798",
+      "status": "three narrow recovery observations passed"
+    }
+  ],
+  "limitations": [
+    "This proves one bounded production fetch, parse, Store, cache, reopen, and display-representative path for one known existing message in one disposable Gmail account.",
+    "It does not exercise normal sync_all, snapshot finalization, or Dakia's production mailbox planner.",
+    "The wrapper resolved INBOX and the selectable Sent mailbox through its own bounded LIST and modified UTF-7 parser. That does not validate Dakia's production LIST parser.",
+    "The Gmail message identity was compared across the two remote copies but was not used as a Store deduplication key.",
+    "The Store produced one display representative after reopen. This is not evidence of Reader frontend or native WebKit rendering.",
+    "It does not prove broad Gmail label behavior, large or changing mailboxes, multiple accounts, another provider, reconnect, or long-duration reliability.",
+    "It does not prove remote-content blocking, attachment saving, mutations, or sending. Those require their separate source, native, and provider evidence lanes.",
+    "The public evidence intentionally excludes the raw IMAP transcript, account identifier, UIDs, flags, Gmail message ID, RFC Message-ID, credentials, and message content.",
+    "This pass does not explain or erase the earlier harness failures, harness preparation no-go decisions, or provider timeouts. Those records remain separate evidence."
+  ]
+}

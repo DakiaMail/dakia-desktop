@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "status": "partial",
+  "recordedAtUtc": "2026-10-22T05:33:31.485Z",
+  "scope": "A same-profile relaunch of the 04b fictional packaged app visibly recovered one terminal sent-copy-failed view-only Compose window and one UID 6 Reader message. It is not a sealed restart acceptance result.",
+  "sourceTree": {
+    "digest": "04b1368f7a758b2ad77d95442a2d5a0d3b7ce74f1f100bb59967aeef8b9ad471",
+    "fileCount": 952
+  },
+  "candidate": {
+    "desktopSha256": "ab4ec8052fd398b8433119e36edb331089c4e8d4673499fd2ec164c2cc7b373d",
+    "relaunchPid": 46662,
+    "exitCode": 0,
+    "signal": null,
+    "evidence": {
+      "launchIntentSha256": "d3b49dbe016f74895502d859ffa6f72631ebdd2d25a26c1e2a392ea45eb02b1c",
+      "relaunchProcessSha256": "716cd02ae2bb6c2cd03d40265a21070f25a6ee823bea9f7de1f647347120f7b4",
+      "relaunchExitSha256": "57013f8d608ddd331d4a8aae59f3d4872ff8a7dc9ab5f32de8d157e270a4f2a0"
+    }
+  },
+  "preRestartMailbox": {
+    "evidence": {
+      "basename": "uid6-before-restart.json",
+      "sha256": "44f331166f40f80d465e64abf4ded18e95282ef0cc6feb7cb476c5c720a362c3"
+    },
+    "uids": [1, 2, 3, 4, 5, 6],
+    "uidNext": 7,
+    "uid6": {
+      "mimeShape": [
+        "multipart/mixed",
+        "multipart/alternative",
+        "text/plain",
+        "text/html"
+      ],
+      "generatedMessageId": "<4c249e56-beec-444d-92b0-ee9862596a61@localhost>",
+      "attachmentCandidates": 0,
+      "cachedAttachmentRows": 0,
+      "readerAttachmentPayloadCount": 0
+    }
+  },
+  "visibleResults": [
+    {
+      "name": "terminal sent-copy recovery",
+      "result": "The recovery window reopened the fictional account, exact body and disabled Send control after relaunch.",
+      "evidence": [
+        {
+          "basename": "53-restart-recovered-view-only.txt",
+          "sha256": "a160414e569d52058dd670a7cd77c07afffb043ecbde080e200143db9e56f41d"
+        },
+        {
+          "basename": "53-restart-recovered-view-only.png",
+          "sha256": "df4b12fa256f05837765947568dcddc78f5a86c3fd85eb3e020c1e312e56eaa3"
+        }
+      ]
+    },
+    {
+      "name": "UID 6 Reader",
+      "result": "The same-profile Reader displayed the exact UID 6 body with no attachment presentation.",
+      "evidence": [
+        {
+          "basename": "54-restart-uid6-reader.txt",
+          "sha256": "3ba5a4da8bb0dec6d789aba61579f16ce4e57c7ece51fd07f402868105dbf735"
+        },
+        {
+          "basename": "54-restart-uid6-reader.png",
+          "sha256": "86c7142b841be3d1babedde0b3c88dcd1de92f8b481dd3c5ca5c3aea760a6bf3"
+        }
+      ]
+    }
+  ],
+  "notAccepted": [
+    "Both runtime-attestation attempts failed because the profile handle inventory command returned lsof exit 1 while reporting a Time Machine warning and exact PID, database, WAL and SHM rows. The helper rejected that state.",
+    "No CUA attestation file, restart seal, post-restart durable-state receipt or UID 7 leap-second replay exists.",
+    "No SMTP resend occurred.",
+    "This does not establish general restart recovery, process resource stability, provider behavior or release readiness."
+  ],
+  "cleanupAndIdentityRestoration": {
+    "result": "The incomplete outer harness timed out and remains historical incomplete evidence. The guarded recovery command later restored the approved original identity, preserved the tested candidate, and completed its transaction.",
+    "evidence": {
+      "privatePath": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.tdadMZ/approved-identity-swap-c27aaa72-bae5-4e72-a42e-f72b2f0e9348-recovered.json",
+      "sha256": "8e525775240ce4736ee4b1865890bce70f38ed2338f1f770b6ae41106b8d0ed5",
+      "transactionId": "c27aaa72-bae5-4e72-a42e-f72b2f0e9348",
+      "stage": "recovered",
+      "completedAt": "2026-10-22T05:36:06.399Z"
+    }
+  }
+}

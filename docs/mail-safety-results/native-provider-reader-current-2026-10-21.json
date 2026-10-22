@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "lane": "native-WebKit",
+  "status": "partial-failed",
+  "sourceDigest": "7126a3b01086f50ffb453b8ddc7ba68909c25258f31058b256c2393d6c521162",
+  "passed": [
+    "post-mounted-provider-to-Reader-without-manual-sync",
+    "consent-reset-zero-additional-contacts",
+    "account-two-unified-scoped-search-detached-Reader-Reply-Forward",
+    "individual-bulk-partial-denied-retry-attachment-saving-exact-bytes-mode0600-quarantine",
+    "malformed-message-error-valid-neighbor-readable",
+    "long-email-inner-and-outer-bottom-marker-visible-with-Reply-controls",
+    "light-and-dark-controls-readable",
+    "synthetic-disconnect-cached-reading-resume-provider-arrival-Reader",
+    "five-history-transitions",
+    "embedded-SVG-before-after-consent",
+    "no-notification-listener-rejection"
+  ],
+  "failed": [
+    "allowed-HTTP-redirect-final-image-not-requested-WebKit-network-connection-lost"
+  ],
+  "limitations": [
+    "physical-sleep-wake-explicitly-waived",
+    "initial-automation-attach-delayed38minutes-not-startup-latency-proof",
+    "current-source-native-pass-not-established-due-redirect-failure"
+  ],
+  "finishedAt": "2026-10-21T05:39:02.817Z",
+  "sourceAfterRun": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "7126a3b01086f50ffb453b8ddc7ba68909c25258f31058b256c2393d6c521162",
+    "fileCount": 743
+  },
+  "privateEvidenceRoot": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.pWeI3Q",
+  "executableSha256": "53215eb037166cab2cefd3894b0a8e9d44f6b92e9247be1b6e80b2d32fa2eb5a",
+  "appExitCode": 0,
+  "releaseArtifact": false
+}

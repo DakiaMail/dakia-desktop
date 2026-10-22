@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "startedAt": "2026-10-17T15:36:14.728Z",
+  "capturedAt": "2026-10-17T15:41:12.833Z",
+  "totalRequests": 1,
+  "counts": {
+    "/remote-image.svg": 1
+  },
+  "requests": [
+    {
+      "sequence": 1,
+      "at": "2026-10-17T15:38:23.578Z",
+      "method": "GET",
+      "path": "/remote-image.svg",
+      "query": "",
+      "destination": "image",
+      "referer": "http://127.0.0.1:1420/",
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)"
+    }
+  ]
+}

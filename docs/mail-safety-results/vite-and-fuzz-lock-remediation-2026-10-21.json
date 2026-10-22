@@ -1,0 +1,160 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-21T07:52:33Z",
+  "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "lane": "dependency-security-remediation",
+  "status": "passed",
+  "vite": {
+    "reason": "The prior package-lock audit recorded direct vite 7.3.6 as affected by GHSA-698v-4r3x-3vcv, GHSA-r825-w8mm-5pxw, and GHSA-587h-7wmj-h5pm.",
+    "officialAdvisorySources": [
+      "https://github.com/advisories/GHSA-698v-4r3x-3vcv",
+      "https://github.com/advisories/GHSA-r825-w8mm-5pxw",
+      "https://github.com/advisories/GHSA-587h-7wmj-h5pm"
+    ],
+    "fixedVersion": "7.3.7",
+    "compatibility": {
+      "manifestRangeBeforeAndAfter": "^7.1.2",
+      "reason": "The existing range includes 7.3.7. Vite 7.3.6 and 7.3.7 declare the same Node engine and direct dependency ranges; @vitejs/plugin-react 4.7.0 accepts Vite ^7.0.0."
+    },
+    "change": {
+      "packageManifestChanged": false,
+      "packageLockResolution": {
+        "from": "7.3.6",
+        "to": "7.3.7",
+        "beforeSha256": "88d13fbfec1968f992106fab1f8d7fc9e8fc78049cfc26300b26c584d78c3db1",
+        "afterSha256": "ec85e8d77a670963d49224d083cc9133b30763f048e8b520360f9c51c4bb5e1b"
+      },
+      "command": "npm exec --yes npm@11 -- update vite --package-lock-only --ignore-scripts --registry=https://registry.npmjs.org"
+    },
+    "tooling": {
+      "npm": "11.21.1",
+      "node": "v22.23.2",
+      "registry": "https://registry.npmjs.org"
+    },
+    "verification": [
+      {
+        "command": "npm exec --yes npm@11 -- audit --package-lock-only --ignore-scripts --audit-level=low --registry=https://registry.npmjs.org --json",
+        "result": "passed",
+        "vulnerabilityCount": 0,
+        "reportPath": "/private/tmp/dakia-vite-npm-audit-2026-10-21.json",
+        "reportSha256": "174bb74a357686185db7eafad9445b875ba42bae8c3b7e07dfd7b5f54b1108be"
+      },
+      {
+        "command": "npm run typecheck",
+        "result": "passed",
+        "logPath": "/private/tmp/dakia-vite-typecheck-2026-10-21.log",
+        "logSha256": "c2268e3e652e91f6f47df2ec4ebcca2d69c778f7a67a4e19434ab3924c10b8f3"
+      },
+      {
+        "command": "node --test scripts/change-classifier.node-test.mjs",
+        "result": "passed",
+        "tests": { "passed": 4, "failed": 0 },
+        "logPath": "/private/tmp/dakia-vite-dependency-script-check-2026-10-21.log",
+        "logSha256": "313a3681ce3b8b9e5e43025602591d15c6cee83b048ddd7c2ad9b9acdc0cb650"
+      },
+      {
+        "command": "node /private/tmp/dakia-vite-7.3.7-run/node_modules/vite/bin/vite.js build --config /Users/arsalan/code/codex-worktrees/36f9/dakia-desktop/apps/desktop/vite.config.ts",
+        "binaryVersion": "7.3.7",
+        "result": "passed",
+        "logPath": "/private/tmp/dakia-vite-build-7.3.7-2026-10-21.log",
+        "logSha256": "b24481aa81408615490f5d3c91329179361699d6366dd34222db211cff0fcfe8",
+        "warnings": [
+          "The existing build emitted the VITE_NATIVE_MAIL_SAFETY_FIXTURE undefined-environment warning and browser externalization notices from @browsermt/bergamot-translator."
+        ]
+      },
+      {
+        "command": "npm exec --yes npm@11 -- ci --ignore-scripts",
+        "result": "passed",
+        "installedVite": {
+          "resolvedPath": "/Users/arsalan/code/codex-worktrees/36f9/dakia-desktop/node_modules/vite/package.json",
+          "version": "7.3.7"
+        },
+        "logPath": "/private/tmp/dakia-vite-npm11-ci-2026-10-21.log",
+        "logSha256": "75a91fcfbcb0a60e8bfeb2b9d4ab810aad5330db09c21cc64987065e8fb79c96",
+        "preservedInputs": {
+          "desktopNodeModulesBeforeAndAfterSha256": "b93f941e15d111941706f7441f9a319a4602e28a2dd38fcf453fbbe94d7b9b62",
+          "classifierAssetsSha256": "6f21cbdf7a1b994083cc600b353ff39a7c4c3ed43e65968d4723064f5186de12"
+        }
+      },
+      {
+        "command": "npm run build:web",
+        "binaryVersion": "7.3.7",
+        "result": "passed",
+        "logPath": "/private/tmp/dakia-vite-installed-build-2026-10-21.log",
+        "logSha256": "abc2086d128911ce6a92e2d9728307f00a19d0756d8a20e4ce4885d086c8c777"
+      }
+    ],
+    "toolingLimitation": "npm 10.9.8 crashed during its targeted update with an internal edgesOut null error and left the lockfile unchanged. npm 11.21.1 completed the lock-only update; no broad npm update was used.",
+    "installationOverlap": {
+      "initialSourceRunLog": "/private/tmp/dakia-startup-lock-three-run-source-2026-10-21.log",
+      "initialSourceRunLogSha256": "6310ba24c5e8457a48417ca0c3c25a4cd854cda3ff7e70a7b146edd0f609ca33",
+      "observation": "An initial source-run typecheck overlapped npm ci and reported TS7016 for @tabler/icons-react while the package tree was being replaced.",
+      "settledVerification": {
+        "command": "npm run typecheck",
+        "result": "passed",
+        "logPath": "/private/tmp/dakia-vite-settled-typecheck-2026-10-21.log",
+        "logSha256": "c2268e3e652e91f6f47df2ec4ebcca2d69c778f7a67a4e19434ab3924c10b8f3",
+        "tabler": {
+          "version": "3.45.0",
+          "declaredTypes": "dist/tabler-icons-react.d.ts",
+          "typeFileBytes": 7518360,
+          "typeFilePresent": true
+        }
+      }
+    }
+  },
+  "fuzzLock": {
+    "reason": "The standalone fuzz manifest failed Cargo --locked because its dependency resolution lagged the frozen dakia-core manifest.",
+    "change": {
+      "file": "fuzz/Cargo.lock",
+      "beforeSha256": "1c403442a94a7c8c2663cebaea192d93172205fa8553a41f21eacb80bb5578df",
+      "afterSha256": "1c3ee00357a6f243b73a70616dc83113f1a4a21e2eef5600264f4493fff0be0b",
+      "command": "cd fuzz && cargo generate-lockfile --offline",
+      "diff": [
+        "The dakia-core package dependency list adds already-locked libc, matching the frozen workspace manifest.",
+        "tempfile resolves its allowed getrandom dependency from 0.3.4 to 0.4.3."
+      ],
+      "manifestChanged": false,
+      "broadVersionUpdates": false
+    },
+    "verification": [
+      {
+        "command": "cd fuzz && cargo metadata --locked --offline --no-deps --format-version 1",
+        "result": "passed",
+        "reportPath": "/private/tmp/dakia-fuzz-lock-2026-10-21-metadata.json",
+        "reportSha256": "7e9b24507d5cecbd0a5c772ea4511e76170b070e21424bfcd35e454922d0363d"
+      },
+      {
+        "command": "cd fuzz && cargo tree --locked --offline --depth 1",
+        "result": "passed",
+        "reportPath": "/private/tmp/dakia-fuzz-lock-2026-10-21-tree.txt",
+        "reportSha256": "99be90f4de0f82cffcc26a2d7c4be3bc86aa0e231ce6dd7d72e7cb6f63984e4c"
+      },
+      {
+        "command": "cargo tree --manifest-path fuzz/Cargo.toml --locked --offline --target aarch64-apple-darwin -i rsa@0.9.10",
+        "result": "passed with no matching dependency",
+        "reportPath": "/private/tmp/dakia-fuzz-lock-2026-10-21-rsa-tree.txt",
+        "reportSha256": "4dc8e4fe7f86c681d8b81d94c4e76a3dda13457f37def5513d5850195a7778f6"
+      },
+      {
+        "command": "/private/tmp/dakia-mail-safety-tools/bin/cargo-audit audit --file fuzz/Cargo.lock --no-fetch --json",
+        "toolVersion": "0.22.2",
+        "result": "passed",
+        "vulnerabilities": 0,
+        "allowedInformationalWarnings": [
+          { "advisory": "RUSTSEC-2024-0436", "package": "paste", "version": "1.0.15", "kind": "unmaintained" }
+        ],
+        "reportPath": "/private/tmp/dakia-fuzz-lock-2026-10-21-audit-configured.json",
+        "reportSha256": "2c1fac13ed58b98738ee226b2c150fc820f45610196be2040a47f4d0b4a2aa81"
+      }
+    ]
+  },
+  "historicalEvidence": [
+    "docs/mail-safety-results/npm-audit-2026-10-21.json records the pre-remediation npm failure and remains unchanged.",
+    "docs/mail-safety-results/dependency-audit-2026-10-21.json records the pre-synchronization fuzz-lock mismatch and remains unchanged."
+  ],
+  "limitations": [
+    "The temporary Vite build is source and bundle validation only. It does not replace native WebKit or packaged-app verification.",
+    "Private logs and JSON reports are referenced by SHA-256 but their retention is not guaranteed."
+  ]
+}

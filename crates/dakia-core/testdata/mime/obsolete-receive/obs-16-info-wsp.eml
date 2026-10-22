@@ -1,0 +1,13 @@
+X-Dakia-Corpus-Case: obs-16-info-wsp
+X-Dakia-Corpus-Source: RFC 5322 section 4.5.5; fictional
+Date: Tue, 28 Jul 2026 12:01:00 +0000
+From: Sender <sender@example.test>
+To: Reader <reader@example.test>
+Message-ID: <obs-obs-16-info-wsp@example.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Subject 	: visible subject
+Comments : fictional comment
+Keywords	: alpha,,beta,
+
+Fictional body obs-16-info-wsp.

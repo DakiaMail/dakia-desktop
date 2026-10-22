@@ -1,0 +1,188 @@
+{
+  "schemaVersion": 1,
+  "lane": "manual-mailbox-performance-investigation",
+  "status": "root-cause-unproven",
+  "recordedAt": "2026-10-21T20:20:18Z",
+  "scope": "Read-only investigation of the 2,000-message regression reported for source c56d2d80, incorporating a separately executed quiet follow-up against the preserved c56 binary. The investigator did not execute a performance workload.",
+  "failedRun": {
+    "report": {
+      "path": "docs/mail-safety-results/remaining-gap-closure-performance-window-handoff-recovery-2026-10-21.json",
+      "sha256": "8de443644dd4b5b38811c2e4776d0d2fc8dd101dad33ffe4a9fc5b7f9503cac2"
+    },
+    "detail": {
+      "path": "docs/mail-safety-results/remaining-gap-closure-performance-window-handoff-recovery-detail-2026-10-21.json",
+      "sha256": "8f1f683a1ce1700c2ee42facb6f1e97b6af08678c369e53c20a9a43d5414ba42"
+    },
+    "rawLog": {
+      "path": "/private/tmp/dakia-performance-window-handoff-recovery-20261021.log",
+      "sha256": "a6403456b832998c3ec904f08335a788e22dc5ec048018b8248b53c4624b0ce5"
+    },
+    "sourceDigest": "c56d2d806d8623dd14c858c8a8362729655496036405ad8c24162fce02a9a85b",
+    "measurementsMilliseconds": [711, 878, 695],
+    "medianMilliseconds": 711,
+    "baselineMedianMilliseconds": 560,
+    "changePercent": 26.96428571428571,
+    "thresholdPercent": 20,
+    "disposition": "Retained as a failed run. A later quiet follow-up must not replace, erase, or reclassify it."
+  },
+  "historicalBaseline": {
+    "report": {
+      "path": "docs/mail-safety-results/remaining-gap-closure-performance-2026-10-21.json",
+      "sha256": "6b5d4c28d6f95f3370c6fe6689a43aade155b5caf65b7796d61df837a7b85352"
+    },
+    "sourceDigest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+    "sourceFileCount": 933,
+    "measurementsMilliseconds": [603, 557, 560],
+    "medianMilliseconds": 560
+  },
+  "sourceManifests": {
+    "historical": {
+      "path": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-c47c2de0.json",
+      "sha256": "43060add67b37337eec6820d93c0d8dfe00db7fc0123fa188b58b452778bc3d2",
+      "sourceDigest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+      "fileCount": 933
+    },
+    "current": {
+      "path": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-window-handoff-recovery.json",
+      "sha256": "6a983e12901b7042fd0c3bfbd0fe3d38e6c08447c667d19d03bcdc786654679b",
+      "sourceDigest": "c56d2d806d8623dd14c858c8a8362729655496036405ad8c24162fce02a9a85b",
+      "fileCount": 939
+    }
+  },
+  "measuredPathChangeAnalysis": {
+    "changedCoreProductionFiles": [
+      {
+        "path": "crates/dakia-core/src/mail.rs",
+        "historicalSha256": "d892e89131ff402edc16259637a7f5cfc2c403e7cbe4e5156c78f2afb1fa4a93",
+        "currentSha256": "0ac200ebfc7f285adcff6863287f709e6480a91f16990482d8f6d399abd4ced6"
+      }
+    ],
+    "verifiedUnchangedInputs": [
+      "Cargo.toml",
+      "Cargo.lock",
+      "crates/dakia-core/Cargo.toml",
+      "crates/dakia-core/src/storage.rs",
+      "crates/dakia-core/src/mail/tests/resilience_performance_tests.rs",
+      "scripts/run-mail-resilience-performance.mjs"
+    ],
+    "changeSequence": "The mail.rs hash first changes in the window-handoff-progress-safe manifest and remains identical in the progress-contract and recovery manifests. That source change added probe progress tests and progress observer interfaces for IMAP and SMTP authentication probes.",
+    "snapshotPath": "The measured snapshot creates an injected duplex IMAP client and calls sync_mailboxes_with_progress_on_client. It does not call production connect_with_progress, imap_auth_probe_with_progress, or smtp_auth_probe_with_progress.",
+    "resourceSoakPath": "The measured soak creates a plain loopback IMAP client for NOOP and LOGOUT, then repeatedly calls Store::open. It does not call the authentication probe progress interfaces.",
+    "conclusion": "The visible probe progress callbacks are not dynamically executed by either measured scenario. This does not prove that mail.rs has no other relevant c47 to c56 change because the exact c47 source body is unavailable. Unoptimized binary layout effects also remain possible."
+  },
+  "environmentEvidence": {
+    "cargoLockContention": {
+      "evidence": "/private/tmp/dakia-performance-window-handoff-recovery-20261021.log:10",
+      "observation": "The run logged 'Blocking waiting for file lock on build directory' before the 30,000-message invocation, proving another Cargo operation overlapped the runner at that point."
+    },
+    "cpuSnapshot": {
+      "path": "/private/tmp/dakia-performance-environment-observation-20261021.json",
+      "sha256": "bf9bff87180925591388653ab4ac1c75bf8d32382c399ab9bde156c62fb30ceb",
+      "testProcessCpuPercent": 95.3,
+      "otherObservedProcessesCpuPercent": [56.3, 49.4, 20.4, 19.1, 9.2]
+    },
+    "interpretation": "Concurrent build activity and competing CPU use are observed confounders. A single process snapshot cannot prove that they caused the regression."
+  },
+  "binaryArtifacts": {
+    "currentObservedBinary": {
+      "originalPath": "target/debug/deps/dakia_core-a91e447a9eb4eadc",
+      "preservedPath": "/private/tmp/dakia-c56-core-performance-binary-20261021/dakia_core-a91e447a9eb4eadc",
+      "sha256": "ba4db3a0dedcdc03c48d768d41aa93501a30fad7d1b26f0c603fde9063d45bb0",
+      "preservedMode": "0500",
+      "provenance": {
+        "path": "/private/tmp/dakia-c56-core-performance-binary-20261021/provenance.json",
+        "sha256": "a3733c1e921bfce5bcc89d6c48c2a4f340991dd3b1e3536804c3477b58bae06b"
+      },
+      "provenanceLimitation": "The binary was observed and copied after the c56 full, deep, and performance runs. The original report does not record a binary hash at execution time, so this is not a cryptographic execution-time binding."
+    },
+    "olderCandidateBinary": {
+      "path": "/private/tmp/dakia-obsolete-fresh-target/debug/deps/dakia_core-a91e447a9eb4eadc",
+      "sha256": "894ccff5972f023c18ad7c20aa337a76cc2c9a670bd0096adb1aae05967ff5eb",
+      "provenance": "Built before the c47 manifest and lacks the later probe progress strings, but no artifact binds it to the c47 manifest.",
+      "acceptanceUse": "Diagnostic only. It must not be presented as the exact historical side of an A/B comparison."
+    },
+    "exactHistoricalArtifactAvailable": false,
+    "boundedSearchResult": "The bounded top-level /private/tmp search found the c47 manifest but no c47 source archive and no binary cryptographically bound to the c47 report."
+  },
+  "quietFollowUp": {
+    "status": "observed-under-quieter-conditions",
+    "sessionId": 67358,
+    "exitCode": 0,
+    "result": {
+      "path": "/private/tmp/dakia-c56-quiet-2k-followup-20261021/result.json",
+      "sha256": "44685df92fe5d8b8769e716d7593cb6d5a310e60887e89148edc08d3823458e8"
+    },
+    "binarySha256": "ba4db3a0dedcdc03c48d768d41aa93501a30fad7d1b26f0c603fde9063d45bb0",
+    "sourceDigest": "c56d2d806d8623dd14c858c8a8362729655496036405ad8c24162fce02a9a85b",
+    "execution": "Direct preserved test binary with no Cargo invocation and no compilation.",
+    "warmup": {
+      "excluded": true,
+      "elapsedMilliseconds": 614
+    },
+    "measurementsMilliseconds": [591, 744, 1150, 601, 599, 618, 579, 599, 583],
+    "measurementCount": 9,
+    "minimumMilliseconds": 579,
+    "maximumMilliseconds": 1150,
+    "medianMilliseconds": 599,
+    "historicalBaselineMedianMilliseconds": 560,
+    "changePercent": 6.964285714285712,
+    "thresholdPercent": 20,
+    "compilerProcessesAbsentBeforeEverySample": true,
+    "competingCpuObservation": "Other application load remained present and was recorded before every sample. The retained result contains the exact per-sample CPU percentages.",
+    "runLogs": [
+      {
+        "path": "/private/tmp/dakia-c56-quiet-2k-followup-20261021/run-00.log",
+        "sha256": "be4b50272736cae04b07ce1c233724d1c3a3d3499e15eea35b07373a63acdf7c"
+      },
+      {
+        "path": "/private/tmp/dakia-c56-quiet-2k-followup-20261021/run-01.log",
+        "sha256": "93a50d42384aeda6215565756c9fb513cd0d6512210e99e62bd3dd8e46454bbd"
+      },
+      {
+        "path": "/private/tmp/dakia-c56-quiet-2k-followup-20261021/run-02.log",
+        "sha256": "aaac9b45afaf12c330e2fe229bfd2f64dd5c084ac4a75e2a1685ae3019909ebc"
+      },
+      {
+        "path": "/private/tmp/dakia-c56-quiet-2k-followup-20261021/run-03.log",
+        "sha256": "5e6ff8f6dfff2bfc0e5947883a890bc54fd10c99236b6ca4a618830c29a73c25"
+      },
+      {
+        "path": "/private/tmp/dakia-c56-quiet-2k-followup-20261021/run-04.log",
+        "sha256": "64256dcdfbd2a6620426061141a3302d39f47bbb5a547eb9312732d46284f511"
+      },
+      {
+        "path": "/private/tmp/dakia-c56-quiet-2k-followup-20261021/run-05.log",
+        "sha256": "5a9ce55b5bf43104c837361199a88f2ce6c23912ec3376fd709621c64be7ea30"
+      },
+      {
+        "path": "/private/tmp/dakia-c56-quiet-2k-followup-20261021/run-06.log",
+        "sha256": "3d6925df4acd882b6584fa1339cec48a0af8d4ea3133f9f18bd53a2ee9f2fcba"
+      },
+      {
+        "path": "/private/tmp/dakia-c56-quiet-2k-followup-20261021/run-07.log",
+        "sha256": "280987edac34a5981ac8f3f677b294af027e73d5649af8c8265c25b3badc6e72"
+      },
+      {
+        "path": "/private/tmp/dakia-c56-quiet-2k-followup-20261021/run-08.log",
+        "sha256": "5a9ce55b5bf43104c837361199a88f2ce6c23912ec3376fd709621c64be7ea30"
+      },
+      {
+        "path": "/private/tmp/dakia-c56-quiet-2k-followup-20261021/run-09.log",
+        "sha256": "77315a79c14ec41f2572875e7021210ee783641e0997f4b27051fb09d614ec85"
+      }
+    ],
+    "interpretation": "The failed 26.96 percent result was not reproduced by the same observed c56 binary in this direct nine-sample follow-up. This is follow-up evidence under different observed conditions. It does not replace the failed report and cannot establish its cause."
+  },
+  "followUpPolicy": {
+    "exactABRequirement": "An exact A/B acceptance or causal claim requires an exact c47 source archive or binary bound to its manifest, paired execution in the same controlled environment, and retained input and binary hashes for both sides.",
+    "currentDisposition": "Retain both the failed report and the quiet follow-up. Do not attribute the difference to progress instrumentation, compiler state, Cargo contention, or other application load without a controlled source pair."
+  },
+  "limitations": [
+    "The investigator did not execute a performance workload; this receipt incorporates the root-run quiet follow-up artifacts.",
+    "The exact c47 mail.rs source body, source archive, and report-bound test binary were not found in the bounded artifact search.",
+    "Source manifests establish file differences but do not establish which machine-code path caused a timing difference.",
+    "The failed and historical runs used the same hardware and toolchain labels but were not paired in the same quiet interval.",
+    "The benchmark uses the unoptimized Cargo test profile, so code layout and incremental build state can affect absolute timing.",
+    "The one CPU snapshot and unavailable thermal query cannot establish the cause of the regression."
+  ]
+}

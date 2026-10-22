@@ -1,0 +1,8 @@
+{
+  "status": "passed",
+  "scope": "one exact fictional UID and checked Message-ID only",
+  "flags": [
+    "4 (FLAGS (\\Flagged \\Seen) UID 4)"
+  ],
+  "at": "2026-10-21T12:32:23.595474+00:00"
+}

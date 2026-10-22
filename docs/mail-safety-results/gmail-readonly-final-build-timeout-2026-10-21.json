@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T15:17:54.884619+00:00",
+  "lane": "credentialed-gmail-read-only-exact-message-recovery",
+  "status": "failed",
+  "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "evidence": {
+    "binarySha256": "c7ef17aeff1e3e565c34304759660a006c7975bb7c05d56307bd74a3db718981",
+    "childReaped": true,
+    "cleanupIncomplete": false,
+    "elapsedMs": 48427,
+    "fixedRecoveryId": "redacted-fixed-id",
+    "forcedKillRequested": false,
+    "implementation": {
+      "focusedProviderSmokeTests": "19 passed",
+      "independentReview": "approved"
+    },
+    "innerTimeoutSeconds": 45,
+    "kind": "private-provider-smoke-ci-read-only-recovery",
+    "mailSubmissionRequested": false,
+    "operations": [
+      "read-only exact recovery"
+    ],
+    "outerTimeout": false,
+    "outerTimeoutSeconds": 70,
+    "ownedChildTempDirRemoved": true,
+    "processExitCode": 1,
+    "providerSourceSha256": "43d4f78f10a590572c0e241591dfbc8195df7ca6142dcf1ec8f77d806309eab6",
+    "rawEvidence": {
+      "bytes": 1063,
+      "schemaValid": true,
+      "sha256": "ac6776f193748ccee9f55ffa2af001e05b150aba9a9c05e5efc590bf0c53c0c6"
+    },
+    "recoveryEvidence": {
+      "outcome": "failed",
+      "stage": "timeout",
+      "stageHistory": [
+        "prepared",
+        "recovery_store_open",
+        "recovery_account_persist",
+        "recovery_credential_persist",
+        "recovery_smoke",
+        "recovery_header_sync",
+        "recovery_exact_search",
+        "recovery_body_fetch",
+        "recovery_cache_verify",
+        "timeout"
+      ]
+    },
+    "recoveryEvidenceRemoved": true,
+    "remoteMutationRequested": false,
+    "roundtripRequested": false,
+    "schemaVersion": 1,
+    "sourceBindingSha256": "3be2d12c8554dc66a56747e5f202a51c9caa04db4659ea1923f836c41a3edab9",
+    "terminationRequested": false,
+    "workspaceSourceSha256": "14081b6cb59e0ea43082ef5b2edd1dccba85736dfd17ce4674cf36042c7de308"
+  },
+  "sanitizedReportSha256": "1b867a693b72b676244196cc5008fefc60deba707f593b51fb2c91b649ac480c",
+  "observations": [
+    "Initial exact search and production full body fetch completed; the exact subject/body checks passed before recovery_cache_verify.",
+    "The 45-second inner timeout occurred after entering the combined hydration/cache-verification suffix. The old stage marker cannot distinguish its second hydration from cache lookup.",
+    "The child exited 1, was reaped, and its owned temporary encrypted credential state was removed. No send or remote mailbox mutation was requested."
+  ],
+  "limitations": [
+    "This is a failed invocation, not a provider acceptance pass.",
+    "The earlier 9182ms successful invocation remains separate evidence on its own executable/source identity.",
+    "Additional nonsecret stage markers now distinguish recovery_hydrate from recovery_cache_read; they do not fix or explain this timeout.",
+    "No automatic resend or mutation is authorized."
+  ]
+}

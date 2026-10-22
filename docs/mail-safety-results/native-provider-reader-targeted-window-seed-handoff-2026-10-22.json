@@ -1,0 +1,134 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-21T21:20:58.941Z",
+  "lane": "native-packaged-provider-reader",
+  "status": "partial-failed",
+  "sourceIdentity": {
+    "digest": "8218b1f3621ee3cba9b2cb697275f0d85c0cac6abc39b5b90a817ed876abe605",
+    "fileCount": 940,
+    "manifestPath": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-targeted-window-seed-handoff.json",
+    "manifestSha256": "6207c844963d47316127e254b9e55a4de7d7dab9cffcb38b8b8c5cd64abd80ca",
+    "sourceUnfrozenAfterRun": true
+  },
+  "runtimeIdentity": {
+    "runRoot": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.7Olu2S",
+    "pid": 75728,
+    "desktopSha256": "c81cb106b0a70c45c2969b219dad6cb981124c458feaf0b04f01c75dee65021c",
+    "cliSha256": "80513a5081d5f7051a736243ce2187ef0a389a600b82543b7c47ba01240732fb",
+    "appExitCode": 0,
+    "harnessPid": 27450,
+    "harnessCleanupExitCode": 0,
+    "approvedOriginalRestored": true
+  },
+  "evidence": {
+    "harnessLog": {
+      "path": "/private/tmp/dakia-final-packaged-provider-reader-targeted-window-seed-handoff-20261021.log",
+      "sha256": "d2ee321dc7d92b366d7db16f067fdda38c77bcc596ab9020d6757e58721bd063"
+    },
+    "sourceAfterRun": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.7Olu2S/source-after-run.json",
+      "sha256": "becba69d3dd7ffa7179aa454a68751812032797ae9ed0146fb90eb2b963db8a5"
+    },
+    "approvedIdentityBegin": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.7Olu2S/approved-identity-begin.json",
+      "sha256": "b0ca3921e194571617e8add554160b9bba7697cf129905687fe3a57cb00c114a"
+    },
+    "approvedIdentityRestored": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.7Olu2S/approved-identity-swap-092cfe02-3f9f-4249-82cd-231d719d5f36-restored.json",
+      "sha256": "c7e22bf24030cb7e43c02cea36e7fcc6f25a5e5a96a38acef178a34641d59601"
+    },
+    "nativeAcl": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.7Olu2S/native-acl-acceptance.json",
+      "sha256": "ca684a17ccbbe8a7ec666db1e560f5a75b6436ef3a0fc484065fa34b4a8b4edf"
+    },
+    "translationNetworkCounter": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.7Olu2S/native-ui-evidence/translation-zero-network.json",
+      "sha256": "9c18da2358e823f38b8282422517755026ebabe69b8c26b6aa6c054f87f817af"
+    },
+    "remoteNetworkCounter": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.7Olu2S/network-requests.json",
+      "sha256": "dda7f97d1271151a08ed365cdbe6596ddd75028d7b95452642cf5c38be1b8ed8"
+    },
+    "g013GenerationConflict": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.7Olu2S/native-ui-evidence/g013-generation-conflict/observation.json",
+      "sha256": "785bae42ce4dc65b5c92c3ac012ab1d21cbe4ed8e476e990e52ad76f9d7b5954"
+    },
+    "launchMetadataHardening": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.7Olu2S/native-ui-evidence/launch-metadata-mode-hardening.json",
+      "sha256": "8b28ab24edb03eb21d559ce3f10931112071829023a8b4a19bfb0073b5b55015"
+    },
+    "resourceRunnerBinding": {
+      "path": "/private/tmp/dakia-l013-native-resource-runner-targeted-window-seed-handoff-receipt.json",
+      "sha256": "44771e4d2ad382eba83da47a6f5f757f5f798b62cf381edfbd025d848c1ccb75"
+    },
+    "priorC56NativeAttachmentEvidence": {
+      "path": "docs/mail-safety-results/native-provider-reader-window-handoff-recovery-2026-10-21.json",
+      "sha256": "2d528b8ca3e7c3a9067cb61e1942baa32fd4d4bbd06c800c160932d8c245b66b",
+      "relationship": "separate historical bounded attachment evidence; it is not carried forward to this candidate"
+    }
+  },
+  "boundedPasses": [
+    {
+      "scope": "identity and cleanup",
+      "outcome": "The approved packaged desktop and CLI hashes were used; the app quit normally, the harness cleaned up, and the approved original was restored."
+    },
+    {
+      "scope": "native mailto and detached handoff",
+      "outcome": "All 11 visible mailto cases and the detached account-B reply and forward handoff were completed without sending."
+    },
+    {
+      "scope": "Reader and account lifecycle observation",
+      "outcome": "Ten Reader open and close cycles and ten account cycles completed. The guarded Reader interruption evidence is retained."
+    },
+    {
+      "scope": "translation privacy",
+      "outcome": "UID 4 translation returned to the original English view with zero controlled HTTP or TLS contacts before the explicit action."
+    },
+    {
+      "scope": "remote-content and history rendering",
+      "outcome": "The explicit grant produced five controlled HTTP requests, four expected TLS probe contacts and no unexpected HTTP or TLS contacts. Five history states showed visible growth and shrinkage controls, and the embedded image remained visible."
+    },
+    {
+      "scope": "native ACL",
+      "outcome": "The retained ACL probe reached the local bridge and denied local registered commands, remote origins and static probe-window scopes without side effects."
+    }
+  ],
+  "failuresAndUnexecutedBoundaries": [
+    {
+      "scope": "MS-G-013 current candidate",
+      "outcome": "failed",
+      "detail": "The single UID 5 safe-first sync failed with an inactive generation. The recorded database observation contains no account-A new row, catalogue total five, UIDNEXT six and watermark five; account-B rows remain intact. No current raw fetch, cache or native attachment pass was produced."
+    },
+    {
+      "scope": "remote-content permission reset",
+      "outcome": "not-run",
+      "detail": "The list was empty before the attempt."
+    },
+    {
+      "scope": "Smart state",
+      "outcome": "under-investigation",
+      "detail": "The external UID 4 star was observed without a sync, but a Smart duplicate remains under investigation."
+    },
+    {
+      "scope": "native resource acceptance",
+      "outcome": "partial",
+      "detail": "Only two of six planned resource phases were sampled. The recorded main-process baseline was RSS 913,915,904 bytes and FD 17. This is not an L013 resource-cohort pass."
+    },
+    {
+      "scope": "unexecuted scenarios",
+      "outcome": "not-run",
+      "detail": "No UID 6 or UID 7 send, held sync, shared CLI, offline, H016, two fatal-alert exits, permission-reset, current G013 attachment flow or full resource cohort ran."
+    },
+    {
+      "scope": "launch metadata hardening",
+      "outcome": "not-acceptance",
+      "detail": "Fixture launch-metadata permissions changed from 0644 to 0600 without content change. The H016 adapter still has a classifier mismatch."
+    }
+  ],
+  "limits": [
+    "This is a partial-failed native checkpoint. It does not establish native acceptance, attachment acceptance for this candidate, H016, provider reliability, packaged-release acceptance or resource stability.",
+    "The current source tree changed after this run. No native result here carries forward to later source identities.",
+    "Controlled local HTTP and TLS counters do not establish the absence of all operating-system network activity.",
+    "The older c56 native attachment evidence remains separate and is not used to pass the current candidate."
+  ]
+}

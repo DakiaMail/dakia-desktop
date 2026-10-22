@@ -1,0 +1,156 @@
+{
+  "schemaVersion": 1,
+  "lane": "source",
+  "revision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "workingTree": "modified or unavailable",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "2388879602bac035bbf5703410816ebd308065bdf2d335869166483c609a27e3",
+    "fileCount": 743
+  },
+  "environment": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "node": "v22.23.2"
+  },
+  "startedAt": "2026-10-20T21:48:03.470Z",
+  "finishedAt": "2026-10-20T21:51:05.121Z",
+  "status": "failed",
+  "runs": [
+    {
+      "iteration": 1,
+      "status": "failed",
+      "commands": [
+        {
+          "command": "node",
+          "args": ["scripts/validate-mail-safety-catalogue.mjs"],
+          "startedAt": "2026-10-20T21:48:03.471Z",
+          "finishedAt": "2026-10-20T21:48:03.843Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": ["scripts/validate-mail-standards-requirements.mjs"],
+          "startedAt": "2026-10-20T21:48:03.843Z",
+          "finishedAt": "2026-10-20T21:48:04.052Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": ["scripts/validate-realistic-fixtures.mjs"],
+          "startedAt": "2026-10-20T21:48:04.052Z",
+          "finishedAt": "2026-10-20T21:48:04.175Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": ["scripts/tauri-contract-inventory.mjs"],
+          "startedAt": "2026-10-20T21:48:04.175Z",
+          "finishedAt": "2026-10-20T21:48:04.317Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "npm",
+          "args": ["run", "typecheck"],
+          "startedAt": "2026-10-20T21:48:04.317Z",
+          "finishedAt": "2026-10-20T21:48:08.028Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "npm",
+          "args": ["run", "format:check"],
+          "startedAt": "2026-10-20T21:48:08.028Z",
+          "finishedAt": "2026-10-20T21:48:09.809Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "cargo",
+          "args": ["fmt", "--all", "--", "--check"],
+          "startedAt": "2026-10-20T21:48:09.809Z",
+          "finishedAt": "2026-10-20T21:48:10.452Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "cargo",
+          "args": [
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--locked",
+            "--",
+            "-D",
+            "warnings"
+          ],
+          "startedAt": "2026-10-20T21:48:10.452Z",
+          "finishedAt": "2026-10-20T21:48:23.000Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "npm",
+          "args": ["test", "--", "--maxWorkers=1"],
+          "startedAt": "2026-10-20T21:48:23.000Z",
+          "finishedAt": "2026-10-20T21:49:36.321Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "cargo",
+          "args": ["test", "--workspace", "--locked"],
+          "startedAt": "2026-10-20T21:49:36.321Z",
+          "finishedAt": "2026-10-20T21:51:05.121Z",
+          "status": "failed",
+          "exitCode": 101,
+          "signal": null
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "Ignored credentialed/independent-server tests are separate evidence.",
+    "Native WebKit, packaged upgrades, live providers, audits, performance, and fuzzing are not established by this source run.",
+    "Source changed during execution; this is not a clean baseline."
+  ],
+  "sourceTreeAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "f538959b3e3f7b78d67adb79f1b098f4c5c20b5ece603ffe94a0a1ff81bd6fcf",
+    "fileCount": 743
+  },
+  "checkpointNotes": {
+    "acceptedBaseline": false,
+    "log": "/private/tmp/dakia-current-native-corrections-source-2026-10-21.log",
+    "frontend": {
+      "passed": 548,
+      "skipped": 2,
+      "failed": 0
+    },
+    "coreLibrary": {
+      "passed": 579,
+      "failed": 1,
+      "ignored": 9
+    },
+    "failure": "The shared selective corpus inventory still expected complete-parse success for the newly governed malformed quoted-printable fixture; the fixture correctly produces mime_content_undecodable. The inventory was subsequently corrected and its focused rerun passed.",
+    "sourceChangesDuringRun": [
+      "Fixture-governance .eml derivative count corrected from25 to28.",
+      "Shared selective fixture inventory reconciled with the three new fixtures."
+    ],
+    "remainingReview": "Storage preflight and MIME recovery assertions still require final independent review before a replacement full run.",
+    "flakeClaim": "No flaky retry established or used; this run is a deterministic failed and source-changed checkpoint."
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "status": "failed",
+  "recordedAtUtc": "2026-10-22T00:07:50.920765+00:00",
+  "sourceTree": {
+    "digest": "fa50b916653bfc470eb69d22d34046a1867b03d022313d1a5e66eba04d44b131",
+    "fileCount": 951
+  },
+  "command": [
+    "cargo",
+    "test",
+    "--locked",
+    "-p",
+    "dakia-desktop",
+    "--features",
+    "native-mail-safety-fixture",
+    "--lib"
+  ],
+  "exitCode": 101,
+  "passed": 235,
+  "failed": 1,
+  "failedTest": "native_acl_acceptance::tests::exhaustive_inventory_is_source_coupled_and_rejects_post_acl_outcomes",
+  "error": "native ACL runtime/static command partition drifted from the handler inventory",
+  "cause": "Four recovery commands were added to the handler inventory but the opt-in native ACL probe runtime partition was not updated.",
+  "privateLog": "/private/tmp/dakia-staged-full-native-fixture-feature-fa50-20261022.log",
+  "logSha256": "8a8390c687d7a795b6fe25f1923c6079c5f71ac1f2e684e2fef84e4d7aa073ac",
+  "nativeAppLaunched": false,
+  "observedPrivilegedCommandEscape": false,
+  "repairStatus": "in-progress in isolated staging; primary a86 frozen unchanged",
+  "newGate": "The next source lane requires the entire fixture-enabled Tauri library suite, increasing source gates from 16 to 17.",
+  "limitations": [
+    "Earlier fa50 ordinary source, deep and performance passes remain their original evidence, not a pass for this additional fixture-feature gate.",
+    "New source freeze, review and three clean expanded source cycles are required after repair."
+  ]
+}

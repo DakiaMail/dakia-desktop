@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "operation": "enospc-prepare",
+  "root": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.dzkRZz",
+  "recordedAt": "2026-10-21T11:34:17.145Z",
+  "image": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.dzkRZz/attachment-enospc.dmg",
+  "initialImageSha256": "924fbe85c6a2178ba16809af26d21a4062469998382a50d6932ab63b95e7573a",
+  "imageBytes": "67108864",
+  "imageInfoPlist": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.dzkRZz/native-attachment-fault-evidence/hdiutil-imageinfo.plist",
+  "imageInfoPlistSha256": "d9d507ea682f22de8dd2ab52d5f92d44334548ea48cbc87a0e4da5d9fb9790de",
+  "imageFileDevice": "16777231",
+  "imageInode": "140710879",
+  "mountPoint": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.dzkRZz/Downloads",
+  "device": "/dev/disk8s1",
+  "filesystemKiB": "65496",
+  "savedDownloads": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.dzkRZz/Downloads.saved-before-enospc",
+  "originalDownloadsDevice": "16777231",
+  "originalDownloadsInode": "140678449",
+  "originalDownloadsMode": "755"
+}

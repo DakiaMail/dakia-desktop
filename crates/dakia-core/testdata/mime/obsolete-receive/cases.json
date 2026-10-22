@@ -1,0 +1,935 @@
+{
+  "schemaVersion": 1,
+  "provenance": "Fictional RFC-derived receive examples; no private messages. Independent expected semantics, no generated parser observations.",
+  "cases": [
+    {
+      "id": "obs-01-comment-qtext",
+      "uid": 1200,
+      "family": "OBS-01",
+      "section": "4.1",
+      "test": "obsolete_receive_obs_01_comment_qtext",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-01-comment-qtext.\r\n",
+        "fromName": "A\u0001B (note\u0002)"
+      },
+      "proposedSemantics": "Preserve the exact declared source-text projection and separate actionable mailbox identity. Retain original raw octets; do not claim preferred modern rendering or a universal obsolete-grammar certificate.",
+      "rawExportRequired": true,
+      "coreProjectionPolicy": "Intentional core/source-text preservation tolerance. Exact control-bearing text survives parsing and Store/cache reopen; this does not prescribe visible control glyphs or prove frontend/Tauri/WebKit/clipboard/search rendering. Actionable CTL-bearing addresses must be rejected before SMTP rather than cleaned into another identity."
+    },
+    {
+      "id": "obs-01-unstructured",
+      "uid": 1201,
+      "family": "OBS-01",
+      "section": "4.1",
+      "test": "obsolete_receive_obs_01_unstructured",
+      "expected": {
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-01-unstructured.\r\n",
+        "subject": "alpha\u0000omega\u007f"
+      },
+      "proposedSemantics": "Preserve the exact declared source-text projection and separate actionable mailbox identity. Retain original raw octets; do not claim preferred modern rendering or a universal obsolete-grammar certificate.",
+      "rawExportRequired": true,
+      "coreProjectionPolicy": "Intentional core/source-text preservation tolerance. Exact control-bearing text survives parsing and Store/cache reopen; this does not prescribe visible control glyphs or prove frontend/Tauri/WebKit/clipboard/search rendering. Actionable CTL-bearing addresses must be rejected before SMTP rather than cleaned into another identity."
+    },
+    {
+      "id": "obs-02-body-controls",
+      "uid": 1202,
+      "family": "OBS-02",
+      "section": "4.1",
+      "test": "obsolete_receive_obs_02_body_controls",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "alpha\rbeta\ngamma\u0000omega\r\n"
+      },
+      "proposedSemantics": "Preserve the exact declared source-text projection and separate actionable mailbox identity. Retain original raw octets; do not claim preferred modern rendering or a universal obsolete-grammar certificate.",
+      "rawExportRequired": true,
+      "coreProjectionPolicy": "Intentional core/source-text preservation tolerance. Exact control-bearing text survives parsing and Store/cache reopen; this does not prescribe visible control glyphs or prove frontend/Tauri/WebKit/clipboard/search rendering. Actionable CTL-bearing addresses must be rejected before SMTP rather than cleaned into another identity."
+    },
+    {
+      "id": "obs-02-mixed-header-separators",
+      "uid": 1203,
+      "family": "OBS-02",
+      "section": "4.1",
+      "test": "obsolete_receive_obs_02_mixed_header_separators",
+      "expected": {
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-02-mixed-header-separators.\r\n",
+        "subject": "alpha\rbeta"
+      },
+      "proposedSemantics": "Preserve the exact declared source-text projection and separate actionable mailbox identity. Retain original raw octets; do not claim preferred modern rendering or a universal obsolete-grammar certificate.",
+      "rawExportRequired": true,
+      "coreProjectionPolicy": "Intentional core/source-text preservation tolerance. Exact control-bearing text survives parsing and Store/cache reopen; this does not prescribe visible control glyphs or prove frontend/Tauri/WebKit/clipboard/search rendering. Actionable CTL-bearing addresses must be rejected before SMTP rather than cleaned into another identity."
+    },
+    {
+      "id": "obs-03-dotted-display",
+      "uid": 1204,
+      "family": "OBS-03",
+      "section": "4.1",
+      "test": "obsolete_receive_obs_03_dotted_display",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-03-dotted-display.\r\n",
+        "fromName": "Dr. A. Fictional"
+      },
+      "proposedSemantics": "Sender address stays exact and display tokens do not become addr-spec segments.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-03-keyword-nulls",
+      "uid": 1205,
+      "family": "OBS-03",
+      "section": "4.1",
+      "test": "obsolete_receive_obs_03_keyword_nulls",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-03-keyword-nulls.\r\n"
+      },
+      "proposedSemantics": "Mail body remains readable and original header remains retrievable. No invented Keywords UI is required.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-04-whitespace-only-fold",
+      "uid": 1206,
+      "family": "OBS-04",
+      "section": "4.2",
+      "test": "obsolete_priority_obs_04_whitespace_only_fold",
+      "expected": {
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-04-whitespace-only-fold.\r\n",
+        "subjectTokens": ["alpha", "omega"]
+      },
+      "proposedSemantics": "Header does not end at the whitespace-only continuation; subject contains alpha then omega without exposing continuation as body.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-05-year-thresholds-00",
+      "uid": 1207,
+      "family": "OBS-05",
+      "section": "4.3",
+      "test": "obsolete_priority_obs_05_year_thresholds_00",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2000-01-01T00:00:00+00:00",
+        "bodyText": "Fictional body obs-05-year-thresholds-00.\r\n"
+      },
+      "proposedSemantics": "Each Date yields its listed year at midnight UTC in all metadata/complete paths; a supplied conflicting IMAP INTERNALDATE must not hide incorrect Date interpretation.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-05-year-thresholds-49",
+      "uid": 1208,
+      "family": "OBS-05",
+      "section": "4.3",
+      "test": "obsolete_priority_obs_05_year_thresholds_49",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2049-01-01T00:00:00+00:00",
+        "bodyText": "Fictional body obs-05-year-thresholds-49.\r\n"
+      },
+      "proposedSemantics": "Each Date yields its listed year at midnight UTC in all metadata/complete paths; a supplied conflicting IMAP INTERNALDATE must not hide incorrect Date interpretation.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-05-year-thresholds-50",
+      "uid": 1209,
+      "family": "OBS-05",
+      "section": "4.3",
+      "test": "obsolete_priority_obs_05_year_thresholds_50",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "1950-01-01T00:00:00+00:00",
+        "bodyText": "Fictional body obs-05-year-thresholds-50.\r\n"
+      },
+      "proposedSemantics": "Each Date yields its listed year at midnight UTC in all metadata/complete paths; a supplied conflicting IMAP INTERNALDATE must not hide incorrect Date interpretation.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-05-year-thresholds-99",
+      "uid": 1210,
+      "family": "OBS-05",
+      "section": "4.3",
+      "test": "obsolete_priority_obs_05_year_thresholds_99",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "1999-01-01T00:00:00+00:00",
+        "bodyText": "Fictional body obs-05-year-thresholds-99.\r\n"
+      },
+      "proposedSemantics": "Each Date yields its listed year at midnight UTC in all metadata/complete paths; a supplied conflicting IMAP INTERNALDATE must not hide incorrect Date interpretation.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-05-year-thresholds-123",
+      "uid": 1211,
+      "family": "OBS-05",
+      "section": "4.3",
+      "test": "obsolete_priority_obs_05_year_thresholds_123",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2023-01-01T00:00:00+00:00",
+        "bodyText": "Fictional body obs-05-year-thresholds-123.\r\n"
+      },
+      "proposedSemantics": "Each Date yields its listed year at midnight UTC in all metadata/complete paths; a supplied conflicting IMAP INTERNALDATE must not hide incorrect Date interpretation.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-05-date-token-comments",
+      "uid": 1212,
+      "family": "OBS-05",
+      "section": "4.3",
+      "test": "obsolete_receive_obs_05_date_token_comments",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-01-01T00:00:00+00:00",
+        "bodyText": "Fictional body obs-05-date-token-comments.\r\n"
+      },
+      "proposedSemantics": "Interpret the intended 2026-01-01T00:00:00Z rather than silently using receipt time.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-06-zone-matrix-ut",
+      "uid": 1213,
+      "family": "OBS-06",
+      "section": "4.3",
+      "test": "obsolete_receive_obs_06_zone_matrix_ut",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-01-01T12:00:00+00:00",
+        "bodyText": "Fictional body obs-06-zone-matrix-ut.\r\n"
+      },
+      "proposedSemantics": "Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-06-zone-matrix-gmt",
+      "uid": 1214,
+      "family": "OBS-06",
+      "section": "4.3",
+      "test": "obsolete_receive_obs_06_zone_matrix_gmt",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-01-01T12:00:00+00:00",
+        "bodyText": "Fictional body obs-06-zone-matrix-gmt.\r\n"
+      },
+      "proposedSemantics": "Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-06-zone-matrix-est",
+      "uid": 1215,
+      "family": "OBS-06",
+      "section": "4.3",
+      "test": "obsolete_receive_obs_06_zone_matrix_est",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-01-01T17:00:00+00:00",
+        "bodyText": "Fictional body obs-06-zone-matrix-est.\r\n"
+      },
+      "proposedSemantics": "Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-06-zone-matrix-edt",
+      "uid": 1216,
+      "family": "OBS-06",
+      "section": "4.3",
+      "test": "obsolete_receive_obs_06_zone_matrix_edt",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-01-01T16:00:00+00:00",
+        "bodyText": "Fictional body obs-06-zone-matrix-edt.\r\n"
+      },
+      "proposedSemantics": "Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-06-zone-matrix-cst",
+      "uid": 1217,
+      "family": "OBS-06",
+      "section": "4.3",
+      "test": "obsolete_receive_obs_06_zone_matrix_cst",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-01-01T18:00:00+00:00",
+        "bodyText": "Fictional body obs-06-zone-matrix-cst.\r\n"
+      },
+      "proposedSemantics": "Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-06-zone-matrix-cdt",
+      "uid": 1218,
+      "family": "OBS-06",
+      "section": "4.3",
+      "test": "obsolete_receive_obs_06_zone_matrix_cdt",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-01-01T17:00:00+00:00",
+        "bodyText": "Fictional body obs-06-zone-matrix-cdt.\r\n"
+      },
+      "proposedSemantics": "Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-06-zone-matrix-mst",
+      "uid": 1219,
+      "family": "OBS-06",
+      "section": "4.3",
+      "test": "obsolete_receive_obs_06_zone_matrix_mst",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-01-01T19:00:00+00:00",
+        "bodyText": "Fictional body obs-06-zone-matrix-mst.\r\n"
+      },
+      "proposedSemantics": "Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-06-zone-matrix-mdt",
+      "uid": 1220,
+      "family": "OBS-06",
+      "section": "4.3",
+      "test": "obsolete_receive_obs_06_zone_matrix_mdt",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-01-01T18:00:00+00:00",
+        "bodyText": "Fictional body obs-06-zone-matrix-mdt.\r\n"
+      },
+      "proposedSemantics": "Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-06-zone-matrix-pst",
+      "uid": 1221,
+      "family": "OBS-06",
+      "section": "4.3",
+      "test": "obsolete_receive_obs_06_zone_matrix_pst",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-01-01T20:00:00+00:00",
+        "bodyText": "Fictional body obs-06-zone-matrix-pst.\r\n"
+      },
+      "proposedSemantics": "Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-06-zone-matrix-pdt",
+      "uid": 1222,
+      "family": "OBS-06",
+      "section": "4.3",
+      "test": "obsolete_receive_obs_06_zone_matrix_pdt",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-01-01T19:00:00+00:00",
+        "bodyText": "Fictional body obs-06-zone-matrix-pdt.\r\n"
+      },
+      "proposedSemantics": "Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-06-zone-matrix-a",
+      "uid": 1223,
+      "family": "OBS-06",
+      "section": "4.3",
+      "test": "obsolete_receive_obs_06_zone_matrix_a",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-01-01T12:00:00+00:00",
+        "bodyText": "Fictional body obs-06-zone-matrix-a.\r\n"
+      },
+      "proposedSemantics": "Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-07-direct-route",
+      "uid": 1224,
+      "family": "OBS-07",
+      "section": "4.4",
+      "test": "obsolete_priority_obs_07_direct_route",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-07-direct-route.\r\n",
+        "toAllowed": ["reader@example.test", "<reader@example.test>"]
+      },
+      "proposedSemantics": "The terminal sender/reader mailboxes remain exact; route domains are not recipients, identities or destinations. Reply preparation must not reintroduce route syntax.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-08-cfws-dot",
+      "uid": 1225,
+      "family": "OBS-08",
+      "section": "4.4",
+      "test": "obsolete_receive_obs_08_cfws_dot",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender.part@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-08-cfws-dot.\r\n"
+      },
+      "proposedSemantics": "Interpret sender.part@example.test without changing meaningful local-part bytes; no encoded-word decoding inside identity.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-08-quoted-word-dot",
+      "uid": 1226,
+      "family": "OBS-08",
+      "section": "4.4",
+      "test": "obsolete_receive_obs_08_quoted_word_dot",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "\"left word.part\"@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-08-quoted-word-dot.\r\n"
+      },
+      "proposedSemantics": "Preserve the literal quoted local-part identity and produce a valid reply target; never collapse it into another mailbox. Exact serialization oracle must account for meaningful quoted whitespace.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-09-null-recipients",
+      "uid": 1227,
+      "family": "OBS-09",
+      "section": "4.4",
+      "test": "obsolete_receive_obs_09_null_recipients",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-09-null-recipients.\r\n",
+        "toAllowed": [
+          "first@example.test, second@example.test",
+          ",first@example.test,, second@example.test,"
+        ],
+        "ccAllowed": ["Empty:;", "Empty: , , ;"]
+      },
+      "proposedSemantics": "Keep exactly the two real To mailboxes and an empty group; no phantom recipient or parse failure. Reader Reply All retains the real recipients only.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-10-domain-escape",
+      "uid": 1228,
+      "family": "OBS-10",
+      "section": "4.4",
+      "test": "obsolete_receive_obs_10_domain_escape",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@[192.0.2.10]",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-10-domain-escape.\r\n"
+      },
+      "proposedSemantics": "Keep the domain-literal address distinct and literal; do not reinterpret it as an application URL, local-file path or command.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-10-domain-control",
+      "uid": 1229,
+      "family": "OBS-10",
+      "section": "4.4",
+      "test": "obsolete_receive_obs_10_domain_control",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-10-domain-control.\r\n",
+        "fromAddress": "sender@[192.0.2.10\u0001]"
+      },
+      "proposedSemantics": "Preserve the exact declared source-text projection and separate actionable mailbox identity. Retain original raw octets; do not claim preferred modern rendering or a universal obsolete-grammar certificate.",
+      "rawExportRequired": true,
+      "coreProjectionPolicy": "Intentional core/source-text preservation tolerance. Exact control-bearing text survives parsing and Store/cache reopen; this does not prescribe visible control glyphs or prove frontend/Tauri/WebKit/clipboard/search rendering. Actionable CTL-bearing addresses must be rejected before SMTP rather than cleaned into another identity."
+    },
+    {
+      "id": "obs-11-reorder-and-wsp",
+      "uid": 1230,
+      "family": "OBS-11",
+      "section": "4.5",
+      "test": "obsolete_receive_obs_11_reorder_and_wsp",
+      "expected": {
+        "subject": "reordered",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "reader@example.test",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-11-reorder-and-wsp.\r\n"
+      },
+      "proposedSemantics": "Same exposed metadata/body across full/header/catalogue and reopen despite order and whitespace. Singleton ambiguity uses the documented deterministic policy.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-12-date-wsp",
+      "uid": 1231,
+      "family": "OBS-12",
+      "section": "4.5.1",
+      "test": "obsolete_receive_obs_12_date_wsp",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-12-date-wsp.\r\n"
+      },
+      "proposedSemantics": "Use the valid historical message date, even with a conflicting provider INTERNALDATE; no invented now().",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-13-originator-fields",
+      "uid": 1232,
+      "family": "OBS-13",
+      "section": "4.5.2",
+      "test": "obsolete_receive_obs_13_originator_fields",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "replies@example.test",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-13-originator-fields.\r\n"
+      },
+      "proposedSemantics": "Expose original sender and explicit Reply-To correctly. Sender/delegate must not replace From or silently retarget reply. Raw unknown fields remain retrievable.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-14-repeat-destinations",
+      "uid": 1233,
+      "family": "OBS-14",
+      "section": "4.5.3",
+      "test": "obsolete_priority_obs_14_repeat_destinations",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "first@example.test, second@example.test",
+        "ccAddresses": "copy-one@example.test, copy-two@example.test",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-14-repeat-destinations.\r\n"
+      },
+      "proposedSemantics": "Preserve both To and both Cc mailboxes in order for Reader/Reply All; empty Bcc members add nobody. If deviating from the concatenation recommendation, document and test the deviation explicitly.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-15-thread-phrases",
+      "uid": 1234,
+      "family": "OBS-15",
+      "section": "4.5.4",
+      "test": "obsolete_priority_obs_15_thread_phrases",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-15-thread-phrases.\r\n",
+        "inReplyTo": "<parent@example.test>",
+        "references": "<root@example.test> <parent@example.test>"
+      },
+      "proposedSemantics": "Only the two real identifiers contribute to threading; words are ignored, with account isolation and no cycles.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-15-thread-cfws",
+      "uid": 1235,
+      "family": "OBS-15",
+      "section": "4.5.4",
+      "test": "obsolete_priority_obs_15_thread_cfws",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-15-thread-cfws.\r\n",
+        "messageId": "<left.part@example.test>"
+      },
+      "proposedSemantics": "Compare the semantic ID left.part@example.test without treating comments as identity bytes. Preserve original source, and never apply encoded-word decoding while normalizing CFWS.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-16-info-wsp",
+      "uid": 1236,
+      "family": "OBS-16",
+      "section": "4.5.5",
+      "test": "obsolete_receive_obs_16_info_wsp",
+      "expected": {
+        "subject": "visible subject",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-16-info-wsp.\r\n"
+      },
+      "proposedSemantics": "Reader displays the correct Subject/body; optional informational headers neither override identity nor trigger actions. Original fields remain available via raw fetch.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-17-resent-block",
+      "uid": 1237,
+      "family": "OBS-17",
+      "section": "4.5.6",
+      "test": "obsolete_receive_obs_17_resent_block",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-17-resent-block.\r\n"
+      },
+      "proposedSemantics": "A prepended resent block does not replace original From, Reply-To, Date or conversation identity; preserve original header source. No sending occurs merely because these fields exist.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-18-trace-wsp",
+      "uid": 1238,
+      "family": "OBS-18",
+      "section": "4.5.7",
+      "test": "obsolete_receive_obs_18_trace_wsp",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-18-trace-wsp.\r\n"
+      },
+      "proposedSemantics": "Trace headers do not override Date/From or become reply destinations; body remains readable and raw trace bytes retrievable.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-19-optional-wsp",
+      "uid": 1239,
+      "family": "OBS-19",
+      "section": "4.5.8",
+      "test": "obsolete_receive_obs_19_optional_wsp",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-19-optional-wsp.\r\n"
+      },
+      "proposedSemantics": "Unknown header does not reject the message, alter known identity or create a privileged action. Raw fetch/export retains the uninterpreted bytes.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "quoted-local-encoded-looking-identity",
+      "uid": 1240,
+      "family": "ADDR-QUOTED-LOCAL-ENCODED-LITERAL",
+      "section": "3.4.1",
+      "test": "obsolete_adjacent_quoted_local_identity_stays_literal",
+      "expected": {
+        "subject": "Fictional obsolete syntax",
+        "toAddresses": "Reader <reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "fromAllowed": [
+          "\"=?UTF-8?Q?attacker?=\"@example.test",
+          "=?UTF-8?Q?attacker?=@example.test",
+          "\"=?UTF-8?Q?attacker?=\" (note) @example.test"
+        ],
+        "bodyText": "Fictional body quoted-local-encoded-looking-identity.\r\n"
+      },
+      "proposedSemantics": "Equivalent quoting or preserved CFWS must not decode or alter literal local-part bytes.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-route-control-group",
+      "uid": 1300,
+      "family": "OBS-07-ROUTE-BOUNDARY",
+      "section": "4.4",
+      "test": "obsolete_route_control_group",
+      "expected": {
+        "subject": "Fictional route boundary control",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "Friends: A <a@example.test>, <reader@example.test>;",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-route-control-group.\r\n"
+      },
+      "proposedSemantics": "Strip only a proven valid direct route span; preserve surrounding group/address syntax and ambiguous/invalid terminal identity exactly. This is a bounded Dakia compatibility policy, not universal obsolete grammar conformance.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-route-control-null-relays",
+      "uid": 1301,
+      "family": "OBS-07-ROUTE-BOUNDARY",
+      "section": "4.4",
+      "test": "obsolete_route_control_null_relays",
+      "expected": {
+        "subject": "Fictional route boundary control",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "<reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-route-control-null-relays.\r\n"
+      },
+      "proposedSemantics": "Strip only a proven valid direct route span; preserve surrounding group/address syntax and ambiguous/invalid terminal identity exactly. This is a bounded Dakia compatibility policy, not universal obsolete grammar conformance.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-route-control-invalid-domain",
+      "uid": 1302,
+      "family": "OBS-07-ROUTE-BOUNDARY",
+      "section": "4.4",
+      "test": "obsolete_route_control_invalid_domain",
+      "expected": {
+        "subject": "Fictional route boundary control",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "<@relay..example:reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-route-control-invalid-domain.\r\n"
+      },
+      "proposedSemantics": "Strip only a proven valid direct route span; preserve surrounding group/address syntax and ambiguous/invalid terminal identity exactly. This is a bounded Dakia compatibility policy, not universal obsolete grammar conformance.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-route-control-colon-lookalike",
+      "uid": 1303,
+      "family": "OBS-07-ROUTE-BOUNDARY",
+      "section": "4.4",
+      "test": "obsolete_route_control_colon_lookalike",
+      "expected": {
+        "subject": "Fictional route boundary control",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "<not-a-route:reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-route-control-colon-lookalike.\r\n"
+      },
+      "proposedSemantics": "Strip only a proven valid direct route span; preserve surrounding group/address syntax and ambiguous/invalid terminal identity exactly. This is a bounded Dakia compatibility policy, not universal obsolete grammar conformance.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-route-control-quoted-local",
+      "uid": 1304,
+      "family": "OBS-07-ROUTE-BOUNDARY",
+      "section": "4.4",
+      "test": "obsolete_route_control_quoted_local",
+      "expected": {
+        "subject": "Fictional route boundary control",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "<@relay.example:\"left word\"@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-route-control-quoted-local.\r\n"
+      },
+      "proposedSemantics": "Strip only a proven valid direct route span; preserve surrounding group/address syntax and ambiguous/invalid terminal identity exactly. This is a bounded Dakia compatibility policy, not universal obsolete grammar conformance.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-route-control-comments",
+      "uid": 1305,
+      "family": "OBS-07-ROUTE-BOUNDARY",
+      "section": "4.4",
+      "test": "obsolete_route_control_comments",
+      "expected": {
+        "subject": "Fictional route boundary control",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "<reader@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-route-control-comments.\r\n"
+      },
+      "proposedSemantics": "Strip only a proven valid direct route span; preserve surrounding group/address syntax and ambiguous/invalid terminal identity exactly. This is a bounded Dakia compatibility policy, not universal obsolete grammar conformance.",
+      "rawExportRequired": true
+    },
+    {
+      "id": "obs-route-control-encoded-local",
+      "uid": 1306,
+      "family": "OBS-07-ROUTE-BOUNDARY",
+      "section": "4.4",
+      "test": "obsolete_route_control_encoded_local",
+      "expected": {
+        "subject": "Fictional route boundary control",
+        "fromAddress": "sender@example.test",
+        "toAddresses": "<@relay.example:\"=?UTF-8?Q?attacker?=\"@example.test>",
+        "ccAddresses": "",
+        "bccAddresses": "",
+        "replyToAddresses": "",
+        "receivedAt": "2026-07-28T12:01:00+00:00",
+        "bodyText": "Fictional body obs-route-control-encoded-local.\r\n"
+      },
+      "proposedSemantics": "Strip only a proven valid direct route span; preserve surrounding group/address syntax and ambiguous/invalid terminal identity exactly. This is a bounded Dakia compatibility policy, not universal obsolete grammar conformance.",
+      "rawExportRequired": true
+    }
+  ]
+}

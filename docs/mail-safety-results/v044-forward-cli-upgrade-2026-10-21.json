@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "lane": "previous-stable-forward-CLI-upgrade",
+  "status": "passed-bounded",
+  "previousVersion": "0.4.4",
+  "candidateExecutableSha256": "91966d1e1c3466127fd05da0e8470df9933e7e7320cc0e73497cb5215f686cb3",
+  "oldExecutableSha256": "73f4d7fdde0a8322b0152aa0778def1766a00d7e5ed9314f36a53142db712806",
+  "backupRestoreBytesVerified": true,
+  "checks": {
+    "new-accounts": {
+      "exitCode": 0,
+      "rows": 1,
+      "id": "7c044000-0000-4000-8000-000000000044"
+    },
+    "new-search": {
+      "exitCode": 0,
+      "rows": 1,
+      "id": "fictional-v044-upgrade-message"
+    },
+    "restored-old-accounts": {
+      "exitCode": 0,
+      "rows": 1,
+      "id": "7c044000-0000-4000-8000-000000000044"
+    },
+    "restored-old-search": {
+      "exitCode": 0,
+      "rows": 1,
+      "id": "fictional-v044-upgrade-message"
+    }
+  },
+  "limitations": [
+    "Fictional disabled account; no credentials seeded",
+    "Native GUI upgrade and shared concurrent desktop/CLI not established",
+    "Downgrade unsupported; restoration used complete pre-upgrade backup in separate profile"
+  ],
+  "privateEvidenceRoot": "/private/tmp/dakia-forward-upgrade-20261021"
+}

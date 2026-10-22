@@ -23,6 +23,7 @@ pub enum MimeBudgetError {
     MimeHeadersTooLarge,
     TooManyMimeParts,
     MultipartNestingTooDeep,
+    InvalidMimePartGraph,
 }
 
 impl MimeBudgetError {
@@ -34,6 +35,7 @@ impl MimeBudgetError {
             Self::MimeHeadersTooLarge => "mime_headers_too_large",
             Self::TooManyMimeParts => "mime_too_many_parts",
             Self::MultipartNestingTooDeep => "mime_multipart_nesting_too_deep",
+            Self::InvalidMimePartGraph => "mime_invalid_part_graph",
         }
     }
 }
@@ -392,6 +394,51 @@ mod tests {
         assert_eq!(
             validate_structure(MAX_MIME_PARTS, MAX_MULTIPART_NESTING),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn every_numeric_budget_has_below_at_and_above_boundary_evidence() {
+        assert_eq!(validate_header_bytes(MAX_MIME_HEADER_BYTES - 1), Ok(()));
+        assert_eq!(validate_header_bytes(MAX_MIME_HEADER_BYTES), Ok(()));
+        assert_eq!(
+            validate_header_bytes(MAX_MIME_HEADER_BYTES + 1),
+            Err(MimeBudgetError::MimeHeadersTooLarge)
+        );
+
+        for (parts, expected) in [
+            (MAX_MIME_PARTS - 1, Ok(())),
+            (MAX_MIME_PARTS, Ok(())),
+            (MAX_MIME_PARTS + 1, Err(MimeBudgetError::TooManyMimeParts)),
+        ] {
+            assert_eq!(validate_structure(parts, 0), expected, "parts={parts}");
+        }
+        for (depth, expected) in [
+            (MAX_MULTIPART_NESTING - 1, Ok(())),
+            (MAX_MULTIPART_NESTING, Ok(())),
+            (
+                MAX_MULTIPART_NESTING + 1,
+                Err(MimeBudgetError::MultipartNestingTooDeep),
+            ),
+        ] {
+            assert_eq!(validate_structure(1, depth), expected, "depth={depth}");
+        }
+
+        // Put the blank header separator first so this isolates the raw byte
+        // budget instead of failing the smaller aggregate-header budget.
+        let mut raw = vec![b'x'; MAX_RAW_MESSAGE_BYTES];
+        raw[0] = b'\r';
+        raw[1] = b'\n';
+        raw.pop();
+        assert_eq!(raw.len(), MAX_RAW_MESSAGE_BYTES - 1);
+        assert!(preflight_raw_message(&raw).is_ok());
+        raw.push(b'x');
+        assert_eq!(raw.len(), MAX_RAW_MESSAGE_BYTES);
+        assert!(preflight_raw_message(&raw).is_ok());
+        raw.push(b'x');
+        assert_eq!(
+            preflight_raw_message(&raw),
+            Err(MimeBudgetError::RawMessageTooLarge)
         );
     }
 

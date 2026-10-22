@@ -1,0 +1,212 @@
+{
+  "schemaVersion": 1,
+  "status": "partial-failed",
+  "recordedAtUtc": "2026-10-22T07:03:37.172Z",
+  "scope": "Three static fictional fatal-startup profiles were observed in the same-identity 09a5 fixture app. This records only their recovery screens, process exits, and durable-profile comparisons. It is not complete native, recovery, provider, package, release, or original 69-gap acceptance.",
+  "sourceTree": {
+    "digest": "09a533c681e40a8a36fbb0159a5c5de025c43c88dbca3dbdc7b0abec91aad2c4",
+    "fileCount": 956,
+    "manifest": {
+      "path": "/private/tmp/dakia-next-fatal-recovery-evidence-v3-20261022/dakia-next-fatal-recovery-v3-source-manifest-20261022.json",
+      "sha256": "eddd189bddadc876eaf55d4cc9c15be986583703a2fe4e82bdbca97de24f2a92"
+    }
+  },
+  "candidate": {
+    "desktopSha256": "cf45c7eafc868882e4e28f437a484896db56c779286251d0420ec844b9b970ef",
+    "bundleIdentifier": "dev.dakia.fictional-provider-reader.run-OTAMH2",
+    "dataStoreIdentifier": "ca7f45a9-f8dd-432b-8457-a8b1ef903829",
+    "positiveBoot": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.nbX3Jl/positive-normal-boot.json",
+      "sha256": "064725f1e964e091d280a1dfdc08855b315341411569bab86bb6fad36dda89f4",
+      "exitCode": 0,
+      "signal": null,
+      "sourceDigest": "09a533c681e40a8a36fbb0159a5c5de025c43c88dbca3dbdc7b0abec91aad2c4",
+      "appSha256": "cf45c7eafc868882e4e28f437a484896db56c779286251d0420ec844b9b970ef"
+    }
+  },
+  "cases": [
+    {
+      "name": "future-version marker",
+      "fixtureCase": "future-marker-3",
+      "status": "passed-bounded-case",
+      "observation": {
+        "url": "tauri://localhost/fatal-recovery.html?reason=newer_profile",
+        "reason": "newer_profile",
+        "title": "This mail data needs a newer Dakia version",
+        "quitVisible": true,
+        "inboxVisible": false,
+        "controlledCloseMethod": "fixture-controlled Quit Dakia button"
+      },
+      "processExit": {
+        "code": 1,
+        "signal": null,
+        "error": null
+      },
+      "durableFilesUnchanged": true,
+      "evidence": {
+        "control": {
+          "path": "/private/tmp/dakia-fatal-recovery-native.c0a75de8-9188-4df6-9b21-f9d69f3935d5/control.json",
+          "sha256": "7f7c4e10b6eda7c90d984446def146e4e26921f2140d210a22eefef3493fd01e"
+        },
+        "observedInput": {
+          "path": "/private/tmp/dakia-fatal-recovery-native.c0a75de8-9188-4df6-9b21-f9d69f3935d5/observed-input.json",
+          "sha256": "8bb9a6ffac05bb78b56d3a2d60ecc7dd792e62b6fd4fe3504ffa69442823085e"
+        },
+        "cuaObservation": {
+          "path": "/private/tmp/dakia-fatal-recovery-native.c0a75de8-9188-4df6-9b21-f9d69f3935d5/cua-observation.json",
+          "sha256": "d1441ea6f9f16bfe9d6895cc5e735f8f397732fefc5884d145c0f1bc77628889"
+        },
+        "accessibility": {
+          "path": "/private/tmp/dakia-fatal-recovery-native.c0a75de8-9188-4df6-9b21-f9d69f3935d5/observed.ax.txt",
+          "sha256": "31f9a2e0dbc24583baeabda917dd7a51eed574592a7b9be0c14b5a4e821d6367"
+        },
+        "screenshot": {
+          "path": "/private/tmp/dakia-fatal-recovery-native.c0a75de8-9188-4df6-9b21-f9d69f3935d5/observed.png",
+          "sha256": "33523bb151df2613126392067d932e9d31e8c7d5edff124dc04bef6b5a672c10"
+        },
+        "exit": {
+          "path": "/private/tmp/dakia-fatal-recovery-native.c0a75de8-9188-4df6-9b21-f9d69f3935d5/exit.json",
+          "sha256": "6c9215c9b689d626b6f48bbf4e6bfbe974342b5fda21c90b3b5bb9556f391b34"
+        },
+        "processResult": {
+          "path": "/private/tmp/dakia-fatal-recovery-native.c0a75de8-9188-4df6-9b21-f9d69f3935d5/process-result.json",
+          "sha256": "90c4e0d2612198955633a56b3e6b559f6d48913415edebd4bd8882da2189bf5e"
+        },
+        "profileBefore": {
+          "path": "/private/tmp/dakia-fatal-recovery-native.c0a75de8-9188-4df6-9b21-f9d69f3935d5/profile-before.json",
+          "sha256": "9528cc7dfd277fb1733a077d24511f798085bfd696e6e5326c5f024922995569"
+        },
+        "profileAfter": {
+          "path": "/private/tmp/dakia-fatal-recovery-native.c0a75de8-9188-4df6-9b21-f9d69f3935d5/profile-after.json",
+          "sha256": "9528cc7dfd277fb1733a077d24511f798085bfd696e6e5326c5f024922995569"
+        }
+      }
+    },
+    {
+      "name": "conflicting send attempts",
+      "fixtureCase": "conflicting-send-attempts",
+      "status": "passed-bounded-case",
+      "observation": {
+        "url": "tauri://localhost/fatal-recovery.html?reason=upgrade_failed",
+        "reason": "upgrade_failed",
+        "title": "Dakia couldn't safely upgrade your mail data",
+        "quitVisible": true,
+        "inboxVisible": false,
+        "controlledCloseMethod": "fixture-controlled titlebar close"
+      },
+      "processExit": {
+        "code": 1,
+        "signal": null,
+        "error": null
+      },
+      "durableFilesUnchanged": true,
+      "evidence": {
+        "control": {
+          "path": "/private/tmp/dakia-fatal-recovery-native.b091e0fd-1f78-433f-b287-561486956b22/control.json",
+          "sha256": "9dd5e6fdf4b7f5fb8ab9a13adcb22e1b368cdab19167f2634cd06fcb98bf4a6a"
+        },
+        "observedInput": {
+          "path": "/private/tmp/dakia-fatal-recovery-native.b091e0fd-1f78-433f-b287-561486956b22/observed-input.json",
+          "sha256": "03af4de35949b706992203e40d71da843f5c006a3046fb0b6d4ab6053f755ed7"
+        },
+        "cuaObservation": {
+          "path": "/private/tmp/dakia-fatal-recovery-native.b091e0fd-1f78-433f-b287-561486956b22/cua-observation.json",
+          "sha256": "0c66b6c7e409a6d8968b81d9ced22a04b07643ef56d449eae2beb54fde9c0864"
+        },
+        "accessibility": {
+          "path": "/private/tmp/dakia-fatal-recovery-native.b091e0fd-1f78-433f-b287-561486956b22/observed.ax.txt",
+          "sha256": "244d82f12aea6710708e52b82a383719c17e510140ddb8b42372bcf2a36d531a"
+        },
+        "screenshot": {
+          "path": "/private/tmp/dakia-fatal-recovery-native.b091e0fd-1f78-433f-b287-561486956b22/observed.png",
+          "sha256": "9eb2ebc67e5eb5b9bb96c4cfde1b71ee3d59596d70e9b3fd6e27b20246c2d9bd"
+        },
+        "exit": {
+          "path": "/private/tmp/dakia-fatal-recovery-native.b091e0fd-1f78-433f-b287-561486956b22/exit.json",
+          "sha256": "9f253a3365973e8a72b3b8ca9faf07638c40a8f255ff4713be3ccb1c21527469"
+        },
+        "processResult": {
+          "path": "/private/tmp/dakia-fatal-recovery-native.b091e0fd-1f78-433f-b287-561486956b22/process-result.json",
+          "sha256": "90c4e0d2612198955633a56b3e6b559f6d48913415edebd4bd8882da2189bf5e"
+        },
+        "profileBefore": {
+          "path": "/private/tmp/dakia-fatal-recovery-native.b091e0fd-1f78-433f-b287-561486956b22/profile-before.json",
+          "sha256": "87b1267a80154c00ad3080e2f5516ff13b1b8b828ee41d35d73b54da88961eb7"
+        },
+        "profileAfter": {
+          "path": "/private/tmp/dakia-fatal-recovery-native.b091e0fd-1f78-433f-b287-561486956b22/profile-after.json",
+          "sha256": "87b1267a80154c00ad3080e2f5516ff13b1b8b828ee41d35d73b54da88961eb7"
+        }
+      }
+    },
+    {
+      "name": "corrupt database",
+      "fixtureCase": "corrupt-database",
+      "status": "failed",
+      "observation": {
+        "url": "tauri://localhost/fatal-recovery.html?reason=storage_unavailable",
+        "reason": "storage_unavailable",
+        "title": "Dakia couldn't safely open your mail data",
+        "quitVisible": true,
+        "inboxVisible": false,
+        "controlledCloseMethod": "fixture-controlled Cmd-Q"
+      },
+      "processExit": {
+        "code": 0,
+        "signal": null,
+        "error": null
+      },
+      "durableFilesUnchanged": true,
+      "evidence": {
+        "control": {
+          "path": "/private/tmp/dakia-fatal-recovery-native.3ce3303a-798d-46f5-b202-a95b89747660/control.json",
+          "sha256": "e3a330e97054aa47b4a8a5545615bc3d3fdd02dbdf7006013c348dc86f314b18"
+        },
+        "observedInput": {
+          "path": "/private/tmp/dakia-fatal-recovery-native.3ce3303a-798d-46f5-b202-a95b89747660/observed-input.json",
+          "sha256": "22150a3eaf788c32873d8d0b9ebafd8d2a5b12683c554d26fdcca55338b40908"
+        },
+        "cuaObservation": {
+          "path": "/private/tmp/dakia-fatal-recovery-native.3ce3303a-798d-46f5-b202-a95b89747660/cua-observation.json",
+          "sha256": "cc74516785d1ad19a3a61c483a6763cf9d8d36b4b20aabedbd83f69d4fa01fd8"
+        },
+        "accessibility": {
+          "path": "/private/tmp/dakia-fatal-recovery-native.3ce3303a-798d-46f5-b202-a95b89747660/observed.ax.txt",
+          "sha256": "e2d70d5eb7583248c1f12dad46aae2f4343765cdc758df61904b96a749cb9bbf"
+        },
+        "screenshot": {
+          "path": "/private/tmp/dakia-fatal-recovery-native.3ce3303a-798d-46f5-b202-a95b89747660/observed.png",
+          "sha256": "83ddfed6b2645d2c0b652da597061993550619d2fc4b1f8c6debc1be66e71037"
+        },
+        "exit": {
+          "path": "/private/tmp/dakia-fatal-recovery-native.3ce3303a-798d-46f5-b202-a95b89747660/exit.json",
+          "sha256": "ecfb646073a4d7e38c011c1ce34624224b213d519a4c5b091c5de25c82a75985"
+        },
+        "processResult": {
+          "path": "/private/tmp/dakia-fatal-recovery-native.3ce3303a-798d-46f5-b202-a95b89747660/process-result.json",
+          "sha256": "11ed7ce706604e5260521857ea9ed4bb7a4942f0ac14780dfcb12eb9d4f69235"
+        },
+        "profileBefore": {
+          "path": "/private/tmp/dakia-fatal-recovery-native.3ce3303a-798d-46f5-b202-a95b89747660/profile-before.json",
+          "sha256": "2e237a9212ead3387728354db0cf04ebf82f4591f4fb7d50e833474e9858b2f1"
+        },
+        "profileAfter": {
+          "path": "/private/tmp/dakia-fatal-recovery-native.3ce3303a-798d-46f5-b202-a95b89747660/profile-after.json",
+          "sha256": "2e237a9212ead3387728354db0cf04ebf82f4591f4fb7d50e833474e9858b2f1"
+        }
+      }
+    }
+  ],
+  "failure": {
+    "case": "corrupt-database",
+    "observed": "Cmd-Q exited with code 0 although the fatal-recovery fixture requires code 1.",
+    "durableFilesUnchanged": true,
+    "pendingCause": "Cmd-Q bypasses the fatal-recovery run_return resolve path. The bridge cause is pending."
+  },
+  "limits": [
+    "The future-version and conflicting-send cases are bounded passes only. They do not generalize to other startup failures.",
+    "The corrupt-database case preserved durable files but failed the required exit-status behavior.",
+    "No provider operation, mailbox mutation, native MIME/attachment/restart replay, Compose recovery, or release acceptance is claimed here.",
+    "This receipt does not close the original 69-gap programme or any aggregate manual-required scenario."
+  ]
+}

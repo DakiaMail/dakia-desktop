@@ -1,0 +1,128 @@
+"$schema" = "schemas/schema.json"
+
+# Dakia owns these commands.  Tauri's built-in protection rejects remote
+# origins, but without an application permission manifest every local window
+# can invoke every custom command.  Keep the command groups separate so a
+# utility or reader window cannot acquire account or terminal authority merely
+# by loading a local route.
+
+[[permission]]
+identifier = "allow-main-mail"
+description = "Allows the main mail window to read, synchronize, and mutate its mail."
+commands.allow = [
+  "accounts",
+  "apply_mailbox_action",
+  "classify_pending",
+  "configure_tray",
+  "conversation_for_target",
+  "export_message",
+  "forward_attachments",
+  "hydrate_message",
+  "message_attachments",
+  "message_content",
+  "mail_rebuild_status",
+  "record_notification_delivered",
+  "realtime_sync_status",
+  "reconcile_realtime_sync",
+  "search",
+  "search_remote",
+  "search_smart_inbox",
+  "send_desktop_notification",
+  "set_message_category",
+  "set_message_read",
+  "set_message_starred",
+  "start_realtime_sync",
+  "starred_conversation_count",
+  "sync_account",
+  "trash_messages_from_sender",
+  "unsubscribe_message",
+  "save_attachment",
+  "save_all_attachments",
+  "open_external_url",
+  "open_account_window",
+  "open_compose_window",
+  "list_send_recoveries",
+  "open_send_recovery_window",
+  "open_reader_window",
+  "open_settings_window",
+  "translation_models",
+  "translation_model_files",
+  "translation_detect_language",
+  "translation_install_model",
+  "translation_cancel_install",
+  "translation_remove_model",
+  "terminal_command_status",
+  "install_terminal_command",
+  "remove_terminal_command",
+]
+
+[[permission]]
+identifier = "allow-reader-mail"
+description = "Allows a reader window to read mail and perform supported mail actions."
+commands.allow = [
+  "accounts",
+  "apply_mailbox_action",
+  "conversation_for_target",
+  "export_message",
+  "message_attachments",
+  "message_content",
+  "save_attachment",
+  "save_all_attachments",
+  "set_message_read",
+  "set_message_starred",
+  "trash_messages_from_sender",
+  "unsubscribe_message",
+  "open_external_url",
+  "open_compose_window",
+  "show_email_address_context_menu",
+  "translation_models",
+  "translation_model_files",
+  "translation_detect_language",
+  "translation_install_model",
+  "translation_cancel_install",
+]
+
+[[permission]]
+identifier = "allow-compose-mail"
+description = "Allows a compose window to recover attachments and submit its own draft."
+commands.allow = [
+  "accounts",
+  "read_send_recovery_seed",
+  "acknowledge_send_recovery_seed",
+  "forward_attachments",
+  "read_dropped_files",
+  "send_message",
+]
+
+[[permission]]
+identifier = "allow-settings-mail"
+description = "Allows the settings window to manage accounts and local settings."
+commands.allow = [
+  "accounts",
+  "mail_rebuild_status",
+  "open_external_url",
+  "realtime_sync_status",
+  "remove_account",
+  "send_desktop_notification",
+  "sync_account",
+  "translation_models",
+  "translation_remove_model",
+  "open_account_window",
+  "update_account",
+]
+
+[[permission]]
+identifier = "allow-account-setup"
+description = "Allows the account-setup window to inspect presets and add one account."
+commands.allow = [
+  "add_account",
+  "open_external_url",
+  "provider_presets",
+]
+
+[[permission]]
+identifier = "allow-fatal-recovery"
+description = "Allows only the fatal recovery window to exit after a startup storage failure."
+commands.allow = [
+  "quit_startup_recovery",
+]

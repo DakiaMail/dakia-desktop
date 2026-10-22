@@ -1,0 +1,132 @@
+Window: "Dakia Fictional Provider Reader", App: Dakia Fictional Provider Reader.
+0 standard window Dakia Fictional Provider Reader, Secondary Actions: Raise
+	1 scroll area
+		2 HTML content Description: Dakia, URL: 127.0.0.1:1420/
+			3 container Dakia
+				4 text MAIL
+				5 button Inbox
+				6 button (expanded) Hide inbox accounts, Secondary Actions: Collapse
+				7 container Accounts
+					8 button Fictional native mail safety, Help: fictional-reader@localhost
+					9 button Fictional native mail safety two, Help: fictional-reader-two@localhost
+					10 button Add account
+				11 text FOLDERS
+				12 button All mail
+				13 button Unread
+				14 button Starred
+				15 button Outbox
+				16 button Sent
+				17 button Drafts
+				18 button Archive
+				19 button Spam
+				20 button Trash
+				21 button Feedback
+			22 container Fictional native mail safety
+				23 container
+					24 text Fictional native mail safety
+					25 container Message view
+						26 toggle button Smart, Value: off
+						27 toggle button List, Value: on
+					28 button Compose, Help: Compose (⌘N)
+					29 button Sync
+					30 text field (settable) Search mail, Placeholder: Search every account…
+				31 button Select Fictional Provider 15:21 Dakia fictional Estonian translation arrival Tere, see on turvaline fiktiivne kiri. Palun kinnita, et Dakia tõlgib selle sõnumi kohapeal ilma sisu võrku saatmata. Star conversation
+				32 button Select Fictional Provider 15:10 Remote content safety check Fictional provider body reached the real Reader. Native remote-resource matrix marker. Remote CSS and font marker stays readable. Submit hostile formNative mailto regression anchors. Open each in Dakia compose and close without sending. Nat Star conversation Has attachments
+				33 button Select Fictional Provider 15:10 Malformed fictional MIME regression Star conversation
+				34 button Select Fictional Provider 15:10 Fictional Reader height-bound acceptance Fictional long email starts here. Fictional tall message content.Fictional bottom marker remains reachable by scrolling inside the capped email surface. Star conversation
+			35 container
+				36 button Archive
+				37 button Mark as spam
+				38 button Mark as unread
+				39 button Delete
+				40 button Star conversation
+				41 button Translate to English
+				42 container Remote content safety check
+					43 heading Remote content safety check, Value: 1
+						44 text Remote content safety check
+					45 container Message from Fictional Provider
+						46 text F Fictional Provider
+						47 button Email provider@example.test
+						48 button (collapsed) Show full recipient details, Secondary Actions: Expand
+						49 text Fictional Reader <fictional-reader@localhost>
+						50 text Wednesday 21 Oct at 15:10
+						51 button Quick reply
+						52 button More actions
+						53 container Remote content safety check
+							54 scroll area
+								55 HTML content Description: Email content, URL: about:srcdoc
+									56 text Fictional provider body reached the real Reader.
+									57 text Native remote-resource matrix marker.
+									58 text Remote CSS and font marker stays readable.
+									59 image Direct remote fixture
+									60 image Redirected remote fixture
+									61 image Encoded remote fixture
+									62 image Protocol-relative remote fixture
+									63 image Srcset must stay inert
+									64 container Local embedded safety marker
+										65 text Embedded image loaded locally
+									66 container Embedded SVG active-content canary
+										67 text Embedded SVG stays inert
+										68 image
+									69 image Event handler canary
+									70 image Local file canary
+									71 image Asset canary
+									72 image Tauri canary
+									73 image IPC canary
+									74 container Native mailto regression anchors
+										75 text Native mailto regression anchors. Open each in Dakia compose and close without sending.
+										76 link Native mailto CR To rejection
+											77 text Native mailto CR To rejection
+										78 link Native mailto CR Cc rejection
+											79 text Native mailto CR Cc rejection
+										80 link Native mailto CR subject rejection
+											81 text Native mailto CR subject rejection
+										82 link Native mailto LF To rejection
+											83 text Native mailto LF To rejection
+										84 link Native mailto LF Cc rejection
+											85 text Native mailto LF Cc rejection
+										86 link Native mailto LF subject rejection
+											87 text Native mailto LF subject rejection
+										88 link Native mailto double encoded To
+											89 text Native mailto double encoded To
+										90 link Native mailto double encoded Cc
+											91 text Native mailto double encoded Cc
+										92 link Native mailto double encoded subject
+											93 text Native mailto double encoded subject
+										94 link Native mailto double encoded body
+											95 text Native mailto double encoded body
+										96 link Native mailto body CRLF
+											97 text Native mailto body CRLF
+									98 text Active-content canaries must remain inert before and after consent.
+								99 scroll bar (settable, float) 0
+							100 button Load remote content
+							101 button (collapsed) Show history, Secondary Actions: Expand
+						102 container Reply
+							103 button Reply
+							104 button Reply all
+							105 button Forward
+						106 container Attachments
+							107 text Attachments Saves directly to Downloads
+							108 button Save all
+							109 text quarterly-report.pdf.command
+							110 text Size unavailable ·  application/octet-stream This file may run software. Only open it if you trust the sender.
+							111 button Save quarterly-report.pdf.command to Downloads
+							112 text meeting-notes.txt
+							113 text Size unavailable ·  text/plain
+							114 button Save meeting-notes.txt to Downloads
+							115 text Could not save the attachment to Downloads
+			116 text Save meeting-notes.txt to Downloads
+	117 close button
+	118 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	119 minimize button
+	120 text Dakia Fictional Provider Reader
+121 menu bar
+	122 Dakia Fictional Provider Reader
+	123 File
+	124 Edit
+	125 Mailbox
+	126 Message
+	127 Window
+	128 Help
+
+The focused UI element is 2 HTML content Description: Dakia, URL: 127.0.0.1:1420/

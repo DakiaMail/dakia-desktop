@@ -1,0 +1,16 @@
+X-Dakia-Corpus-Case: empty-alternative-leaf
+Date: Tue, 28 Jul 2026 12:00:00 +0000
+From: sender@example.test
+To: recipient@example.test
+Subject: Synthetic empty MIME leaf
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary=empty-leaf
+
+--empty-leaf
+Content-Type: text/plain; charset=utf-8
+
+--empty-leaf
+Content-Type: text/html; charset=utf-8
+
+<p>Visible HTML after an empty plain part.</p>
+--empty-leaf--

@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21",
+  "kind": "imap-list-source-fix-evidence",
+  "status": "source-verification-complete",
+  "scope": "Bounded RFC 3501 LIST response support: line-bound mailbox literals, hierarchy delimiters, strict modified UTF-7 validation, exact remote wire identity, and \\Noselect fences. This is source and loopback evidence only. It is separate from the MIME full-fetch endpoint seam and does not update MSR requirement status.",
+  "source": {
+    "checkoutHead": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+    "current1aNativeInputDigest": "1a27848c0142d4b2f51439fc77caeae076acc9fd7a640b66569aa0b4d67376e6",
+    "current1aFileCount": 761,
+    "sourceTreeStatus": "The native input digest is recorded for provenance only. This mutable source checkout has subsequent scoped changes and is not asserted to match that digest."
+  },
+  "rfc3501": {
+    "sections": [
+      {
+        "section": "6.3.8",
+        "subject": "LIST command"
+      },
+      {
+        "section": "7.2.2",
+        "subject": "LIST response"
+      }
+    ],
+    "hierarchyDelimiter": "Accepted only as NIL or one quoted character. Atom, literal, and multi-character delimiters are rejected because they are not valid RFC 3501 LIST delimiter grammar.",
+    "mailboxName": "Accepted as atom, quoted string, or a literal bound to the originating LIST response line. Accepted non-ASCII names must be canonical modified UTF-7."
+  },
+  "implementation": {
+    "literalBinding": "ImapLiteralItem::ListResponse stores the originating response-line index. LIST parsing consumes only literals whose index matches its LIST line; FETCH literals and extra literals cannot provide a mailbox name.",
+    "resourceLimit": {
+      "perListLiteralBytes": 8192,
+      "aggregateListLiteralBytes": "8192 multiplied by the existing maximum response-literal count",
+      "enforcement": "The declared literal length is rejected by the command reader before mailbox-byte allocation."
+    },
+    "remoteIdentity": "The accepted remote mailbox name stays as its exact canonical wire string in mailbox catalog state. Logical configured names are encoded through the strict modified UTF-7 codec only for matching.",
+    "noSelect": {
+      "attributeMatching": "Case-insensitive canonical comparison of LIST attributes. Unknown attributes, including \\HasChildren, are retained only as response metadata and do not alter selectability; a co-present \\Noselect still fences the mailbox.",
+      "specialUse": "A \\Noselect special-use listing is ignored. A successful LIST with no selectable special-use candidate retains the configured fallback.",
+      "knownTarget": "An exact configured mailbox that LIST marks \\Noselect fails before SELECT, APPEND, MOVE, or delete mutation commands.",
+      "pruning": "Malformed or noncanonical LIST literals fail synchronization before catalog replacement, preserving the existing local mailbox family."
+    },
+    "failureHandling": "LIST parse and transport errors now propagate to synchronization, search, Sent-copy save, and mutation paths. They no longer become an empty listing that could permit a configured fallback action."
+  },
+  "focusedVerification": {
+    "commands": [
+      {
+        "command": "cargo fmt --all -- --check",
+        "result": "passed"
+      },
+      {
+        "command": "cargo clippy -p dakia-core --lib --tests --locked -- -D warnings",
+        "result": "passed"
+      },
+      {
+        "command": "cargo test -p dakia-core list_literal_tests --lib --locked",
+        "result": "passed",
+        "tests": 7
+      },
+      {
+        "command": "cargo test -p dakia-core imap_mailbox_wire_tests --lib --locked",
+        "result": "passed",
+        "tests": 5
+      },
+      {
+        "command": "cargo test -p dakia-core scripted_permanent_delete --lib --locked",
+        "result": "passed",
+        "tests": 4
+      },
+      {
+        "command": "cargo test -p dakia-core imap_gap_matrix_tests --lib --locked",
+        "result": "passed",
+        "tests": 13
+      },
+      {
+        "command": "cargo test -p dakia-core remote_search_safety_tests --lib --locked",
+        "result": "passed",
+        "tests": 15
+      },
+      {
+        "command": "cargo test -p dakia-core sent_copy_recovery_tests --lib --locked",
+        "result": "passed",
+        "tests": 1
+      }
+    ],
+    "productionBoundary": "The seven LIST tests include a fragmented public-TLS loopback connection through the production IMAP connector, exact LIST then SELECT transcript checks, Store reopen verification, selectable unknown-attribute tolerance, and no-command assertions after rejected LIST data or co-present unknown attribute plus \\Noselect.",
+    "sensitivity": [
+      "scripted_reset_noncanonical_list_literal_cannot_select_or_prune_a_family supplies the formerly accepted literal form with noncanonical modified UTF-7. The test now proves no SELECT occurs and the existing Sent::Legacy family remains present.",
+      "malformed_list_after_known_noselect_sent_mailbox_never_reaches_append supplies a valid \\NoSelect \\Sent line followed by a malformed line. It proves the malformed LIST failure is not treated as an empty listing and APPEND is never issued.",
+      "known_noselect_source_never_reaches_select_or_move and known_noselect_source_never_reaches_select_or_delete assert no SELECT or destructive protocol command follows the fenced source.",
+      "list_literal_parser_rejects_missing_extra_noncanonical_and_nonselect_targets proves unknown attributes and \\HasChildren do not make a selectable mailbox non-selectable, while an unknown attribute cannot hide a co-present case-mixed \\Noselect. The production TLS sync transcript includes an unknown attribute and still selects the exact wire identity."
+    ]
+  },
+  "review": {
+    "initialIndependentSecurityReview": {
+      "result": "findings fixed",
+      "findings": [
+        "High: LIST failures were being converted to empty listings in paths including Sent-copy saving, allowing fallback actions after malformed server data.",
+        "Medium: permanent delete checked UIDPLUS before LIST and could SELECT a known \\Noselect source.",
+        "Low: delimiter parsing admitted forms outside RFC 3501 grammar."
+      ],
+      "remediation": "All LIST consumers propagate parse failures; delete lists and fences after UIDPLUS validation; delimiter parsing accepts only NIL or one quoted character."
+    },
+      "finalIndependentReview": {
+        "result": "approved",
+        "scope": "LIST implementation and the separate full-fetch endpoint seam",
+        "finalCorrection": "Delimiter parsing no longer delegates to the generic astring parser. It accepts NIL or exactly one printable seven-bit quoted byte, permits escaping only quote or backslash, and rejects raw quote, raw backslash, control, raw Unicode, invalid escape, atom, literal, and multi-character forms."
+      }
+  },
+  "separateMimeFullFetchEndpointSeam": {
+    "status": "implemented separately from LIST; dependent MIME tests are owned and executed by the MIME workstream",
+    "productionPath": "fetch_full_message passes no endpoint override into its private common implementation, retaining normal production certificate-verifying connection selection.",
+    "testPath": "A cfg(test) loopback endpoint helper delegates into that same private implementation."
+  },
+  "remainingLimits": [
+    "MSR-3501-list remains unmarked in machine-readable standards metadata until the governed source3 finalization and final independent review complete.",
+    "This evidence does not claim full RFC 3501 conformance, independent-server integration, provider acceptance, native app verification, or a full source suite.",
+    "Literal hierarchy delimiters are rejected by design because RFC 3501 defines the hierarchy delimiter as NIL or a quoted character."
+  ]
+}

@@ -96,14 +96,11 @@ export async function sendNewMailNotification(
   messages: MailSummary[],
   settings: NotificationSettings,
   copy: NotificationCopy,
+  isStillAllowed: () => boolean = () => true,
 ) {
-  if (
-    !isTauri() ||
-    !settings.enabled ||
-    !messages.length ||
-    !(await isPermissionGranted())
-  )
-    return false;
+  if (!isTauri() || !settings.enabled || !messages.length) return false;
+  const permissionGranted = await isPermissionGranted();
+  if (!permissionGranted || !isStillAllowed()) return false;
   const notification = buildNewMailNotification(
     messages,
     settings.showPreview,
@@ -149,22 +146,46 @@ export async function sendTestNotification(
   body: string,
 ) {
   if (!(await requestNotificationAccess())) return false;
-  sendNotification({
-    title,
-    body,
-    group: "new-mail",
-    autoCancel: true,
-    sound: settings.soundEnabled ? notificationSound() : undefined,
-    extra: { count: 0 },
-  });
+  if (isMac()) {
+    await api.sendDesktopNotification({
+      title,
+      body,
+      count: 0,
+      sound: settings.soundEnabled ? notificationSound() : undefined,
+    });
+  } else {
+    sendNotification({
+      title,
+      body,
+      group: "new-mail",
+      autoCancel: true,
+      sound: settings.soundEnabled ? notificationSound() : undefined,
+      extra: { count: 0 },
+    });
+  }
   return true;
 }
 
 export function onNotificationAction(
   handler: (extra: Record<string, unknown>) => void,
 ): Promise<PluginListener | (() => void)> {
-  if (!isTauri()) return Promise.resolve(() => undefined);
-  return onAction((notification) => handler(notification.extra ?? {}));
+  // macOS delivery and actions use Dakia's native notification bridge. The
+  // notification plugin does not expose its action listener on this runtime,
+  // so registering it would create an unhandled rejected promise at startup.
+  if (!isTauri() || isMac()) return Promise.resolve(() => undefined);
+  return onAction((notification) => handler(notification.extra ?? {})).catch(
+    (error) => {
+      if (isUnavailableActionListener(error)) return () => undefined;
+      throw error;
+    },
+  );
+}
+
+function isUnavailableActionListener(error: unknown) {
+  const detail = error instanceof Error ? error.message : String(error);
+  return /notification\.(?:registerListener|register_listener).*command not found/i.test(
+    detail,
+  );
 }
 
 function notificationSound() {

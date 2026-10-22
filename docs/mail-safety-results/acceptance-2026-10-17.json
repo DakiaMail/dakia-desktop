@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-17T19:25:37.230308+00:00",
+  "status": "passed-with-explicit-coverage-gaps",
+  "baseRevision": "fccbace81192c5b5354f681e2feb2b66971e88cf",
+  "sourceManifest": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "6777974a12f401ab5d8fbb727d4fdf3c993e9ebeb1839848571ea44ab2066ea0",
+    "fileCount": 664
+  },
+  "source": {
+    "report": "source-readiness-fixed-2026-10-17.json",
+    "consecutiveFreshRuns": 3,
+    "commandsPerRun": 12,
+    "rustPassedPerRun": 584,
+    "frontendPassedPerRun": 430,
+    "nodePassedPerRun": 147,
+    "externalServerTestsIgnoredHere": 3,
+    "artifactDependentFrontendSkipExecutedSeparately": true
+  },
+  "deep": {
+    "report": "deep-accepted-2026-10-17.json",
+    "sourceManifest": {
+      "algorithm": "sha256-path-and-content-manifest",
+      "digest": "ad502e348cd774298b68d7a00f0816cc8914b41a592acca0f54641d23abf6130",
+      "fileCount": 664
+    },
+    "independentServerCasesPassed": 3,
+    "mimeFuzzExecutions": 40515,
+    "attachmentFuzzExecutions": 102513,
+    "secondsPerTarget": 30
+  },
+  "native": {
+    "sourceManifest": "ad502e348cd774298b68d7a00f0816cc8914b41a592acca0f54641d23abf6130",
+    "evidenceIndex": "native-2026-10-17/evidence-index.json",
+    "buildInputEquivalence": "native-build-input-equivalence-2026-10-17.json",
+    "requestsBeforeConsent": 0,
+    "permittedImageRequestsAfterConsent": 1,
+    "scope": "Fictional development Reader privacy, disclosure layout, warning, and native AppHandle-to-Wry listener. No live-provider/MIME-to-Reader, real file-save, or packaged-release claim."
+  },
+  "failuresRetained": {
+    "mimeFindings": "Earlier fuzz parser-assertion and unbounded graph-traversal findings have production fixes and permanent original/minimized fixtures.",
+    "frontendReadiness": "source-known-flake-2026-10-17.json retains the earlier empty restored-body assertion failure. Test now waits for editor content; an empty-body mutation fails; three fresh full runs pass.",
+    "sandbox": "source-sandbox-failure-2026-10-17.json retains loopback permission failure."
+  },
+  "remaining": {
+    "catalogueScenarios": 161,
+    "sourceEvidenceDeclarations": 81,
+    "coverageGaps": 69,
+    "manualRequirements": 11,
+    "nativeK015CurrentScopedEvidence": true,
+    "fullStandardsConformance": "not-established",
+    "releaseAcceptance": "not-established",
+    "rustBranchObservations": "unavailable",
+    "hostedPRCostBudget": "unmeasured"
+  }
+}

@@ -1,0 +1,136 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-22",
+  "kind": "unsubscribe-infrastructure-and-pr-wiring-primary-focused",
+  "status": "passed-focused-primary",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "a6b8543a03218c9f7f3f05a5fd25db6f67e765d753aba5e3f876d0eb69bdc046",
+    "fileCount": 996,
+    "manifest": "/private/tmp/dakia-unsubscribe-test-gating-ci-primary-20261022/source-manifest.json",
+    "manifestSha256": "e7e1d656f1a09791277b5007ede1b99fde3018296235b4565bf483eaa4cbd807"
+  },
+  "application": {
+    "journal": "/private/tmp/dakia-unsubscribe-test-gating-ci-primary-20261022/application-journal.json",
+    "journalSha256": "d51ad4ab84b6ff1d18caf136ac714b2f95bd31a466e1c3125db120f27c6cfc13",
+    "baseSourceTree": {
+      "digest": "5a08dcbcceef824ba98c56cb2a040f60f5b24769083e384f25df8e93727222f1",
+      "fileCount": 996
+    },
+    "patches": [
+      {
+        "path": "/private/tmp/dakia-unsubscribe-command-tls-infrastructure-explicit.patch",
+        "sha256": "ebc7a3310fcbe96c6c56f7214061e73b3374881c30ff07b96fe49dfc48604f22",
+        "scope": "Make the three fixture-dependent Tauri tests explicitly ignored by default, require the owned fixture when selected, add --ignored to the owned runner, and stabilize the timeout regression with an IPC-ready fictional child.",
+        "independentReview": "GO; exact patch applied cleanly in private review"
+      },
+      {
+        "path": "/private/tmp/dakia-private-unsubscribe-pr-wiring-20261022/unsubscribe-pr-wiring.patch",
+        "sha256": "2ec37a81e03c9cf6c4e6417bb52af6c4a76684e2a8de7b05f16456897e48162a",
+        "scope": "Run the unsubscribe TLS command in the ordinary pull-request Tauri boundary and classify every owned runner, fixture, and command source into the coupled Rust, mail, and Tauri scopes."
+      }
+    ],
+    "changedPaths": [
+      {
+        "path": "apps/desktop/src-tauri/src/unsubscribe_command_tls_tests.rs",
+        "sha256": "2a963292946fbf46520b684a4c4083174f944607549830f9c02d7bd34672cbdb"
+      },
+      {
+        "path": "scripts/test-unsubscribe-command-tls.mjs",
+        "sha256": "422fb010486b24d804bc146d5cc288f01b1bedf757d81b831f03dc5e81c48d7f"
+      },
+      {
+        "path": "scripts/test-unsubscribe-command-tls.node-test.mjs",
+        "sha256": "0c60c704e625cdf38733871a1f18889781f1db5ee29b1021229e59c357324915"
+      },
+      {
+        "path": ".github/workflows/pull-request-validation.yml",
+        "sha256": "8c6ee0fbdb2311c7de07cc3100c78c9f0edb7f45fc45102fb0ab783d6e2225f4"
+      },
+      {
+        "path": "scripts/change-classifier.mjs",
+        "sha256": "d8b4ecc5b1460d62614187b8016a823cf33ffbaa8322503ef003036820717ed6"
+      },
+      {
+        "path": "scripts/change-classifier.node-test.mjs",
+        "sha256": "46d8e27fb903af58de1c29597f228030ab40985f0737aad005d1939aad926b66"
+      }
+    ],
+    "wrapperIncident": "The first guarded wrapper stopped after the three infrastructure files because it expected a Git diff header for the second plain unified patch. All 996 base hashes and backups were checked before the three CI files were applied, so the retained intermediate state is not treated as ambiguous or as a completed application.",
+    "historicalEvidencePolicy": "No prior report was rewritten. The focused-node-after-gating-before-ci log is retained as intermediate 19-test evidence and is not the final focused result."
+  },
+  "verification": {
+    "focusedNode": {
+      "log": "/private/tmp/dakia-unsubscribe-test-gating-ci-primary-20261022/focused-node.log",
+      "logSha256": "26fe44285fe627c41e437aa7479fb7f7f54abb499f2063b3cbc3fe5a9ab1e541",
+      "result": {
+        "passed": 20,
+        "failed": 0,
+        "skipped": 0
+      },
+      "perFile": {
+        "changeClassifier": "6 passed",
+        "runMailSafety": "11 passed",
+        "unsubscribeCommandTimeoutRunner": "2 passed",
+        "unsubscribeFixtureServer": "1 passed"
+      },
+      "intermediateLog": {
+        "path": "/private/tmp/dakia-unsubscribe-test-gating-ci-primary-20261022/focused-node-after-gating-before-ci.log",
+        "sha256": "eafefac1a1fe90a731bfe1cd18ce09fb20812587595c555378b587ea0ba710c4",
+        "result": "19 passed before the pull-request classifier and workflow patch was applied"
+      }
+    },
+    "defaultInfrastructureBehavior": {
+      "log": "/private/tmp/dakia-unsubscribe-test-gating-ci-primary-20261022/default-ignored.log",
+      "logSha256": "ed0e54852f0b2173e300e51bc145cb33da35e1ac5564faf5e4b13c1ee400e902",
+      "result": "0 passed, 0 failed, 3 ignored with the reason requires isolated unsubscribe TLS fixture runner",
+      "meaning": "An ordinary fixture-feature library run no longer counts environment-absent early returns as passed unsubscribe tests."
+    },
+    "configuredLoopbackTls": {
+      "log": "/private/tmp/dakia-unsubscribe-test-gating-ci-primary-20261022/configured-tls.log",
+      "logSha256": "4c7d498cf6a6223f8baf2178d8a8dc2d9edfd0f1dacbcff5db98c5e42b215627",
+      "result": "3 passed with --exact --ignored through the owned fictional loopback TLS runner",
+      "tests": [
+        "production_tauri_unsubscribe_posts_once_and_stale_or_wrong_account_never_reach_tls",
+        "production_tauri_unsubscribe_rejects_untrusted_tls_without_http_post",
+        "production_tauri_unsubscribe_rejects_wrong_tls_hostname_without_http_post"
+      ],
+      "retainedFixtureRoot": "/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-unsubscribe-command-tls-BOO6Ok",
+      "commandReceiptSha256": "f387f620812784ff317ba0fab5986f569b1a790dc38655957e12493c03f9d34d",
+      "httpReceiptSha256": "fcdb0050acc3980371b16fef3d165a7d65216542945c781e0ca921c1f7db08a9"
+    },
+    "missingInfrastructureSensitivity": {
+      "record": "/private/tmp/dakia-unsubscribe-test-gating-ci-primary-20261022/missing-infrastructure-sensitivity.json",
+      "recordSha256": "b74f7bd60447475d8e84515370ef5dceca46dd4f99c1c05b1e266a18e95fad6b",
+      "log": "/private/tmp/dakia-unsubscribe-test-gating-ci-primary-20261022/missing-infrastructure-expected-failure.log",
+      "logSha256": "6bc65063caee718b91b35df9b0010bc9ecb09ee788d13e11cb9e5d5428d1a941",
+      "expectedExitCode": 101,
+      "actualExitCode": 101,
+      "result": "One explicitly selected ignored test failed with the fixed requires isolated unsubscribe TLS fixture runner message before exercising the command."
+    },
+    "featureClippy": {
+      "command": "cargo clippy --locked -p dakia-desktop --lib --features native-mail-safety-fixture -- -D warnings",
+      "log": "/private/tmp/dakia-unsubscribe-test-gating-ci-primary-20261022/feature-clippy.log",
+      "logSha256": "a90a160db8d0fd6ff069bd4832e9ea86eef6fc347ef42bb14830a54ec83e89cb",
+      "result": "passed"
+    }
+  },
+  "pullRequestWiring": {
+    "ordinaryTauriBoundary": "The pull-request workflow now runs node scripts/test-unsubscribe-command-tls.mjs with the other fictional command-boundary artifacts.",
+    "changeClassification": "The unsubscribe runner, fixture server, shared lifecycle helper, native fixture, and Tauri dispatcher test select their required Rust, mail, Tauri, frontend where applicable, and release-only where applicable scopes.",
+    "costAndExternalEffects": "The focused tests used only owned temporary files and fictional loopback TLS. No native application was launched, and no credentials, live provider, production mailbox, paid runner, release publishing, or external service was used."
+  },
+  "historicalQualification": {
+    "report": "docs/mail-safety-results/combined-mail-boundaries-three-run-source-2026-10-22.json",
+    "reportSha256": "da52455d8cf2148ea72621373d495898369dd104ae6f5be0200707c7802d5f5c",
+    "sourceDigest": "5a08dcbcceef824ba98c56cb2a040f60f5b24769083e384f25df8e93727222f1",
+    "status": "retained unchanged as passed-with-qualifications",
+    "qualification": "That earlier three-run result already records that the three environment-absent unsubscribe tests returned early and that its timeout oracle lacked the explicit readiness barrier. This focused a6b follow-up repairs those test-gating weaknesses but does not turn the historical run into current-source evidence."
+  },
+  "limitations": [
+    "This report covers the six-file primary integration and focused checks only. No complete source lane or three-run baseline was executed for a6b8543a.",
+    "This report does not establish native WebKit, packaged application, live provider, production mailbox, dependency audit, performance, fuzzing, release, or publishing evidence.",
+    "The configured TLS tests use a fictional loopback service and MockRuntime command dispatch. They do not prove a physical Reader click in a live webview.",
+    "The retained configured fixture directory contains synthetic test state and is referenced only as focused evidence."
+  ]
+}

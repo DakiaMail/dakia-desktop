@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "kind": "test-only-successor-progress",
+  "status": "passed-focused-progress",
+  "scope": "An applied test-only successor to c2. It records only the three-path guarded application and focused storage/native-helper checks. It does not establish a complete successor source lane, deep lane, native acceptance, provider, package, performance, audit, release, or catalogue closure.",
+  "source": {
+    "previousCompleteCheckpoint": {
+      "digest": "c2e8ba357d822b2ef086e497916e77f6555a422605e7a4b99acfb1e81e379888",
+      "fileCount": 956,
+      "completedLanes": ["source", "deep", "bounded native slices"]
+    },
+    "appliedSuccessor": {
+      "digest": "9107367d02c9905b658db6ab028924e6c97d289e042ef5a7e7134d6b7e37e7d2",
+      "fileCount": 956,
+      "changedPaths": [
+        "crates/dakia-core/src/storage_fault_tests.rs",
+        "scripts/native-shared-profile-acceptance.mjs",
+        "scripts/native-shared-profile-acceptance.node-test.mjs"
+      ]
+    }
+  },
+  "application": {
+    "journal": "/private/tmp/dakia-h016-k018-source-application-20261022/journal.json",
+    "journalSha256": "ecf13583c7974d7656f508a3fdf6eaa900bc836e09f660db9a35c99f56c063f7",
+    "status": "applied"
+  },
+  "focusedChecks": {
+    "storageFaults": {
+      "command": "cargo test --locked -p dakia-core --lib storage_fault_tests:: -- --nocapture",
+      "passed": 24,
+      "failed": 0,
+      "log": "/private/tmp/dakia-h016-primary-storage-fault-tests-20261022.log",
+      "logSha256": "1a0ce1360a9b401f6a1193a6c5c287db971cd9878ec0dd94314967f95c5de3b0"
+    },
+    "nativeSharedProfileHelper": {
+      "passed": 13,
+      "failed": 0,
+      "scope": "Node helper and fixture assertions only; not a native packaged-app run."
+    }
+  },
+  "limitations": [
+    "c2 remains the latest completed source, deep and bounded native checkpoint.",
+    "No complete successor lane or same-identity successor native run has completed.",
+    "The private G013 fixture review failure is not integrated by this application.",
+    "No catalogue status or count changes follow from focused checks."
+  ],
+  "sensitivity": {
+    "path": "/private/tmp/dakia-h016-c2-source-regression-96cbed25-a2b5-47c1-bea6-6cdfb9ba7494/sensitivity-byte-normalization.json",
+    "sha256": "178dde66efe5429789b0853ea8911c073bddecbbfccfe0f0d4088145b3860af5",
+    "result": "The private JSON-whitespace normalization mutant failed at the raw-byte preservation assertion with exit 101. The candidate test file was restored byte-identically; no primary mutation was made."
+  }
+}

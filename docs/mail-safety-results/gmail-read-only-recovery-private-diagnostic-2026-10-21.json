@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-21",
+  "scope": "Gmail disposable mailbox, existing-message read-only recovery diagnostic",
+  "existingTestMessageId": "45bacd384f0c4a74893f14e4fea23d9a",
+  "remoteMutationRequested": false,
+  "forbiddenOperations": ["SMTP MAIL", "SMTP RCPT", "SMTP DATA", "message submission", "mailbox mutation"],
+  "frozenSource": {
+    "sha256": "7126a3b01086f50ffb453b8ddc7ba68909c25258f31058b256c2393d6c521162",
+    "passedGates": 16,
+    "changed": false
+  },
+  "privateDiagnostic": {
+    "instrumented": true,
+    "base": "copied frozen workspace",
+    "changes": [
+      "fixed stage-name and elapsed-time markers",
+      "private-only credential fidelity checks",
+      "private-only LOGIN command serializer factoring"
+    ],
+    "executableSha256": "62cefeae5404d4c3301dd38b093338b4843a924cc81974897dde3216c3b4ece8",
+    "finalSourcePass": false,
+    "privateDiagnosticPassIsNotFinalSourceAcceptance": true
+  },
+  "earlierTimeouts": [
+    {
+      "outcome": "failed",
+      "stage": "timeout",
+      "timeoutSeconds": 45,
+      "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+      "executableSha256": "7acfa4183e8d0b9b089ca76ddb58cf424b3fc72d72d3a8b231a3a885a2979799",
+      "messageFetchLimit": 0,
+      "remoteMutationRequested": false
+    },
+    {
+      "outcome": "failed",
+      "stage": "timeout",
+      "timeoutSeconds": 45,
+      "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+      "executableSha256": "3977ec53af49000489fd674b073acf9ef243e98e1be4aabb3c4249f0e9ac67e8",
+      "messageFetchLimit": 0,
+      "remoteMutationRequested": false
+    },
+    {
+      "outcome": "failed",
+      "stage": "timeout",
+      "timeoutSeconds": 45,
+      "instrumented": true,
+      "executableSha256": "0af5e41c2075ccf7b381298d0d4adadfc03e2549bdf7d553157256a6bb7580b5",
+      "lastObservedStage": "imap.probe.auth.begin",
+      "messageFetchLimit": 0,
+      "remoteMutationRequested": false
+    }
+  ],
+  "passingPrivateDiagnostic": {
+    "outcome": "passed",
+    "stage": "inbox_observation",
+    "exactMessageVerified": true,
+    "messageFetchLimit": 0,
+    "inboxSyncLimit": 1,
+    "remoteSearchLimit": 10,
+    "remoteMutationRequested": false,
+    "firstImapProbe": {
+      "tcpConnectedMs": 28,
+      "tlsCompletedMs": 41,
+      "greetingCompletedMs": 50,
+      "postTlsCapabilityCompletedMs": 59,
+      "probeCapabilityCompletedMs": 8,
+      "login": {
+        "writeCompleted": true,
+        "flushCompleted": true,
+        "responseSequence": ["untagged", "tagged"],
+        "tagMatched": true,
+        "taggedStatus": "ok",
+        "completedMs": 143
+      },
+      "listCompletedMs": 161,
+      "examineCompletedMs": 182,
+      "statusCompletedMs": 236,
+      "logoutCompletedMs": 262
+    },
+    "laterReadOnlyImapSessions": {
+      "count": 3,
+      "loginWriteAndFlushCompleted": true,
+      "responseSequence": ["untagged", "tagged"],
+      "tagMatched": true,
+      "taggedStatus": "ok"
+    }
+  },
+  "offlineCredentialFidelity": {
+    "rpasswordInputEqualsApprovedEnvironmentValue": true,
+    "providerSmokeConfigPasswordEqualsApprovedEnvironmentValue": true,
+    "encryptedStoreRoundtripEqualsApprovedEnvironmentValue": true,
+    "loginWireFieldsEqualApprovedEnvironmentValue": true
+  },
+  "limitations": [
+    "Private diagnostic markers and serializer factoring are absent from the frozen source.",
+    "The private pass does not establish that the earlier LOGIN timeouts are fixed in the frozen source.",
+    "No raw credentials, account address, protocol payload, response line, or message body was retained in this record.",
+    "No further provider attempts were made after the passing diagnostic."
+  ]
+}

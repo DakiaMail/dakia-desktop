@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21",
+  "lane": "native-launch-services-unavailable-source-repair",
+  "status": "passed-focused-source-only",
+  "sourceFreeze": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "a3f5e5edcef56f09522ee3f5f4485b0a5b804df4065624e355a24aa532b15b71",
+    "fileCount": 937,
+    "manifestPath": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-ls-unavailable.json",
+    "manifestSha256": "4ddff015b80254f000bf365f080336c6d4b230d3ae6fa11c2877b1fabeb394dd"
+  },
+  "governedFiles": {
+    "scripts/native-provider-reader-acceptance.sh": "6c98e4eae657abbc946df5b1e7c7aaa468b3d5496c578028e9461e816a08e054",
+    "scripts/native-provider-reader-fixture.node-test.mjs": "12c40f23382475ce58085377305f76c080a1911c534fba3cbeaf5f1ffd35a12e"
+  },
+  "failureRetained": "packaged-native-registration-verification-failure-2026-10-21.json",
+  "repair": {
+    "behavior": "Allow a partial non-notification native lane only when the fixed LaunchServices registrar succeeds, the candidate lookup is exactly zero URLs with NSOSStatusErrorDomain/-10814, and the same structured lookup resolves only the canonical TextEdit control application.",
+    "evidence": "Write a separate private unavailable receipt retaining the actual candidate and control structured lookup objects. It has no resolvedApplication field and marks notificationDelivery as not-tested.",
+    "warningGate": "Before the partial lane continues after direct launch, require both product warning records for the exact approved bundle identifier. The identifier must end the record or be followed by a character outside [A-Za-z0-9._-]."
+  },
+  "realReadOnlyTypedProbe": {
+    "bundleIdentifier": "dev.dakia.fictional-provider-reader.run-OTAMH2",
+    "method": "Fixed /usr/bin/swift CoreServices lookup with an isolated private module cache, without invoking lsregister or launching Dakia.",
+    "candidateLookup": {
+      "urls": [],
+      "errorDomain": "NSOSStatusErrorDomain",
+      "errorCode": -10814
+    },
+    "controlLookup": {
+      "urls": ["/System/Applications/TextEdit.app"],
+      "errorDomain": null,
+      "errorCode": null
+    }
+  },
+  "focusedChecks": [
+    {
+      "command": "bash -n scripts/native-provider-reader-acceptance.sh",
+      "result": "passed"
+    },
+    {
+      "command": "node --check scripts/native-provider-reader-fixture.node-test.mjs",
+      "result": "passed"
+    },
+    {
+      "command": "npm exec prettier -- --check scripts/native-provider-reader-fixture.node-test.mjs",
+      "result": "passed"
+    },
+    {
+      "command": "node --test scripts/native-provider-reader-fixture.node-test.mjs",
+      "result": "passed, 1 of 1, 16.8 seconds"
+    }
+  ],
+  "review": {
+    "security": "approved for the exact frozen hashes; direct production-predicate probes rejected alphanumeric, dot, and hyphen identifier continuations and accepted a punctuation-delimited exact identifier.",
+    "nativeAcl": "approved for the exact frozen hashes; the strict typed fallback, structured receipt, TextEdit control, runtime warning gate, and non-notification scope were reviewed."
+  },
+  "limitations": [
+    "This report covers source and mocked-harness behavior only.",
+    "No LaunchServices registration, Dakia app launch, live webview check, UI interaction, provider action, or mailbox action occurred for this repair.",
+    "Notification delivery and notification actions remain not tested because the LaunchServices identity was unavailable.",
+    "The source-wide three-run baseline was still running when this focused report was recorded and is a separate gate."
+  ]
+}

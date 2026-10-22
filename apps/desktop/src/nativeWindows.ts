@@ -1,9 +1,7 @@
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import {
-  getAllWebviewWindows,
-  WebviewWindow,
-} from "@tauri-apps/api/webviewWindow";
+import { getAllWebviewWindows } from "@tauri-apps/api/webviewWindow";
 import type {
   Account,
   AccountConnection,
@@ -26,7 +24,7 @@ export async function openSettingsWindow() {
 }
 
 export async function openAccountWindow() {
-  await openUtilityWindow("account", "Add Account", 620, 720, 520, 560);
+  await openUtilityWindow("account");
 }
 
 export async function openSettingsWindowForAccount(accountId?: string) {
@@ -41,28 +39,15 @@ export async function openSettingsWindowForAccount(accountId?: string) {
     if (accountId) await emitTo("settings", "select-account", accountId);
     return;
   }
-  await openUtilityWindow(
-    "settings",
-    "Settings",
-    760,
-    560,
-    640,
-    460,
-    accountId ? `&accountId=${encodeURIComponent(accountId)}` : "",
-  );
+  await openUtilityWindow("settings", accountId);
 }
 
-async function openUtilityWindow(
-  view: NativeView,
-  title: string,
-  width: number,
-  height: number,
-  minWidth: number,
-  minHeight: number,
-  query = "",
-) {
-  const url = `/?view=${view}${query}`;
+async function openUtilityWindow(view: NativeView, accountId?: string) {
+  const url = `/?view=${view}${
+    accountId ? `&accountId=${encodeURIComponent(accountId)}` : ""
+  }`;
   if (!isTauri()) {
+    const [width, height] = view === "settings" ? [760, 560] : [620, 720];
     window.open(
       url,
       view,
@@ -80,24 +65,15 @@ async function openUtilityWindow(
     return;
   }
 
-  const utilityWindow = new WebviewWindow(view, {
-    url,
-    title,
-    width,
-    height,
-    minWidth,
-    minHeight,
-    center: true,
-    focus: true,
-    resizable: true,
-    decorations: true,
-    shadow: true,
-    titleBarStyle: "overlay",
-    hiddenTitle: true,
-  });
-  utilityWindow.once("tauri://error", (event) => {
-    console.error(`Could not open ${view} window`, event.payload);
-  });
+  try {
+    if (view === "settings") {
+      await invoke("open_settings_window", { accountId });
+    } else {
+      await invoke("open_account_window");
+    }
+  } catch (error) {
+    console.error(`Could not open ${view} window`, error);
+  }
 }
 
 export async function closeNativeWindow() {

@@ -1,0 +1,33 @@
+X-Dakia-Corpus-Case: standards-multipart-boundary-lengths
+Date: Tue, 28 Jul 2026 10:27:00 +0000
+From: sender@example.test
+To: recipient@example.test
+Subject: Synthetic multipart boundary lengths
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="quoted ()+_,-./:=? boundary"
+
+--quoted ()+_,-./:=? boundary
+Content-Type: multipart/mixed; boundary="b66666666666666666666666666666666666666666666666666666666666666666666"
+
+--b66666666666666666666666666666666666666666666666666666666666666666666
+Content-Type: text/plain; charset=us-ascii
+
+Boundary length 69.
+--b66666666666666666666666666666666666666666666666666666666666666666666--
+--quoted ()+_,-./:=? boundary
+Content-Type: multipart/mixed; boundary="b777777777777777777777777777777777777777777777777777777777777777777777"
+
+--b777777777777777777777777777777777777777777777777777777777777777777777
+Content-Type: text/plain; charset=us-ascii
+
+Boundary length 70.
+--b777777777777777777777777777777777777777777777777777777777777777777777--
+--quoted ()+_,-./:=? boundary
+Content-Type: multipart/mixed; boundary="b8888888888888888888888888888888888888888888888888888888888888888888888"
+
+--b8888888888888888888888888888888888888888888888888888888888888888888888
+Content-Type: text/plain; charset=us-ascii
+
+Boundary length 71 is accepted as a documented parser tolerance.
+--b8888888888888888888888888888888888888888888888888888888888888888888888--
+--quoted ()+_,-./:=? boundary--

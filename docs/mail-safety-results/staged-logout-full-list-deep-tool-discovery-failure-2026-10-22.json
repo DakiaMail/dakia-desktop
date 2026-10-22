@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "status": "infrastructure-failure-retained",
+  "recordedAtUtc": "2026-10-22T00:53:10.980259+00:00",
+  "sourceDigest": "04b1368f7a758b2ad77d95442a2d5a0d3b7ce74f1f100bb59967aeef8b9ad471",
+  "sourceFileCount": 952,
+  "report": "/private/tmp/dakia-deep-logout-and-full-list-20261022.json",
+  "reportSha256": "efccf6fb56a25bb14781afaf6033be27743b07b4ee96331b9064333ffb85dc09",
+  "log": "/private/tmp/dakia-deep-logout-and-full-list-20261022.log",
+  "logSha256": "304cbd5e5b704bb04cc5a27ef047852135b349d034f7b8863136154570de8716",
+  "independentServers": "passed",
+  "fuzz": "not executed; cargo-fuzz discovery failed with exit69",
+  "remediation": "Separate new run with DAKIA_CARGO_FUZZ_BIN=/private/tmp/dakia-mail-safety-tools/bin/cargo-fuzz; original failed report unchanged.",
+  "limitations": [
+    "No generated fuzz input failed in this run; fuzzing did not start.",
+    "The failed lane is not counted as a passing deterministic run or erased by a later result."
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "status": "invalidated-and-stopped",
+  "recordedAt": "2026-10-21T14:31:29.503997+00:00",
+  "reason": "Standards inventory test changed after source freeze declaration. Root stopped this attempt and will start three fresh unchanged-input runs. No result from this attempt counts toward baseline.",
+  "sourceBeforeDigest": "2742cade8090db0a5e1d861b8139bdbde045ed11ba40d5606f1d86a1f9a77bd0",
+  "stoppedOwnedProcessIds": [
+    32569,
+    34207,
+    34538
+  ],
+  "rawLog": "/private/tmp/dakia-remaining-gap-closure-three-run-source-20261021.log",
+  "nativeOrProviderProcessesSignaled": false
+}

@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T16:49:37.264408+00:00",
+  "lane": "source-three-run",
+  "status": "interrupted-environment-preflight",
+  "sourceTree": {
+    "digest": "a7a9edfa42117d74424c4ea25c646aca6be0cd6912ddad791d68002083bdb1ed",
+    "fileCount": 937
+  },
+  "exitCode": 130,
+  "completedRuns": 0,
+  "lastStartedGate": "npm test -- --maxWorkers=1",
+  "testFailureObserved": false,
+  "reason": "Stopped restricted attempt after sibling fixture suite demonstrated local-listener EPERM and process inspection was denied. The full attempt had not emitted a frontend result. No claim that its unfinished tests failed or that socket denial caused the wait.",
+  "rawLog": {
+    "path": "/private/tmp/dakia-three-run-source-notification-safe-20261021.log",
+    "sha256": "c968bb20171b9c880a968bfd771477fe2a32c094e652a2bba658cfab8ee8ad1e",
+    "bytes": 866
+  },
+  "cleanup": "Read-only process inventory after interruption found only the new authorized unrestricted runner and its Vitest child, with no earlier mail-safety/Vitest child.",
+  "replacement": "Fresh unchanged-source three-run invocation outside sandbox, no per-test retries.",
+  "limitations": [
+    "This interrupted run is not a passing or failing completed test suite.",
+    "The separately observed 19 fixture EPERM failures and subsequent 210 pass are recorded in native-notification-identity-repair-2026-10-21.json."
+  ]
+}

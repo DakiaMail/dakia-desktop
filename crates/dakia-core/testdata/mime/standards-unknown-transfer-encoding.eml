@@ -1,0 +1,24 @@
+X-Dakia-Corpus-Case: standards-unknown-transfer-encoding
+Date: Tue, 28 Jul 2026 10:23:00 +0000
+From: sender@example.test
+To: recipient@example.test
+Subject: Synthetic unknown transfer encoding
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="unknown-transfer"
+
+--unknown-transfer
+Content-Type: text/plain; charset=us-ascii
+
+Visible safe body.
+--unknown-transfer
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: attachment; filename*=utf-8''invoice%2Eexe
+Content-Transfer-Encoding: x-fictional-transfer
+
+Opaque transport bytes =QZ must not be decoded or discarded.
+--unknown-transfer
+Content-Type: text/html; charset=us-ascii
+Content-Transfer-Encoding: x-unknown-html
+
+<script>opaque HTML transport bytes must never render</script>
+--unknown-transfer--

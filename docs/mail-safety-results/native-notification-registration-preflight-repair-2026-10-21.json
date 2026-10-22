@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T17:04:24Z",
+  "lane": "focused-source",
+  "status": "passed-focused-native-replay-pending",
+  "scope": "Prevent mac-notification-sys from installing its process-global NSBundle hook unless LaunchServices first resolves the intended notification application identity. Packaged builds additionally require the configured identifier to resolve to the canonical currently running .app bundle.",
+  "historicalEvidence": {
+    "startupFailureReport": {
+      "path": "docs/mail-safety-results/packaged-native-notification-startup-failure-2026-10-21.json",
+      "sha256": "4d1e918fd3231645458538f4775ab87c6ee1546b7dae0907c28314f77b61ad91"
+    },
+    "previousRepairReport": {
+      "path": "docs/mail-safety-results/native-notification-identity-repair-2026-10-21.json",
+      "sha256": "a2f0528081b45a5a4e5d5054b9e6b5be3f04d50b8d78bad7aabbd80be730186b",
+      "note": "Its lib.rs hash and focused counts are historical. This report records the later registration preflight repair."
+    }
+  },
+  "dependencyFinding": {
+    "package": "mac-notification-sys 0.6.15",
+    "cargoLockChecksum": "fd604973958ddcc11b561193c0fb96ba146506ef2f231ef2e7c35fd2cbc9beca",
+    "behavior": "setApplication installs the NSBundle bundleIdentifier swizzle before querying LaunchServices. When the query fails, the hook remains installed with no fake identifier and reports com.apple.Terminal for the process main bundle. The crate process-global Once also remains completed after the failed call.",
+    "sourceEvidence": [
+      {
+        "path": "$CARGO_HOME/registry/src/index.crates.io-1949cf8c6b5b557f/mac-notification-sys-0.6.15/objc/notify.h",
+        "sha256": "f37f0b29a95a107d9c2075199260e5a3b154160ea4f8e95bc4ccbf06b8618e04",
+        "bytes": 2080
+      },
+      {
+        "path": "$CARGO_HOME/registry/src/index.crates.io-1949cf8c6b5b557f/mac-notification-sys-0.6.15/objc/notify.m",
+        "sha256": "2718937f88da096382800413f91ba41f1e88083133a708f0f23cab35e74a017e",
+        "bytes": 15406
+      },
+      {
+        "path": "$CARGO_HOME/registry/src/index.crates.io-1949cf8c6b5b557f/mac-notification-sys-0.6.15/src/lib.rs",
+        "sha256": "662a30d60369d3e507f8d3dcab13f27fcc38fa7ad3a1d44eb6c9a52410a89f41",
+        "bytes": 5332
+      }
+    ]
+  },
+  "behavior": [
+    "The setup initializer performs a read-only LaunchServices preflight before any notify-rust application initialization call.",
+    "A preflight failure is nonfatal for mailbox startup, leaves notification readiness false, skips notify-rust entirely and blocks the notification show boundary.",
+    "Development mode requires LaunchServices to resolve com.apple.Terminal before the dependency hook may run.",
+    "Packaged mode derives the current bundle only from a canonical executable path ending in .app/Contents/MacOS and requires a canonical exact-path match among LaunchServices results for the configured identifier.",
+    "The direct CoreServices/CoreFoundation boundary rejects nulls, unexpected CF types, negative or excessive array counts, relative or empty paths and paths over 65536 bytes. Create/copy-rule values are released on every return path.",
+    "No subprocess, registration, notification delivery, signing or publication occurs in the product preflight."
+  ],
+  "checks": [
+    {
+      "command": "cargo fmt --all -- --check",
+      "status": "passed"
+    },
+    {
+      "command": "cargo check -p dakia-desktop --locked --lib",
+      "status": "passed"
+    },
+    {
+      "command": "CARGO_TARGET_DIR=/private/tmp/dakia-notification-preflight-feature-target cargo check -p dakia-desktop --locked --features native-mail-safety-fixture --lib",
+      "status": "passed"
+    },
+    {
+      "command": "cargo test -p dakia-desktop --locked --lib desktop_notification_tests -- --nocapture",
+      "status": "passed",
+      "passed": 6,
+      "failed": 0,
+      "actualMacosBoundary": "A fresh UUID bundle identifier was queried through the production CoreServices FFI and resolved to no applications. This exercised the ABI, null result and RAII release path without registration, hook installation or notification delivery."
+    },
+    {
+      "command": "cargo test -p dakia-desktop --locked --features native-mail-safety-fixture --lib",
+      "status": "failed-in-sandbox-environment",
+      "passed": 194,
+      "failed": 19,
+      "diagnostic": "Every failure required a local fictional listener and reported EPERM or Operation not permitted when binding."
+    },
+    {
+      "command": "cargo test -p dakia-desktop --locked --features native-mail-safety-fixture --lib",
+      "status": "passed-outside-sandbox",
+      "passed": 213,
+      "failed": 0,
+      "reason": "The identical suite was rerun with permission to bind only its isolated local test listeners."
+    }
+  ],
+  "regressionSensitivity": {
+    "mutation": "Bypassed the preflight result and invoked the injected process-global initializer even when preflight failed.",
+    "command": "cargo test -p dakia-desktop --locked --lib desktop_notification_tests::notification_identity_failure_is_nonfatal_and_blocks_the_show_boundary -- --exact",
+    "status": "failed-as-expected",
+    "diagnostic": "The test failed because the initializer ran and no preflight failure was reported. This is the unsafe call ordering that the regression must detect.",
+    "restoration": "apps/desktop/src-tauri/src/lib.rs was restored byte-for-byte to SHA-256 c5bec752891dbbed9ec4a31e187446e6d47a9eb2f15aea00823ad024f0a10197 and the unchanged exact test passed."
+  },
+  "artifacts": [
+    {
+      "path": "apps/desktop/src-tauri/src/lib.rs",
+      "sha256": "c5bec752891dbbed9ec4a31e187446e6d47a9eb2f15aea00823ad024f0a10197",
+      "bytes": 281773
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "78e7136d6ff7a477e2317feb99a976a75376b1283a331babaca26b83c27f58b2",
+      "bytes": 197759
+    }
+  ],
+  "independentReview": {
+    "status": "approved",
+    "reviewedLibSha256": "c5bec752891dbbed9ec4a31e187446e6d47a9eb2f15aea00823ad024f0a10197",
+    "finding": "No blocker. The CoreServices FFI ownership, signatures, bounds, type checks, canonical application ancestry, exact packaged path match, development behavior, absolute-path rejection and read-only absent-UUID ABI probe were approved. The reviewer required the residual lookup race to remain explicit."
+  },
+  "baseline": {
+    "historical": "The interrupted a7 source run is retained as historical evidence only.",
+    "current": "Three clean unchanged-source runs are pending after this source repair and this evidence file."
+  },
+  "limitations": [
+    "There is a narrow time-of-check to time-of-use race between Dakia's read-only LaunchServices preflight and the dependency's second lookup. Eliminating that race requires repairing or vendoring mac-notification-sys so it performs lookup before installing its own hook.",
+    "The controlled packaged application has not been rebuilt or launched after this repair, so exact registered-bundle startup remains pending native replay.",
+    "No OS notification was displayed, clicked or attributed during this focused verification.",
+    "These checks do not establish Developer ID signing, notarization, stapling, updater signing, architecture acceptance or publication."
+  ]
+}

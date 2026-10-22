@@ -1,0 +1,107 @@
+{
+  "schemaVersion": 1,
+  "kind": "provider-reader-coupling-direct-producer-sensitivity-result",
+  "status": "passed",
+  "recordedAtUtc": "2026-10-22T11:28:00Z",
+  "scope": "One focused private negative test of the production-coupled MIME Reader runner. It proves that the runner rejects the retired direct-parse profile producer after that producer's core test passes and before either the Tauri or React stage starts. This is not a full source, native WebKit, provider, package, release, or Phase 2 result.",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "before": "5a08dcbcceef824ba98c56cb2a040f60f5b24769083e384f25df8e93727222f1",
+    "after": "5a08dcbcceef824ba98c56cb2a040f60f5b24769083e384f25df8e93727222f1",
+    "fileCount": 996,
+    "beforeArtifact": {
+      "path": "/private/tmp/dakia-phase1-direct-parse-producer-sensitivity-20261022/source-before.json",
+      "sha256": "612491b0ae7db67d814eeb16b86f68f2c6b6f319cd396cfdbfb0bcc369499a4c"
+    },
+    "afterArtifact": {
+      "path": "/private/tmp/dakia-phase1-direct-parse-producer-sensitivity-20261022/source-after.json",
+      "sha256": "612491b0ae7db67d814eeb16b86f68f2c6b6f319cd396cfdbfb0bcc369499a4c"
+    }
+  },
+  "mutation": {
+    "script": {
+      "path": "/private/tmp/dakia-phase1-direct-parse-producer-sensitivity-20261022/test-mime-reader-artifact-direct-parse-mutant.mjs",
+      "sha256": "c987fba9ad5988e3f31395733eb1d2e224216f37132d8136e12184e49ef6e73a"
+    },
+    "diff": {
+      "path": "/private/tmp/dakia-phase1-direct-parse-producer-sensitivity-20261022/mutant.diff",
+      "sha256": "d538967b456d633eb509e7a665c4e6d4da6d6a601aa2fbe3a4891b972baacc34"
+    },
+    "semanticChange": "The selected core test was changed from mail::tests::mime_reader_handoff_tests::public_full_and_selective_reader_fetches_preserve_every_governed_reader_fixture to mail::tests::mime_tauri_artifact_export_tests::governed_mime_fixtures_export_a_real_reader_profile_for_tauri.",
+    "nonSemanticImportChange": "The sourceSnapshot import was rebound to the absolute primary helper because the private mutant ran outside the repository scripts directory."
+  },
+  "fixtures": {
+    "accountId": "13131313-1313-4313-8313-131313131313",
+    "mailbox": "INBOX",
+    "uidValidity": 7707,
+    "fixtureIds": [
+      "competing-nested-alternatives",
+      "attached-message-rfc822",
+      "multipart-attachment-container",
+      "empty-alternative-leaf",
+      "truncated-multipart-lf",
+      "charset-matrix",
+      "format-flowed-delsp",
+      "international-reader-semantics",
+      "ambiguous-inline-identities"
+    ],
+    "expectedCoupledProducerUidRange": [800, 808],
+    "rejectedDirectParseUidRange": [701, 709]
+  },
+  "execution": {
+    "expectedExitCode": 1,
+    "actualExitCode": 1,
+    "log": {
+      "path": "/private/tmp/dakia-phase1-direct-parse-producer-sensitivity-20261022/mutant-final.log",
+      "sha256": "8ddb17e6f79c3ab47e3ba6ff85fb20996b06a351c8c516c8d191c9e025cc1246"
+    },
+    "coreStage": {
+      "test": "mail::tests::mime_tauri_artifact_export_tests::governed_mime_fixtures_export_a_real_reader_profile_for_tauri",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "filteredOut": 770
+    },
+    "rejection": {
+      "message": "core MIME profile artifact has the wrong identity or producer",
+      "validator": "validateCoreArtifact",
+      "afterOldCorePass": true,
+      "beforeTauri": true,
+      "beforeReact": true
+    },
+    "downstreamStages": {
+      "tauriStarted": false,
+      "reactStarted": false
+    }
+  },
+  "retainedWrongProducerArtifact": {
+    "root": "/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-mime-reader-artifact-6BPwft",
+    "coreManifest": {
+      "path": "/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-mime-reader-artifact-6BPwft/core-manifest.json",
+      "sha256": "1d76f0d75590952b73e8a4c2170c1fc598234ea7723281b6fb8637457c4b906d"
+    },
+    "observedMismatch": "The legacy manifest has no producer or profileState field and carries direct-parse UIDs 701 through 709. The coupled producer uses MailService hydration, a closed-and-reopened profile state, and UIDs 800 through 808."
+  },
+  "privateSensitivityReport": {
+    "path": "/private/tmp/dakia-phase1-direct-parse-producer-sensitivity-20261022/sensitivity-report.json",
+    "sha256": "10fd8fe985ab52584f15e80ca258d38b337791026c562d56d95f871e142469a2"
+  },
+  "earlierHarnessCaptureError": {
+    "status": "retained-not-counted",
+    "log": {
+      "path": "/private/tmp/dakia-phase1-direct-parse-producer-sensitivity-20261022/mutant.log",
+      "sha256": "9b1fe05f8f84f531ca477379a14b6a1b4c85cf8763c918e49fc69fadae8e4885"
+    },
+    "description": "The first mutant execution reached the same expected producer rejection, but the surrounding zsh recorder used the reserved variable name status. It is retained and is not the final exit-code evidence."
+  },
+  "review": {
+    "status": "go",
+    "finding": "Independent review confirmed that the mutation was limited to the producer selection and required out-of-tree import rebind, the legacy core producer passed, the coupled runner rejected its manifest before downstream stages, the expected nonzero exit was recorded, and the source tree was unchanged."
+  },
+  "limitations": [
+    "This focused result does not rerun or alter the earlier successful same-profile provider-to-Reader result.",
+    "The direct-parse core exporter remains present for its older standalone purpose. This result proves only that the coupled runner rejects it as a production hydration artifact.",
+    "The orchestrator subprocess has no explicit wall-clock timeout.",
+    "No full source, native WebKit, external provider, user mailbox, package, release, performance, fuzz, dependency-audit, or Phase 2 result is claimed."
+  ]
+}

@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -17,6 +24,7 @@ const scopeNames = [
   "mail-boundary",
   "tauri-boundary",
   "release-only",
+  "dependency-audit",
 ];
 
 function git(cwd, ...args) {
@@ -51,9 +59,130 @@ test("classifies representative paths and promotes shared or unknown paths", () 
       expected: { activeScopes: ["mail-boundary"] },
     },
     {
+      name: "mail safety catalogue changes exercise its source-level validator",
+      paths: ["testdata/mail-safety-catalogue.json"],
+      expected: { activeScopes: ["mail-boundary"] },
+    },
+    {
+      name: "mail safety evidence documentation cannot bypass its validator",
+      paths: ["docs/mail-safety-evidence.md"],
+      expected: { activeScopes: ["mail-boundary"] },
+    },
+    {
+      name: "standards requirement matrix changes run its boundary and contract gates",
+      paths: ["testdata/mail-standards-requirements.json"],
+      expected: { activeScopes: ["mail-boundary", "release-only"] },
+    },
+    {
+      name: "standards validator changes run its boundary and contract gates",
+      paths: ["scripts/validate-mail-standards-requirements.mjs"],
+      expected: { activeScopes: ["mail-boundary", "release-only"] },
+    },
+    {
+      name: "standards profile changes cannot be treated as documentation only",
+      paths: ["docs/mail-safety-standards-profile.md"],
+      expected: { activeScopes: ["mail-boundary"] },
+    },
+    {
       name: "Tauri inventory changes exercise the Tauri boundary",
       paths: ["scripts/tauri-contract-inventory.mjs"],
       expected: { activeScopes: ["tauri-boundary"] },
+    },
+    {
+      name: "coupled realtime delivery script exercises the Tauri boundary",
+      paths: ["scripts/test-realtime-delivery.mjs"],
+      expected: { activeScopes: ["tauri-boundary"] },
+    },
+    {
+      name: "MIME artifact runner keeps core, Reader, mail, and Tauri gates coupled",
+      paths: ["scripts/test-mime-reader-artifact.mjs"],
+      expected: {
+        activeScopes: [
+          "frontend",
+          "rust-core",
+          "mail-boundary",
+          "tauri-boundary",
+        ],
+      },
+    },
+    {
+      name: "attachment artifact runner keeps core, Reader, mail, and Tauri gates coupled",
+      paths: ["scripts/test-attachment-command-artifact.mjs"],
+      expected: {
+        activeScopes: [
+          "frontend",
+          "rust-core",
+          "mail-boundary",
+          "tauri-boundary",
+        ],
+      },
+    },
+    {
+      name: "attachment fixture server keeps core, Reader, mail, and Tauri gates coupled",
+      paths: ["scripts/attachment-command-fixture-server.mjs"],
+      expected: {
+        activeScopes: [
+          "frontend",
+          "rust-core",
+          "mail-boundary",
+          "tauri-boundary",
+        ],
+      },
+    },
+    {
+      name: "mail command artifact runner keeps Rust, mail, and Tauri gates coupled",
+      paths: ["scripts/test-mail-command-tls.mjs"],
+      expected: {
+        activeScopes: ["rust-core", "mail-boundary", "tauri-boundary"],
+      },
+    },
+    {
+      name: "mail command fixture server keeps Rust, mail, and Tauri gates coupled",
+      paths: ["scripts/mail-command-tls-fixture-server.mjs"],
+      expected: {
+        activeScopes: ["rust-core", "mail-boundary", "tauri-boundary"],
+      },
+    },
+    {
+      name: "unsubscribe command runner and owned fixture scripts keep Rust, mail, and Tauri gates coupled",
+      paths: [
+        "scripts/test-unsubscribe-command-tls.mjs",
+        "scripts/test-unsubscribe-command-tls.node-test.mjs",
+        "scripts/unsubscribe-command-tls-fixture-server.mjs",
+        "scripts/unsubscribe-command-tls-fixture-server.node-test.mjs",
+      ],
+      expected: {
+        activeScopes: [
+          "rust-core",
+          "mail-boundary",
+          "tauri-boundary",
+          "release-only",
+        ],
+      },
+    },
+    {
+      name: "unsubscribe command fixture and dispatcher cannot bypass mail or Tauri gates",
+      paths: [
+        "crates/dakia-core/src/native_mail_safety_unsubscribe_fixture.rs",
+        "apps/desktop/src-tauri/src/unsubscribe_command_tls_tests.rs",
+      ],
+      expected: {
+        activeScopes: ["rust-core", "mail-boundary", "tauri-boundary"],
+      },
+    },
+    {
+      name: "artifact Reader fixture tests cannot bypass their coupled Tauri runner",
+      paths: ["apps/desktop/src/components/attachmentCommandArtifact.test.tsx"],
+      expected: { activeScopes: ["frontend", "tauri-boundary"] },
+    },
+    {
+      name: "core MIME artifact export cannot bypass its coupled Tauri runner",
+      paths: [
+        "crates/dakia-core/src/mail/tests/mime_tauri_artifact_export_tests.rs",
+      ],
+      expected: {
+        activeScopes: ["rust-core", "mail-boundary", "tauri-boundary"],
+      },
     },
     {
       name: "shared Tauri contract fixtures exercise both consumers",
@@ -82,6 +211,19 @@ test("classifies representative paths and promotes shared or unknown paths", () 
     {
       name: "classifier changes cannot narrow the required lane",
       paths: ["scripts/change-classifier.mjs"],
+      expected: { activeScopes: scopeNames },
+    },
+    {
+      name: "vendored source and its integrity manifest cannot bypass dependency audit",
+      paths: [
+        "vendor/lettre/src/transport/smtp/client/mod.rs",
+        "testdata/vendored-crates/lettre.json",
+      ],
+      expected: { activeScopes: scopeNames },
+    },
+    {
+      name: "the dependency audit gate cannot be changed without selecting itself",
+      paths: ["scripts/audit-dependencies.sh"],
       expected: { activeScopes: scopeNames },
     },
     {
@@ -115,6 +257,61 @@ test("classifies representative paths and promotes shared or unknown paths", () 
     classifyPaths(["crates/dakia-cli/src/main.rs"]).requiresLfs,
     false,
   );
+  assert.equal(
+    classifyPaths(["Cargo.lock"]).scopes["dependency-audit"],
+    true,
+    "lockfile changes must run the dependency audit lane",
+  );
+});
+
+test("each unsubscribe TLS command boundary input selects the executable coupled scopes", () => {
+  const coupled = Object.fromEntries(
+    scopeNames.map((scope) => [
+      scope,
+      ["rust-core", "mail-boundary", "tauri-boundary"].includes(scope),
+    ]),
+  );
+  for (const path of [
+    "scripts/test-unsubscribe-command-tls.mjs",
+    "scripts/unsubscribe-command-tls-fixture-server.mjs",
+    "crates/dakia-core/src/native_mail_safety_unsubscribe_fixture.rs",
+    "apps/desktop/src-tauri/src/unsubscribe_command_tls_tests.rs",
+    "crates/dakia-core/src/lib.rs",
+  ]) {
+    assert.deepEqual(classifyPaths([path]).scopes, coupled, path);
+  }
+
+  const sharedLifecycle = Object.fromEntries(
+    scopeNames.map((scope) => [
+      scope,
+      [
+        "rust-core",
+        "frontend",
+        "mail-boundary",
+        "tauri-boundary",
+        "release-only",
+      ].includes(scope),
+    ]),
+  );
+  assert.deepEqual(
+    classifyPaths(["scripts/fixture-process-lifecycle.mjs"]).scopes,
+    sharedLifecycle,
+  );
+
+  const nodeTests = Object.fromEntries(
+    scopeNames.map((scope) => [
+      scope,
+      ["rust-core", "mail-boundary", "tauri-boundary", "release-only"].includes(
+        scope,
+      ),
+    ]),
+  );
+  for (const path of [
+    "scripts/test-unsubscribe-command-tls.node-test.mjs",
+    "scripts/unsubscribe-command-tls-fixture-server.node-test.mjs",
+  ]) {
+    assert.deepEqual(classifyPaths([path]).scopes, nodeTests, path);
+  }
 });
 
 test("uses the merge base rather than unrelated commits on the base branch", () => {
@@ -241,9 +438,7 @@ test("ordinary pull-request workflow preserves the cost and release boundaries",
   ]) {
     assert.match(
       workflow,
-      new RegExp(
-        `--skip classification::model_integration_tests::${testName}`,
-      ),
+      new RegExp(`--skip classification::model_integration_tests::${testName}`),
       `the LFS-free PR lane must skip ${testName}`,
     );
   }
@@ -258,13 +453,128 @@ test("ordinary pull-request workflow preserves the cost and release boundaries",
     workflow,
     /id: frontend[\s\S]*npm run test[\s\S]*node --test scripts\/tauri-contract-inventory\.node-test\.mjs[\s\S]*node scripts\/tauri-contract-inventory\.mjs/,
   );
+  assert.match(
+    workflow,
+    /id: mail_boundary[\s\S]*node --test scripts\/mail-safety-catalogue\.node-test\.mjs[\s\S]*node scripts\/validate-mail-safety-catalogue\.mjs[\s\S]*node --test scripts\/validate-mail-standards-requirements\.node-test\.mjs[\s\S]*node scripts\/validate-mail-standards-requirements\.mjs[\s\S]*node scripts\/report-mail-safety-catalogue\.mjs --lane pull-request/,
+  );
+  assert.match(
+    workflow,
+    /name: Audit changed dependency lockfiles[\s\S]*cargo \+1\.89\.0 install cargo-audit --version 0\.22\.2 --locked[\s\S]*npm run audit:dependencies:npm/,
+  );
   const tauriStep = workflow.match(
     /id: tauri_boundary[\s\S]*?(?=\n      - id:|\n      - name: Report selected scopes)/,
   )?.[0];
   assert.ok(tauriStep, "expected a Tauri boundary step");
   assert.doesNotMatch(tauriStep, /tauri-contract-inventory/);
+  for (const runner of [
+    "test-realtime-delivery",
+    "test-mime-reader-artifact",
+    "test-attachment-command-artifact",
+    "test-mail-command-tls",
+    "test-unsubscribe-command-tls",
+  ]) {
+    assert.match(
+      tauriStep,
+      new RegExp(`node scripts/${runner}\\.mjs`),
+      `${runner} must remain in the existing Tauri boundary job`,
+    );
+  }
   assert.doesNotMatch(
     workflow,
     /cargo test -p dakia-desktop tauri_contracts_tests/,
+  );
+});
+
+function workflowRunBlock(workflow, stepId) {
+  const stepStart = workflow.indexOf(`      - id: ${stepId}\n`);
+  assert.ok(stepStart >= 0, `expected workflow step ${stepId}`);
+  const runStart = workflow.indexOf("        run: |\n", stepStart);
+  assert.ok(runStart >= 0, `expected run block for ${stepId}`);
+  const nextStep = workflow.indexOf("\n      - ", runStart);
+  const block = workflow.slice(
+    runStart + "        run: |\n".length,
+    nextStep === -1 ? undefined : nextStep,
+  );
+  return block
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map((line) => line.replace(/^ {10}/, ""))
+    .join("\n");
+}
+
+function runDependencyFetchBlock(block, { failFirstFetch = false } = {}) {
+  const directory = mkdtempSync(join(tmpdir(), "dakia-audit-fetch-test-"));
+  const bin = join(directory, "bin");
+  const log = join(directory, "cargo.log");
+  mkdirSync(bin);
+  const cargo = join(bin, "cargo");
+  writeFileSync(
+    cargo,
+    `#!/bin/sh
+printf '%s\\n' "$*" >> "$DAKIA_TEST_CARGO_LOG"
+if [ "${failFirstFetch ? "true" : "false"}" = true ] && [ "$1" = fetch ] && [ "$2" = --locked ]; then
+  exit 91
+fi
+`,
+  );
+  chmodSync(cargo, 0o700);
+  try {
+    const result = spawnSync("bash", ["-euc", block], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        DAKIA_TEST_CARGO_LOG: log,
+      },
+    });
+    return {
+      result,
+      calls: readFileSync(log, "utf8").trimEnd().split("\n"),
+    };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+test("dependency-audit workflow fetches both locked graphs before offline audit and stops on failure", () => {
+  const workflow = readFileSync(
+    join(root, ".github/workflows/pull-request-validation.yml"),
+    "utf8",
+  );
+  const fetchBlock = workflowRunBlock(workflow, "dependency_audit_fetch");
+  const fetchStep = workflow.indexOf("      - id: dependency_audit_fetch\n");
+  const auditStep = workflow.indexOf("      - id: dependency_audit\n");
+  assert.ok(
+    fetchStep < auditStep,
+    "locked fetches must precede the offline audit step",
+  );
+  assert.match(
+    workflow.slice(fetchStep, auditStep),
+    /if: needs\.classify\.outputs\.dependency_audit == 'true'/,
+    "the warm-cache preparation must remain dependency-audit scoped",
+  );
+  assert.match(
+    workflow,
+    /hashFiles\('Cargo\.lock', 'fuzz\/Cargo\.lock'\)/,
+    "the registry cache must invalidate when either locked graph changes",
+  );
+  assert.deepEqual(fetchBlock.split("\n"), [
+    "cargo fetch --locked",
+    "cargo fetch --manifest-path fuzz/Cargo.toml --locked",
+  ]);
+
+  const success = runDependencyFetchBlock(fetchBlock);
+  assert.equal(success.result.status, 0, success.result.stderr);
+  assert.deepEqual(success.calls, [
+    "fetch --locked",
+    "fetch --manifest-path fuzz/Cargo.toml --locked",
+  ]);
+
+  const failure = runDependencyFetchBlock(fetchBlock, { failFirstFetch: true });
+  assert.equal(failure.result.status, 91);
+  assert.deepEqual(
+    failure.calls,
+    ["fetch --locked"],
+    "bash -e must stop before the fuzz graph or audit can be treated as prepared",
   );
 });

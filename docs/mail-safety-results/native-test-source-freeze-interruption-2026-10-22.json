@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-21T23:24:22.637902+00:00",
+  "status": "restored-with-recorded-test-source-interruption",
+  "sourceDigestBeforeAndAfter": "a86feeae88ffe172c8697a84f1d29afa123856661ee3765ca3307562c410193c",
+  "fileCount": 940,
+  "entireIntervalUnchanged": false,
+  "incident": {
+    "status": "restored-with-explicit-interruption",
+    "recordedAt": "2026-10-21T23:23:16.928494+00:00",
+    "path": "scripts/native-provider-reader-fixture.node-test.mjs",
+    "frozenSha256": "12c40f23382475ce58085377305f76c080a1911c534fba3cbeaf5f1ffd35a12e",
+    "accidentalPatchSha256": "aeff47b95eab1449e06bf86e37903543a6cb76936201103bce1e0e59c8b48b5e",
+    "preservedPatch": "/private/tmp/dakia-primary-test-freeze-interruption-20261022.node-test.mjs",
+    "patchCopiedToStaging": "/private/tmp/dakia-next-safety-fixes-a86-staging-20261022/scripts/native-provider-reader-fixture.node-test.mjs",
+    "primaryAll940EntriesMatchFrozenNow": true,
+    "entireIntervalUnchangedClaim": false,
+    "scope": "Only Node fixture test changed transiently. No compiled app source, exact executable, approved identity, active acceptance helper, app process or profile was changed."
+  },
+  "desktopExecutableSha256Revalidated": "1f3a21dff8d83bad428602b1950b79280af5b88d08809517a1a5dc4176135510",
+  "effectOnAcceptance": "The transient change affected a Node fixture test, not compiled app sources, the running executable, approved app identity, active acceptance helper, or profile. Do not claim every checkout input stayed unchanged throughout the interval. Startup-alert inspection and exit evidence remain pending.",
+  "remaining": "The migration-conflict alert is still awaiting the user inspection and Quit click. No fatal-alert pass is inferred."
+}

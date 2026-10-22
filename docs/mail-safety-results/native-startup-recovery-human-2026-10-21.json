@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "lane": "human-assisted-native-startup-recovery",
+  "status": "failed-exit-code",
+  "sourceDigest": "7126a3b01086f50ffb453b8ddc7ba68909c25258f31058b256c2393d6c521162",
+  "executableSha256": "53215eb037166cab2cefd3894b0a8e9d44f6b92e9247be1b6e80b2d32fa2eb5a",
+  "cases": [
+    {
+      "profile": "future-marker-2",
+      "humanConfirmedExpectedTitleAndRecoveryText": true,
+      "humanConfirmedNoInbox": true,
+      "humanClickedQuitDakia": true,
+      "exitCode": 0,
+      "expectedExitCode": 1
+    },
+    {
+      "profile": "conflicting-send-attempts",
+      "humanConfirmedExpectedTitleAndRecoveryText": true,
+      "humanConfirmedNoInbox": true,
+      "humanClickedQuitDakia": true,
+      "exitCode": 0,
+      "expectedExitCode": 1
+    },
+    {
+      "profile": "corrupt-database",
+      "humanConfirmedExpectedTitleAndRecoveryText": true,
+      "humanConfirmedNoInbox": true,
+      "humanClickedQuitDakia": true,
+      "exitCode": 0,
+      "expectedExitCode": 1
+    }
+  ],
+  "durableProfileManifestEntriesPreserved": 12,
+  "transientShmExcluded": true,
+  "normalQuitVerified": true,
+  "privateEvidenceRoot": "/private/tmp/dakia-startup-failure-native.JHqScN",
+  "limitations": [
+    "User reported native alert text and absence of inbox; automation is blocked from system dialog",
+    "All three returned zero instead of intended startup-failure exit one; fix and replay pending",
+    "Ad-hoc wrapper, not release candidate"
+  ]
+}

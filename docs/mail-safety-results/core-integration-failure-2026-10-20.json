@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "status": "failed",
+  "command": "cargo test --locked -p dakia-core",
+  "lane": "early full core integration, not the frozen three-run baseline",
+  "counts": {
+    "passed": 559,
+    "failed": 9,
+    "ignored": 9
+  },
+  "failingTests": [
+    "mail::tests::attachment_filename_precedence_ignores_empty_and_malformed_candidates",
+    "mail::tests::authentication_distinguishes_rejection_from_retryable_bye",
+    "mail::tests::realistic_selective_bodystructure_fixtures_match_complete_parser_and_starred_storage",
+    "mail::tests::scripted_imap_rejects_bye_eof_and_oversize_literal_before_reading_it",
+    "mail::tests::scripted_reset_clears_optional_namespace_only_after_nonexistent_response_code",
+    "mail::tests::scripted_reset_nonexistent_sent_sibling_does_not_clear_current_sibling",
+    "mail::tests::selective_alternative_keeps_plain_fallback_when_html_is_undecodable",
+    "mail::tests::selective_composite_footer_cannot_claim_branch_after_primary_html_failure",
+    "mail::tests::selective_nested_alternative_fallback_can_select_its_enclosing_branch"
+  ],
+  "durationSeconds": 54.16,
+  "log": "/private/tmp/dakia-core-full-current-2026-10-20.log",
+  "logSha256": "c5addca3c1c124bf13aa8323d6008ac71db02f38aa64f2aaa342c52d18be3ce7",
+  "provenanceLimit": "No immutable source manifest was taken for this early integration run. Source writers were still active in other scopes.",
+  "nextAction": "Reconcile MIME alternative/filename semantics and safe IMAP status-code/auth classification, then rerun full suites.",
+  "flakeClaim": "No retry hides these failures; they are retained as integration regressions, not accepted baseline results."
+}

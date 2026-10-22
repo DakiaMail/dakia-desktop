@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T17:18:25.927740+00:00",
+  "lane": "source-three-run",
+  "status": "failed",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "cedc3777c2fe96cd54160fd661521751ab688da6bf2aab7a4a486be23a3de0da",
+    "fileCount": 937
+  },
+  "completedCleanRuns": 1,
+  "failedIteration": 2,
+  "failedGate": [
+    "cargo",
+    "test",
+    "--workspace",
+    "--locked"
+  ],
+  "failure": {
+    "test": "updater_acceptance_tests::tampered_updater_artifact_is_rejected_before_the_old_app_is_changed",
+    "desktopTestsPassed": 195,
+    "desktopTestsFailed": 1,
+    "fixtureFailure": "Fictional server request read returned WouldBlock/OS35 at updater_acceptance_tests.rs:275, followed by Reqwest IncompleteMessage checking latest.json.",
+    "classification": "Observed intermittent local updater fixture failure on unchanged source; not a completed security assertion and not yet a proven production updater defect."
+  },
+  "rawReport": {
+    "path": "docs/mail-safety-results/remaining-gap-closure-three-run-source-registration-safe-2026-10-21.json",
+    "sha256": "cbfd29ef90a6986e48bd3ec196d12bbb6648f7ccad11e875e29b60c1712d75b9"
+  },
+  "rawLog": {
+    "path": "/private/tmp/dakia-three-run-source-registration-safe-20261021.log",
+    "sha256": "4214930149c3c8b2a271c97a192754f71c2dd042bcc1d6f05f013dda1f5e5844",
+    "bytes": 271011
+  },
+  "followup": "A bounded deterministic idle/preconnect/fragmented request regression and fixture repair are being prepared. Preserve all updater signature and unchanged-old-app oracles. Establish a new unchanged-source three-run baseline afterward.",
+  "limitations": [
+    "No retry contributes to the clean baseline.",
+    "The tampered-artifact acceptance assertion did not complete in the failed test.",
+    "No native app was launched."
+  ]
+}

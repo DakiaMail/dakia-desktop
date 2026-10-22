@@ -1,0 +1,11 @@
+X-Dakia-Corpus-Case: obs-03-dotted-display
+X-Dakia-Corpus-Source: RFC 5322 section 4.1; fictional
+Date: Tue, 28 Jul 2026 12:01:00 +0000
+To: Reader <reader@example.test>
+Subject: Fictional obsolete syntax
+Message-ID: <obs-obs-03-dotted-display@example.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+From: Dr. A. Fictional <sender@example.test>
+
+Fictional body obs-03-dotted-display.

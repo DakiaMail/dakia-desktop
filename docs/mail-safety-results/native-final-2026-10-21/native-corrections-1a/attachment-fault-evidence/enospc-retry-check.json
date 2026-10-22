@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "operation": "enospc-retry-check",
+  "root": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2",
+  "recordedAt": "2026-10-21T12:29:48.467Z",
+  "savedFile": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/Downloads/meeting-notes.txt",
+  "savedSha256": "666dec5256feac267cd6c46b97107397c0a87fcde80a932321819f5a1cf2955e",
+  "savedSize": "32",
+  "savedMode": "600",
+  "quarantine": "0081;6ad8b035;Dakia;",
+  "partialArtifacts": "[]"
+}

@@ -1,0 +1,140 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-10-17T20:54:28Z",
+  "status": "blocked",
+  "scope": "Exact isolated fictional provider-to-Reader macOS test app only",
+  "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "identity": {
+    "pid": 64372,
+    "executable": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.LRbJ62/Dakia Fictional Provider Reader.app/Contents/MacOS/dakia-desktop",
+    "executableSha256": "5fe744c9474b390cebeddf8c28fb879333cd6b19e75ed4b8e748ea24a52b1a56",
+    "architecture": "arm64",
+    "window": {
+      "id": 6691,
+      "pid": 64372,
+      "layer": 0,
+      "bounds": {
+        "x": 252,
+        "y": 133,
+        "width": 1296,
+        "height": 811
+      }
+    }
+  },
+  "permissions": {
+    "accessibility": true,
+    "screenCapture": true
+  },
+  "fixtureState": {
+    "profile": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.LRbJ62/profile",
+    "downloads": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.LRbJ62/Downloads",
+    "account": "fictional-reader@localhost",
+    "messages": [
+      {
+        "uid": 1,
+        "subject": "Fictional Reader height-bound acceptance",
+        "catalogueState": "complete",
+        "cachedContent": true
+      },
+      {
+        "uid": 2,
+        "subject": "Malformed fictional MIME regression",
+        "catalogueState": "headers_only",
+        "cachedContent": false
+      },
+      {
+        "uid": 3,
+        "subject": "Fictional provider to Reader acceptance",
+        "catalogueState": "complete",
+        "cachedContent": true,
+        "attachmentMetadata": [
+          "quarterly-report.pdf.command",
+          "meeting-notes.txt"
+        ]
+      }
+    ],
+    "downloadsInitiallyEmpty": true
+  },
+  "accessibilityProbe": {
+    "helper": "docs/mail-safety-results/native-2026-10-17/dakia-ax.swift",
+    "helperSha256": "8f75b239172b7f78eb73741aa1cf5b23a19f7e995ff004b8000376a7d22c2a34",
+    "snapshot": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.LRbJ62/ax-snapshot.json",
+    "snapshotSha256": "dd941551f0fae2a3622ef69eace393cbddf7184fd0fe48c924752dca451d0350",
+    "nodeCount": 5523,
+    "roleCounts": {
+      "AXApplication": 41,
+      "AXMenuBar": 78,
+      "AXMenuBarItem": 342,
+      "AXMenu": 438,
+      "AXMenuItem": 4624
+    },
+    "finding": "The temporary helper recursively followed a cyclic accessibility child graph without a visited-element guard. It repeated AXApplication and menu nodes through its depth limit and did not reach an AXWindow or AXWebArea. This snapshot cannot establish the live webview URL and is a harness failure, not evidence of a Dakia product limitation."
+  },
+  "captureAttempts": [
+    {
+      "command": "screencapture -x -l 6691 /private/tmp/dakia-provider-reader-window-6691.png",
+      "result": "failed: could not create image from window"
+    },
+    {
+      "command": "/private/tmp/dakia-window-capture 6691 /private/tmp/dakia-provider-reader-window-6691.png",
+      "result": "failed: com.apple.ScreenCaptureKit.SCStreamErrorDomain -3811, audio/video capture failure"
+    },
+    {
+      "command": "cua.getState()",
+      "result": "blocked: The Mac is locked and automatic unlock could not unlock it"
+    }
+  ],
+  "gates": [
+    {
+      "gate": "Exact executable path",
+      "result": "passed",
+      "evidence": "ps -p 64372 -o pid=,ppid=,state=,etime=,command="
+    },
+    {
+      "gate": "Exact native window",
+      "result": "passed",
+      "evidence": "dakia-ax window 64372 returned window 6691 for PID 64372"
+    },
+    {
+      "gate": "Live webview URL",
+      "result": "skipped",
+      "evidence": "The cyclic helper snapshot did not reach AXWebArea, and the locked Mac blocked replacement runtime inspection"
+    },
+    {
+      "gate": "Provider body in Reader",
+      "result": "skipped",
+      "evidence": "Cached provider content exists in the isolated database, but no visible native Reader state was captured"
+    },
+    {
+      "gate": "Remote content before consent, after consent, and reset after identity switch",
+      "result": "skipped",
+      "evidence": "No UI interaction was performed while macOS was locked"
+    },
+    {
+      "gate": "History expand, collapse, and repeat with WebKit growth and shrinkage",
+      "result": "skipped",
+      "evidence": "No UI interaction was performed while macOS was locked"
+    },
+    {
+      "gate": "6000-pixel cap with bottom marker reachable",
+      "result": "skipped",
+      "evidence": "No UI interaction was performed while macOS was locked"
+    },
+    {
+      "gate": "Malformed message error followed by valid message recovery",
+      "result": "skipped",
+      "evidence": "The malformed row and the next valid cached row exist, but their visible Reader sequence was not exercised"
+    },
+    {
+      "gate": "Individual Save and Save all exact bytes, mode, executable bit, quarantine, and path containment",
+      "result": "skipped",
+      "evidence": "The isolated Downloads directory remained empty and no save action was attempted"
+    },
+    {
+      "gate": "Unread to seen identity behavior",
+      "result": "skipped",
+      "evidence": "No UI interaction was performed while macOS was locked"
+    }
+  ],
+  "remainingRisk": "The source and provider fixture evidence does not replace the missing native WebKit interaction pass. Relaunch the updated exact wrapper after macOS is unlocked, prove its runtime webview URL, and exercise every skipped gate before native acceptance."
+}

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "operation": "enospc-restore",
+  "root": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2",
+  "recordedAt": "2026-10-21T12:29:27.378Z",
+  "detachedDevice": "/dev/disk8s1",
+  "retainedImage": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/attachment-enospc.dmg",
+  "retainedImageSha256": "db0f32727bebf6e408ccc9c5268577b625afeeaa410ac498a6bfffabb9f5dbf6",
+  "retainedImageBytes": "67108864",
+  "restoredDownloads": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/Downloads",
+  "restoredDownloadsDevice": "16777231",
+  "restoredDownloadsInode": "140768361",
+  "restoredDownloadsMode": "755"
+}

@@ -1,0 +1,10 @@
+X-Dakia-Corpus-Case: standards-malformed-quoted-printable
+Date: Tue, 28 Jul 2026 10:26:00 +0000
+From: sender@example.test
+To: recipient@example.test
+Subject: Synthetic malformed quoted printable
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Transfer-Encoding: quoted-printable
+
+Malformed escape =QZ must not become invented text.

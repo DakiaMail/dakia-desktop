@@ -1,20 +1,34 @@
 import { IconChevronDown } from "@tabler/icons-react";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { RefObject } from "react";
 import { api } from "../api";
+import { cloneInertHtmlDocument, parseInertHtml } from "../inertHtml";
 
 type Props = {
   html: string;
   title: string;
   showHistoryLabel: string;
   hideHistoryLabel: string;
+  remoteContentAllowed?: boolean;
+  loadRemoteContentLabel?: string;
+  onLoadRemoteContent?: () => void;
   onMailto?: (href: string) => void;
 };
 
 type EmailDocument = {
   source: string;
+  document: Document;
   historySource?: string;
+  historyDocument?: Document;
   dark: boolean;
+  hasBlockedRemoteContent: boolean;
 };
 
 const providerQuoteSelector = [
@@ -63,9 +77,25 @@ const urlAttributes = new Set([
   "formaction",
   "xlink:href",
 ]);
+const urlBearingSvgAttributes = new Set([
+  "filter",
+  "fill",
+  "stroke",
+  "mask",
+  "clip-path",
+  "marker",
+  "marker-start",
+  "marker-mid",
+  "marker-end",
+  "cursor",
+]);
+
+function normalizeUrl(value: string) {
+  return value.trim().replace(/[\u0000-\u001f\u007f\s]+/g, "");
+}
 
 function safeUrl(value: string, attribute: string) {
-  const normalized = value.trim().replace(/[\u0000-\u001f\u007f\s]+/g, "");
+  const normalized = normalizeUrl(value);
   if (attribute === "href" && normalized.startsWith("#")) return true;
   if (/^(https?:|mailto:)/i.test(normalized)) return true;
   if (
@@ -77,29 +107,158 @@ function safeUrl(value: string, attribute: string) {
   return false;
 }
 
+function safeEmbeddedImageUrl(value: string) {
+  return /^data:image\/(?:png|gif|jpe?g|webp|svg\+xml);/i.test(
+    normalizeUrl(value),
+  );
+}
+
+function externalResourceUrl(value: string) {
+  const normalized = normalizeUrl(value);
+  if (/^\/\//.test(normalized)) return `https:${normalized}`;
+  return /^https?:/i.test(normalized) ? normalized : undefined;
+}
+
+function isNavigationAttribute(element: Element, attribute: string) {
+  return (
+    (attribute === "href" || attribute === "xlink:href") &&
+    element.localName === "a"
+  );
+}
+
+function isImageSourceAttribute(element: Element, attribute: string) {
+  return element.localName === "img" && attribute === "src";
+}
+
+function sanitizedResourceUrl(
+  element: Element,
+  attribute: string,
+  value: string,
+  allowRemoteContent: boolean,
+) {
+  // Consent permits only ordinary image sources. Do not let a message use it
+  // to start media playback or fetch SVG subresources. This sanitizer remains
+  // independent of CSP so the resource allowlist is enforced before mounting.
+  if (!isImageSourceAttribute(element, attribute)) return undefined;
+  if (safeEmbeddedImageUrl(value)) return value.trim();
+  return allowRemoteContent ? externalResourceUrl(value) : undefined;
+}
+
+function sanitizeCssUrls(value: string) {
+  // CSS parsing has too many resource syntaxes to safely reconstruct with
+  // regular expressions. Email CSS may still control layout and typography,
+  // but it may never load a resource, even after image consent.
+  if (/\\|\/\*/.test(value)) return { value: "", blocked: true };
+  let blocked = false;
+  const sanitized = value
+    .replace(/@import\b[\s\S]*?(?:;|$)/gi, () => {
+      blocked = true;
+      return "";
+    })
+    .replace(
+      /(^|[;{])[^;{}]*(?:url\s*\(|(?:-webkit-)?image-set\s*\(|cross-fade\s*\(|image\s*\(|paint\s*\(|element\s*\(|(?:asset|tauri|ipc|file|data|javascript|vbscript)\s*:)[^;{}]*(?=;|}|$)/gi,
+      (_declaration, delimiter: string) => {
+        blocked = true;
+        return delimiter;
+      },
+    )
+    .replace(
+      /(?:expression\s*\([^;]*\)|(?:behavior|-moz-binding)\s*:[^;]*;?)/gi,
+      () => {
+        blocked = true;
+        return "";
+      },
+    );
+  return { value: sanitized, blocked };
+}
+
+function sanitizeSrcSet(_value: string) {
+  // srcset permits data URLs containing commas, making a partial parser easy
+  // to bypass. Keep the normal src allowlist and drop srcset until it has a
+  // standards-complete parser. This also prevents asset:, tauri:, file:, and
+  // other local/native schemes after a user permits ordinary remote content.
+  return undefined;
+}
+
 export function buildEmailDocument(
   html: string,
   darkMode: boolean,
+  allowRemoteContent = false,
 ): EmailDocument {
-  const document = new DOMParser().parseFromString(html, "text/html");
+  const document = parseInertHtml(html);
+  const dark = darkMode && supportsDarkAppearance(document);
   document
     .querySelectorAll(blockedElements.join(","))
     .forEach((node) => node.remove());
+
+  let hasBlockedRemoteContent = false;
+  for (const link of document.querySelectorAll<HTMLLinkElement>("link")) {
+    const href = link.getAttribute("href") ?? "";
+    if (href && !allowRemoteContent) hasBlockedRemoteContent = true;
+    link.remove();
+  }
 
   for (const element of document.querySelectorAll("*")) {
     for (const attribute of [...element.attributes]) {
       const name = attribute.name.toLowerCase();
       const value = attribute.value.trim();
-      if (urlAttributes.has(name) && value.startsWith("//")) {
-        element.setAttribute(attribute.name, `https:${value}`);
+      if (name === "srcset") {
+        const safe = sanitizeSrcSet(attribute.value);
+        if (safe) element.setAttribute(attribute.name, safe);
+        else {
+          if (value && !allowRemoteContent) hasBlockedRemoteContent = true;
+          element.removeAttribute(attribute.name);
+        }
+        continue;
+      }
+      if (name.startsWith("on") || name === "srcdoc") {
+        element.removeAttribute(attribute.name);
+        continue;
+      }
+      if (name === "referrerpolicy") {
+        element.removeAttribute(attribute.name);
         continue;
       }
       if (
-        name.startsWith("on") ||
-        name === "srcdoc" ||
-        (urlAttributes.has(name) && !safeUrl(attribute.value, name))
+        urlBearingSvgAttributes.has(name) ||
+        /url\s*\(/i.test(attribute.value)
       ) {
+        const sanitized = sanitizeCssUrls(attribute.value);
+        if (sanitized.blocked) hasBlockedRemoteContent = true;
+        element.setAttribute(attribute.name, sanitized.value);
+        continue;
+      }
+      if (
+        (urlAttributes.has(name) &&
+          !isNavigationAttribute(element, name) &&
+          !sanitizedResourceUrl(
+            element,
+            name,
+            attribute.value,
+            allowRemoteContent,
+          )) ||
+        (urlAttributes.has(name) &&
+          isNavigationAttribute(element, name) &&
+          !safeUrl(attribute.value, name))
+      ) {
+        if (
+          urlAttributes.has(name) &&
+          !isNavigationAttribute(element, name) &&
+          value
+        ) {
+          hasBlockedRemoteContent = true;
+        }
         element.removeAttribute(attribute.name);
+        continue;
+      }
+      if (urlAttributes.has(name) && !isNavigationAttribute(element, name)) {
+        const safe = sanitizedResourceUrl(
+          element,
+          name,
+          attribute.value,
+          allowRemoteContent,
+        );
+        if (safe) element.setAttribute(attribute.name, safe);
       }
       if (
         name === "style" &&
@@ -108,8 +267,20 @@ export function buildEmailDocument(
         )
       ) {
         element.removeAttribute(attribute.name);
+        continue;
+      }
+      if (name === "style") {
+        const sanitized = sanitizeCssUrls(attribute.value);
+        if (sanitized.blocked) hasBlockedRemoteContent = true;
+        element.setAttribute(attribute.name, sanitized.value);
       }
     }
+  }
+
+  for (const style of document.querySelectorAll("style")) {
+    const sanitized = sanitizeCssUrls(style.textContent ?? "");
+    if (sanitized.blocked) hasBlockedRemoteContent = true;
+    style.textContent = sanitized.value;
   }
 
   for (const anchor of document.querySelectorAll<HTMLElement>("a")) {
@@ -132,7 +303,6 @@ export function buildEmailDocument(
     if (!anchor.hasAttribute("tabindex")) anchor.tabIndex = 0;
   }
 
-  const dark = darkMode && supportsDarkAppearance(document);
   normalizePathologicalTypography(document);
   if (dark) normalizeNeutralPresentation(document);
   collapseEmptySpacers(document);
@@ -144,7 +314,10 @@ export function buildEmailDocument(
   const policy = document.createElement("meta");
   policy.httpEquiv = "Content-Security-Policy";
   policy.content =
-    "default-src 'none'; script-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'; img-src data: http: https:; style-src 'unsafe-inline' http: https:; font-src data: http: https:;";
+    "default-src 'none'; script-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'; " +
+    (allowRemoteContent
+      ? "img-src data: http: https:; style-src 'unsafe-inline'; font-src data:;"
+      : "img-src data:; style-src 'unsafe-inline'; font-src data:;");
   document.head.prepend(policy);
 
   installCompatibilityStyles(document, dark);
@@ -152,10 +325,16 @@ export function buildEmailDocument(
   const historySource = history
     ? documentSourceWithBody(document, history)
     : undefined;
+  const historyDocument = history
+    ? documentWithBody(document, history)
+    : undefined;
   return {
     source: documentSource(document),
+    document,
     historySource,
+    historyDocument,
     dark,
+    hasBlockedRemoteContent: !allowRemoteContent && hasBlockedRemoteContent,
   };
 }
 
@@ -196,13 +375,14 @@ function documentSource(document: Document) {
   return `<!doctype html>${document.documentElement.outerHTML}`;
 }
 
-function documentSourceWithBody(document: Document, content: HTMLElement) {
-  const historyDocument = new DOMParser().parseFromString(
-    documentSource(document),
-    "text/html",
-  );
+function documentWithBody(document: Document, content: HTMLElement) {
+  const historyDocument = cloneInertHtmlDocument(document);
   historyDocument.body.replaceChildren(content.cloneNode(true));
-  return documentSource(historyDocument);
+  return historyDocument;
+}
+
+function documentSourceWithBody(document: Document, content: HTMLElement) {
+  return documentSource(documentWithBody(document, content));
 }
 
 function extractQuotedHistory(document: Document) {
@@ -609,96 +789,252 @@ function isExplicitDarkColor(value: string) {
   return (rgb[0] + rgb[1] + rgb[2]) / 3 < 60;
 }
 
-function useShadowEmailDocument(
+type RendererMessage =
+  | {
+      channel: "dakia-email-renderer";
+      token: string;
+      type: "resize";
+      height: unknown;
+    }
+  | {
+      channel: "dakia-email-renderer";
+      token: string;
+      type: "external-link";
+      href: unknown;
+    };
+
+const rendererChannel = "dakia-email-renderer";
+// A mail body must not reserve arbitrary application height. At the cap the
+// isolated document keeps its own ordinary scroll container, so long mail
+// stays reachable without pushing Reader controls away.
+const maxRendererHeight = 6_000;
+
+function approvedExternalLinks(document: Document) {
+  return new Set(
+    [...document.querySelectorAll("a[data-dakia-external-href]")]
+      .map((anchor) => anchor.getAttribute("data-dakia-external-href") ?? "")
+      .filter((href) => safeUrl(href, "href") && !href.startsWith("#")),
+  );
+}
+
+function hasTrustedUserActivation() {
+  // Opaque iframe messages have the `null` origin, so origin is not a useful
+  // signal. A current WebKit user activation prevents a retained capability
+  // from opening a sender-selected link outside an actual click or Enter key.
+  return !navigator.userActivation || navigator.userActivation.isActive;
+}
+
+function rendererToken() {
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
+}
+
+// This exact source is authorized by a SHA-256 CSP hash in both the isolated
+// document and the packaged Tauri policy. Keep the capability out of these
+// bytes: each trusted script element carries its own random token attribute.
+const rendererBootstrapSource = String.raw`(() => {
+    const token = document.currentScript?.getAttribute("data-dakia-renderer-token");
+    if (!/^[a-f0-9]{48}$/.test(token ?? "")) return;
+    const channel = "dakia-email-renderer";
+    const post = (type, payload) => parent.postMessage({ channel, token, type, ...payload }, "*");
+    const contentHeight = () => {
+      const body = document.body;
+      if (!body) return 0;
+      const range = document.createRange();
+      range.selectNodeContents(body);
+      const bounds = range.getBoundingClientRect();
+      const style = getComputedStyle(body);
+      return bounds.height + (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
+    };
+    const reportSize = () => {
+      post("resize", { height: contentHeight() });
+    };
+    const onLink = (event) => {
+      if (event.type === "keydown" && event.key !== "Enter") return;
+      if (event.type === "auxclick" && event.button !== 1) return;
+      if (!event.isTrusted || (navigator.userActivation && !navigator.userActivation.isActive)) return;
+      const path = event.composedPath ? event.composedPath() : [];
+      const anchor = path.find((item) => item && item.nodeType === Node.ELEMENT_NODE && item.localName === "a");
+      if (!anchor) return;
+      const fragment = anchor.getAttribute("data-dakia-fragment-href");
+      if (fragment && fragment.startsWith("#")) {
+        event.preventDefault();
+        event.stopPropagation();
+        let id = fragment.slice(1);
+        try { id = decodeURIComponent(id); } catch { return; }
+        document.getElementById(id)?.scrollIntoView({ block: "nearest" });
+        return;
+      }
+      const href = anchor.getAttribute("data-dakia-external-href");
+      if (!href) return;
+      event.preventDefault();
+      event.stopPropagation();
+      post("external-link", { href });
+    };
+    addEventListener("click", onLink, true);
+    addEventListener("auxclick", onLink, true);
+    addEventListener("keydown", onLink, true);
+    addEventListener("load", () => requestAnimationFrame(reportSize), { once: true });
+    document.addEventListener("load", () => requestAnimationFrame(reportSize), true);
+    if (typeof ResizeObserver === "function") {
+      const observer = new ResizeObserver(() => requestAnimationFrame(reportSize));
+      if (document.documentElement) observer.observe(document.documentElement);
+      if (document.body) observer.observe(document.body);
+    }
+    if (typeof MutationObserver === "function" && document.documentElement) {
+      new MutationObserver(() => requestAnimationFrame(reportSize)).observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
+    }
+    requestAnimationFrame(reportSize);
+  })();`;
+
+// SHA-256 over the UTF-8 bytes of rendererBootstrapSource. This must stay in
+// lock-step with Tauri's outer CSP because srcdoc inherits the app policy.
+const rendererBootstrapCspHash =
+  "sha256-DQ9sEW+p9sEcZuLPMT1IkscbxbaaZo680QmKWLgSjoo=";
+
+function sandboxedEmailSource(source: Document, token: string) {
+  const document = cloneInertHtmlDocument(source);
+  document
+    .querySelectorAll('meta[name="referrer" i], meta[http-equiv="referrer" i]')
+    .forEach((meta) => meta.remove());
+  const referrer = document.createElement("meta");
+  referrer.name = "referrer";
+  referrer.content = "no-referrer";
+  // The browser processes srcdoc from top to bottom. This must precede every
+  // resource-bearing node so an author-supplied policy cannot reveal the app
+  // URL while a consented image is requested.
+  document.head.prepend(referrer);
+  const policy = document.querySelector<HTMLMetaElement>(
+    'meta[http-equiv="Content-Security-Policy"]',
+  );
+  if (!policy) throw new Error("Sanitized email is missing its CSP");
+  policy.content = `${policy.content
+    .replace(/script-src\s+'none'/i, `script-src '${rendererBootstrapCspHash}'`)
+    .replace(
+      /font-src\s+data:/i,
+      "font-src 'none'",
+    )}; connect-src 'none'; child-src 'none'; worker-src 'none'; media-src 'none'`;
+  const script = document.createElement("script");
+  // Sender scripts are removed before this trusted element is appended. The
+  // bootstrap reads only its own attribute through currentScript, so sender
+  // data attributes and IDs cannot name or retain the capability.
+  script.setAttribute("data-dakia-renderer-token", token);
+  script.textContent = rendererBootstrapSource;
+  // An inline sender declaration such as `body { height: 100px !important;
+  // overflow: hidden !important }` would otherwise beat our stylesheet and
+  // make content below the frame cap unreachable. These are trusted inline
+  // root constraints, applied after sanitising sender markup.
+  for (const root of [document.documentElement, document.body]) {
+    root.style.setProperty("height", "auto", "important");
+    root.style.setProperty("min-height", "0", "important");
+    root.style.setProperty("max-height", "none", "important");
+    root.style.setProperty("overflow-y", "auto", "important");
+    root.style.setProperty("overflow-x", "auto", "important");
+  }
+  const scrollPolicy = document.createElement("style");
+  scrollPolicy.setAttribute("data-dakia-renderer-scroll", "");
+  scrollPolicy.textContent =
+    "html, body { overflow-y: auto !important; overflow-x: auto !important; }";
+  document.head.append(scrollPolicy);
+  document.head.append(script);
+  return documentSource(document);
+}
+
+function useSandboxedEmailDocument(
   host: RefObject<HTMLDivElement | null>,
+  emailDocument?: Document,
   source?: string,
   slotLightDom = false,
-  onMailto?: (href: string) => void,
+  onMailtoRef?: RefObject<((href: string) => void) | undefined>,
 ) {
-  useEffect(() => {
+  const committedSourceRef = useRef<string | undefined>(source);
+  useLayoutEffect(() => {
+    committedSourceRef.current = source;
+  }, [source]);
+
+  useLayoutEffect(() => {
     const element = host.current;
     if (!element) return;
-    if (!source) {
+    if (!emailDocument || !source) {
+      element.shadowRoot?.replaceChildren();
       element.replaceChildren();
       return;
     }
     const outerShadow =
       element.shadowRoot ?? element.attachShadow({ mode: "open" });
-    const surface = window.document.createElement("div");
-    surface.style.cssText = [
+    const token = rendererToken();
+    const allowedLinks = approvedExternalLinks(emailDocument);
+    const frame = window.document.createElement("iframe");
+    frame.setAttribute("sandbox", "allow-scripts");
+    frame.setAttribute("referrerpolicy", "no-referrer");
+    frame.setAttribute("scrolling", "auto");
+    frame.setAttribute("title", "Email content");
+    frame.style.cssText = [
       "display:block!important",
-      "position:static!important",
-      "width:auto!important",
-      "height:auto!important",
+      "width:100%!important",
       "min-width:0!important",
+      "height:1px!important",
+      "border:0!important",
       "margin:0!important",
       "padding:0!important",
-      "border:0!important",
-      "transform:none!important",
+      "overflow:auto!important",
     ].join(";");
-    const shadow = surface.attachShadow({ mode: "open" });
-    const parsedDocument = new DOMParser().parseFromString(source, "text/html");
-    const root = parsedDocument.documentElement;
-    root.querySelector('meta[http-equiv="Content-Security-Policy"]')?.remove();
-    shadow.replaceChildren(root);
+    frame.setAttribute("srcdoc", sandboxedEmailSource(emailDocument, token));
     if (slotLightDom) {
-      outerShadow.replaceChildren(
-        surface,
-        window.document.createElement("slot"),
-      );
+      outerShadow.replaceChildren(frame, window.document.createElement("slot"));
     } else {
-      outerShadow.replaceChildren(surface);
+      outerShadow.replaceChildren(frame);
     }
-
-    const activateLink = (event: Event) => {
-      if (event.type === "keydown" && (event as KeyboardEvent).key !== "Enter")
+    const onRendererMessage = (event: MessageEvent<RendererMessage>) => {
+      if (event.source !== frame.contentWindow) return;
+      const message = event.data;
+      if (
+        !message ||
+        message.channel !== rendererChannel ||
+        message.token !== token ||
+        committedSourceRef.current !== source
+      ) {
         return;
-      if (event.type === "auxclick" && (event as MouseEvent).button !== 1)
+      }
+      if (message.type === "resize") {
+        const height = Number(message.height);
+        if (!Number.isFinite(height) || height < 0) return;
+        frame.style.height = `${Math.min(Math.ceil(height), maxRendererHeight)}px`;
         return;
-      const anchor = event
-        .composedPath()
-        .find(
-          (item): item is Element =>
-            item instanceof Element && item.localName === "a",
+      }
+      if (message.type !== "external-link" || typeof message.href !== "string")
+        return;
+      const href = message.href;
+      if (
+        !hasTrustedUserActivation() ||
+        !safeUrl(href, "href") ||
+        href.startsWith("#") ||
+        !allowedLinks.has(href)
+      ) {
+        return;
+      }
+      const onMailto = onMailtoRef?.current;
+      if (/^mailto:/i.test(href) && onMailto) {
+        onMailto(href);
+        return;
+      }
+      void api
+        .openExternal(href)
+        .catch((error) =>
+          console.error(
+            "Could not open email link in the default browser",
+            error,
+          ),
         );
-      if (!anchor) return;
-      event.preventDefault();
-      event.stopPropagation();
-      const href = anchor.getAttribute("data-dakia-external-href");
-      if (href && safeUrl(href, "href") && !href.startsWith("#")) {
-        if (/^mailto:/i.test(href) && onMailto) {
-          onMailto(href);
-          return;
-        }
-        void api
-          .openExternal(href)
-          .catch((error) =>
-            console.error(
-              "Could not open email link in the default browser",
-              error,
-            ),
-          );
-        return;
-      }
-      const fragment = anchor.getAttribute("data-dakia-fragment-href");
-      if (!fragment?.startsWith("#")) return;
-      let id = fragment.slice(1);
-      try {
-        id = decodeURIComponent(id);
-      } catch {
-        return;
-      }
-      shadow.getElementById(id)?.scrollIntoView({ block: "nearest" });
     };
-    shadow.addEventListener("click", activateLink, true);
-    shadow.addEventListener("auxclick", activateLink, true);
-    shadow.addEventListener("keydown", activateLink, true);
+    window.addEventListener("message", onRendererMessage);
     return () => {
-      shadow.removeEventListener("click", activateLink, true);
-      shadow.removeEventListener("auxclick", activateLink, true);
-      shadow.removeEventListener("keydown", activateLink, true);
+      window.removeEventListener("message", onRendererMessage);
     };
-  }, [host, onMailto, slotLightDom, source]);
+  }, [emailDocument, host, onMailtoRef, slotLightDom, source]);
 }
 
 export function HtmlMessage({
@@ -706,18 +1042,29 @@ export function HtmlMessage({
   title,
   showHistoryLabel,
   hideHistoryLabel,
+  remoteContentAllowed = false,
+  loadRemoteContentLabel,
+  onLoadRemoteContent,
   onMailto,
 }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const historyHost = useRef<HTMLDivElement>(null);
+  // Parent Reader state creates a new closure on ordinary rerenders. Commit
+  // the bridge callback after React has committed the matching visible tree.
+  // Writing this ref during render would let an abandoned concurrent render
+  // redirect the frame that remains visible.
+  const onMailtoRef = useRef(onMailto);
+  useLayoutEffect(() => {
+    onMailtoRef.current = onMailto;
+  }, [onMailto]);
   const historyId = useId();
   const [historyVisible, setHistoryVisible] = useState(false);
   const [darkMode, setDarkMode] = useState(
     () => document.documentElement.dataset.mantineColorScheme === "dark",
   );
   const email = useMemo(
-    () => buildEmailDocument(html, darkMode),
-    [darkMode, html],
+    () => buildEmailDocument(html, darkMode, remoteContentAllowed),
+    [darkMode, html, remoteContentAllowed],
   );
 
   useEffect(() => {
@@ -735,8 +1082,20 @@ export function HtmlMessage({
   }, []);
 
   useEffect(() => setHistoryVisible(false), [html]);
-  useShadowEmailDocument(host, email.source, true, onMailto);
-  useShadowEmailDocument(historyHost, email.historySource, false, onMailto);
+  useSandboxedEmailDocument(
+    host,
+    email.document,
+    email.source,
+    true,
+    onMailtoRef,
+  );
+  useSandboxedEmailDocument(
+    historyHost,
+    email.historyDocument,
+    email.historySource,
+    false,
+    onMailtoRef,
+  );
 
   return (
     <div
@@ -746,6 +1105,30 @@ export function HtmlMessage({
       aria-label={title}
       style={{ contain: "layout paint", isolation: "isolate" }}
     >
+      {email.hasBlockedRemoteContent &&
+      onLoadRemoteContent &&
+      loadRemoteContentLabel ? (
+        <button
+          type="button"
+          className="html-message-remote-content-toggle"
+          onClick={onLoadRemoteContent}
+          style={{
+            background: "var(--dakia-email-control-surface)",
+            borderColor: "var(--dakia-email-control-border)",
+            borderStyle: "solid",
+            borderWidth: 1,
+            borderRadius: 8,
+            color: "var(--dakia-email-control-ink)",
+            cursor: "pointer",
+            font: "inherit",
+            marginTop: 8,
+            minHeight: 36,
+            padding: "6px 10px",
+          }}
+        >
+          {loadRemoteContentLabel}
+        </button>
+      ) : null}
       {email.historySource && (
         <div style={{ marginTop: 8 }}>
           <button
@@ -756,10 +1139,12 @@ export function HtmlMessage({
             onClick={() => setHistoryVisible((visible) => !visible)}
             style={{
               alignItems: "center",
-              background: "transparent",
-              border: 0,
+              background: "var(--dakia-email-control-surface)",
+              borderColor: "var(--dakia-email-control-border)",
+              borderStyle: "solid",
+              borderWidth: 1,
               borderRadius: 8,
-              color: "inherit",
+              color: "var(--dakia-email-control-ink)",
               cursor: "pointer",
               display: "inline-flex",
               font: "inherit",

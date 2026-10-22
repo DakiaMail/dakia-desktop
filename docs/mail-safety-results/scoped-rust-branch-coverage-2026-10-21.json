@@ -1,0 +1,124 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-21T07:02:15Z",
+  "lane": "focused-rust-branch-coverage",
+  "status": "passed",
+  "scope": {
+    "description": "Two separate named dakia-core test modules measured production-source branches with fresh coverage profiles.",
+    "notProductWide": true,
+    "reportsAreNotAggregated": true
+  },
+  "toolEnvironment": {
+    "cargoLlvmCov": {
+      "path": "/private/tmp/dakia-mail-safety-tools/bin/cargo-llvm-cov",
+      "version": "0.9.1"
+    },
+    "rustToolchain": {
+      "name": "nightly-aarch64-apple-darwin",
+      "rustc": "1.101.0-nightly (5d8fec066 2026-10-16)",
+      "llvm": "23.1.4",
+      "component": "llvm-tools-aarch64-apple-darwin"
+    },
+    "branchOption": "unstable nightly cargo-llvm-cov option"
+  },
+  "privateCoverageRoot": "/private/tmp/dakia-mail-safety-branch-coverage-2026-10-21",
+  "relevantInputManifest": {
+    "beforePath": "/private/tmp/dakia-mail-safety-branch-coverage-2026-10-21/source-before.sha256",
+    "afterPath": "/private/tmp/dakia-mail-safety-branch-coverage-2026-10-21/source-after.sha256",
+    "beforeSha256": "ca28c361726e8fb0b279c2101592a28022c1f57f4ddffd868a93be52a7b6962b",
+    "afterSha256": "ca28c361726e8fb0b279c2101592a28022c1f57f4ddffd868a93be52a7b6962b",
+    "unchanged": true,
+    "files": [
+      {
+        "path": "Cargo.toml",
+        "sha256": "27a850d744a5c940078c61a77d7cb10d53e2fea8b0c6dea4313b9fab3d48ac66"
+      },
+      {
+        "path": "Cargo.lock",
+        "sha256": "15488306522bcb4858723a227675ebe592360bc8786c6f8950a800550c267c92"
+      },
+      {
+        "path": "crates/dakia-core/Cargo.toml",
+        "sha256": "d140b70921ff31ef176cd6045d332d1bfc0ade4a3fca3ef718df74f4d68d0c31"
+      },
+      {
+        "path": "crates/dakia-core/src/mail.rs",
+        "sha256": "5b2d8209acfc904858bd3f986ed48765d848a4272017f79e08baba588cb802fa"
+      },
+      {
+        "path": "crates/dakia-core/src/storage.rs",
+        "sha256": "82dbccfd4b946ff70617cf6a22894e7c18a8bcaeba3e08dd8f241c70689e82d4"
+      },
+      {
+        "path": "crates/dakia-core/src/tls_certificate_safety_tests.rs",
+        "sha256": "1114b116e3fa8bdb9c085e994394ec5453d0c13c5d24045aa18158214d3fa116"
+      },
+      {
+        "path": "crates/dakia-core/src/storage_fault_tests.rs",
+        "sha256": "9bfff4198f1062e0360bbed40e4ec7baae4aec9eb319f3a60d12f3221af08b5e"
+      }
+    ]
+  },
+  "runs": [
+    {
+      "name": "tls-certificate-safety",
+      "command": "PATH=/private/tmp/dakia-mail-safety-tools/bin:$PATH CARGO_TARGET_DIR=/private/tmp/dakia-mail-safety-branch-coverage-2026-10-21/target cargo +nightly llvm-cov --branch --locked --package dakia-core --lib --json --output-path /private/tmp/dakia-mail-safety-branch-coverage-2026-10-21/tls-certificate-safety.json -- tls_certificate_safety_tests",
+      "tests": {
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0,
+        "filteredOut": 645
+      },
+      "report": {
+        "path": "/private/tmp/dakia-mail-safety-branch-coverage-2026-10-21/tls-certificate-safety.json",
+        "sha256": "297f804ea23278ab1d43c444bf418289a4de7174d216ec40a44b12d1c39bf421"
+      },
+      "runLog": {
+        "path": "/private/tmp/dakia-mail-safety-branch-coverage-2026-10-21/tls-certificate-safety.run-summary.log",
+        "sha256": "f309caa3b0009bdecdedeae08e75b7f5117a755df503253ea37eb736986484d4",
+        "kind": "retrospective-summary",
+        "rawStdoutRetained": false
+      },
+      "productionSourceBranchObservation": {
+        "path": "crates/dakia-core/src/mail.rs",
+        "found": 2126,
+        "covered": 38,
+        "uncovered": 2088,
+        "percent": 1.7873941674506115
+      }
+    },
+    {
+      "name": "storage-fault-recovery",
+      "command": "PATH=/private/tmp/dakia-mail-safety-tools/bin:$PATH CARGO_TARGET_DIR=/private/tmp/dakia-mail-safety-branch-coverage-2026-10-21/target cargo +nightly llvm-cov --branch --locked --package dakia-core --lib --json --output-path /private/tmp/dakia-mail-safety-branch-coverage-2026-10-21/storage-fault-recovery.json -- storage_fault_tests",
+      "tests": {
+        "passed": 22,
+        "failed": 0,
+        "ignored": 0,
+        "filteredOut": 630
+      },
+      "report": {
+        "path": "/private/tmp/dakia-mail-safety-branch-coverage-2026-10-21/storage-fault-recovery.json",
+        "sha256": "848ee51d5569e6f06947b74ed43cb415ae724812b0ed3062302b3f1cbf374cbe"
+      },
+      "runLog": {
+        "path": "/private/tmp/dakia-mail-safety-branch-coverage-2026-10-21/storage-fault-recovery.run-summary.log",
+        "sha256": "bd81148432c4ca4d49162461020fb4123462619ca1ebc972816fd4870d52729a",
+        "kind": "retrospective-summary",
+        "rawStdoutRetained": false
+      },
+      "productionSourceBranchObservation": {
+        "path": "crates/dakia-core/src/storage.rs",
+        "found": 682,
+        "covered": 105,
+        "uncovered": 577,
+        "percent": 15.395894428152491
+      }
+    }
+  ],
+  "limitations": [
+    "cargo-llvm-cov excludes *_tests.rs from reports by default, so observations describe production source exercised by the named test modules.",
+    "The two runs used separate fresh profiles and must not be summed or compared as whole-product coverage.",
+    "The full JSON reports and retrospective run summaries are private temporary artifacts. This durable summary preserves their paths and hashes, but their retention is not guaranteed.",
+    "No whole-workspace Rust branch-coverage run, historical comparison, or coverage threshold claim was made."
+  ]
+}

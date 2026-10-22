@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-10-21T08:09:03Z",
+  "scope": "Preparation-only evidence for the private faithful v0.4.4 to current packaged-GUI forward-upgrade acceptance",
+  "status": "ready-for-parent-invocation",
+  "files": {
+    "helper": {
+      "path": "/private/tmp/dakia-h016-faithful-upgrade.mjs",
+      "sha256": "00079250e9ae21ee557093da555f8bcdfd7c1aa277db13053a01049f83250f97"
+    },
+    "tests": {
+      "path": "/private/tmp/dakia-h016-faithful-upgrade.node-test.mjs",
+      "sha256": "455a0d17a9ec47aa324725316085dd693cf40ddc0c787f20f641b9d72ae4f084"
+    },
+    "faithfulFixture": {
+      "path": "/private/tmp/dakia-forward-upgrade-20261021/h016-faithful-pre-candidate-backup",
+      "databaseSha256": "ce9a8ed68a41013a09c3d25e6d867e3d97aa4e579018a183cf388d232fa73330"
+    },
+    "faithfulProvenance": {
+      "path": "/private/tmp/dakia-forward-upgrade-20261021/h016-evidence/faithful-v044/h016-faithful-profile-report.json",
+      "sha256": "9373ddf1d36769d642668ebff46c7bca82871494fb8253a63838a01a20c6dd03"
+    }
+  },
+  "gates": [
+    {
+      "gate": "Required native and release documents read",
+      "status": "passed",
+      "evidence": [
+        "docs/tauri-dev-ui-verification.md",
+        "docs/publishing-macos-release.md"
+      ]
+    },
+    {
+      "gate": "JavaScript syntax",
+      "status": "passed",
+      "command": "node --check /private/tmp/dakia-h016-faithful-upgrade.mjs && node --check /private/tmp/dakia-h016-faithful-upgrade.node-test.mjs"
+    },
+    {
+      "gate": "Static and rejection suite",
+      "status": "passed",
+      "command": "node --test /private/tmp/dakia-h016-faithful-upgrade.node-test.mjs",
+      "result": "9 passed, 0 failed"
+    },
+    {
+      "gate": "Independent native-release review",
+      "status": "passed",
+      "result": "Approved after two blocker-remediation reviews; current helper and test hashes independently matched"
+    },
+    {
+      "gate": "Application Support mutation",
+      "status": "skipped",
+      "reason": "Preparation task explicitly prohibited Library mutation. No dev.dakia.fictional-packaged-acl.* profile was created."
+    },
+    {
+      "gate": "Candidate build, launch, and native WebKit interaction",
+      "status": "skipped",
+      "reason": "The actual completed packaged ACL candidate does not belong to this preparation phase. Parent performs this only after all source and package gates pass."
+    },
+    {
+      "gate": "Developer ID, notarization, stapling, updater signing, installation, publication",
+      "status": "waived-not-applicable",
+      "reason": "The candidate is a private ad-hoc fixture-enabled debug application. No external release action is authorized."
+    }
+  ],
+  "readyCommands": {
+    "preflight": "node /private/tmp/dakia-h016-faithful-upgrade.mjs preflight --provenance <PACKAGED_ROOT>/artifact-provenance.json --inventory <PACKAGED_ROOT>/app-inventory.json --expected-app-sha <RUNNER_CAPTURED_APP_SHA256> --expected-provenance-sha <CAPTURED_PROVENANCE_SHA256> --expected-inventory-sha <CAPTURED_INVENTORY_SHA256> --expected-bundle-identifier <RUNNER_CAPTURED_UNIQUE_IDENTIFIER> --expected-source-digest <FROZEN_SOURCE_DIGEST>",
+    "prepare": "node /private/tmp/dakia-h016-faithful-upgrade.mjs prepare --provenance <PACKAGED_ROOT>/artifact-provenance.json --inventory <PACKAGED_ROOT>/app-inventory.json --expected-app-sha <RUNNER_CAPTURED_APP_SHA256> --expected-provenance-sha <CAPTURED_PROVENANCE_SHA256> --expected-inventory-sha <CAPTURED_INVENTORY_SHA256> --expected-bundle-identifier <RUNNER_CAPTURED_UNIQUE_IDENTIFIER> --expected-source-digest <FROZEN_SOURCE_DIGEST>",
+    "launch": "node /private/tmp/dakia-h016-faithful-upgrade.mjs launch --evidence-root <PREPARE_OUTPUT_EVIDENCE_ROOT>",
+    "runtime": "node /private/tmp/dakia-h016-faithful-upgrade.mjs attest-runtime --evidence-root <PREPARE_OUTPUT_EVIDENCE_ROOT>",
+    "cuaRecord": "node /private/tmp/dakia-h016-faithful-upgrade.mjs record-cua --evidence-root <PREPARE_OUTPUT_EVIDENCE_ROOT> --observed-url tauri://localhost/ --visible-subject 'Fictional previous-stable upgrade evidence' --visible-body 'Preserve this fictional message across the forward upgrade.' --unread-visible yes --star-visible yes",
+    "incompleteCleanup": "node /private/tmp/dakia-h016-faithful-upgrade.mjs quarantine --evidence-root <PREPARE_OUTPUT_EVIDENCE_ROOT>"
+  },
+  "controls": [
+    "Working-profile SQLite reads are WAL-aware; immutable mode is reserved for the sealed fixture.",
+    "A WAL-only mutation sensitivity test proves the working oracle rejects state an immutable read would miss.",
+    "The helper requires independent hashes for executable, provenance, app inventory, and source snapshot plus the exact unique compiled identifier.",
+    "The complete app bundle inventory, ad-hoc signature, arm64 architecture, executable path and hash are rechecked before launch and after exit.",
+    "HOME is never replaced and must match the current macOS account directory. All specified Dakia test/profile overrides are removed from the inherited launch environment.",
+    "The candidate has a 600-second handoff limit. Failure, signal, timeout, stale evidence, or integrity mismatch cannot seal and triggers exact-child termination followed by owned-profile quarantine.",
+    "Cleanup remains available when candidate or provenance integrity fails, but still requires exact UUID, bundle identifier, immediate Application Support child, control-marker identity, stopped process, and zero open handles.",
+    "The original sealed fixture is revalidated in full at final sealing and never moved or modified."
+  ],
+  "remainingRisk": [
+    "The runtime Internet-socket inventory is point-in-time evidence and cannot by itself exclude a connection that completed before capture. The fixture also has zero credentials, an account confined to loopback port 9, and a candidate overlay with no updater endpoints.",
+    "The CUA observation record is parent-supplied. Final acceptance requires the parent to retain the actual exact-PID, exact-executable, tauri://localhost/ accessibility or screenshot evidence.",
+    "The helper is intentionally limited to private ad-hoc fixture acceptance and provides no public release assurance."
+  ]
+}

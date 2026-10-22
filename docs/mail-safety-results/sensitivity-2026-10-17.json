@@ -1,0 +1,145 @@
+{
+  "schemaVersion": 1,
+  "lane": "deterministic-sensitivity",
+  "baseRevision": "fccbace81192c5b5354f681e2feb2b66971e88cf",
+  "environment": {
+    "platform": "darwin",
+    "architecture": "arm64"
+  },
+  "status": "passed",
+  "experiments": [
+    {
+      "initial": {
+        "scenario": "compose-draft-durability",
+        "mutation": "Skip recovery-state commit before SMTP",
+        "test": "does not invoke SMTP until the sending draft is durably committed",
+        "originalSha256": "ca2e89389c0e3b8e82e0ae0b4fca73390d62ce7d9c2a495efde7457ed0ed9708",
+        "startedAt": "2026-10-17T14:16:10.497046+00:00",
+        "mutantExitCode": 0,
+        "killed": false,
+        "restoredSha256": "ca2e89389c0e3b8e82e0ae0b4fca73390d62ce7d9c2a495efde7457ed0ed9708",
+        "restored": true
+      },
+      "finding": "The synchronous assertion ran before the asynchronous SMTP continuation. The representative broken implementation survived.",
+      "testCorrection": "Flush React async work while the draft commit remains unresolved.",
+      "strengthened": {
+        "scenario": "compose-draft-durability",
+        "mutation": "Skip recovery-state commit before SMTP using an immediately resolved promise",
+        "test": "does not invoke SMTP until the sending draft is durably committed",
+        "originalSha256": "ca2e89389c0e3b8e82e0ae0b4fca73390d62ce7d9c2a495efde7457ed0ed9708",
+        "startedAt": "2026-10-17T14:16:56.553643+00:00",
+        "mutantExitCode": 1,
+        "killed": true,
+        "restoredSha256": "ca2e89389c0e3b8e82e0ae0b4fca73390d62ce7d9c2a495efde7457ed0ed9708",
+        "restored": true
+      },
+      "restoredRun": {
+        "command": [
+          "npx",
+          "vitest",
+          "run",
+          "apps/desktop/src/ComposeApp.test.tsx"
+        ],
+        "exitCode": 0,
+        "passed": 21
+      }
+    },
+    {
+      "strengthened": {
+        "scenario": "recycled-uid-content",
+        "mutation": "Ignore UIDVALIDITY equality while retaining account, mailbox, UID and non-null receipt checks",
+        "test": "native_content_cache_refuses_a_recycled_uidvalidity_target",
+        "originalSha256": "76423986445c7bacd7cf85b3454a34a4155b5f63d88ea21f42d57a6fe7dcf95a",
+        "startedAt": "2026-10-17T14:25:57.312084+00:00",
+        "mutantExitCode": 101,
+        "killed": true,
+        "restoredSha256": "76423986445c7bacd7cf85b3454a34a4155b5f63d88ea21f42d57a6fe7dcf95a",
+        "restored": true
+      },
+      "restoredRun": {
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "dakia-desktop",
+          "native_content_cache_refuses_a_recycled_uidvalidity_target",
+          "--",
+          "--nocapture"
+        ],
+        "exitCode": 0,
+        "passed": 1
+      }
+    },
+    {
+      "initial": {
+        "scenario": "duplicate-send-journal",
+        "mutation": "Allow an existing pending send attempt to poll SMTP again",
+        "test": "native_send_attempt_submits_once_across_windows_and_reopen",
+        "originalSha256": "76423986445c7bacd7cf85b3454a34a4155b5f63d88ea21f42d57a6fe7dcf95a",
+        "startedAt": "2026-10-17T14:27:43.868632+00:00",
+        "mutantExitCode": 0,
+        "killed": false,
+        "restoredSha256": "76423986445c7bacd7cf85b3454a34a4155b5f63d88ea21f42d57a6fe7dcf95a",
+        "restored": true
+      },
+      "finding": "A scheduler yield did not ensure that the second claim ran while the first submission remained pending. The representative broken implementation survived.",
+      "testCorrection": "Use two independent Store handles and a oneshot barrier that holds the first submission pending until the second claim resolves.",
+      "strengthened": {
+        "scenario": "duplicate-send-journal",
+        "mutation": "Allow an existing pending send attempt to poll SMTP again",
+        "test": "native_send_attempt_submits_once_across_windows_and_reopen",
+        "originalSha256": "76423986445c7bacd7cf85b3454a34a4155b5f63d88ea21f42d57a6fe7dcf95a",
+        "startedAt": "2026-10-17T14:29:14.422934+00:00",
+        "mutantExitCode": 101,
+        "killed": true,
+        "restoredSha256": "76423986445c7bacd7cf85b3454a34a4155b5f63d88ea21f42d57a6fe7dcf95a",
+        "restored": true
+      },
+      "restoredRun": {
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "dakia-desktop",
+          "native_send_attempt_submits_once_across_windows_and_reopen",
+          "--",
+          "--nocapture"
+        ],
+        "exitCode": 0,
+        "passed": 1
+      }
+    },
+    {
+      "strengthened": {
+        "scenario": "restored-compose-body",
+        "mutation": "Keep the rendered rich-text editor empty instead of restoring its HTML",
+        "test": "restores an uncertain draft and attachment after reload without another submission",
+        "originalSha256": "461d77feee81bd872036aa3bd4e69baa4b855a9e042b6cb0962e283290db47c4",
+        "startedAt": "2026-10-17T19:15:51.299182+00:00",
+        "mutantExitCode": 1,
+        "killed": true,
+        "restoredSha256": "461d77feee81bd872036aa3bd4e69baa4b855a9e042b6cb0962e283290db47c4",
+        "restored": true
+      },
+      "restoredRun": {
+        "command": [
+          "npx",
+          "vitest",
+          "run",
+          "apps/desktop/src/ComposeApp.test.tsx",
+          "-t",
+          "restores an uncertain draft and attachment after reload without another submission"
+        ],
+        "exitCode": 0,
+        "passed": 1
+      },
+      "purpose": "The readiness wait still detects a genuinely missing restored editor body."
+    }
+  ],
+  "limitations": [
+    "Only the four listed representative mutations are established by this report.",
+    "No production mail or credentials were used."
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "date": "2026-10-20",
+  "status": "passed",
+  "registry": "https://registry.npmjs.org",
+  "userDisclosureApproval": true,
+  "command": "npm audit --package-lock-only --ignore-scripts --audit-level=low --registry=https://registry.npmjs.org --json",
+  "metadata": {
+    "vulnerabilities": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 0,
+      "critical": 0,
+      "total": 0
+    },
+    "dependencies": {
+      "prod": 56,
+      "dev": 208,
+      "optional": 63,
+      "peer": 8,
+      "peerOptional": 0,
+      "total": 263
+    }
+  },
+  "error": null
+}

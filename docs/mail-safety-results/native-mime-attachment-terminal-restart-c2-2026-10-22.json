@@ -1,0 +1,154 @@
+{
+  "schemaVersion": 1,
+  "status": "passed-bounded-c2-native-slice",
+  "recordedAtUtc": "2026-10-22T07:56:45.901Z",
+  "scope": "A same-identity c2 packaged fictional-app replay covering exact MIME rejection, two attachment saves, one terminal Sent-copy failure, one watcher arrival and one same-profile relaunch. This is bounded native evidence, not complete native, provider, release, or original 69-gap acceptance.",
+  "sourceTree": {
+    "digest": "c2e8ba357d822b2ef086e497916e77f6555a422605e7a4b99acfb1e81e379888",
+    "fileCount": 956
+  },
+  "candidate": {
+    "desktopSha256": "cd95321034cadd8d601656b3a967ef5eb9d930ffc46dbbfb836ccbbdc993ca40",
+    "mainPid": 1518,
+    "restartPid": 2359,
+    "mainExitCode": 0,
+    "restartMonitorExitCode": 0,
+    "testedExecutable": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.aMUhgB/tested-approved-candidate.app/Contents/MacOS/dakia-desktop",
+      "bytes": 107980816,
+      "sha256": "cd95321034cadd8d601656b3a967ef5eb9d930ffc46dbbfb836ccbbdc993ca40"
+    },
+    "restoredApprovedExecutable": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/Dakia Fictional Provider Reader.app/Contents/MacOS/dakia-desktop",
+      "bytes": 127392432,
+      "sha256": "2cc898a0691f8f9f3b015b33f841fca2847b7afca99b8a2c267c42a2e74c12f1"
+    }
+  },
+  "mime": {
+    "status": "passed",
+    "sequence": [4, 8, 5, 8, 6, 8, 7, 8],
+    "rejectedSeedUids": [4, 5, 6, 7],
+    "validNeighborUid": 8,
+    "hydrationCyclesPerRejectedSeed": 2,
+    "cacheProtection": "four rejected seeds have no content cache and no attachments; valid neighbor remains cached",
+    "evidence": {
+      "acceptance": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.aMUhgB/exact-mime-phase-snapshot-immutable-v3/exact-mime-native-acceptance.json",
+        "sha256": "afed88c12a645fda927fbeb94a09bf29e962a8fbc24bce5fb467d1b067979872"
+      },
+      "phaseSnapshot": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.aMUhgB/exact-mime-phase-snapshot-immutable-v3/phase-snapshot-receipt.json",
+        "sha256": "1597610dee53460af7ed2483f64fe5dcf48fb9d6435a8a88a4fe523ee493e599"
+      },
+      "mainCaptures": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.aMUhgB/native-main-cua-capture-index.json",
+        "sha256": "0696261e6e466a7d138597cd813a771658b893ef33cf97ec61aedc3357d9e90b"
+      }
+    },
+    "verification": "The reviewed sealer passed once before restart. The verifier passed before and after relaunch, before original-identity restoration."
+  },
+  "attachments": {
+    "status": "passed",
+    "warningPersistenceObserved": true,
+    "noConsentContacts": 0,
+    "safeSave": {
+      "bytes": 32,
+      "sha256": "666dec5256feac267cd6c46b97107397c0a87fcde80a932321819f5a1cf2955e",
+      "mode": "0600",
+      "quarantine": "0081;6ad9c080;Dakia;"
+    },
+    "leafSymlink": {
+      "savedBytes": "28",
+      "savedSha256": "1679a56fbd964b0463ec644f56fa9a3189d1402343de932a66b210586d00c02f",
+      "savedMode": "600",
+      "quarantine": "0081;6ad9c070;Dakia;",
+      "canarySha256": "af0fb29d777c7bfea075bfff6615c174e9c4236bd770ccc05d1f7943fdfe6faf"
+    },
+    "evidence": {
+      "safeSave": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.aMUhgB/native-safe-attachment-save.json",
+        "sha256": "343d3c27586d864cf58b7d9f8560241047aad16bb67f596e536c9ed51dddf59e"
+      },
+      "leafCheck": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.aMUhgB/native-attachment-fault-evidence/leaf-check.json",
+        "sha256": "f90c2a0aea7705d36227867e92655da7d06312fe770da5e333422e84e8e98c40"
+      },
+      "noConsentCounter": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.aMUhgB/native-no-consent-network-counter.json",
+        "sha256": "8cb58ac64eaf25e9e86385822c5cef662b60b3a18030a5236b9a37aaa94da185"
+      }
+    }
+  },
+  "terminalSentCopyRecovery": {
+    "status": "passed-bounded-slice",
+    "observed": "One user-initiated fictional Send action produced the Sent-copy-failure UI, disabled repeat keyboard send, and left one view-only Outbox recovery row. IMAP resume delivered watcher UID 9 to Reader without a manual Sync action.",
+    "restart": {
+      "status": "passed",
+      "claim": "same-profile terminal Sent-copy recovery remained viewable after one normal packaged relaunch, with Send disabled and no user-initiated send action in the observed flow",
+      "attemptId": "747ba3f4-c7a7-4196-9862-876e616262e7",
+      "accountId": "62a9320c-04f5-47c2-b4fa-d4952f0b6121",
+      "sendAction": "not-performed-by-user",
+      "uid": 9,
+      "rawBytes": 1067,
+      "rawMessageSha256": "5efbdbc568332b4105413fc74ea381e7f8beee53ce484f794ada11d3884b8683",
+      "bodySha256": "2246d029a326e0c6550035069e5ba7b06569002200b9610694a995f37bf10839",
+      "beforeAfterMatch": true
+    },
+    "evidence": {
+      "relaunch": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.aMUhgB/native-same-profile-relaunch/final-report.json",
+        "sha256": "3d7fa11d6b7c83392529209de7755bd93a543b754b427bc5c05ba5cb540ab4da"
+      },
+      "imapBefore": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.aMUhgB/terminal-recovery-imap-before.json",
+        "sha256": "d50e3e5d0967c162860030185510516e05da5f3d180ca31122c47a65dedbb5f1"
+      },
+      "imapAfter": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.aMUhgB/terminal-recovery-imap-after.json",
+        "sha256": "16084ff0d9dc7fc1b6c0c8d66976e8a18d0787b0679d471a8575ee9aff1336a7"
+      },
+      "restartCaptures": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.aMUhgB/native-restart-cua-capture-index.json",
+        "sha256": "536bf9c182076476d95caeadc0aa3da78bd50348e89406a1d4b1cc194901071d"
+      }
+    }
+  },
+  "cleanup": {
+    "status": "approved original identity restored",
+    "evidence": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.aMUhgB/approved-identity-swap-01293283-5ad5-4a02-8c8e-0e91d6a24233-restored.json",
+      "sha256": "c336d79ec1117fe47540a4430856b3dad762b1c7cb66c0aa446ec5fa28855e1b"
+    },
+    "note": "The retained tested candidate has the bound c2 executable hash. The held approved app path was restored to its original executable after the verifier had completed."
+  },
+  "limitations": [
+    "No before-and-after SMTP transaction or recipient-mailbox watermark was captured, so this does not prove the absence of every automatic resend.",
+    "This does not prove retryable not-submitted recovery, broad provider behavior, all attachment interruptions, a user cancellation flow, or a full MIME corpus.",
+    "The current deep, provider, performance and audit lanes remain tied to earlier source revisions unless separately rerun and bound.",
+    "The original 69-gap programme is not complete. Catalogue status/counts are unchanged by this bounded native slice.",
+    "The zero-contact counter covers only the controlled HTTP and TLS fixture endpoints during the observed pre-consent window. It is not a global operating-system network capture."
+  ],
+  "sourceProvenance": {
+    "preparationReceipt": {
+      "path": "/private/tmp/dakia-c2-native-exact-mime-seed-preparation-20261022/native-provider-reader-exact-mime-c2.sh.receipt.json",
+      "sha256": "77a6353c346daac7ad99c0995f22640c3c3dbd7d70e89ff3042cfb9d1b27768f"
+    },
+    "positiveNormalBoot": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.aMUhgB/positive-normal-boot.json",
+      "sha256": "7af3c3e38328559639597826587d3be530deaa97f14c59f495436c8f6ebce42f"
+    },
+    "sourceBeforeBuild": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.aMUhgB/source-before-build.json",
+      "sha256": "ddc45b6373c89aed3a1f21be543cef8b3f17c22b2bf2777a1d33db55484acefa"
+    },
+    "sourceAfterBuild": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.aMUhgB/source-after-build.json",
+      "sha256": "81ff86fcbada58c3d8959bc98a0365f343b5d1cd24a0226be82be4693bce1f49"
+    },
+    "assertion": "The preparation receipt and both build snapshots bind the exact-MIME overlay to c2/956 before launch and after the native run.",
+    "sourceAfterRun": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.aMUhgB/source-after-run.json",
+      "sha256": "81ff86fcbada58c3d8959bc98a0365f343b5d1cd24a0226be82be4693bce1f49"
+    }
+  }
+}

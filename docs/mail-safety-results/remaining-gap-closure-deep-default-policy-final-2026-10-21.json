@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "lane": "deep",
+  "revision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "workingTree": "modified or unavailable",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "14081b6cb59e0ea43082ef5b2edd1dccba85736dfd17ce4674cf36042c7de308",
+    "fileCount": 933
+  },
+  "environment": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "node": "v22.23.2"
+  },
+  "startedAt": "2026-10-21T15:04:10.607Z",
+  "finishedAt": "2026-10-21T15:06:15.736Z",
+  "status": "passed",
+  "runs": [
+    {
+      "iteration": 1,
+      "status": "passed",
+      "commands": [
+        {
+          "command": "bash",
+          "args": [
+            "scripts/mail-safety-servers.sh",
+            "all"
+          ],
+          "startedAt": "2026-10-21T15:04:10.608Z",
+          "finishedAt": "2026-10-21T15:04:23.828Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "bash",
+          "args": [
+            "scripts/run-mail-safety-fuzz.sh",
+            "30"
+          ],
+          "startedAt": "2026-10-21T15:04:23.828Z",
+          "finishedAt": "2026-10-21T15:06:15.736Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "This deep lane does not establish native, live-provider, packaged-release, or performance acceptance."
+  ],
+  "sourceTreeAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "14081b6cb59e0ea43082ef5b2edd1dccba85736dfd17ce4674cf36042c7de308",
+    "fileCount": 933
+  }
+}

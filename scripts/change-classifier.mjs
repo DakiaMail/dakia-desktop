@@ -7,6 +7,7 @@ const ACTIVE_SCOPES = [
   "mail-boundary",
   "tauri-boundary",
   "release-only",
+  "dependency-audit",
 ];
 
 const DOCS_OR_METADATA = [
@@ -18,10 +19,98 @@ const DOCS_OR_METADATA = [
   /^\.github\/(?:CODEOWNERS|dependabot\.yml|pull_request_template\.md|ISSUE_TEMPLATE\/)/,
 ];
 
+const MAIL_SAFETY_CATALOGUE = new Set([
+  "testdata/mail-safety-catalogue.json",
+  "docs/mail-safety-test-catalogue.md",
+  "docs/mail-safety-evidence.md",
+]);
+
+// The standards matrix is a source-level assurance contract. Its validator
+// sensitivity tests also run through the release-script glob, so changes must
+// select both the mail boundary and that existing contract-test lane.
+const MAIL_STANDARDS_CONTRACT = new Set([
+  "testdata/mail-standards-requirements.json",
+  "scripts/validate-mail-standards-requirements.mjs",
+  "scripts/validate-mail-standards-requirements.node-test.mjs",
+]);
+
+const MAIL_STANDARDS_PROFILE = "docs/mail-safety-standards-profile.md";
+
 const MAIL_CORE =
   /^crates\/dakia-core\/(?:src\/(?:mail|storage|provider|mime_budget|classification|flowed|oauth|ai)\.rs|testdata\/|tests\/)/;
 const MAIL_FRONTEND =
   /^apps\/desktop\/src\/(?:api(?:MessageContent)?|types|App|components\/(?:HtmlMessage|Reader))(?:\.test)?\.(?:ts|tsx)$/;
+
+// These runners join core/Tauri/frontend stages with nonce-bound artifacts.
+// Their inputs must select every existing validation scope their runner uses,
+// otherwise a changed fixture runner could skip the coupled Tauri boundary.
+const TAURI_ARTIFACT_RUNNER_SCOPES = new Map([
+  [
+    "scripts/test-mime-reader-artifact.mjs",
+    ["rust-core", "frontend", "mail-boundary", "tauri-boundary"],
+  ],
+  [
+    "scripts/test-attachment-command-artifact.mjs",
+    ["rust-core", "frontend", "mail-boundary", "tauri-boundary"],
+  ],
+  [
+    "scripts/test-mail-command-tls.mjs",
+    ["rust-core", "mail-boundary", "tauri-boundary"],
+  ],
+  [
+    "scripts/test-unsubscribe-command-tls.mjs",
+    ["rust-core", "mail-boundary", "tauri-boundary"],
+  ],
+  [
+    "scripts/test-unsubscribe-command-tls.node-test.mjs",
+    ["rust-core", "mail-boundary", "tauri-boundary", "release-only"],
+  ],
+  [
+    "scripts/unsubscribe-command-tls-fixture-server.mjs",
+    ["rust-core", "mail-boundary", "tauri-boundary"],
+  ],
+  [
+    "scripts/unsubscribe-command-tls-fixture-server.node-test.mjs",
+    ["rust-core", "mail-boundary", "tauri-boundary", "release-only"],
+  ],
+  [
+    "scripts/fixture-process-lifecycle.mjs",
+    [
+      "rust-core",
+      "frontend",
+      "mail-boundary",
+      "tauri-boundary",
+      "release-only",
+    ],
+  ],
+  [
+    "scripts/attachment-command-fixture-server.mjs",
+    ["rust-core", "frontend", "mail-boundary", "tauri-boundary"],
+  ],
+  [
+    "scripts/mail-command-tls-fixture-server.mjs",
+    ["rust-core", "mail-boundary", "tauri-boundary"],
+  ],
+]);
+
+const TAURI_ARTIFACT_COMPONENTS = new Set([
+  "apps/desktop/src/components/mimeReaderArtifact.test.tsx",
+  "apps/desktop/src/components/mimeCorpusHandoff.test.tsx",
+  "apps/desktop/src/components/attachmentCommandArtifact.test.tsx",
+  "crates/dakia-core/src/mail/tests/mime_tauri_artifact_export_tests.rs",
+  "crates/dakia-core/src/native_mail_safety_unsubscribe_fixture.rs",
+  "apps/desktop/src-tauri/src/unsubscribe_command_tls_tests.rs",
+  "crates/dakia-core/src/lib.rs",
+]);
+
+// These Tauri artifacts carry mail protocol data through the command boundary.
+// The generic Tauri path branch supplies rust-core and tauri-boundary; it does
+// not otherwise know that these two files also require mail-boundary checks.
+const MAIL_TAURI_ARTIFACT_COMPONENTS = new Set([
+  "crates/dakia-core/src/native_mail_safety_unsubscribe_fixture.rs",
+  "apps/desktop/src-tauri/src/unsubscribe_command_tls_tests.rs",
+  "crates/dakia-core/src/lib.rs",
+]);
 
 function matches(path, patterns) {
   return patterns.some((pattern) => pattern.test(path));
@@ -47,7 +136,15 @@ export function classifyPaths(paths) {
   );
   let requiresLfs = false;
 
-  if (docsOnly) {
+  // The catalogue is documentation-shaped, but changing it changes a
+  // source-level assurance declaration. Do not let it bypass its validator.
+  if (
+    docsOnly &&
+    !normalizedPaths.some(
+      (path) =>
+        MAIL_SAFETY_CATALOGUE.has(path) || path === MAIL_STANDARDS_PROFILE,
+    )
+  ) {
     return {
       changedPaths: normalizedPaths,
       docsOnly: true,
@@ -57,6 +154,23 @@ export function classifyPaths(paths) {
   }
 
   for (const path of normalizedPaths) {
+    const artifactScopes = TAURI_ARTIFACT_RUNNER_SCOPES.get(path);
+    if (artifactScopes) {
+      for (const scope of artifactScopes) scopes[scope] = true;
+      continue;
+    }
+
+    if (TAURI_ARTIFACT_COMPONENTS.has(path)) {
+      scopes["tauri-boundary"] = true;
+      if (
+        path.startsWith("crates/dakia-core/") ||
+        MAIL_TAURI_ARTIFACT_COMPONENTS.has(path)
+      ) {
+        scopes["mail-boundary"] = true;
+      }
+      // The generic path branch below selects the source language boundary.
+    }
+
     if (
       path === "Cargo.toml" ||
       path === "Cargo.lock" ||
@@ -70,6 +184,41 @@ export function classifyPaths(paths) {
       path === "scripts/change-classifier.node-test.mjs"
     ) {
       Object.assign(scopes, allActiveScopes());
+      continue;
+    }
+
+    // A crates.io path patch has no registry source checksum in Cargo.lock.
+    // Its provenance manifest and verifier are therefore part of the
+    // dependency-security boundary and must not be able to skip that gate.
+    if (
+      path === ".cargo/audit.toml" ||
+      path === "scripts/audit-dependencies.sh" ||
+      path.startsWith("scripts/verify-vendored-crates.") ||
+      path.startsWith("testdata/vendored-crates/") ||
+      path.startsWith("vendor/")
+    ) {
+      Object.assign(scopes, allActiveScopes());
+      continue;
+    }
+
+    if (
+      MAIL_SAFETY_CATALOGUE.has(path) ||
+      path.startsWith("scripts/mail-safety-catalogue.") ||
+      path.startsWith("scripts/validate-mail-safety-catalogue.") ||
+      path.startsWith("scripts/report-mail-safety-catalogue.")
+    ) {
+      scopes["mail-boundary"] = true;
+      continue;
+    }
+
+    if (MAIL_STANDARDS_CONTRACT.has(path)) {
+      scopes["mail-boundary"] = true;
+      scopes["release-only"] = true;
+      continue;
+    }
+
+    if (path === MAIL_STANDARDS_PROFILE) {
+      scopes["mail-boundary"] = true;
       continue;
     }
 
@@ -140,6 +289,11 @@ export function classifyPaths(paths) {
     }
 
     if (path.startsWith("scripts/tauri-contract-inventory.")) {
+      scopes["tauri-boundary"] = true;
+      continue;
+    }
+
+    if (path === "scripts/test-realtime-delivery.mjs") {
       scopes["tauri-boundary"] = true;
       continue;
     }

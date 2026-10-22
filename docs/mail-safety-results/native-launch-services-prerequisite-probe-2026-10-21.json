@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T16:45:40.306820+00:00",
+  "lane": "native-prerequisite-read-only",
+  "status": "blockers-confirmed",
+  "bundleIdentifier": "dev.dakia.fictional-provider-reader.run-OTAMH2",
+  "actions": [
+    "Read installed mac-notification-sys setApplication implementation.",
+    "Run fixed /usr/bin/swift CoreServices lookup without registering or launching any app.",
+    "Repeat lookup with an isolated mktemp module cache under /private/tmp after default cache was denied."
+  ],
+  "results": {
+    "defaultSwiftCache": "Denied by filesystem sandbox at /Users/arsalan/.cache/clang/ModuleCache; no successful lookup.",
+    "isolatedSwiftCache": "Lookup completed with NO_REGISTERED_APPLICATION.",
+    "dependencyBehavior": "setApplication returns false if LSCopyApplicationURLsForBundleIdentifier yields no registered application."
+  },
+  "conclusion": "Missing temporary-app registration is consistent with the actual packaged notification setup failure. The harness must also keep Swift cache writes inside its owned run root.",
+  "limitations": [
+    "No LaunchServices registration occurred.",
+    "No Dakia launch, UI, WebKit, notification delivery or mailbox action occurred.",
+    "This probe inspects current registration state, not a captured internal trace from the aborted process."
+  ]
+}

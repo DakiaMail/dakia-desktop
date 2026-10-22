@@ -96,6 +96,16 @@ test("maps Rust command parameters to frontend keys and excludes injected parame
   });
 });
 
+test("parses crate-visible production commands", () => {
+  assert.deepEqual(
+    extractRustCommandParameters(`
+      #[tauri::command]
+      pub(crate) async fn read_send_recovery_seed(recovery_key: String, state: State<'_, AppState>) -> Result<(), String> { Ok(()) }
+    `),
+    { read_send_recovery_seed: ["recoveryKey"] },
+  );
+});
+
 test("parses Rust handler macros and native event constants", () => {
   const source = `
     const RECEIPT: &str = "dakia://receipt";
@@ -136,6 +146,99 @@ test("parses frontend event listener and cross-window emitter argument positions
     "webview-event",
   ]);
   assert.deepEqual(extractFrontendEmitters(source), ["frontend-event"]);
+});
+
+test("requires a declared frontend coordination event to have both endpoints", () => {
+  const inventory = {
+    frontendInvokes: [],
+    frontendInvokeRequests: [],
+    rustHandlers: [],
+    rustCommandParameters: {},
+    rustNativeEmits: [],
+    frontendListeners: ["reader-ready"],
+    frontendEmitters: ["reader-ready"],
+  };
+  const contract = {
+    schemaVersion: 1,
+    demoOnlyInvokes: [],
+    eventOrigins: { "reader-ready": "frontend" },
+  };
+
+  assert.deepEqual(validateInventory(inventory, contract), []);
+
+  assert.match(
+    validateInventory({ ...inventory, frontendListeners: [] }, contract).join(
+      "\n",
+    ),
+    /frontend event classifications missing: reader-ready/,
+  );
+  assert.match(
+    validateInventory({ ...inventory, frontendEmitters: [] }, contract).join(
+      "\n",
+    ),
+    /frontend emitted events vs frontend listeners missing: reader-ready/,
+  );
+});
+
+test("requires both private window-handoff endpoints", () => {
+  const inventory = {
+    frontendInvokes: [],
+    frontendInvokeRequests: [],
+    rustHandlers: [],
+    rustCommandParameters: {},
+    rustNativeEmits: [],
+    frontendListeners: ["compose-ready", "compose-target"],
+    frontendEmitters: ["compose-ready", "compose-target"],
+  };
+  const contract = {
+    schemaVersion: 1,
+    demoOnlyInvokes: [],
+    eventOrigins: { "compose-ready": "frontend", "compose-target": "frontend" },
+  };
+  assert.deepEqual(validateInventory(inventory, contract), []);
+  assert.match(
+    validateInventory(
+      { ...inventory, frontendEmitters: ["compose-ready"] },
+      contract,
+    ).join("\n"),
+    /frontend emitted events vs frontend listeners missing: compose-target/,
+  );
+  assert.match(
+    validateInventory(
+      { ...inventory, frontendListeners: ["compose-target"] },
+      contract,
+    ).join("\n"),
+    /frontend event classifications missing: compose-ready/,
+  );
+});
+
+test("requires all three endpoints for bidirectional lifecycle events", () => {
+  const inventory = {
+    frontendInvokes: [],
+    frontendInvokeRequests: [],
+    rustHandlers: [],
+    rustCommandParameters: {},
+    rustNativeEmits: ["outbox-changed"],
+    frontendListeners: ["outbox-changed"],
+    frontendEmitters: ["outbox-changed"],
+  };
+  const contract = {
+    schemaVersion: 1,
+    demoOnlyInvokes: [],
+    eventOrigins: { "outbox-changed": "bidirectional" },
+  };
+  assert.deepEqual(validateInventory(inventory, contract), []);
+  for (const key of [
+    "rustNativeEmits",
+    "frontendListeners",
+    "frontendEmitters",
+  ]) {
+    assert.match(
+      validateInventory({ ...inventory, [key]: [] }, contract).join("\n"),
+      /outbox-changed/,
+      `${key} is mandatory for a bidirectional lifecycle event`,
+    );
+  }
 });
 
 test("reports command, origin, and event drift with demo-only exclusions explicit", () => {

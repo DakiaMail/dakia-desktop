@@ -1,0 +1,8 @@
+Content-Type:multipart;boundary=outer
+
+--outerContent-Type:message/rfc822
+
+Content-Type:message/rfc822
+
+
+--outer--

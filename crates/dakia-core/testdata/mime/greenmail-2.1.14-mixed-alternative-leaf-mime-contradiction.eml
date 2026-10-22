@@ -1,0 +1,28 @@
+Return-Path: <fictional-reader@localhost>
+Received: from 192.0.2.1 (HELO fixture.example.test); Wed Oct 21 22:19:47 UTC 2026
+From: "Fictional Reader" <fictional-reader@localhost>
+Subject: Dakia fictional held-sync single-send 8VRoLm
+To: fictional-reader@localhost
+MIME-Version: 1.0
+Date: Wed, 21 Oct 2026 22:19:47 +0000
+Content-Type: multipart/mixed;
+ boundary="h31i6HiogmhGLvvmyZeUtGNb54SJ9QdrknPspbz1"
+
+--h31i6HiogmhGLvvmyZeUtGNb54SJ9QdrknPspbz1
+Content-Type: multipart/alternative;
+ boundary="lsuiFkGwC3aYPCzfOOXQAmDjU18CrsM9KqFFSB0h"
+
+--lsuiFkGwC3aYPCzfOOXQAmDjU18CrsM9KqFFSB0h
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+One isolated fictional message for native send outcome acceptance. Do not r=
+esend.
+--lsuiFkGwC3aYPCzfOOXQAmDjU18CrsM9KqFFSB0h
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+One isolated fictional message for native send outcome acceptance. Do not r=
+esend.
+--lsuiFkGwC3aYPCzfOOXQAmDjU18CrsM9KqFFSB0h--
+--h31i6HiogmhGLvvmyZeUtGNb54SJ9QdrknPspbz1--

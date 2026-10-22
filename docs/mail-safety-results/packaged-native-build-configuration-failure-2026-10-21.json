@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T15:38:09.247560+00:00",
+  "lane": "packaged-native-provider-reader",
+  "status": "failed-before-launch",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+    "fileCount": 933
+  },
+  "harnessRoot": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.a3kXDF",
+  "buildExitCode": 1,
+  "failure": {
+    "kind": "generated-fixture-configuration-compile-error",
+    "rustCode": "E0308",
+    "entryPoint": "apps/desktop/src-tauri/src/lib.rs:104 tauri::generate_context!()",
+    "expected": "[u8;16]",
+    "generated": "Vec<u8>",
+    "scope": "Per-run main-window WebKit data-store identifier in generated packaged fixture configuration."
+  },
+  "appLaunched": false,
+  "uiAccessed": false,
+  "log": {
+    "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.a3kXDF/tauri-build.log",
+    "bytes": 11849,
+    "sha256": "33fa305133c9fd723301b7ecf2c3877dd0dc1d6b00b95c8bb6fd718a20cfd990"
+  },
+  "limitations": [
+    "Passing source suites did not compile this generated native fixture configuration.",
+    "No packaged ACL, WebKit rendering, attachment saving or upgrade acceptance is established by this failed invocation.",
+    "Retain the previous c47 unchanged-source and deep/performance evidence separately; the repair will require new validation."
+  ],
+  "approvedIdentityAfterFailure": {
+    "executableSha256": "2cc898a0691f8f9f3b015b33f841fca2847b7afca99b8a2c267c42a2e74c12f1",
+    "matchesSealedOriginal": true,
+    "activeSwapJournalPresent": false
+  }
+}

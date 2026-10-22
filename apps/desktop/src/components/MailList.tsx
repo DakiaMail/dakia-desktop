@@ -36,6 +36,7 @@ import {
 import { useTranslation } from "react-i18next";
 import type { PendingMailActions } from "../mailActions";
 import { cleanEmailSnippet } from "../snippet";
+import { mailTimestampForDisplay, UNKNOWN_MAIL_DATE } from "../mailTimestamp";
 import type {
   MailCategory,
   MailListView,
@@ -50,6 +51,8 @@ import { EmptyState } from "./EmptyState";
 
 type Props = {
   threads: MailThread[];
+  supplementaryContent?: React.ReactNode;
+  suppressEmptyState?: boolean;
   activeThreadId?: string;
   selected: Set<string>;
   query: string;
@@ -57,6 +60,7 @@ type Props = {
   loadingMore: boolean;
   hasMore: boolean;
   remoteSearchUnavailable: boolean;
+  remoteSearchLimitReached?: boolean;
   syncStatus?: SyncStatus;
   classifying: boolean;
   lastSyncAt?: string;
@@ -95,6 +99,8 @@ type Props = {
 
 export function MailList({
   threads,
+  supplementaryContent,
+  suppressEmptyState = false,
   activeThreadId,
   selected,
   query,
@@ -102,6 +108,7 @@ export function MailList({
   loadingMore,
   hasMore,
   remoteSearchUnavailable,
+  remoteSearchLimitReached = false,
   syncStatus,
   classifying,
   lastSyncAt,
@@ -229,6 +236,11 @@ export function MailList({
             {t("search.localOnly")}
           </div>
         ) : null}
+        {query.trim() && remoteSearchLimitReached ? (
+          <div className="search-scope-notice" role="status">
+            {t("search.serverLimit")}
+          </div>
+        ) : null}
         {syncStatus ? <SyncIndicator status={syncStatus} compact /> : null}
         {classifying ? (
           <div className="classification-indicator" role="status">
@@ -279,6 +291,7 @@ export function MailList({
         ) : null}
       </header>
       <div className="mail-scroll" onScroll={loadNearEnd}>
+        {supplementaryContent}
         {syncStatus && displayedThreads.length === 0 ? (
           <div className="sync-empty" role="status" aria-live="polite">
             <div className="sync-empty-symbol">
@@ -293,10 +306,21 @@ export function MailList({
             <Loader size="sm" />
           </div>
         ) : null}
-        {!loading && !syncStatus && displayedThreads.length === 0 ? (
+        {!loading &&
+        !syncStatus &&
+        !suppressEmptyState &&
+        displayedThreads.length === 0 ? (
           <EmptyState
-            title={t("search.emptyTitle")}
-            body={t("search.emptyBody")}
+            title={t(
+              query.trim() && remoteSearchUnavailable
+                ? "search.localEmptyTitle"
+                : "search.emptyTitle",
+            )}
+            body={t(
+              query.trim() && remoteSearchUnavailable
+                ? "search.localEmptyBody"
+                : "search.emptyBody",
+            )}
           />
         ) : null}
         {view === "smart" && smartInbox ? (
@@ -396,7 +420,15 @@ function SmartThreadSections(
         <div className="smart-section-header">
           <span>{t(labels[id])}</span>
         </div>
-        <ThreadRows {...props} threads={threads} />
+        <ThreadRows
+          {...props}
+          threads={threads}
+          exitingThreadIds={
+            ["starred", "seen"].includes(id)
+              ? undefined
+              : props.exitingThreadIds
+          }
+        />
         {nextCursor ? (
           <button
             className="smart-section-more"
@@ -761,7 +793,8 @@ function syncDetail(
 }
 
 function dateLabel(value: string) {
-  const date = new Date(value);
+  const date = mailTimestampForDisplay(value);
+  if (!date) return UNKNOWN_MAIL_DATE;
   return isToday(date)
     ? format(date, "HH:mm")
     : isThisYear(date)
@@ -774,8 +807,8 @@ function syncTooltip(
   t: ReturnType<typeof useTranslation>["t"],
 ) {
   if (!value) return t("inbox.neverSynced");
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return t("inbox.neverSynced");
+  const date = mailTimestampForDisplay(value);
+  if (!date) return t("inbox.neverSynced");
   return t("inbox.lastSynced", {
     date: isToday(date)
       ? format(date, "'today at' HH:mm")

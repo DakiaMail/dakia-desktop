@@ -1,0 +1,386 @@
+{
+  "schemaVersion": 1,
+  "status": "passed-bounded",
+  "recordedAtUtc": "2026-10-22T09:59:41Z",
+  "amendedAtUtc": "2026-10-22T10:22:59Z",
+  "scope": "Bounded native evidence for interrupted individual and bulk attachment saving, account-isolated fault routing, and eight concurrent read-only CLI operations against the fictional desktop profile. H016 is recorded in a separate linked report. This does not establish release acceptance, provider compatibility, or closure of the full mail-safety programme.",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "b14fca648f7d0862f439fbb08890cef8085d025687e35d75322814d2f8dcca0e",
+    "fileCount": 961,
+    "unchangedBeforeAndAfterBuild": true,
+    "unchangedBeforeLaunchServicesRegistration": true
+  },
+  "runtime": {
+    "runRoot": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.A50y6z",
+    "bundleIdentifier": "dev.dakia.fictional-provider-reader.run-OTAMH2",
+    "appExitCode": 0,
+    "candidate": {
+      "app": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/Dakia Fictional Provider Reader.app",
+      "desktopPath": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/Dakia Fictional Provider Reader.app/Contents/MacOS/dakia-desktop",
+      "desktopBytes": 107980816,
+      "desktopSha256": "004f33084b3f9157f9e4e3da129bc63caede9b0aaf99708eb81f43ffc129f81f",
+      "cliPath": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/Dakia Fictional Provider Reader.app/Contents/MacOS/dakia",
+      "cliBytes": 83433024,
+      "cliSha256": "c3890ca8acb2cdb2365b5cfa0a89c92e03c377bcd44ffc6353da33f34bc98ac6",
+      "architecture": "arm64",
+      "signatureScope": "ad-hoc fictional acceptance wrapper",
+      "releaseArtifact": false,
+      "pathMeaning": "The approved app path and candidate hashes are the historical test-time identity. The reusable approved path now contains the restored original bytes recorded under cleanup."
+    },
+    "retainedTestedCandidate": {
+      "app": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.A50y6z/tested-approved-candidate.app",
+      "desktopPath": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.A50y6z/tested-approved-candidate.app/Contents/MacOS/dakia-desktop",
+      "desktopBytes": 107980816,
+      "desktopSha256": "004f33084b3f9157f9e4e3da129bc63caede9b0aaf99708eb81f43ffc129f81f",
+      "cliPath": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.A50y6z/tested-approved-candidate.app/Contents/MacOS/dakia",
+      "cliBytes": 83433024,
+      "cliSha256": "c3890ca8acb2cdb2365b5cfa0a89c92e03c377bcd44ffc6353da33f34bc98ac6"
+    }
+  },
+  "attachmentBinding": {
+    "accountId": "62a9320c-04f5-47c2-b4fa-d4952f0b6121",
+    "mailbox": "INBOX",
+    "uid": 3,
+    "uidValidity": 1792662687,
+    "messageId": "<fictional-provider-reader-acceptance@localhost>",
+    "subject": "Remote content safety check",
+    "rawBytes": 8058,
+    "rawSha256": "6bd6c868c4b39e9aa5404df304639de461487c8fa75230c28d2fe1ea138e374f",
+    "faultedAttachment": {
+      "id": "62a9320c-04f5-47c2-b4fa-d4952f0b6121:INBOX:3:mime-v1:3",
+      "section": "3",
+      "rawOffset": 7990,
+      "wirePrefixLength": 12,
+      "wirePrefix": "ZmljdGlvbmFs",
+      "wirePrefixSha256": "2d40944ae1965bad78b49edaa45bea24e111fbb6728bd973055aaf11da746525",
+      "decodedBytes": 32,
+      "decodedSha256": "666dec5256feac267cd6c46b97107397c0a87fcde80a932321819f5a1cf2955e"
+    },
+    "unsafeAttachment": {
+      "sourceFilename": "../../quarterly-report.pdf.command",
+      "savedFilename": "quarterly-report.pdf.command",
+      "decodedBytes": 28,
+      "decodedSha256": "1679a56fbd964b0463ec644f56fa9a3189d1402343de932a66b210586d00c02f"
+    }
+  },
+  "individualAttachmentInterruption": {
+    "status": "passed",
+    "commandId": "addc522d-9760-4a26-8b4e-5b9caab25d4c",
+    "target": {
+      "kind": "single",
+      "uid": 3,
+      "announcedLiteralBytes": 44,
+      "deliveredLiteralBytes": 12
+    },
+    "failure": {
+      "visibleError": "Could not save the attachment to Downloads",
+      "downloadsBefore": [],
+      "downloadsAfter": [],
+      "partialFileObserved": false
+    },
+    "retry": {
+      "visibleResult": "Saved 1 attachment to Downloads",
+      "filename": "meeting-notes.txt",
+      "bytes": 32,
+      "sha256": "666dec5256feac267cd6c46b97107397c0a87fcde80a932321819f5a1cf2955e",
+      "mode": "0600",
+      "quarantine": "0081;6ad9dd3a;Dakia;"
+    }
+  },
+  "bulkAttachmentInterruption": {
+    "status": "passed",
+    "commandId": "92e70161-7ee0-485f-af90-26797d8187ab",
+    "target": {
+      "kind": "all",
+      "uid": 3,
+      "announcedLiteralBytes": 8058,
+      "deliveredLiteralBytes": 8002,
+      "deliveredPastAttachmentOffsetByBytes": 12
+    },
+    "failure": {
+      "visibleError": "Could not save the attachment to Downloads",
+      "downloadsUnchanged": true,
+      "existingFile": {
+        "filename": "meeting-notes.txt",
+        "inode": 144967827,
+        "sha256": "666dec5256feac267cd6c46b97107397c0a87fcde80a932321819f5a1cf2955e",
+        "mode": "0600"
+      },
+      "newFileObserved": false,
+      "partialFileObserved": false
+    },
+    "retry": {
+      "visibleResult": "Saved 2 attachments to Downloads",
+      "existingFileUnchanged": true,
+      "createdFiles": [
+        {
+          "filename": "meeting-notes (1).txt",
+          "bytes": 32,
+          "sha256": "666dec5256feac267cd6c46b97107397c0a87fcde80a932321819f5a1cf2955e",
+          "mode": "0600",
+          "quarantine": "0081;6ad9dd73;Dakia;"
+        },
+        {
+          "filename": "quarterly-report.pdf.command",
+          "bytes": 28,
+          "sha256": "1679a56fbd964b0463ec644f56fa9a3189d1402343de932a66b210586d00c02f",
+          "mode": "0600",
+          "quarantine": "0081;6ad9dd73;Dakia;",
+          "unsafeWarningVisible": true
+        }
+      ]
+    }
+  },
+  "accountIsolation": {
+    "status": "passed-bounded-all-fetch",
+    "accountB": {
+      "email": "fictional-reader-two@localhost",
+      "uid": 3,
+      "uidValidity": 1792662687,
+      "messageId": "<fictional-provider-reader-acceptance@localhost>",
+      "rawSha256": "245ee093817c0f96943e0ab92caf9c53080d81ba05fa39932bfcee46eeebf8de",
+      "attachmentFilename": "account-two-notes.txt",
+      "attachmentSection": "2",
+      "attachmentSha256": "8d75a6c97173c8be55b14daccce4f7cc4cfb2821ce13d3cb98fe2b2b28796541"
+    },
+    "observation": "One authenticated account-B full-message fetch passed through the TLS overlay while account A's Save All fault remained armed. The outer accepted-connection count increased from 16 to 17. Account A's state and transcript remained byte-identical, then account A consumed the same armed command ID.",
+    "accountAArmedStateSha256Before": "37303267c45c18b20bbb89dd457e6953e3c16c6746a2f17170e30ec570c3804c",
+    "accountAArmedStateSha256After": "37303267c45c18b20bbb89dd457e6953e3c16c6746a2f17170e30ec570c3804c",
+    "accountATranscriptSha256Before": "edea892acfd3d04f756e64a6b1a30262a5d0fcfcaa517f6c835281f91ca4cf3a",
+    "accountATranscriptSha256After": "edea892acfd3d04f756e64a6b1a30262a5d0fcfcaa517f6c835281f91ca4cf3a",
+    "tlsVersion": "TLSv1.3"
+  },
+  "sharedProfile": {
+    "status": "passed",
+    "requirement": "MS-H-015",
+    "parallelReadCount": 8,
+    "allCommandsUserReadOnly": true,
+    "providerContactRequested": false,
+    "reads": {
+      "accountLists": {
+        "count": 2,
+        "resultCountEach": 2,
+        "matchingStdoutSha256": "892d916cd622f0f44bb69ba1969c163787d816430a832ff7a4f2fe4a6577f6c3"
+      },
+      "accountAPositiveSearches": {
+        "count": 2,
+        "accountId": "62a9320c-04f5-47c2-b4fa-d4952f0b6121",
+        "query": "Fictional provider body reached the real Reader",
+        "resultCountEach": 1,
+        "matchingStdoutSha256": "6ebc74f55a9e90f3e1373d3696439cb8fa25b647653b85f6a0306b150868c2af"
+      },
+      "accountBPositiveSearches": {
+        "count": 2,
+        "accountId": "62a9320c-04f5-47c2-b4fa-d4952f0b6122",
+        "query": "Account two collision safety check",
+        "resultCountEach": 1,
+        "matchingStdoutSha256": "42b7f15890077e43919ec309c5dcda1cdf9e8ab1cc02fc3d0b71cd8f5c85b96c"
+      },
+      "crossAccountNegativeSearches": [
+        {
+          "accountId": "62a9320c-04f5-47c2-b4fa-d4952f0b6121",
+          "query": "Account two collision safety check",
+          "resultCount": 0,
+          "stdoutSha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+        },
+        {
+          "accountId": "62a9320c-04f5-47c2-b4fa-d4952f0b6122",
+          "query": "Fictional provider body reached the real Reader",
+          "resultCount": 0,
+          "stdoutSha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+        }
+      ]
+    },
+    "desktopRealtimeConnections": {
+      "proxy": {
+        "pid": 25338,
+        "port": 63637,
+        "backendPort": 63628
+      },
+      "before": {
+        "established": true,
+        "attempts": 1,
+        "exactLoopbackConnections": 2
+      },
+      "after": {
+        "established": true,
+        "attempts": 1,
+        "exactLoopbackConnections": 2
+      }
+    },
+    "logicalStore": {
+      "integrityBefore": "ok",
+      "integrityAfter": "ok",
+      "foreignKeyViolationsBefore": 0,
+      "foreignKeyViolationsAfter": 0,
+      "digestBefore": "dc303c93bd11e4bd7f8a821048de83011b839f2749ce0ee482f679b911c47115",
+      "digestAfter": "dc303c93bd11e4bd7f8a821048de83011b839f2749ce0ee482f679b911c47115",
+      "unchanged": true,
+      "tableCountsBeforeAndAfter": {
+        "accounts": 2,
+        "attachments": 0,
+        "credentials": 2,
+        "deleted_account_tombstones": 0,
+        "mail_rebuild_jobs": 0,
+        "mailbox_action_tombstones": 0,
+        "message_content_cache": 5,
+        "messages": 6,
+        "send_attempts": 0,
+        "sent_correspondents": 0,
+        "starred_attachment_metadata": 0,
+        "starred_message_bodies": 0
+      },
+      "coveredTables": [
+        "accounts",
+        "attachments",
+        "credentials",
+        "deleted_account_tombstones",
+        "mail_rebuild_jobs",
+        "mailbox_action_tombstones",
+        "message_content_cache",
+        "messages",
+        "send_attempts",
+        "sent_correspondents",
+        "starred_attachment_metadata",
+        "starred_message_bodies"
+      ]
+    },
+    "cachedReaderBody": {
+      "messageId": "62a9320c-04f5-47c2-b4fa-d4952f0b6121:INBOX:3",
+      "normalization": "CRLF and CR normalized to LF; no whitespace trimmed",
+      "utf8Bytes": 925,
+      "sha256": "9ea8bac4c145580dead7b8197b8c89157efd78053a1b12bd65b110407c45f3c5",
+      "independentlyRecomputedFromReadOnlyStore": true
+    },
+    "readerBinding": {
+      "capture": "b14-reader-before-faults-full",
+      "subject": "Remote content safety check",
+      "visibleMarkers": [
+        "Fictional provider body reached the real Reader.",
+        "Native remote-resource matrix marker.",
+        "Embedded image loaded locally",
+        "Embedded SVG stays inert",
+        "Active-content canaries must remain inert before and after consent.",
+        "Load remote content",
+        "quarterly-report.pdf.command",
+        "meeting-notes.txt"
+      ],
+      "claim": "The cached body hash is bound to the source body for account A, INBOX UID 3. The full accessibility capture independently records the same fictional subject and visible markers. No hash of sanitized visible HTML is claimed."
+    }
+  },
+  "remoteContentDuringObservedWindow": {
+    "status": "passed-controlled-endpoints-only",
+    "totalHttpRequests": 0,
+    "tlsContactAttempts": 0,
+    "totalContacts": 0,
+    "loadRemoteContentStillOffered": true,
+    "capturedAt": "2026-10-22T09:55:43.848Z"
+  },
+  "oracleCorrection": {
+    "status": "validation-tool-corrected",
+    "detail": "After the successful individual retry, the first manual validation attempted to call os.getxattr in the system Python and raised AttributeError because that API was unavailable. The same already-saved file was then inspected with the macOS xattr CLI. No save was repeated.",
+    "productFailure": false,
+    "testFlake": false
+  },
+  "captures": {
+    "index": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.A50y6z/b14-cua-capture-index.json",
+      "bytes": 4367,
+      "sha256": "613379d572c3814621faa1a46da5a97b2e614e095f447c00cea4814efb00a85e"
+    },
+    "items": [
+      { "name": "b14-reader-before-faults.ax.txt", "bytes": 181, "sha256": "bd0abcf1ec4093a5ed1e5240e1160da20c119b7ac3a9e694eda56e860a106594", "media": "accessibility-text" },
+      { "name": "b14-reader-before-faults.png", "bytes": 501695, "sha256": "a83cee35373b86ddd6f74e947fca25bb51b746f2131060908a257490dd287cde", "media": "image/jpeg", "extensionMismatch": true },
+      { "name": "b14-reader-before-faults-full.ax.txt", "bytes": 5813, "sha256": "e0ac13da044bc57c689ff4ab76e2be3d6668ad3aedf89f01e4774004751a4508", "media": "accessibility-text" },
+      { "name": "b14-reader-before-faults-full.png", "bytes": 501687, "sha256": "77773054124736c91321c860e002c024a6993fb53eb550c8c4320efb72323b32", "media": "image/jpeg", "extensionMismatch": true },
+      { "name": "b14-single-interrupted-visible-error.ax.txt", "bytes": 5920, "sha256": "022c610a0753e1bd034012087cc8a73374653c502bb82e429726b1b28ce9895a", "media": "accessibility-text" },
+      { "name": "b14-single-interrupted-visible-error.png", "bytes": 460803, "sha256": "a737fad80ff611a8e1f64b3c8e1af780ffa2caeae7e1724ef959c4cff8168e14", "media": "image/jpeg", "extensionMismatch": true },
+      { "name": "b14-single-retry-visible-success.ax.txt", "bytes": 5861, "sha256": "3c83b9d4daadd78b138d1d43bbb93310ab2e01cc843e277e7f1098b62ecd0bdc", "media": "accessibility-text" },
+      { "name": "b14-single-retry-visible-success.png", "bytes": 449449, "sha256": "4f6d0fe2c2601d5c47b65891636d42ba1bf77826d865644cb1e83375850a2cdc", "media": "image/jpeg", "extensionMismatch": true },
+      { "name": "b14-all-interrupted-visible-error.ax.txt", "bytes": 5872, "sha256": "6e30bb339e09925c9ebddf9d348081dab1f19d3c888b56f97ceb9679f031754c", "media": "accessibility-text" },
+      { "name": "b14-all-interrupted-visible-error.png", "bytes": 450373, "sha256": "afc600037cbde8ceaf1f6b9c3170f9533c4e523920db7fb7911965ed070f6df5", "media": "image/jpeg", "extensionMismatch": true },
+      { "name": "b14-all-retry-visible-success.ax.txt", "bytes": 5862, "sha256": "85d09efef1ee283da741f68ce56e43c2d89a4e6f08c031fe63b42d7e4fe8ae84", "media": "accessibility-text" },
+      { "name": "b14-all-retry-visible-success.png", "bytes": 449140, "sha256": "ce88cac648a7e52455160af037249616f192c33cfb0e31c2f0e0bc603f1658d2", "media": "image/jpeg", "extensionMismatch": true }
+    ]
+  },
+  "evidence": [
+    { "path": "native-shared-profile-acceptance.json", "bytes": 8741, "sha256": "61c8f01f896915b90f7c859ee9d760e557fcfd794016458fc996e04669bc972f" },
+    { "path": "source-before-build.json", "bytes": 154, "sha256": "bb4fa8dee0648995096a220b6a11187ff9857582ea977b2127c5232c2eff9ac9" },
+    { "path": "source-after-build.json", "bytes": 378, "sha256": "24835b7dd5cb2a6056a6e8d6b10cfcdcaf57c3cdd29cc00fbe1707a84a65a8ce" },
+    { "path": "source-before-launch-services-registration.json", "bytes": 378, "sha256": "24835b7dd5cb2a6056a6e8d6b10cfcdcaf57c3cdd29cc00fbe1707a84a65a8ce" },
+    { "path": "approved-identity-begin.json", "bytes": 219, "sha256": "e01bb85e8e6fa1277301e8ea596999f77d3cb028122da0c98614e3f705da5f71" },
+    { "path": "attachment-interruption-binding.json", "bytes": 1472, "sha256": "92feeca8576433edbf43a01fe1e0c5bf8b7de05082c8353df2ad7135997b36a3" },
+    { "path": "attachment-interruption-preflight.json", "bytes": 328, "sha256": "845352d72ac94622ac3eaa0c3212dee0c1193d661b87053a1a8fe89d5b978b7d" },
+    { "path": "attachment-interruption-overlay.json", "bytes": 1185, "sha256": "1b6310ca2eed18304a47f506f886a61bf5c61bdad491fd07c94bc8ac26342529" },
+    { "path": "attachment-interruption-state.json", "bytes": 1450, "sha256": "4f7d3f1fecae80efa51f253f75a7e94eda4b75dcea62154136d1d21a4c3ea813" },
+    { "path": "attachment-interruption-transcript.jsonl", "bytes": 2271, "sha256": "dacf67c4350fa6160c4a629da119d0da228e880726f389b808305dc59f02e807" },
+    { "path": "attachment-interruption-uid3.eml", "bytes": 8058, "sha256": "6bd6c868c4b39e9aa5404df304639de461487c8fa75230c28d2fe1ea138e374f" },
+    { "path": "single-before-downloads.json", "bytes": 1203, "sha256": "c94e28fa969b4d05dbfd87d079994426d7f362d803e20c666eb445e98c0525e7" },
+    { "path": "single-interrupted-no-files.json", "bytes": 1534, "sha256": "fb40278a52b8a6e7d41cd5989884ffec5d9cc59a27e9192ee4a520d0c50702bc" },
+    { "path": "single-retry-file.json", "bytes": 459, "sha256": "b55b9161de365d5e91dcf73b7723750efea344c67cc72352a580e3e9b252f3fa" },
+    { "path": "account-b-all-arm-probe.json", "bytes": 1094, "sha256": "c05ac3837ca3814eeb5d25da498608ad819a8442d94104eb10b1c5d8abe07a83" },
+    { "path": "all-before-downloads.json", "bytes": 1602, "sha256": "042b89eadd85b5f4ba42b0108c2e6cbb4a4667fc49e3536427a604b7c430d33f" },
+    { "path": "all-interrupted-no-new-files.json", "bytes": 1797, "sha256": "77f4e37bdd92ed567ae78d4e125b8b2162720af86a1e63e8ddaddf03611ed700" },
+    { "path": "all-retry-files.json", "bytes": 816, "sha256": "8f602238319dac1615ac3016ee19c6f5ffa677c3e2a9ebdf187387b45c6ab402" },
+    { "path": "b14-remote-counter-preconsent.json", "bytes": 474, "sha256": "75a62373a2d239fa94a9b7889c1e800245e53e4079e1c633d8e79ea8695fd3e4" },
+    { "path": "native-runtime-files.json", "bytes": 3572, "sha256": "aa6a1d7c435b2a63b25cd7862f5c9ba8469d7eedb5a6e3af09aa964c0b7201f0" },
+    { "path": "native-build-mode.json", "bytes": 768, "sha256": "1b040ce2e8ddb80f31500e2335b4f5763972af099ef9b6246371cf1afaf7eed5" },
+    { "path": "tauri.json", "bytes": 1168, "sha256": "32fc43e7d07ba1b0a0f3577bc8630167398f148842173ad0f2a36e7c01e1eeac" },
+    { "path": "app-exit-status.txt", "bytes": 2, "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa" },
+    { "path": "post-exit-acceptance-handoff.json", "bytes": 1012, "sha256": "f93fdc6031fd3abe4de443cdded919db0024dba01dc887ed8f7b700a28e9dbfb" },
+    { "path": "imap-proxy-state.json", "bytes": 246, "sha256": "1990a0782561624de47299afff24c24486bdf7d9c1589b2b11e7194185876a2d" },
+    { "path": "approved-identity-swap-25834983-37df-4ebd-bedb-742d1e3bc852-restored.json", "bytes": 1457, "sha256": "e28ed42f4c2c32b22a10c345bf8db901fc3ae345da1568e1d0e7236086d4e5a5" },
+    { "path": "b14-root-cleanup-receipt.json", "bytes": 1244, "sha256": "b614ad1d14606db2b5defc903b8ab823465bdd4c2ef7d6f590e867b60afaf9b4" }
+  ],
+  "relatedReports": {
+    "h016ForwardUpgrade": {
+      "status": "passed",
+      "path": "docs/mail-safety-results/native-h016-faithful-packaged-gui-upgrade-b14-2026-10-22.json",
+      "bytes": 7572,
+      "sha256": "85b31d031f741bc431e4b091c7f8e9e00f3b006cd15df196a1500b43688cf608",
+      "relationship": "Separate bounded evidence for one faithful previous-stable v0.4.4 profile forward upgrade with the same b14 candidate."
+    }
+  },
+  "cleanup": {
+    "status": "passed",
+    "h016Status": "passed-in-separate-linked-report",
+    "candidateInstallTransactionId": "25834983-37df-4ebd-bedb-742d1e3bc852",
+    "candidateInstallFinalStage": "restored",
+    "outerSession": 53022,
+    "outerExitCode": 0,
+    "ownedPidsAbsent": [31379, 38103, 56854, 25293, 25338],
+    "approvedAppAbsentFromCuaRunningInventory": true,
+    "isolatedUpgradeProfileRemoved": true,
+    "restorationReceipt": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.A50y6z/approved-identity-swap-25834983-37df-4ebd-bedb-742d1e3bc852-restored.json",
+      "bytes": 1457,
+      "sha256": "e28ed42f4c2c32b22a10c345bf8db901fc3ae345da1568e1d0e7236086d4e5a5"
+    },
+    "cleanupReceipt": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.A50y6z/b14-root-cleanup-receipt.json",
+      "bytes": 1244,
+      "sha256": "b614ad1d14606db2b5defc903b8ab823465bdd4c2ef7d6f590e867b60afaf9b4"
+    },
+    "currentRestoredOriginal": {
+      "app": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/Dakia Fictional Provider Reader.app",
+      "desktopPath": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/Dakia Fictional Provider Reader.app/Contents/MacOS/dakia-desktop",
+      "desktopBytes": 127392432,
+      "desktopSha256": "2cc898a0691f8f9f3b015b33f841fca2847b7afca99b8a2c267c42a2e74c12f1",
+      "cliPath": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/Dakia Fictional Provider Reader.app/Contents/MacOS/dakia",
+      "cliBytes": 76850528,
+      "cliSha256": "6b72b2de4f89f6910b01f0b7fc6198f42f3d54ccb5708c20aaea6d955e5ea0cd"
+    },
+    "note": "The original same-identity app is restored at the reusable approved path. The exact tested b14 candidate is retained separately under the run root."
+  },
+  "limitations": [
+    "The native account-B filesystem receipt covers the Save All fetch. The account-B single-fetch success exists only in the retained tool result and offline TLS tests, not as a run-root receipt, and was not rerun.",
+    "Capture files with a .png suffix contain JPEG bytes. Their hashes and pixels are valid, but they are image or JPEG captures rather than PNG artifacts.",
+    "The controlled HTTP and TLS counters cover only the owned fixture endpoints. They are not a global operating-system network capture.",
+    "The cached Reader body hash is a hash of normalized source body text. It is not a hash of sanitized visible HTML. The accessibility capture provides separate visible-marker evidence.",
+    "The shared-profile unchanged assertion covers the listed logical Store tables. It does not claim byte-identical database, WAL, or coordination-marker files.",
+    "H016 is established only by the separate linked report. This attachment and shared-profile report does not independently extend that upgrade result.",
+    "The wrapper is fictional and ad-hoc signed. This is not Developer ID signing, notarization, stapling, updater acceptance, provider compatibility, or distributed release evidence.",
+    "This bounded pass does not close the original mail-safety catalogue or change its aggregate gap counts."
+  ]
+}

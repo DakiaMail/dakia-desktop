@@ -72,4 +72,31 @@ describe("email forwarding", () => {
     expect(history.bodyHtml).toContain('<table style="width: 600px">');
     expect(history.bodyHtml).toContain("Manage budgets");
   });
+
+  it("formats leap-second and malformed received dates without invalid date text", () => {
+    const labels = {
+      originalMessage: "Original message",
+      from: "From",
+      date: "Date",
+      subject: "Subject",
+      to: "To",
+    };
+    const content = { body_text: "Full original body", attachments: [] };
+    const leapSecond = formatForwardHistory(
+      { ...message, received_at: "2016-12-31T23:59:60+00:00" },
+      content,
+      labels,
+    );
+    const malformed = formatForwardHistory(
+      { ...message, received_at: "2016-02-30T23:59:60+00:00" },
+      content,
+      labels,
+    );
+
+    expect(leapSecond.body).toContain(
+      `Date: ${new Date("2016-12-31T23:59:59.999+00:00").toLocaleString()}`,
+    );
+    expect(leapSecond.body).not.toContain("Invalid Date");
+    expect(malformed.body).toContain("Date: Unknown date");
+  });
 });

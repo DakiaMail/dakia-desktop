@@ -1,0 +1,11 @@
+X-Dakia-Corpus-Case: obs-08-cfws-dot
+X-Dakia-Corpus-Source: RFC 5322 section 4.4; fictional
+Date: Tue, 28 Jul 2026 12:01:00 +0000
+To: Reader <reader@example.test>
+Subject: Fictional obsolete syntax
+Message-ID: <obs-obs-08-cfws-dot@example.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+From: sender (a) . part @ example (b) . test
+
+Fictional body obs-08-cfws-dot.

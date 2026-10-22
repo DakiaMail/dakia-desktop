@@ -1,0 +1,30 @@
+X-Dakia-Corpus-Case: standards-base64-final-quanta
+Date: Tue, 28 Jul 2026 10:25:00 +0000
+From: sender@example.test
+To: recipient@example.test
+Subject: Synthetic Base64 final quanta
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="base64-quanta"
+
+--base64-quanta
+Content-Type: text/plain; charset=us-ascii
+Content-Transfer-Encoding: base64
+
+QQ==
+--base64-quanta
+Content-Type: text/plain; charset=us-ascii
+Content-Transfer-Encoding: base64
+
+QUI=
+--base64-quanta
+Content-Type: text/plain; charset=us-ascii
+Content-Transfer-Encoding: base64
+
+QUJD
+--base64-quanta
+Content-Type: text/plain; charset=us-ascii
+Content-Transfer-Encoding: base64
+
+V2hpdGUg
+	c3BhY2U=
+--base64-quanta--

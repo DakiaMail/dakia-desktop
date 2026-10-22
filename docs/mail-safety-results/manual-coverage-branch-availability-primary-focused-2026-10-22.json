@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "kind": "manual-coverage-branch-availability-primary-focused-result",
+  "status": "passed-focused-config-contract",
+  "recordedAtUtc": "2026-10-22T14:45:00Z",
+  "scope": "One focused primary checkout contract run for the manual coverage workflow. It verifies coverage-job-only branch-capable tooling, lock-derived Vitest provider installation and runtime matching, and fail-closed Rust LCOV branch-observation semantics. It does not generate global coverage, run on GitHub-hosted Ubuntu, update a ratchet baseline, or establish a coverage percentage.",
+  "application": {
+    "journal": {
+      "path": "/private/tmp/dakia-coverage-workflow-primary-20261022/application-journal.json",
+      "sha256": "d86fb237911ea3ff336ddebc4d35ab6d3f12ab27636a5935f8a4f89b113d5118"
+    },
+    "patch": {
+      "path": "/private/tmp/dakia-private-coverage-branch-wiring-20261022/coverage-branch-workflow.patch",
+      "sha256": "49dea81bdd22959cbc8ad8d7c6ebd35241a38967a425eaaecd3da8b015a90995"
+    },
+    "baseSourceTree": {
+      "digest": "a6b8543a03218c9f7f3f05a5fd25db6f67e765d753aba5e3f876d0eb69bdc046",
+      "fileCount": 996
+    },
+    "changedFiles": [
+      {
+        "path": ".github/workflows/manual-validation.yml",
+        "beforeSha256": "c25cf301cd5d119fbccb37c1dbcc85146034585acb40de570da09be6250fd87a",
+        "afterSha256": "6960bbdacc4154af1e66d365ac0115969eb377bcf6f4c537228dd5f6476c52a2"
+      },
+      {
+        "path": "scripts/manual-validation.node-test.mjs",
+        "beforeSha256": "f684122970e440e927062794b2e0ca6b84b0ea21b8d603a8f446c4af0b032a1d",
+        "afterSha256": "40250a34375453accd4b3be87bf9ee3cc73783ea016a66eddff91c9859c60440"
+      }
+    ],
+    "sourceSnapshotQualification": "manual-validation.yml is outside SOURCE_SNAPSHOT_PATHS, so this focused report binds its configuration files explicitly and is not a whole-source snapshot claim."
+  },
+  "coverageConfiguration": {
+    "coverageOnlyRustToolchain": "nightly-2026-10-17 with llvm-tools-preview",
+    "coverageOnlyCargoLlvmCov": "0.9.1 installed with --locked",
+    "rustLcovCommand": "cargo +nightly-2026-10-17 llvm-cov --workspace --branch --locked --lcov --output-path coverage/rust.lcov",
+    "ordinaryRustLanes": "full-source, fuzz, and provider-smoke remain configured for Rust 1.89.0",
+    "vitestCoverageProvider": "The workflow derives the provider version from package-lock.json node_modules/vitest, installs it with --ignore-scripts --no-save --package-lock=false --no-audit, and checks installed Vitest and coverage-provider versions against that value before coverage generation.",
+    "branchAvailabilityGate": "The workflow reads coverage/rust.lcov through summarizeLcov and coverageAvailability and fails with a fixed error when Rust branches are unavailable. It does not turn zero observations into 100 percent.",
+    "artifactRetention": "The coverage artifact upload uses if: always() to retain any generated partial report while a failed generation or branch-availability check still fails the job.",
+    "ratchetBaselineChanged": false
+  },
+  "verification": {
+    "contractTest": {
+      "command": "node --test scripts/manual-validation.node-test.mjs",
+      "log": "/private/tmp/dakia-coverage-workflow-primary-20261022/focused-node.log",
+      "sha256": "dcc43a2216c713dcc46c3f664b518ab02f60cf125739da5642dc797dbf814d26",
+      "result": {
+        "passed": 10,
+        "failed": 0,
+        "skipped": 0
+      }
+    },
+    "semanticBranchFixtures": {
+      "observed": "The contract extracts and executes the workflow heredoc against a temporary LCOV fixture containing BRDA data and succeeds.",
+      "unavailable": "The same extracted workflow check rejects a temporary LCOV fixture with no BRDA records and requires the fixed unavailable-branch error."
+    },
+    "sensitivity": [
+      "Removing --branch from the Rust LCOV command made the contract fail.",
+      "Replacing the lock-derived coverage provider with 4.1.10 made the contract fail.",
+      "Changing the fuzz lane from Rust 1.89.0 to 1.88.0 made the contract fail.",
+      "Moving the installed Vitest runtime check after coverage generation made the contract fail.",
+      "Removing the post-LCOV branch-observation check made the contract fail.",
+      "Removing if: always() from coverage artifact upload made the contract fail."
+    ],
+    "formatAndPatchChecks": [
+      "Prettier passed for both changed files.",
+      "git apply --check --whitespace=error-all passed for the reviewed patch."
+    ],
+    "independentReview": "GO"
+  },
+  "limitations": [
+    "No GitHub-hosted Ubuntu coverage job ran, so nightly installation, networked npm installation, and full workspace LCOV generation remain unexecuted.",
+    "No actual global Rust or frontend coverage report, branch percentage, or ratchet comparison is recorded here.",
+    "The branch-availability gate requires observed Rust branch records but sets no percentage threshold.",
+    "This is configuration and focused contract evidence only; it does not establish native, provider, release, performance, fuzzing, or dependency-audit acceptance."
+  ]
+}

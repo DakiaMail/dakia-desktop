@@ -1,0 +1,112 @@
+{
+  "schemaVersion": 2,
+  "date": "2026-10-21",
+  "status": "source-acceptance-only",
+  "scope": "Token-bound private seed handoff for detached Compose and Reader windows",
+  "trigger": {
+    "nativeFixture": "OaVD6G",
+    "observed": "A physical mailto reply opened a Compose window with blank recipient and subject fields. The opener and child WebViews did not share the opener's committed IndexedDB record.",
+    "disposition": "Do not use opener storage as the native handoff authority. Keep URLs opaque and deliver the complete seed only after the exact child has registered its listener."
+  },
+  "behavior": {
+    "compose": [
+      "The parent registers its compose-ready listener before creating the child.",
+      "Rust returns a generated Compose label and appends only the authenticated opener label and opaque seedDbKey to the child URL.",
+      "The child registers its compose-target listener before it acknowledges readiness. The parent sends the seed only to that returned label with the matching token.",
+      "The child persists accepted content in its own IndexedDB and stores a label-and-token-bound session envelope for reloads. A reload can recover from child-local IndexedDB when session storage is unavailable.",
+      "A valid target receipt stops the five-second arrival deadline before a large attachment draft finishes persisting. Persist failure, listener failure, timeout, and feedback failure close the child with fixed feedback instead of leaving a blank Composer."
+    ],
+    "reader": [
+      "Reader follows the same opaque token and exact-label ready/target protocol for its initial target, while ordinary same-label retargets retain the exact Reader label.",
+      "Reader session state is bound to its current label. A registration failure fails closed for both initial and restored Reader windows, so a visible stale Reader cannot remain unable to accept a later retarget.",
+      "Reader emits reader-ready only while an initial handoff is pending."
+    ],
+    "labelContract": "TypeScript emits reader- followed by 32 lowercase hexadecimal characters from the first 16 SHA-256 bytes. Rust accepts the same lowercase-only form."
+  },
+  "reviewedLifecycleFailuresFixed": [
+    {
+      "failure": "A native Compose child assumed it could read the opener's IndexedDB seed, producing blank fields in the physical OaVD6G fixture.",
+      "fix": "Direct token-bound event delivery to the generated child label, with child-local persistence only after acceptance."
+    },
+    {
+      "failure": "A remembered Compose seed was not bound to the current child label and opaque token.",
+      "fix": "Store and verify the label, seedDbKey, and validated seed envelope before restoring it."
+    },
+    {
+      "failure": "A valid large draft could exceed the arrival timer while IndexedDB persistence was still running.",
+      "fix": "Mark validated target receipt synchronously; the timeout now measures event arrival, not storage duration."
+    },
+    {
+      "failure": "Rejected native feedback or Reader target-listener setup could strand a blank or stale child window.",
+      "fix": "Use fail-closed feedback cleanup that closes in finally, and handle every live Reader listener-registration failure."
+    },
+    {
+      "failure": "Compose could not reload a child-local draft if session storage rejected its convenience write.",
+      "fix": "On a pending native URL, bootstrap from child-local IndexedDB before acknowledging a parent handoff."
+    }
+  ],
+  "sensitivity": {
+    "slowPersistenceMutant": {
+      "change": "Restored the old accepted-after-persistence arrival-timer condition.",
+      "result": "The slow valid native draft regression failed because the child closed at five seconds.",
+      "restore": "apps/desktop/src/ComposeApp.tsx was restored byte-identically before the passing focused suite."
+    },
+    "staleSessionMutant": {
+      "change": "Bypassed the current child-label check for remembered Compose state.",
+      "result": "The wrong-label native session regression failed because the stale seed suppressed the required handoff.",
+      "restore": "apps/desktop/src/composeWindow.ts was restored byte-identically before the passing focused suite."
+    }
+  },
+  "testEvidence": {
+    "frontend": {
+      "command": "npx vitest run apps/desktop/src/composeWindow.test.ts apps/desktop/src/ComposeApp.test.tsx apps/desktop/src/ComposeApp.seed.integration.test.tsx apps/desktop/src/readerWindow.test.ts apps/desktop/src/ReaderWindowApp.test.tsx apps/desktop/src/ReaderWindowApp.seed.integration.test.tsx apps/desktop/src/mailIdentityContinuity.integration.test.tsx apps/desktop/src/foregroundDuringSync.integration.test.tsx --maxWorkers=1",
+      "result": "passed",
+      "tests": "92/92",
+      "coverage": [
+        "exact target label and token validation",
+        "opaque URLs with no compose content",
+        "slow child persistence without a false arrival timeout",
+        "feedback rejection and listener-registration failure closing the child",
+        "wrong label or token session rejection",
+        "StrictMode mounted real Compose listener, exact recipient, subject, attachment, child persistence, and reload",
+        "session-storage-denied Compose reload from child-local IndexedDB",
+        "Reader StrictMode startup, same-label retarget, stale-URL reload, and restored-session listener failure"
+      ]
+    },
+    "frontendTypeAndFormat": {
+      "result": "passed",
+      "checks": [
+        "TypeScript typecheck",
+        "Prettier format check",
+        "scoped diff check"
+      ]
+    },
+    "rust": {
+      "command": "cargo test -p dakia-desktop bridge_security_tests::reader_window_labels_match_the_lowercase_typescript_digest_contract --locked",
+      "result": "passed",
+      "tests": "1/1",
+      "coverage": "Rust accepts the canonical TypeScript-style Reader label and rejects uppercase hexadecimal labels."
+    },
+    "securityReview": {
+      "result": "approved",
+      "scope": "Token binding, listener ordering, timeout and cleanup, reload behavior, and reader-label parity."
+    }
+  },
+  "source": {
+    "files": {
+      "apps/desktop/src/composeWindow.ts": "6f81b31152b01594285ebd955c313167b242b046b6cc447b77494eb4c07fc12b",
+      "apps/desktop/src/ComposeApp.tsx": "0b3e98f20ed1b68394bdccd17b017392bc2351623f7b7bff7c8e408a3bc7ec01",
+      "apps/desktop/src/ReaderWindowApp.tsx": "138d8f300bd03bfaa37e2a1ebf102147ca586ea26d73e64a919a5fcb95926860",
+      "apps/desktop/src/ComposeApp.seed.integration.test.tsx": "3d8095102cb50ded6e42a67a4e96066eca23c61138a38b3862a6e4c07d3d5c09",
+      "apps/desktop/src-tauri/src/lib.rs": "58a60ec0ede86417d263296b9b7560e2a77f327db81ab98b3a524330ce0b0916",
+      "apps/desktop/src-tauri/src/bridge_security_tests.rs": "e320e0cc3bc0198d955aac8cec173af43416f1c35f8fb4ecda9a9396ac1dc25e"
+    },
+    "addedFiles": ["apps/desktop/src/ComposeApp.seed.integration.test.tsx"]
+  },
+  "limitations": [
+    "This is source, unit, integration, and MockRuntime evidence only.",
+    "The physical OaVD6G failure is retained as the original trigger. This repair has not yet been replayed in a native WebKit fixture.",
+    "Native acceptance must verify a fictional mailto reply shows the exact recipient and subject, warning and disabled Send behavior, opaque URLs, Reader retargeting, child reload, and fixed feedback.",
+    "The generic Tauri frontend event channel still assumes trusted application realms. The opaque iframe boundary and unguessable per-handoff tokens protect email content from the message-rendering realm."
+  ]
+}

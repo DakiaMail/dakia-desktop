@@ -1,0 +1,166 @@
+{
+  "schemaVersion": 1,
+  "status": "passed-targeted-native-recovery",
+  "recordedAtUtc": "2026-10-22T07:42:23.189Z",
+  "scope": "A same-identity c2 packaged fictional-app check of one healthy Cmd-Q exit and three named fatal-startup fixture profiles. This is a targeted recovery slice, not full native acceptance, release acceptance, or closure of the original 69-gap programme.",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "c2e8ba357d822b2ef086e497916e77f6555a422605e7a4b99acfb1e81e379888",
+    "fileCount": 956
+  },
+  "candidate": {
+    "desktopSha256": "d64de3899fbb0aba37f280c27c24a6fbca0ce9845bb06ca7147301712b98d8bf",
+    "sameApprovedApplicationIdentity": true,
+    "appPath": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/Dakia Fictional Provider Reader.app",
+    "environment": {
+      "system": "Darwin",
+      "release": "25.6.0",
+      "machine": "arm64",
+      "lane": "packaged-ad-hoc-debug-fictional-native"
+    }
+  },
+  "healthyQuit": {
+    "exitCode": 0,
+    "observedUrl": "tauri://localhost",
+    "visibleQuitItem": "Quit Dakia",
+    "nativeMenuAction": "fireMenuItemAction:",
+    "menuScreenshotAvailable": false,
+    "evidence": {
+      "aggregate": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.0629XP/native-recovery-final-result.json",
+        "sha256": "9a7505078fefc16dfc43d7d93fb04b2270d4f98a2f595eaa19c2888c38c1203b"
+      },
+      "observation": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.0629XP/native-c2-healthy-observation.json",
+        "sha256": "6adaf21e5c54cee8188a73d2b862b160e5995f88108159e79c25fa815a8ca92f"
+      },
+      "positiveBoot": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.0629XP/positive-normal-boot.json",
+        "sha256": "77b22041a3b9c7c2cf6e2ef6f8436197210aa86e9985f6f994c2a9eea8e00653"
+      }
+    }
+  },
+  "fatalProfiles": [
+    {
+      "name": "future-marker-3",
+      "closeMethod": "quit-button",
+      "exitCode": 1,
+      "signal": null,
+      "durableFilesUnchanged": true,
+      "bindings": [
+        {
+          "path": "/private/tmp/dakia-fatal-recovery-native.ed0b19a9-ef16-47a1-9ca3-b0add54a26bc/control.json",
+          "sha256": "6ad5350f14b8870dd14b483044e801fbcface447e5b36c7b081547599ff58622"
+        },
+        {
+          "path": "/private/tmp/dakia-fatal-recovery-native.ed0b19a9-ef16-47a1-9ca3-b0add54a26bc/observed.ax.txt",
+          "sha256": "24919788eef03d508d178266ffeede7af46f141474628dd44ea0be534211199b"
+        },
+        {
+          "path": "/private/tmp/dakia-fatal-recovery-native.ed0b19a9-ef16-47a1-9ca3-b0add54a26bc/observed.png",
+          "sha256": "7e78e0fb2839768a4e7116bf2b296c3a4890d1a698291bc6ad770c5dbe28266c"
+        },
+        {
+          "path": "/private/tmp/dakia-fatal-recovery-native.ed0b19a9-ef16-47a1-9ca3-b0add54a26bc/cua-observation.json",
+          "sha256": "bbfbf72fba09c46a9db79ce35613b9ec37e7ef1ca41b38df0f9e2c655ff5f1a8"
+        },
+        {
+          "path": "/private/tmp/dakia-fatal-recovery-native.ed0b19a9-ef16-47a1-9ca3-b0add54a26bc/process-result.json",
+          "sha256": "90c4e0d2612198955633a56b3e6b559f6d48913415edebd4bd8882da2189bf5e"
+        },
+        {
+          "path": "/private/tmp/dakia-fatal-recovery-native.ed0b19a9-ef16-47a1-9ca3-b0add54a26bc/profile-before.json",
+          "sha256": "9528cc7dfd277fb1733a077d24511f798085bfd696e6e5326c5f024922995569"
+        }
+      ]
+    },
+    {
+      "name": "conflicting-send-attempts",
+      "closeMethod": "titlebar-close",
+      "exitCode": 1,
+      "signal": null,
+      "durableFilesUnchanged": true,
+      "bindings": [
+        {
+          "path": "/private/tmp/dakia-fatal-recovery-native.02ec2200-3d6e-4615-a2c7-255c443445cb/control.json",
+          "sha256": "0adc79c5dc5404a52c46d273bf2c1b91ae525a266e5ed064274dfe96c02f9e9c"
+        },
+        {
+          "path": "/private/tmp/dakia-fatal-recovery-native.02ec2200-3d6e-4615-a2c7-255c443445cb/observed.ax.txt",
+          "sha256": "244d82f12aea6710708e52b82a383719c17e510140ddb8b42372bcf2a36d531a"
+        },
+        {
+          "path": "/private/tmp/dakia-fatal-recovery-native.02ec2200-3d6e-4615-a2c7-255c443445cb/observed.png",
+          "sha256": "9eb2ebc67e5eb5b9bb96c4cfde1b71ee3d59596d70e9b3fd6e27b20246c2d9bd"
+        },
+        {
+          "path": "/private/tmp/dakia-fatal-recovery-native.02ec2200-3d6e-4615-a2c7-255c443445cb/cua-observation.json",
+          "sha256": "d6e6203f2536afcce2bb65b16475652a9654049485a66e72b746eb106c134f65"
+        },
+        {
+          "path": "/private/tmp/dakia-fatal-recovery-native.02ec2200-3d6e-4615-a2c7-255c443445cb/process-result.json",
+          "sha256": "90c4e0d2612198955633a56b3e6b559f6d48913415edebd4bd8882da2189bf5e"
+        },
+        {
+          "path": "/private/tmp/dakia-fatal-recovery-native.02ec2200-3d6e-4615-a2c7-255c443445cb/profile-before.json",
+          "sha256": "87b1267a80154c00ad3080e2f5516ff13b1b8b828ee41d35d73b54da88961eb7"
+        }
+      ]
+    },
+    {
+      "name": "corrupt-database",
+      "closeMethod": "keyboard-quit",
+      "exitCode": 1,
+      "signal": null,
+      "durableFilesUnchanged": true,
+      "bindings": [
+        {
+          "path": "/private/tmp/dakia-fatal-recovery-native.c3254880-2e12-46cd-9d48-e03f1f4ef1bc/control.json",
+          "sha256": "172ad76d598738412c881f7efe59eba67ac518e1b48994a5c8341e46773a0f74"
+        },
+        {
+          "path": "/private/tmp/dakia-fatal-recovery-native.c3254880-2e12-46cd-9d48-e03f1f4ef1bc/observed.ax.txt",
+          "sha256": "e2d70d5eb7583248c1f12dad46aae2f4343765cdc758df61904b96a749cb9bbf"
+        },
+        {
+          "path": "/private/tmp/dakia-fatal-recovery-native.c3254880-2e12-46cd-9d48-e03f1f4ef1bc/observed.png",
+          "sha256": "83ddfed6b2645d2c0b652da597061993550619d2fc4b1f8c6debc1be66e71037"
+        },
+        {
+          "path": "/private/tmp/dakia-fatal-recovery-native.c3254880-2e12-46cd-9d48-e03f1f4ef1bc/cua-observation.json",
+          "sha256": "33a902a8bf1e157bfa94f8ab617d0532c702b70b02a635583d2687f1a004da8a"
+        },
+        {
+          "path": "/private/tmp/dakia-fatal-recovery-native.c3254880-2e12-46cd-9d48-e03f1f4ef1bc/process-result.json",
+          "sha256": "90c4e0d2612198955633a56b3e6b559f6d48913415edebd4bd8882da2189bf5e"
+        },
+        {
+          "path": "/private/tmp/dakia-fatal-recovery-native.c3254880-2e12-46cd-9d48-e03f1f4ef1bc/profile-before.json",
+          "sha256": "2e237a9212ead3387728354db0cf04ebf82f4591f4fb7d50e833474e9858b2f1"
+        }
+      ]
+    }
+  ],
+  "preLaunchEvidence": {
+    "reboundFatalHelperUnitChecks": "14 of 14 passed before the c2 native launch."
+  },
+  "cleanup": {
+    "status": "restored approved original identity",
+    "receipt": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.0629XP/approved-identity-swap-0185942a-6018-4ce5-babb-88f389fcdd70-restored.json",
+      "sha256": "e74fa1897357cba6d287ecf3da915417cfec9c795b3ed96998648baff7adecdd"
+    }
+  },
+  "sensitivity": {
+    "historical09a5Failure": "docs/mail-safety-results/native-fatal-recovery-09a5-partial-2026-10-22.json records the prior corrupt-profile Cmd-Q exit-0 failure. This c2 slice reproduces that profile with exit 1 and unchanged durable files."
+  },
+  "carriedForwardEvidence": {
+    "mimeAttachmentTerminalRestart": "docs/mail-safety-results/native-mime-attachment-terminal-restart-09a5-partial-2026-10-22.json remains bound to source 09a5 and is not claimed as fresh c2 native execution."
+  },
+  "limits": [
+    "Only the three named fictional fatal profiles and their assigned close methods were exercised.",
+    "The native open menu was observed through accessibility data, but its screenshot was unavailable.",
+    "No c2 provider, send, MIME, attachment, restart, deep, performance, audit, package release, updater, signing, or physical sleep/wake result is claimed here.",
+    "The broader catalogue still declares 130 implemented references, 12 gaps, 17 manual-required scenarios and two unsupported policies. Those counts are traceability metadata, not execution totals or a subtraction from the original 69 gaps."
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "lane": "native-startup-recovery-alert",
+  "status": "unavailable-native-dialog-access",
+  "profile": "fictional-future-schema-2",
+  "binarySha256": "53215eb037166cab2cefd3894b0a8e9d44f6b92e9247be1b6e80b2d32fa2eb5a",
+  "observed": [
+    "Owned process logged newer_profile before opening mailbox",
+    "Stack sample waits in CFUserNotificationDisplayAlert/CFUserNotificationReceiveResponse"
+  ],
+  "toolRestriction": "Computer Use is not allowed to use the app com.apple.UserNotificationCenter for safety reasons",
+  "cleanup": "Exact owned process path revalidated and SIGTERM sent; not normal Quit or exit-1 evidence",
+  "limitations": [
+    "Alert text/visibility/absence of WebKit/native Quit not verified",
+    "Conflicting-schema and corrupt-profile GUI cases not launched",
+    "Forced cleanup is not acceptance pass"
+  ],
+  "privateEvidenceRoot": "/private/tmp/dakia-startup-failure-native.JHqScN",
+  "durableProfilePreservation": {
+    "status": "passed",
+    "checkedFilesAndAbsentWals": 12,
+    "transientShmExcluded": true
+  }
+}

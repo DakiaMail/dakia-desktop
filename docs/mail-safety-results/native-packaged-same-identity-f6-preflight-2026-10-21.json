@@ -1,0 +1,121 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-10-21T15:55:11.544991+00:00",
+  "status": "reviewed-preparation-full-source-baseline-pending",
+  "priorPreflight": {
+    "path": "docs/mail-safety-results/native-packaged-same-identity-preflight-2026-10-21.json",
+    "sha256": "afc3a634a78b5b76362680c6d2e406120061ceafc295d35b53db8078f1a9cbfc"
+  },
+  "source": {
+    "digest": "f6c8094e26fc9982144aebf7e368d149926001835fa848b94c4445bc87bcfd27",
+    "fileCount": 933,
+    "manifest": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-f6c8094e.json",
+    "manifestSha256": "493df9b39cfc8283ecf9875701b26102be7538d58cc311f7ae979c74ecd06a64"
+  },
+  "governedArtifacts": [
+    {
+      "path": "scripts/native-provider-reader-acceptance.sh",
+      "sha256": "9df4e4d1a86599a521b28d228d863fa0a6488b6ba4def0f6b9461c8d84a526f6",
+      "purpose": "fictional provider, packaged custom-protocol build, sealed identity transaction, runtime evidence, and H016 hold"
+    },
+    {
+      "path": "scripts/native-provider-reader-fixture.node-test.mjs",
+      "sha256": "051acb54b5ec911fc6a01ba7d30f9692610d37b59ac8258d590691685a0653e5",
+      "purpose": "extracted executable harness tests, rejection tests, and transaction sensitivity"
+    },
+    {
+      "path": "scripts/native-fictional-imap-proxy.mjs",
+      "sha256": "150a549459486c9ddace45f0cec034200273635eaff85d88389fb6f0e500264a",
+      "purpose": "nonce-owned fictional IMAP disconnect, bounded hold, automatic release, and explicit resume control"
+    },
+    {
+      "path": "scripts/native-fictional-imap-proxy.node-test.mjs",
+      "sha256": "48d41090fedfcddbe41c3529f2f7e0c8c4719a9961794b895a9dcd27f0b8779f",
+      "purpose": "loopback byte preservation, hold timing, rejection, automatic recovery, and stale-PID independence tests"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/lib.rs",
+      "sha256": "9cfd6d212aad7205fb7714a7dd91b5d37600c9913041eecf39a7a19c20dbb914",
+      "purpose": "feature-only fictional mailbox setup and per-run WebKit data-store propagation"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/native_acl_acceptance.rs",
+      "sha256": "2bf3fb340b6562c24a3cfb270a040c47da23b6a6b2cd7c005fcd558062d7d9e5",
+      "purpose": "feature-only local and remote Wry ACL probes with atomic evidence"
+    },
+    {
+      "path": "scripts/native-shared-profile-acceptance.mjs",
+      "sha256": "3e4b9cc02d2fc226e458a97f4917f4c8b2152530ccd936f0374c8f3f0b03c9e6",
+      "purpose": "bounded read-only bundled CLI waves against the live fictional desktop profile"
+    },
+    {
+      "path": "scripts/native-shared-profile-acceptance.node-test.mjs",
+      "sha256": "7ec75ec4e25e6e5acf23d4bbcbce7b584c8e578855fce3854bec2b7f02e82d92",
+      "purpose": "shared-profile command, identity, and no-mutation contract tests"
+    },
+    {
+      "path": "scripts/native-attachment-fault-acceptance.sh",
+      "sha256": "5caadb830454fa2eb8af4da21dbed0e998b40a24fdb466f360fa5d2389e915cf",
+      "purpose": "guarded native leaf-symlink and bounded HFS+ ENOSPC acceptance"
+    },
+    {
+      "path": "scripts/test-native-attachment-fault-acceptance.sh",
+      "sha256": "48282a04379d3e39b39d3c303935024b2a4605fcc65bf8998c9d47f6e6202b50",
+      "purpose": "shell rejection and synthetic recovery checks"
+    },
+    {
+      "path": "scripts/native-attachment-fault-acceptance.node-test.mjs",
+      "sha256": "125525b7dc8b7e7440de6e40abcc6c8382eb34e1ee73d8241048b19537b9aebf",
+      "purpose": "portable extracted filesystem oracle and sensitivity tests"
+    }
+  ],
+  "privateReviewedArtifacts": [
+    {
+      "path": "/private/tmp/dakia-g013-native-attachment-helper.py",
+      "sha256": "852cfc3388a298dd471c33ef713784e90022670bd03d4f9fd27f78bd865d2ee0"
+    },
+    {
+      "path": "/private/tmp/dakia-g013-run-safe-first.py",
+      "sha256": "a4ab1295180780a463f9ac4c810b5c1e7511e6d28a3e3fd3975fa58ca12123d0"
+    },
+    {
+      "path": "/private/tmp/dakia-g013-fullfetch-runner/final-build-provenance-f6c8094e.json",
+      "sha256": "d9b1220f4d4893caebd9a98ad67e9d6cac5b56abfb76a127029e42ef779ace67"
+    },
+    {
+      "path": "/private/tmp/dakia-g013-fullfetch-runner/final-execution-binding-f6c8094e.json",
+      "sha256": "687202565560fd728cbfcaf792ecd7fad22b86e3ad5bebd3d860700df60cb309"
+    },
+    {
+      "path": "/private/tmp/dakia-native-translation-arrival.py",
+      "sha256": "843efa3079bbbb018d1a568f1918c10328a6f6e24ba914b52c027e0d95473a13"
+    },
+    {
+      "path": "/private/tmp/dakia-l013-native-resource-runner-f6c8094e.mjs",
+      "sha256": "ad71cddfdc9cb64e3f5ba2f8efeacb8eb2194fe4413302ef388727212fcaa213"
+    },
+    {
+      "path": "/private/tmp/dakia-l013-native-resource-collector.mjs",
+      "sha256": "af8384c39d47cf85f5a754c1482b1f3d8ad7a163f8ecbce055e10250d2228224"
+    },
+    {
+      "path": "/private/tmp/dakia-h016-provider-reader-adapter.mjs",
+      "sha256": "965c3f774e5561c106212896f735fe89cd51d4c87f76914072b1933c2e0a1813"
+    },
+    {
+      "path": "/private/tmp/dakia-h016-faithful-upgrade-provider-reader.mjs",
+      "sha256": "d06ec3717c2ef726e7adf7e2915e33e4bc394257b92bd7689ac98e8a2efb09fd"
+    }
+  ],
+  "requiredGates": [
+    "new full-source three-run report passes unchanged f6 source",
+    "all private helpers retain reviewed hashes and runtime ownership requirements",
+    "new target path absent before use; preserve unsigned compile-only app",
+    "exact same approved app path, name and bundle ID",
+    "no UI or H016 acceptance before actual candidate identity is proved"
+  ],
+  "nativeTargetDirectory": "/private/tmp/dakia-native-packaged-final-f6c8094e-20261021-target",
+  "runtimeDataStore": "Static JSON field omitted; exact owned runtime-context receipt binds canonical v4 UUID to16bytes injected before main window build. Main and detached/ACL windows validate and share the value.",
+  "releaseBoundary": "Private ad-hoc fixture-enabled debug candidate only; no Developer ID, notarization, installation, update publication, or public release claim.",
+  "runtimeExecuted": false
+}

@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T15:29:58.777736+00:00",
+  "lane": "unchanged-source-three-run-baseline-detail",
+  "status": "passed",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+    "fileCount": 933
+  },
+  "sourceTreeAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+    "fileCount": 933
+  },
+  "parentReport": "docs/mail-safety-results/remaining-gap-closure-three-run-source-2026-10-21.json",
+  "parentReportSha256": "0b0d137906a3845ba87e23f18613d5768d2643c3d1fabe4311ce3b0f2252e6f9",
+  "consecutiveRuns": 3,
+  "gatesPerRun": 16,
+  "perRun": {
+    "rustRuntimePassed": 983,
+    "rustDoctestsPassed": 2,
+    "rustIgnored": 11,
+    "frontendPassed": 589,
+    "frontendSkipped": 2,
+    "frontendFilesPassed": 61,
+    "frontendFilesSkipped": 3,
+    "scriptTestsPassed": 239,
+    "scriptTestsFailed": 0,
+    "scriptTestsSkipped": 0,
+    "coupledIntegrationRunnersPassed": [
+      "realtime delivery",
+      "MIME Reader artifact",
+      "attachment command artifact",
+      "mail command TLS"
+    ]
+  },
+  "rawLog": {
+    "path": "/private/tmp/dakia-remaining-gap-closure-three-run-source-final-20261021.log",
+    "bytes": 489137,
+    "sha256": "c86ae1fb8e51ae7b9e1d1ede823827df6f122a33b58d9c5e3138519741f9b467"
+  },
+  "retries": 0,
+  "observedFlakes": 0,
+  "limitations": [
+    "Ignored and skipped tests are not passes.",
+    "These are source tests, separate from native, credentialed provider, performance, fuzz, dependency and release lanes.",
+    "Earlier invalidated and failed checkpoints remain retained; their corrected executions are not counted as retries in this clean three-run sequence.",
+    "Build emitted existing fixture-environment placeholder and browser externalization warnings; successful build alone does not establish WebKit translation execution."
+  ]
+}

@@ -139,7 +139,7 @@ export function sanitizeRichText(
   html: string,
   options: { preserveQuotedEmail?: boolean } = {},
 ) {
-  const document = new DOMParser().parseFromString(html, "text/html");
+  const document = parseInertHtml(html);
   sanitizeChildren(document.body, options.preserveQuotedEmail === true);
   return document.body.innerHTML;
 }
@@ -156,9 +156,8 @@ export function richTextFromPlainText(text: string) {
 }
 
 export function plainTextFromRichText(html: string) {
-  const document = new DOMParser().parseFromString(
+  const document = parseInertHtml(
     sanitizeRichText(html, { preserveQuotedEmail: true }),
-    "text/html",
   );
   let output = "";
 
@@ -332,9 +331,7 @@ function safeQuotedEmailStyle(style: string) {
 
 function safeImageSource(value: string) {
   const normalized = value.trim().replace(/[\u0000-\u001f\u007f\s]+/g, "");
-  return /^(?:https?:|data:image\/(?:png|gif|jpe?g|webp|svg\+xml);)/i.test(
-    normalized,
-  );
+  return /^data:image\/(?:png|gif|jpe?g|webp|svg\+xml);/i.test(normalized);
 }
 
 function safeStyle(element: HTMLElement) {
@@ -380,3 +377,4 @@ function escapeHtml(value: string) {
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
 }
+import { parseInertHtml } from "../inertHtml";

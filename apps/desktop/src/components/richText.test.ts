@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   isRichTextEmpty,
   plainTextFromRichText,
@@ -38,7 +38,7 @@ describe("rich text conversion", () => {
     ).toBe("<div>Citation</div><blockquote>Original</blockquote>");
   });
 
-  it("preserves safe rich email layout only inside generated quoted history", () => {
+  it("preserves quoted layout but blocks remote images in generated history", () => {
     const quoted = [
       '<div data-dakia-quoted-email="true">',
       '<table width="600" cellpadding="0" style="width: 600px; background-color: rgb(255, 255, 255); position: fixed">',
@@ -53,9 +53,8 @@ describe("rich text conversion", () => {
     });
     expect(sanitized).toContain('<table width="600" cellpadding="0"');
     expect(sanitized).toContain("background-color: rgb(255, 255, 255)");
-    expect(sanitized).toContain(
-      '<img alt="GitHub" width="32" src="https://example.com/github.png">',
-    );
+    expect(sanitized).toContain('<img alt="GitHub" width="32">');
+    expect(sanitized).not.toContain("https://example.com/github.png");
     expect(sanitized).toContain(
       'style="display: inline-block; background-color: rgb(22, 136, 63);',
     );
@@ -69,6 +68,44 @@ describe("rich text conversion", () => {
     expect(sanitizeRichText(quoted)).toBe(
       '<div><a href="https://example.com/settings" rel="noreferrer noopener">Manage budgets</a></div>',
     );
+  });
+
+  it("keeps embedded quoted images without inheriting remote-content permission", () => {
+    const embedded = "data:image/png;base64,iVBORw0KGgo=";
+    const sanitized = sanitizeRichText(
+      [
+        '<div data-dakia-quoted-email="true">',
+        `<img src="${embedded}" alt="Embedded">`,
+        '<img src="https://images.example.test/tracker.png" alt="Tracker">',
+        "</div>",
+      ].join(""),
+      { preserveQuotedEmail: true },
+    );
+
+    expect(sanitized).toContain(`src="${embedded}"`);
+    expect(sanitized).toContain('alt="Tracker"');
+    expect(sanitized).not.toContain("images.example.test");
+  });
+
+  it("uses inert parsing for rich-text sanitizing and plain-text conversion", () => {
+    vi.stubGlobal(
+      "DOMParser",
+      class {
+        constructor() {
+          throw new Error("live parser must not run for compose HTML");
+        }
+      },
+    );
+    try {
+      const sanitized = sanitizeRichText(
+        '<div data-dakia-quoted-email="true"><img src="https://images.example.test/open.png"><p>Quoted text</p></div>',
+        { preserveQuotedEmail: true },
+      );
+      expect(sanitized).not.toContain("images.example.test");
+      expect(plainTextFromRichText(sanitized)).toBe("Quoted text");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("creates a readable text alternative for structured content", () => {

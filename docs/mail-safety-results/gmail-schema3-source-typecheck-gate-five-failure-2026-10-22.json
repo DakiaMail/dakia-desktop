@@ -1,0 +1,66 @@
+{
+  "execution": {
+    "environment": {
+      "architecture": "arm64",
+      "cargoTargetDir": "/private/tmp/dakia-primary-gmail-integration-target",
+      "gmailCredentials": "GMAIL_ACCOUNT, GMAIL_PASSWORD, and PROVIDER_SMOKE_CONFIG unset",
+      "node": "v22.23.2",
+      "nodeOptions": "--no-experimental-webstorage",
+      "platform": "darwin",
+      "stdin": "/dev/null"
+    },
+    "exitCode": 2,
+    "gatesPassed": 4,
+    "gatesPerRun": 18,
+    "retries": 0,
+    "runner": "node scripts/run-mail-safety.mjs --lane source --repeat 3",
+    "runsRequested": 3,
+    "runsStarted": 1
+  },
+  "failure": {
+    "command": "npm run typecheck",
+    "exitCode": 2,
+    "file": "apps/desktop/src/components/mimeReaderArtifact.test.tsx",
+    "gate": 5,
+    "lines": [
+      181,
+      235,
+      240
+    ],
+    "message": "Element is not assignable to HTMLElement",
+    "otherGatesRun": false
+  },
+  "kind": "gmail-schema3-source-typecheck-gate-five-failure",
+  "limitations": [
+    "This is a gate-five TypeScript failure, not a full source baseline.",
+    "No remaining source-cycle gates or strict fixture-feature clippy check ran after the typecheck failure.",
+    "The report records the same frozen source before and after the attempted run."
+  ],
+  "passedGates": [
+    "mail-safety catalogue validation",
+    "mail standards requirements validation",
+    "realistic fixture validation",
+    "Tauri contract inventory"
+  ],
+  "rawEvidence": {
+    "log": "/private/tmp/dakia-final-gmail-schema3-catalogue-corrected-source-20261022/source-repeat3.log",
+    "logSha256": "df15b8b607eedffad015b12404208455ba360ff194345b01e036821b7a7b051a",
+    "report": "/private/tmp/dakia-final-gmail-schema3-catalogue-corrected-source-20261022/report.json",
+    "reportSha256": "619ed8ca705b863683a84990f4f9a907e0929e3bbde26288b6c9bc3ee2fefc51",
+    "sourceManifest": "/private/tmp/dakia-final-gmail-schema3-catalogue-corrected-source-20261022/source-manifest.json",
+    "sourceManifestSha256": "4a17fce9387c752c87961fc2b8b9848b65e18f781b867acd593faddf4d22b0fb"
+  },
+  "schemaVersion": 1,
+  "sourceScope": "source lane only",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "b120618d54ff58ba3787119460d82f63ebf985aaad2f5af8ec776585638a81bc",
+    "fileCount": 996
+  },
+  "sourceTreeAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "b120618d54ff58ba3787119460d82f63ebf985aaad2f5af8ec776585638a81bc",
+    "fileCount": 996
+  },
+  "status": "failed"
+}

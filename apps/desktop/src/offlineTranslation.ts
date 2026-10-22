@@ -4,6 +4,7 @@ import {
   TranslatorBacking,
 } from "@browsermt/bergamot-translator/translator.js";
 import { api } from "./api";
+import { parseInertHtml } from "./inertHtml";
 
 type ModelDescriptor = { from: string; to: string };
 type BergamotWorker = {
@@ -121,7 +122,7 @@ let translatorSource: string | undefined;
 export const OFFLINE_TRANSLATION_TIMEOUT_MS = 120_000;
 
 function prepareHtmlForTranslation(html: string) {
-  const document = new DOMParser().parseFromString(html, "text/html");
+  const document = parseInertHtml(html);
   return {
     html: document.documentElement.outerHTML,
     hasVisibleText: Boolean(document.body.textContent?.trim()),

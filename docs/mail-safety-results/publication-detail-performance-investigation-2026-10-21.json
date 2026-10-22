@@ -1,0 +1,167 @@
+{
+  "schemaVersion": 1,
+  "lane": "manual-mailbox-performance-investigation",
+  "status": "two-thousand-message-regression-cleared-pending-full-scale-refresh",
+  "recordedAt": "2026-10-21T08:37:52Z",
+  "scope": "Investigate the 2,000-message snapshot regression and measure the cost of exact realtime publication statistics without relaxing the 20 percent threshold.",
+  "originalRegression": {
+    "report": "docs/mail-safety-results/startup-lock-performance-comparison-2026-10-21.json",
+    "reportSha256": "3a21afd6a2b51ca99a215f97dcdb08fc6a6ae5ee8a8e41c4629b1122bbf88c55",
+    "rawLog": "/private/tmp/dakia-startup-lock-performance-comparison-2026-10-21.log",
+    "rawLogSha256": "2a2e711be1b17575a7c0fb908566d38d4d2747668375107cfb9c5d543a19359f",
+    "sourceTree": {
+      "algorithm": "sha256-path-and-content-manifest",
+      "digest": "423a76f16559b42900d57c57f6875a04f0d7b56be1da2af0b79393de7fcda228",
+      "fileCount": 758
+    },
+    "measurementsMilliseconds": [892, 842, 832],
+    "medianMilliseconds": 842,
+    "baselineMedianMilliseconds": 654,
+    "changePercent": 28.74617737003058,
+    "disposition": "Retained as a real failed run. It is not overwritten or reclassified by this investigation."
+  },
+  "investigationSourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "2a4e14731ba246806f3700b020ff7c1ec4afdbce0ceea6466fcfa46cb41d475f",
+    "fileCount": 758,
+    "storageRsSha256": "6276106a9432cc6a927d92736e0e9ae66fec1451014f8cd669bb4f85834b23e2",
+    "publicationTestsSha256": "0096a36780dd24b39a1d9ecd59551dc12014ddd031858fe9b73bca670da8bd78"
+  },
+  "productionChange": {
+    "summary": "Established public snapshot finalizers request DeletedOnly publication detail and avoid exact flag and metadata statistics that their Result<u64> contract cannot expose. The two private realtime finalizers continue to request Exact publication detail.",
+    "preservedSemantics": [
+      "Deletion counts and public Result<u64> contracts are unchanged.",
+      "Realtime insert, flag, delete, UIDVALIDITY replacement, tombstone, no-op, stale-generation, and removed-account publication outcomes remain exact.",
+      "Transaction, generation fencing, sync state, tombstone cleanup, commit, and thread rebuild behavior remains unconditional."
+    ]
+  },
+  "privateInputs": {
+    "workspace": "/private/tmp/dakia-perf-ab.qDmU2B",
+    "files": [
+      {
+        "path": "/private/tmp/dakia-perf-ab.qDmU2B/Cargo.toml",
+        "sha256": "47bbb06da69694b95d75f64ebbebdf1bc7e6b829a150b00cc9637821fc6d65b3"
+      },
+      {
+        "path": "/private/tmp/dakia-perf-ab.qDmU2B/Cargo.lock",
+        "sha256": "c75c4da551e415e6b883c061b19b0ed24a3d8ba5e4b36809db3f947ab4c31a4d"
+      },
+      {
+        "path": "/private/tmp/dakia-perf-ab.qDmU2B/crates/dakia-core/Cargo.toml",
+        "sha256": "f69475dc8dd0741daa758a623a886d37431b7969ae6e87cc23e268ab136f0d13"
+      },
+      {
+        "path": "/private/tmp/dakia-perf-ab.qDmU2B/storage-mutant.rs",
+        "sha256": "96ad2aa334445b5a4cac56b3325e08df859af98c890ad94a0b70013187c1061e",
+        "purpose": "Retained input for the initial flags-count-only diagnostic probe."
+      },
+      {
+        "path": "/private/tmp/dakia-perf-ab.qDmU2B/storage-deleted-only.rs",
+        "sha256": "6276106a9432cc6a927d92736e0e9ae66fec1451014f8cd669bb4f85834b23e2",
+        "purpose": "Exact copy of the frozen production DeletedOnly input."
+      },
+      {
+        "path": "/private/tmp/dakia-perf-ab.qDmU2B/storage-exact-public-wrappers.rs",
+        "sha256": "b337ac32303f6abeda701f4125be66344aaf04d02f2aa7ee416200aab8312309",
+        "purpose": "Reconstructed after the run from the frozen production input by changing only the eight public wrapper detail arguments from DeletedOnly to Exact. The original ephemeral mutation was not separately copied before it was restored."
+      }
+    ],
+    "testBinaries": [
+      {
+        "path": "/private/tmp/dakia-perf-ab.qDmU2B/target/debug/deps/dakia_core-416f5353cf6a53e7",
+        "sha256": "515d923b628dd49976b3e4ef82070269661b34a16d1e29f536cadc8510abb757"
+      },
+      {
+        "path": "target/debug/deps/dakia_core-416f5353cf6a53e7",
+        "sha256": "4c483f7ff80af62ea0861e45396d3bdd4fbb6cb6a8a89d7ef8653b112b981224"
+      }
+    ]
+  },
+  "controlledPrivateTargetComparison": {
+    "testName": "manual_two_thousand_message_snapshot_baseline",
+    "command": "cargo test --locked -p dakia-core manual_two_thousand_message_snapshot_baseline --lib -- --ignored --nocapture",
+    "targetDirectory": "/private/tmp/dakia-perf-ab.qDmU2B/target",
+    "rawMeasurements": {
+      "deletedOnlyMilliseconds": [592, 588, 562],
+      "exactPublicWrappersMilliseconds": [632, 599, 619]
+    },
+    "medians": {
+      "deletedOnlyMilliseconds": 588,
+      "exactPublicWrappersMilliseconds": 619,
+      "differenceMilliseconds": 31,
+      "differencePercentOfExact": 5.008077544426494
+    },
+    "conclusion": "On the same private target, skipping exact statistics for public deleted-only callers accounts for about 31 milliseconds, or 5 percent of the Exact median. This is the only controlled causal performance attribution from the investigation.",
+    "rawLogProvenance": "The six values were retained from the interactive command output in this report. The commands were not originally piped to standalone log files."
+  },
+  "initialConfoundedProbe": {
+    "privateMutantApproximateMedianMilliseconds": 563,
+    "workspaceApproximateMedianMilliseconds": 889,
+    "initialApparentDifferenceMilliseconds": 326,
+    "disposition": "Rejected as causal evidence because the two measurements used different target and generated-artifact states. The 326 millisecond difference must not be attributed to the publication COUNT query.",
+    "input": "/private/tmp/dakia-perf-ab.qDmU2B/storage-mutant.rs"
+  },
+  "canonicalCleanRebuild": {
+    "commands": [
+      "cargo clean -p dakia-core",
+      "cargo test --locked -p dakia-core manual_two_thousand_message_snapshot_baseline --lib -- --ignored --nocapture"
+    ],
+    "cleanResult": {
+      "filesRemoved": 131776,
+      "bytesReportedByCargo": "73.3 GiB"
+    },
+    "measurementsMilliseconds": [612, 557, 557],
+    "medianMilliseconds": 557,
+    "baselineMedianMilliseconds": 654,
+    "changePercent": -14.831804281345566,
+    "status": "passed",
+    "interpretation": "The clean canonical workspace build restored the 2,000-message measurement below baseline with the current source, workspace feature graph, and test profile. This associates the larger earlier shift with generated or incremental build state. It does not identify or prove a compiler-level mechanism."
+  },
+  "featureAndProfileComparison": {
+    "workspaceFeatureTree": {
+      "path": "/private/tmp/dakia-publication-perf-workspace-feature-tree-2026-10-21.txt",
+      "sha256": "882238ac53161df81b03aac281d219b912c175fb9ffae25ca2b5a6f7086bc0d7"
+    },
+    "privateFeatureTree": {
+      "path": "/private/tmp/dakia-publication-perf-private-feature-tree-2026-10-21.txt",
+      "sha256": "d33db08b49c9ba6c3c8862c062bc0fbccf0d961d38fde408c34f6aa284727d8a"
+    },
+    "normalizedFeatureTreeSha256": "05931bfc39f23940cdbb340e11bfb14821bf4ebfb24be84a6fa3c159f42b3dda",
+    "normalizedFeatureTreesEqual": true,
+    "manifestEquivalence": {
+      "rootCargoTomlSha256": "47bbb06da69694b95d75f64ebbebdf1bc7e6b829a150b00cc9637821fc6d65b3",
+      "cargoLockSha256": "c75c4da551e415e6b883c061b19b0ed24a3d8ba5e4b36809db3f947ab4c31a4d",
+      "coreCargoTomlSha256": "f69475dc8dd0741daa758a623a886d37431b7969ae6e87cc23e268ab136f0d13"
+    },
+    "profile": "cargo test unoptimized with debuginfo",
+    "limitations": [
+      "Raw feature-tree hashes differ because Cargo prints absolute workspace and patched mail-parser paths. After normalizing only the two workspace roots, the files are byte-identical.",
+      "Matching manifests, lockfile, normalized feature graph, command, compiler, and Cargo version do not prove identical codegen state or incremental cache history.",
+      "The private target binary and canonical workspace binary have different paths, source variants, and hashes, so their absolute timings are not a controlled cross-target comparison."
+    ]
+  },
+  "verification": {
+    "focusedTest": {
+      "command": "cargo test --locked -p dakia-core storage_realtime_publication_tests --lib",
+      "passed": 9,
+      "failed": 0,
+      "ignored": 0
+    },
+    "clippy": {
+      "command": "cargo clippy --locked -p dakia-core --lib --tests -- -D warnings",
+      "status": "passed"
+    },
+    "independentReview": {
+      "status": "approved",
+      "materialFindings": 0,
+      "scope": "Public DeletedOnly call sites, private realtime Exact call sites, unconditional transaction and fencing semantics, query-observer placement, and existing exact publication regressions."
+    },
+    "sourceFrozen": true
+  },
+  "residualLimitations": [
+    "The test query observer directly counts the incremental realtime Exact path. Replacement Exact execution is demonstrated by asserted metadata and namespace outcomes rather than a separate query-count assertion.",
+    "The canonical follow-up reran only the 2,000-message scale. A quiet three-repeat refresh of 2,000, 30,000, 100,000, and 200,000 messages remains required after full source, deep, and coverage builds finish.",
+    "The clean rebuild shows an association with generated or incremental build state, not the exact compiler, linker, cache, or root-certificate initialization mechanism.",
+    "Performance results remain hardware, load, source-tree, feature-graph, profile, and build-state specific."
+  ]
+}

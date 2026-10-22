@@ -1,0 +1,67 @@
+X-Dakia-Corpus-Case: standards-rfc2231-pathologies
+Date: Tue, 28 Jul 2026 10:22:00 +0000
+From: sender@example.test
+To: recipient@example.test
+Subject: Synthetic RFC 2231 pathologies
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="rfc2231"
+
+--rfc2231
+Content-Type: text/plain; charset=us-ascii
+
+RFC 2231 attachment parameter coverage.
+--rfc2231
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename*=utf-8'et'caf%C3%A9.pdf
+Content-Transfer-Encoding: base64
+
+bGFuZ3VhZ2U=
+--rfc2231
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename="unsupported-fallback.bin"; filename*=x-fictional'et'caf%C3%A9.bin
+Content-Transfer-Encoding: base64
+
+dW5zdXBwb3J0ZWQ=
+--rfc2231
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename*2*=tail.txt; filename*0*=utf-8''ordered-; filename*1*=middle-
+Content-Transfer-Encoding: base64
+
+c2h1ZmZsZWQ=
+--rfc2231
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename="missing-fallback.bin"; filename*0*=utf-8''missing-; filename*2*=tail.bin
+Content-Transfer-Encoding: base64
+
+bWlzc2luZw==
+--rfc2231
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename="duplicate-fallback.bin"; filename*0*=utf-8''first-; filename*0*=utf-8''second-; filename*1*=tail.bin
+Content-Transfer-Encoding: base64
+
+ZHVwbGljYXRl
+--rfc2231
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename*0="long-"; filename*1="name.txt"
+Content-Transfer-Encoding: base64
+
+dW5lbmNvZGVk
+--rfc2231
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename*0="quo\""; filename*1="te.txt"
+Content-Transfer-Encoding: base64
+
+cXVvdGU=
+--rfc2231
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename*0="back\\"; filename*1="slash.txt"
+Content-Transfer-Encoding: base64
+
+YmFja3NsYXNo
+--rfc2231
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename*0*=utf-8''mixed-quo; filename*1="\"te.txt"
+Content-Transfer-Encoding: base64
+
+bWl4ZWQ=
+--rfc2231--

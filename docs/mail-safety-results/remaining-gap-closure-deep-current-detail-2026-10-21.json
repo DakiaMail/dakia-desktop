@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T15:22:12.752732+00:00",
+  "lane": "bounded-independent-server-and-fuzz-detail",
+  "status": "passed",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+    "fileCount": 933
+  },
+  "sourceTreeAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+    "fileCount": 933
+  },
+  "parentReport": "docs/mail-safety-results/remaining-gap-closure-deep-current-source-2026-10-21.json",
+  "parentReportSha256": "3fcc68edc2aa7f378c194e64cdcec4d24faba880609c93917aa8aa729ced174f",
+  "independentServers": {
+    "testsPassed": 3,
+    "scope": [
+      "untrusted default certificate rejection",
+      "GreenMail trusted IMAP/SMTP round trip",
+      "Dovecot trusted IMAP production-connector round trip"
+    ]
+  },
+  "fuzz": {
+    "recursiveMimeSeeds": 75,
+    "seedManifestSha256": "3c7b7baad7f2b08377a371ef9bd398b60b201ab3362df63397bab1088dfbabf3",
+    "targetIterations": {
+      "mime_budget": 32844,
+      "attachment_metadata": 103558
+    },
+    "secondsPerTarget": 31,
+    "crashArtifacts": 0,
+    "rssLimitMiB": 512,
+    "maxInputBytes": 1048576,
+    "perInputTimeoutSeconds": 10,
+    "asanOptions": "quarantine_size_mb=64:thread_local_quarantine_size_kb=64; cargo-fuzz appends its normal detect_odr_violation=0 setting"
+  },
+  "rawLog": {
+    "path": "/private/tmp/dakia-remaining-gap-closure-deep-current-source-20261021.log",
+    "sha256": "415e4e31a6952ded2e4d334117df511ba0f314e24c068cf667bbe16d3bb36b75",
+    "bytes": 3157
+  },
+  "limitations": [
+    "A bounded campaign is not proof of absence of vulnerabilities or leaks.",
+    "The smaller governed ASan quarantine weakens temporal use-after-free sensitivity relative to the retained original OOM run.",
+    "The original OOM and premature invalid report remain separate evidence.",
+    "No native, provider, release or performance claim."
+  ]
+}

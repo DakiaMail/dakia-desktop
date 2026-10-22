@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "status": "expanded-source-baseline-passed-native-pending",
+  "recordedAtUtc": "2026-10-21T23:56:33.331492+00:00",
+  "primarySource": {
+    "digest": "a86feeae88ffe172c8697a84f1d29afa123856661ee3765ca3307562c410193c",
+    "fileCount": 940
+  },
+  "testedStagingSource": {
+    "root": "/private/tmp/dakia-next-safety-fixes-a86-staging-20261022",
+    "digest": "fa50b916653bfc470eb69d22d34046a1867b03d022313d1a5e66eba04d44b131",
+    "fileCount": 951,
+    "appliedToPrimary": false
+  },
+  "receipts": [
+    {
+      "path": "docs/mail-safety-results/staged-recovery-selective-mime-three-run-source-2026-10-22.json",
+      "sha256": "e480f0846fa3b6631eea2d52b7fbd9ca76fe34066eed5c086c3e50c54f565711"
+    },
+    {
+      "path": "docs/mail-safety-results/staged-recovery-selective-mime-deep-2026-10-22.json",
+      "sha256": "3acb281770438f35feb6092cf2458d9fb4bb2fbfc64a67c9a15ae4324af30d66"
+    },
+    {
+      "path": "docs/mail-safety-results/staged-recovery-selective-mime-performance-2026-10-22.json",
+      "sha256": "dc3fbd78157a846f4a5b8cec3d1ac837d557b7924e302c1c45dfc9bd44c10233"
+    },
+    {
+      "path": "docs/mail-safety-results/staged-recovery-selective-mime-dependency-audits-2026-10-22.json",
+      "sha256": "61e432a816d6a47af1b32168bdbee537314a553a450f41fad4681f12e0b6365b"
+    }
+  ],
+  "sqliteFaultHarness": {
+    "status": "passed",
+    "privateLog": "/private/tmp/dakia-staged-sqlite-paired-faults-fa50-20261022.log",
+    "logSha256": "bba965584a384aa5999adce285dfa1b88fa8eac0d67108b21446bc70b0e8b385"
+  },
+  "retainedFailuresAndFlakes": [
+    {
+      "case": "Initial staged Outbox event-listener count",
+      "result": "failed",
+      "repair": "Stable production subscription with current refresh reference; final three clean cycles passed."
+    },
+    {
+      "case": "Reader retarget test WebCrypto completion",
+      "result": "flaky timing oracle",
+      "repair": "Explicit digest barrier replaced setTimeout(0); 30 focused clean runs and final three source cycles passed; Reader product implementation unchanged."
+    },
+    {
+      "case": "Native fixture Swift probe cleanup",
+      "result": "flaky child-exit cleanup oracle",
+      "repair": "Await child close and explicit inherited-stream barriers before cache cleanup; mutation sensitivity and final three cycles passed."
+    },
+    {
+      "case": "New realistic fixture missing from cross-path census",
+      "result": "failed",
+      "repair": "Added actual full/selective/SQLite-reopen corpus case; final three cycles passed."
+    },
+    {
+      "case": "Private staging lacked Git metadata",
+      "result": "environment failure",
+      "repair": "Created private Git base without committing/pushing; final script lanes passed."
+    },
+    {
+      "case": "Earlier c56 and a86 performance",
+      "result": "regressed",
+      "repair": "No causal fix claimed; new fa50 performance passed once against original 560ms baseline. Earlier failures and unresolved cause retained."
+    }
+  ],
+  "pending": [
+    "Human inspection and Quit for running a86 conflicting-send-attempt alert; corrupt-database alert not run.",
+    "Held a86 native harness restoration before applying staged changes.",
+    "Fresh same-identity packaged fa50 Reader/MIME/Message-ID/SmartSeen/failed-send recovery restart and profile-v2 upgrade acceptance.",
+    "Remaining native privacy, keyboard, notification and attributable WebKit resource acceptance.",
+    "Wider Gmail LIST/multi-label/reliability and other-provider acceptance.",
+    "Public release, signing/notarization, updater and supported upgrade package gates.",
+    "Global Rust branch observations remain unavailable."
+  ],
+  "ownerDecisions": [
+    "Previous stable v0.4.4 forward upgrade only; downgrade unsupported with complete backup/restore guidance.",
+    "Physical sleep/wake declined, not tested.",
+    "No more Gmail sends or mailbox mutations.",
+    "Same approved fictional test application identity."
+  ],
+  "aggregateGapsClosedClaim": false,
+  "limitations": [
+    "Catalogue implementation declarations are not execution certificates.",
+    "All automated results here apply to frozen staging, not the older active native executable.",
+    "This programme remains incomplete; missing evidence is not a pass."
+  ],
+  "additionalFixtureFeatureFailure": {
+    "path": "docs/mail-safety-results/staged-recovery-native-acl-feature-inventory-failure-2026-10-22.json",
+    "sha256": "2b42a7024ffb211816bc3379adec97cd5d96184e87ba197c86a19a933834c8eb"
+  },
+  "newCandidate": {
+    "digest": "b9c128031b2054c5839e254809e5bcc526e981ee0b0c8fa033a701513e5c94fb",
+    "fileCount": 951,
+    "gatesPerRun": 17,
+    "threeRunStatus": "passed 51/51",
+    "appliedToPrimary": false,
+    "review": "GO four-file delta; focused ACL/runner/recipient and full 236 fixture tests passed",
+    "sourceReceipt": {
+      "path": "docs/mail-safety-results/staged-native-acl-complete-recovery-three-run-source-2026-10-22.json",
+      "sha256": "78ed4d4a45081377ac9d06bd40d1cd1544dc56213d5c4885ec18d8d2a99e8b4c"
+    },
+    "componentEquivalenceReceipt": "docs/mail-safety-results/staged-native-acl-component-input-equivalence-2026-10-22.json"
+  }
+}

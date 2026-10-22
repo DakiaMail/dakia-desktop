@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T19:23:44Z",
+  "lane": "focused-source-and-fictional-loopback",
+  "status": "passed-with-provider-run-pending",
+  "scope": "Secret-free elapsed progress diagnostics for an existing read-only provider recovery flow. No timeout, retry, send, credential, or provider policy changed.",
+  "source": {
+    "mailRsSha256": "0ac200ebfc7f285adcff6863287f709e6480a91f16990482d8f6d399abd4ced6",
+    "probeProgressTestsSha256": "cabd0ec1a810ed2988bc0f3c4adc3a05f9e499100dd28dbb7f68c62e4a855ee0",
+    "providerSmokeSha256": "b2d699c1b25a283518a950ce1feda05c7dc9c89e7cc6fa1fc089fd7a7b9d2338"
+  },
+  "diagnosticContract": {
+    "events": "ProbeProgressEvent::Started and ::Completed with a closed, content-free ProbeProgressPhase enum.",
+    "recoveryFields": [
+      "activeOperation",
+      "activeElapsedMs",
+      "completedOperations.operation",
+      "completedOperations.elapsedMs",
+      "operationsClamped"
+    ],
+    "operationCap": 32,
+    "clock": "monotonic elapsed time",
+    "timeoutBehavior": "The active fixed operation is persisted before awaiting it and remains present if the enclosing recovery deadline cancels that operation.",
+    "prohibitedPayloads": [
+      "provider endpoint",
+      "account identifier",
+      "mailbox",
+      "message identifier",
+      "message content",
+      "credential",
+      "AUTH bytes",
+      "raw provider error"
+    ]
+  },
+  "coveredOperations": {
+    "initialDetailedProbe": [
+      "IMAP TCP connect",
+      "IMAP greeting",
+      "IMAP STARTTLS",
+      "IMAP TLS handshake",
+      "IMAP post-TLS CAPABILITY",
+      "IMAP capability",
+      "IMAP authenticate",
+      "IMAP LIST",
+      "IMAP EXAMINE",
+      "IMAP STATUS",
+      "IMAP LOGOUT",
+      "SMTP connect",
+      "SMTP STARTTLS",
+      "SMTP EHLO",
+      "SMTP authenticate",
+      "SMTP QUIT"
+    ],
+    "laterHighLevelRecovery": [
+      "store open",
+      "account persistence",
+      "credential persistence",
+      "header synchronization",
+      "exact search",
+      "full fetch",
+      "hydrate",
+      "cache read"
+    ]
+  },
+  "verification": {
+    "core": "cargo test -p dakia-core --lib probe_progress_tests --locked: 6 passed, 0 failed, 730 filtered",
+    "cli": "cargo test -p dakia-cli --bin dakia-provider-smoke --locked: 22 passed, 0 failed",
+    "lint": [
+      "cargo clippy -p dakia-core --lib --locked -- -D warnings",
+      "cargo clippy -p dakia-cli --bin dakia-provider-smoke --locked -- -D warnings"
+    ],
+    "formatAndDiff": [
+      "cargo fmt --check -- crates/dakia-core/src/mail.rs crates/dakia-core/src/mail/tests/probe_progress_tests.rs crates/dakia-cli/src/bin/provider-smoke.rs",
+      "git diff --check -- crates/dakia-core/src/mail.rs crates/dakia-cli/src/bin/provider-smoke.rs"
+    ],
+    "independentReview": "Approved by probe_review after rerunning the focused core and CLI suites.",
+    "sensitivity": "A private mutant clearing active timeout state failed recovery_timeout_evidence_retains_the_cancelled_active_operation_without_sensitive_data with actual activeOperation null versus exact_search; the source was restored and the 22-test CLI suite passed."
+  },
+  "transportProvenance": {
+    "evidence": "A pre-instrument target/debug/dakia-provider-smoke artifact, mtime 2026-10-21 18:19:05 and SHA-256 a773cd5ff042121f5defbed80b22fb3f93a690422933c5bfe03a610c7ee618ef, has no progress symbols. Independent DWARF/disassembly review established the pre-existing SMTP order connect_tokio1, conditional STARTTLS, explicit EHLO, unchanged credentials/default mechanisms authentication, then QUIT; IMAP already performed post-TLS CAPABILITY/validation and probe CAPABILITY, validation, authentication.",
+    "conclusion": "The diagnostics wrap the existing command flow and do not introduce a transport-policy change."
+  },
+  "limitations": [
+    "Detailed transport phases cover only the initial IMAP and SMTP authentication probes.",
+    "Later recovery steps retain only their high-level operation name; a timeout there cannot be attributed to an internal fresh connection's TLS or authentication phase.",
+    "SMTP connect includes Lettre's implicit-TLS connection work and does not claim an independently observed TLS-handshake phase.",
+    "No external provider recovery was run after this diagnostic change."
+  ]
+}

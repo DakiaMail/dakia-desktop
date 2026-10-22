@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "status": "passed",
+  "lane": "manual-performance-preparation-provenance",
+  "sourceDigest": "2a4e14731ba246806f3700b020ff7c1ec4afdbce0ceea6466fcfa46cb41d475f",
+  "generatedArtifactReset": {
+    "command": "cargo clean -p dakia-core",
+    "exitCode": 0,
+    "scope": "generated default-target dakia-core build artifacts only",
+    "log": "/private/tmp/dakia-publication-detail-performance-clean-2026-10-21.log",
+    "logSha256": "bfadba52ee0db5dd010c577b98b305d1c20674851c3eb45f07980f0ba3a7bf96",
+    "result": "Removed 4672 files, 3.6GiB total"
+  },
+  "comparisonReport": "docs/mail-safety-results/publication-detail-performance-comparison-2026-10-21.json",
+  "comparisonSha256": "310d9dd78c9a08f26800e2b2b3c9018e1cd2abf38d9bd29a96842330c050b78c",
+  "limitations": [
+    "The clean build removes previously observed generated-artifact variance; its compiler mechanism is unproven.",
+    "The controlled query optimization alone measured about 31 ms; larger shifts must not be attributed entirely to it.",
+    "The original regressed performance report is retained unchanged."
+  ]
+}

@@ -1,0 +1,67 @@
+{
+  "execution": {
+    "childExitCode": 1,
+    "childSignal": "none",
+    "durationMs": 22,
+    "evidenceFileCreated": false,
+    "guardMarkerObserved": false,
+    "localStageMarkerCount": 0,
+    "parentTimeout": false,
+    "passwordPromptObserved": false,
+    "timeline": [
+      {
+        "elapsedSinceRecoveryBeginMs": -30,
+        "marker": "parent.template.begin"
+      },
+      {
+        "elapsedSinceRecoveryBeginMs": 0,
+        "marker": "parent.template.eof"
+      },
+      {
+        "elapsedSinceRecoveryBeginMs": 0,
+        "marker": "parent.recovery.begin"
+      },
+      {
+        "elapsedSinceRecoveryBeginMs": 22,
+        "marker": "parent.child.eof"
+      }
+    ],
+    "wrapperExitCode": 1
+  },
+  "interpretation": {
+    "confirmed": [
+      "The wrapper captured child EOF and classified exit code 1 without a signal or parent timeout.",
+      "No password prompt, local stage marker, or guard marker was captured. This does not prove those events were absent.",
+      "No provider network operation or mailbox mutation was reachable through the reviewed private guard."
+    ],
+    "followUp": "No further run is permitted by this diagnostic budget.",
+    "notConfirmed": [
+      "The duration of local Store initialization or credential persistence remains unmeasured.",
+      "This result cannot identify the cause of the earlier timeout."
+    ],
+    "correction": {
+      "originalReportSha256": "570fb974f19f6196996953c32103562dcdebc0c77e8663a591adfc6b095e3031",
+      "audit": "gmail-read-only-recovery-local-init-preprompt-capture-audit-2026-10-21.json",
+      "reason": "Raw child output was discarded and only one prompt form was recognized. The earlier claim that the binary never reached its prompt or local initialization was stronger than the evidence."
+    }
+  },
+  "kind": "private-local-initialization-synthetic-direct-diagnostic",
+  "privateArtifact": {
+    "binarySha256": "5cf39c2b2b6ece617468d8bffdcb46364778c73041f6277caba326068cd9ae6c",
+    "patchSha256": "9e4ea70bd6f65d73fa3a27952406f50a4f4f5a44fd021420d5cc28371a7c5877",
+    "wrapperSha256": "5be45ed8114836738753396f4419f2d64b2f6b9f3d053a7faf2d9db1fc41c0df"
+  },
+  "reviewedNetworkGuard": {
+    "earlyLocalFailureCaveat": "configuration validation or local setup can fail before the guard",
+    "reviewOutcome": "all DNS, IMAP, SMTP, remote fetch/search, and send paths are unreachable because they follow the always-failing private guard"
+  },
+  "schemaVersion": 1,
+  "scope": {
+    "attemptCount": 1,
+    "credentialSource": "synthetic-local-only",
+    "mailSubmissionAttempted": false,
+    "mailboxMutationAttempted": false,
+    "providerConnectionAttempted": false,
+    "runIdentifier": "redacted-existing-fixture"
+  }
+}

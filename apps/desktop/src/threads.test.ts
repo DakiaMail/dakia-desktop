@@ -58,6 +58,32 @@ describe("groupMessages", () => {
     ).toHaveLength(2);
   });
 
+  it("orders a valid leap second between its preceding second and following minute", () => {
+    const [thread] = groupMessages([
+      message({ id: "following-minute", received_at: "2017-01-01T00:00:00Z" }),
+      message({ id: "leap-second", received_at: "2016-12-31T23:59:60Z" }),
+      message({
+        id: "fractional-leap-second",
+        received_at: "2016-12-31T23:59:60.5Z",
+      }),
+      message({
+        id: "ordinary-second",
+        received_at: "2016-12-31T23:59:59.999Z",
+      }),
+      message({ id: "invalid-b", received_at: "not-a-date" }),
+      message({ id: "invalid-a", received_at: "" }),
+    ]);
+
+    expect(thread.messages.map(({ id }) => id)).toEqual([
+      "invalid-a",
+      "invalid-b",
+      "ordinary-second",
+      "leap-second",
+      "fractional-leap-second",
+      "following-minute",
+    ]);
+  });
+
   it("is invariant while retaining concrete duplicate locators without synthetic row state", () => {
     const messages = permutationFixture(17);
     const expected = groupMessages(messages);

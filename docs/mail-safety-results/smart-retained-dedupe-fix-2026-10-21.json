@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "lane": "smart-inbox-retained-thread-deduplication",
+  "recordedAt": "2026-10-21T11:47:02Z",
+  "status": "passed-source-native-replay-pending",
+  "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "nativeObservation": {
+    "run": "2a",
+    "status": "failed-before-fix",
+    "detail": "After opening unread UID 3 in Smart Inbox, the selected message appeared in Other and Seen at the same time. Opening UID 4 removed the retained Other row.",
+    "interpretation": "Selected-row retention was intentional, but the renderer deduplicated only within the retained row's original section and exposed the same account-scoped thread again when the authoritative refresh moved it to Seen."
+  },
+  "fix": {
+    "detail": "While an opened thread is retained in its original ordinary Smart section, suppress the same account-scoped thread ID from Seen and other ordinary sections. Preserve the Starred exception and the existing 180 ms switch-away transition.",
+    "selectionBehavior": "The retained thread contributes one visible row and one selected item instead of two."
+  },
+  "sensitivity": {
+    "method": "Applied the regression test, temporarily reverted only the App.tsx renderer hunk, ran the exact regression, then restored the renderer hunk.",
+    "brokenRenderer": {
+      "status": "failed-as-expected",
+      "test": "App read state > shows a retained Smart thread only once when it moves to Seen",
+      "assertion": "expected length 1, got 2",
+      "location": "apps/desktop/src/App.test.tsx:3473",
+      "testFilesPassed": 0,
+      "testFilesFailed": 1,
+      "testsFailed": 1,
+      "testsSkipped": 102
+    },
+    "restoredFix": {
+      "status": "passed",
+      "testFilesPassed": 1,
+      "testsPassed": 1,
+      "testsSkipped": 102
+    }
+  },
+  "focusedVerification": {
+    "command": "npx vitest run apps/desktop/src/App.test.tsx apps/desktop/src/realtimeDelivery.integration.test.tsx apps/desktop/src/mutationStateModel.integration.test.tsx --maxWorkers=1 --reporter=dot",
+    "status": "passed",
+    "testFilesPassed": 3,
+    "testsPassed": 120
+  },
+  "staticVerification": {
+    "typecheck": {
+      "command": "npm run typecheck",
+      "status": "passed"
+    },
+    "format": {
+      "command": "npx prettier --check apps/desktop/src/App.tsx apps/desktop/src/App.test.tsx",
+      "status": "passed"
+    }
+  },
+  "independentReview": {
+    "status": "approved",
+    "materialFindings": 0,
+    "detail": "The reviewer confirmed account isolation, the Starred exception, the 180 ms exit and Seen reveal, correct selection counting, and deterministic sensitivity against the broken renderer."
+  },
+  "files": [
+    {
+      "path": "apps/desktop/src/App.tsx",
+      "sha256": "9d123ed7f3783a5036b6f9fa693aa8a1aca52f8e10cf04d5d8dc700f0ca390d6"
+    },
+    {
+      "path": "apps/desktop/src/App.test.tsx",
+      "sha256": "99e02d59ec975762d2ab65f15c363ff7684ec8ab5f6b3738c4f77b9746832269"
+    }
+  ],
+  "privateArtifacts": [
+    {
+      "path": "/private/tmp/dakia-smart-retained-dedupe.patch",
+      "sha256": "66e2fa65298cf95892802204609146d365b16da7386d3e99b9be621b79ac387c",
+      "purpose": "Reviewed integration patch"
+    }
+  ],
+  "rawLogs": [],
+  "rawLogNote": "No standalone raw test log was retained. Exact commands, exit statuses, assertion text, and counts were captured in the active task transcript.",
+  "limitations": [
+    "The fixed behavior has not yet been replayed in native run 2a or a later isolated native run.",
+    "This focused evidence does not replace the coordinated full source baseline.",
+    "The native before-fix observation did not retain a standalone screenshot or raw accessibility log for this specific duplicate-row finding."
+  ]
+}

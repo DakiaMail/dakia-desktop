@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "status": "passed-with-allowed-warnings",
+  "checkedAt": "2026-10-22T08:59:43.947Z",
+  "exitCode": 0,
+  "command": "DAKIA_CARGO_AUDIT_BIN=/private/tmp/dakia-mail-safety-tools/bin/cargo-audit bash scripts/audit-dependencies.sh --npm",
+  "inputs": {
+    "Cargo.lock": "78e7136d6ff7a477e2317feb99a976a75376b1283a331babaca26b83c27f58b2",
+    "Cargo.toml": "a101a1b7d6ef9e1015f15d93fc722a927f38a60cf5fe85c0fc494d41d95561eb",
+    "package-lock.json": "ec85e8d77a670963d49224d083cc9133b30763f048e8b520360f9c51c4bb5e1b",
+    "package.json": "3fdab5c887e52dde4e46087604f2624f4790fc5675588ad53c1bce6dd68a3ebe",
+    ".cargo/audit.toml": "0a31dab852dead3b6c393c395475001792fde4cb008bad2c478d6776d0e52cc0",
+    "scripts/audit-dependencies.sh": "78a1949129f8863be0f70e4e54651552c537781aab07f3da7dce8ace5fe9503b",
+    "scripts/verify-vendored-crates.mjs": "1b5edfd506b5cd15fb96b8a1ce702fbf01791ff1c105815a2a8984dae4ad504c"
+  },
+  "log": {
+    "path": "/private/tmp/dakia-successor-dependency-audit-20261022.log",
+    "sha256": "1a314d5fc06f7af86f8e69c3411d89426934298fe2967288e419493ef94c2cc5"
+  },
+  "npm": {
+    "vulnerabilities": 0
+  },
+  "rust": {
+    "allowedUnmaintainedWarnings": 10,
+    "advisories": [
+      "RUSTSEC-2024-0436",
+      "RUSTSEC-2024-0370",
+      "RUSTSEC-2025-0081",
+      "RUSTSEC-2025-0075",
+      "RUSTSEC-2025-0080",
+      "RUSTSEC-2025-0100",
+      "RUSTSEC-2025-0098",
+      "RUSTSEC-2026-0371",
+      "RUSTSEC-2026-0370",
+      "RUSTSEC-2026-0372"
+    ]
+  },
+  "limitations": [
+    "Configured cargo-audit policy permits the reported unmaintained-package warnings.",
+    "This audit is dependency/advisory evidence, not proof of absence of application vulnerabilities.",
+    "No mailbox or credential data was submitted."
+  ]
+}

@@ -1,0 +1,133 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21",
+  "kind": "b004-private-provider-proof-harness-diagnostic",
+  "lane": "credentialed-gmail-read-only-provider-proof",
+  "status": "provider-proof-not-passed",
+  "providerProofPassed": false,
+  "roundtripId": "45bacd384f0c4a74893f14e4fea23d9a",
+  "sourceRevisionAtAttempts": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "scope": {
+    "provider": "gmail",
+    "mailbox": "dedicated-disposable-test-account",
+    "operation": "inspect-one-existing-roundtrip-message",
+    "readOnly": true,
+    "newMessageSubmitted": false,
+    "remoteMutationRequested": false
+  },
+  "runnerBinding": {
+    "status": "static-review-approved-not-live-executed",
+    "artifact": "dakia-b004-provider-proof-c56-final-v3",
+    "sha256": "ba0054e1c8e9128b299ee66a166339aed53eddea974db0fc0b3ef9762f2d0f13",
+    "sourceDigest": "c56d2d806d8623dd14c858c8a8362729655496036405ad8c24162fce02a9a85b",
+    "sourceManifestSha256": "6a983e12901b7042fd0c3bfbd0fe3d38e6c08447c667d19d03bcdc786654679b",
+    "sourceManifestFileCount": 939,
+    "privateProjectHashes": {
+      "Cargo.toml": "73b82e6e6a7b474bc6c96178bfcb774055ec7ef3bc8abe56888e476c3957afbc",
+      "Cargo.lock": "5c6917f948de6212101111723e03b9c0407f7d2a306a068932cac3378340f556",
+      "README.md": "c499319affcaa06e848e481d157c4e43bf67a87ef42f9107b0263d8e79654dcf",
+      "src/lib.rs": "cdd103aec5383dd95cd29e4da202388e93496148766b3725facfd3ac50bdc5a9",
+      "src/main.rs": "524a9d9a961c2dfd193738871065f81617e0acd8a90a4de40c2f1b870850a671"
+    }
+  },
+  "authorizedReadOnlyAttempts": [
+    {
+      "sequence": 1,
+      "wrapper": {
+        "artifact": "dakia-b004-provider-proof-wrapper-20261021.py",
+        "sha256": "0827bcd026813d1043c80b941e4452b25b8e9ca985a04815075821e0a4b59e9e"
+      },
+      "observedProcessElapsedSeconds": 0.069,
+      "sanitizedReceipt": {
+        "artifact": "b004-provider-proof-receipt.json",
+        "sha256": "0bea29aeec639af2ff869e44bbd3538c1b58c94f4842aea402def49e38052692",
+        "reportedElapsedSeconds": 0.11,
+        "outcome": "failed",
+        "resultCode": "imap_connection_failed",
+        "remoteMutationRequested": false,
+        "rawProviderObservationsRetained": false,
+        "credentialsFileUnchanged": true
+      },
+      "sanitizedCommandResultSha256": "c49586f2513e9801cda183c9f849c1b513d33fb10c44fe73d3c4a62dc4a953af",
+      "attribution": {
+        "exactCauseKnown": false,
+        "statement": "The generic result did not distinguish DNS, TCP, certificate, TLS handshake, IMAP greeting, capability, or authentication failure. A separate offline sensitivity check proved that the original buffered reader could desynchronize on a coalesced response line and literal, but that does not establish the cause of this provider attempt."
+      }
+    },
+    {
+      "sequence": 2,
+      "wrapper": {
+        "artifact": "dakia-b004-provider-proof-wrapper-v2-20261021.py",
+        "sha256": "2787909b3c46f39844288aac51799d5c12412a29f355cf7ca0d6c7c259f1250b"
+      },
+      "runtime": {
+        "implementation": "CPython",
+        "version": "3.14.5",
+        "opensslVersion": "OpenSSL 3.6.4 25 Aug 2026"
+      },
+      "observedProcessElapsedSeconds": 0.098,
+      "sanitizedReceipt": {
+        "artifact": "b004-provider-proof-receipt.json",
+        "sha256": "69f9d70a5a8e124526d0b5bfeef0068344298a5416b6b26b847d77ac1700edf2",
+        "reportedElapsedSeconds": 0.121,
+        "outcome": "failed",
+        "resultCode": "imap_capability_invalid",
+        "remoteMutationRequested": false,
+        "rawProviderObservationsRetained": false,
+        "credentialsFileUnchanged": true
+      },
+      "sanitizedCommandResultSha256": "2719caa20a4645b61a9b8657f12357150fac40c3f0f0db7c2671197d97ae214b",
+      "attribution": {
+        "exactCauseKnown": true,
+        "stage": "after-tls-capability-before-login",
+        "statement": "CPython 3.14 exposes IMAP capabilities as tuple[str]. The wrapper called decode on each value, raised AttributeError locally, and mapped that failure to imap_capability_invalid before LOGIN."
+      }
+    }
+  ],
+  "offlineRepairEvidence": {
+    "wrapper": {
+      "artifact": "dakia-b004-provider-proof-wrapper-v3-20261021.py",
+      "sha256": "0d32374426acec14457383fe403a8fe742f0a7d6391c51331f7bfa3886f6169e"
+    },
+    "testArtifact": {
+      "artifact": "test-dakia-b004-provider-proof-wrapper-v3-20261021.py",
+      "sha256": "b6d4007d3093236b405ff886c3b6f86338dbfd92bd45dd90136648fd4cd5805f"
+    },
+    "tests": {
+      "passed": 5,
+      "failed": 0,
+      "network": "offline-loopback-only",
+      "credentialsUsed": false,
+      "providerContacted": false
+    },
+    "verifiedBehavior": [
+      "A real local TLS session exercised the complete connect_imap path with CPython tuple[str] capabilities.",
+      "Capability validation remains bounded, ASCII-only, token-count-limited, size-limited, and requires IMAP4REV1 or IMAP4REV2.",
+      "Mixed-case valid capability tokens are normalized without weakening the required capability check.",
+      "Bytes, whitespace, non-ASCII tokens, excessive token counts, and excessive total capability data are rejected.",
+      "A coalesced response line, literal, and trailer stays synchronized on the repaired socket reader; the original reader fails this offline sensitivity case."
+    ],
+    "independentSecurityReview": "approved"
+  },
+  "privacyAndMutationEvidence": {
+    "credentialsRecorded": false,
+    "accountIdentifierRecorded": false,
+    "mailboxWireNamesRecorded": false,
+    "messageIdentifierRecorded": false,
+    "providerErrorsRecorded": false,
+    "messageContentRecorded": false,
+    "remoteMutationRequestedInEitherAttempt": false,
+    "newSendAttempted": false
+  },
+  "hold": {
+    "liveRetryAuthorized": false,
+    "v3ExecutedAgainstProvider": false,
+    "reason": "The repaired wrapper remains bound to the older c56 runner and 939-file source manifest while the governed checkout has subsequent handshake-source edits. A new source freeze, compiled-core equivalence check, reviewed binding, and authorization are required before another credentialed provider run."
+  },
+  "limitations": [
+    "Neither authorized attempt reached a passing provider proof.",
+    "The first attempt's exact failure stage cannot be recovered from its sanitized evidence.",
+    "The repaired wrapper has only offline loopback TLS and static-review evidence.",
+    "This record does not establish provider-to-Reader delivery, Store persistence, cache publication, or reopen behavior."
+  ]
+}

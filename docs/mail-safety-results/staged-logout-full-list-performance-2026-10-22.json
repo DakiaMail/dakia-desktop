@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "status": "passed",
+  "recordedAtUtc": "2026-10-22T01:11:34.392691+00:00",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "04b1368f7a758b2ad77d95442a2d5a0d3b7ce74f1f100bb59967aeef8b9ad471",
+    "fileCount": 952
+  },
+  "sourceTreeAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "04b1368f7a758b2ad77d95442a2d5a0d3b7ce74f1f100bb59967aeef8b9ad471",
+    "fileCount": 952
+  },
+  "startedAt": "2026-10-22T01:05:50.411Z",
+  "finishedAt": "2026-10-22T01:10:29.190Z",
+  "hardware": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "osRelease": "25.6.0",
+    "cpuModel": "Apple M1 Max",
+    "logicalCpuCount": 10,
+    "totalMemoryBytes": 68719476736,
+    "node": "v22.23.2"
+  },
+  "build": {
+    "rustProfile": "cargo-test-unoptimized-debuginfo",
+    "rustc": "rustc 1.89.0 (29483883e 2025-08-04)\nbinary: rustc\ncommit-hash: 29483883eed69d5fb4db01964cdf2af4d86e9cb2\ncommit-date: 2025-08-04\nhost: aarch64-apple-darwin\nrelease: 1.89.0\nLLVM version: 20.1.7",
+    "cargo": "cargo 1.89.0 (c24e10642 2025-06-23)"
+  },
+  "repetitionsPerMailboxSize": 3,
+  "comparisons": [
+    {
+      "messageCount": 2000,
+      "currentMedianMilliseconds": 622,
+      "baselineMedianMilliseconds": 560,
+      "changePercent": 11.071428571428571,
+      "status": "passed"
+    },
+    {
+      "messageCount": 30000,
+      "currentMedianMilliseconds": 8162,
+      "baselineMedianMilliseconds": 7660,
+      "changePercent": 6.553524804177546,
+      "status": "passed"
+    },
+    {
+      "messageCount": 100000,
+      "currentMedianMilliseconds": 27312,
+      "baselineMedianMilliseconds": 25662,
+      "changePercent": 6.429740472293664,
+      "status": "passed"
+    },
+    {
+      "messageCount": 200000,
+      "currentMedianMilliseconds": 55128,
+      "baselineMedianMilliseconds": 52573,
+      "changePercent": 4.8599090788047095,
+      "status": "passed"
+    }
+  ],
+  "resourceSoak": {
+    "reconnectCycles": 200,
+    "storeOpenCycles": 100,
+    "elapsedMilliseconds": 1614,
+    "fileDescriptorsBefore": 10,
+    "fileDescriptorsAfter": 10,
+    "residentBytesBefore": 27459584,
+    "residentBytesAfter": 28983296,
+    "residentGrowthBytes": 1523712,
+    "residentGrowthLimitBytes": 67108864
+  },
+  "baseline": {
+    "path": "/Users/arsalan/code/codex-worktrees/36f9/dakia-desktop/docs/mail-safety-results/remaining-gap-closure-performance-2026-10-21.json",
+    "sha256": "6b5d4c28d6f95f3370c6fe6689a43aade155b5caf65b7796d61df837a7b85352",
+    "retained2000MedianMilliseconds": 560
+  },
+  "measuredExecutableSha256": {
+    "/private/tmp/dakia-next-safety-fixes-a86-staging-20261022/target/debug/deps/dakia_core-a91e447a9eb4eadc": "b3caa8567b8554a92758629aac3d582f76cba9674738dd3a13cf9824b0c335aa"
+  },
+  "report": "/private/tmp/dakia-performance-logout-and-full-list-20261022.json",
+  "reportSha256": "3b785c929f268177aa5d15c08ea1ca3770a14a6f4f95a27e563803b2397ddb23",
+  "log": "/private/tmp/dakia-performance-logout-and-full-list-20261022.log",
+  "logSha256": "cf08f8903b0927f61e62d1c0099a48bca1e78c45f23ef95830e350ae68b43f63",
+  "observations": "/private/tmp/dakia-performance-observations-logout-and-full-list-20261022.json",
+  "observationsSha256": "610e1c283418b3b2660881d20ba48cff08e4c14b20e26a0071aa334b96354ec6",
+  "limitations": [
+    "Timer includes Store/schema setup, fixture insertion, scripted protocol, synchronization and final assertions; it is not sync-only latency.",
+    "No concurrent compiler activity at measurement start. Intermittent process samples do not prove causation.",
+    "Earlier c56/a86 performance failures remain retained with unproven root causes; baseline was not reset.",
+    "This bounded loopback/debug-profile comparison does not establish provider latency, native responsiveness, full WebKit resource usage or long-duration leak freedom."
+  ]
+}

@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "lane": "concurrent-profile-startup-recovery",
+  "recordedAt": "2026-10-21T07:58:21.722134+00:00",
+  "status": "passed-source-and-focused",
+  "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "sourceDigest": "423a76f16559b42900d57c57f6875a04f0d7b56be1da2af0b79393de7fcda228",
+  "retainedFailure": {
+    "report": "expanded-baseline-three-run-source-2026-10-21.json",
+    "iteration": 2,
+    "test": "concurrent_fresh_profile_startup_is_bounded_and_restartable",
+    "error": "SQLite code 17: vtable constructor failed: messages_fts"
+  },
+  "cause": "Concurrent processes could execute autocommit initialization and FTS rebuild phases against the same fresh profile.",
+  "fix": "Hold a persistent canonical per-database OS advisory lock across writable open and migration, including FTS rebuild and VACUUM. Acquire an existing coordinator before read-only preflight and recheck the exact first-lookup race.",
+  "failurePolicy": {
+    "databaseReset": false,
+    "genericSchemaErrorRetry": false,
+    "invalidProfileWithoutLockCreatesLock": false,
+    "waitSeconds": 10,
+    "pollMilliseconds": 50
+  },
+  "focusedChecks": {
+    "migrationLockTests": 9,
+    "storageFaultTests": 22,
+    "cliSubprocessTests": 14,
+    "inProcessConcurrentOpen": 1,
+    "freshProfileWave": {
+      "profiles": 3,
+      "processesPerProfile": 8,
+      "targetedAndFullExecutions": 6
+    },
+    "coreClippyWarningsDenied": "passed",
+    "independentReview": "approved"
+  },
+  "sensitivity": "Removing the error-path coordinator recheck causes the deterministic preflight race regression to return an error while its pending assertion expects safe coordination.",
+  "limitations": [
+    "Hard-linked database aliases are unsupported.",
+    "Active symlink retarget by a profile-directory writer is outside this guarantee.",
+    "Published v0.4.4 does not honor this lock and must be closed before upgrading.",
+    "CLOEXEC is configured but a dedicated child-exec acceptance check is absent.",
+    "Source acceptance does not establish native startup-alert dismissal or packaged GUI behavior."
+  ],
+  "files": [
+    {
+      "path": "crates/dakia-core/src/storage.rs",
+      "sha256": "8ddb45545ffd8dbe3489dbcd6f3111b5a44834277eec90acfed547afff2227eb"
+    },
+    {
+      "path": "crates/dakia-core/src/storage_open_lock_tests.rs",
+      "sha256": "faa222dcba187e78d3fb2987e51e8ef72c3974300797377991d02de3ae175e97"
+    },
+    {
+      "path": "crates/dakia-cli/tests/cli_subprocess.rs",
+      "sha256": "86be40efa805dcbe6a0ac93b4c72825bc99e3abbd807a83429ac0c79fde3567c"
+    }
+  ],
+  "fullBaseline": {
+    "report": "startup-lock-three-run-source-installed-2026-10-21.json",
+    "iterations": 3,
+    "gatesPerIteration": 16,
+    "runtimeRustTestsPerIteration": 891,
+    "rustDoctestsPerIteration": 2,
+    "frontendTestsPerIteration": 564,
+    "scriptTestsPerIteration": 207,
+    "rustIgnoredPerIteration": 11,
+    "frontendSkippedPerIteration": 2,
+    "sourceUnchanged": true
+  }
+}
