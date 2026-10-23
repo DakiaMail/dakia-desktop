@@ -305,11 +305,8 @@ export function buildEmailDocument(
 
   normalizePathologicalTypography(document);
   if (dark) normalizeNeutralPresentation(document);
-  collapseEmptySpacers(document);
-  if (!document.body.querySelector("table, img, picture, svg")) {
-    document.body.classList.add("dakia-reader-content");
-  }
   const history = extractQuotedHistory(document);
+  prepareReaderBody(document);
 
   const policy = document.createElement("meta");
   policy.httpEquiv = "Content-Security-Policy";
@@ -341,7 +338,7 @@ export function buildEmailDocument(
 function installCompatibilityStyles(document: Document, dark: boolean) {
   const compatibilityStyles = document.createElement("style");
   compatibilityStyles.textContent = `
-    :root { color-scheme: ${dark ? "dark" : "light"}; }
+    html { color-scheme: ${dark ? "dark" : "light"}; }
     html, body {
       margin: 0;
       padding: 0;
@@ -354,13 +351,12 @@ function installCompatibilityStyles(document: Document, dark: boolean) {
     html { overflow-x: auto; overflow-y: hidden; }
     body {
       box-sizing: border-box;
-      padding: 20px;
-      overflow-wrap: anywhere;
+      overflow-wrap: normal;
       overflow-y: hidden;
     }
+    body.dakia-reader-content { padding: 20px; overflow-wrap: anywhere; }
     body.dakia-reader-content > * { max-width: 72ch; }
     img { max-width: 100%; height: auto; }
-    table { max-width: 100%; }
     pre { white-space: pre-wrap; }
     a[data-dakia-external-href],
     a[data-dakia-fragment-href] {
@@ -378,11 +374,21 @@ function documentSource(document: Document) {
 function documentWithBody(document: Document, content: HTMLElement) {
   const historyDocument = cloneInertHtmlDocument(document);
   historyDocument.body.replaceChildren(content.cloneNode(true));
+  prepareReaderBody(historyDocument);
   return historyDocument;
 }
 
 function documentSourceWithBody(document: Document, content: HTMLElement) {
   return documentSource(documentWithBody(document, content));
+}
+
+function prepareReaderBody(document: Document) {
+  // Classify the visible surface independently of any extracted quoted mail.
+  // Images alone may just be a signature or an invisible tracking pixel.
+  const designedLayout = !!document.body.querySelector("table");
+  document.body.classList.toggle("dakia-reader-content", !designedLayout);
+  // Empty cells and rows are intentional layout primitives in HTML email.
+  if (!designedLayout) collapseEmptySpacers(document);
 }
 
 function extractQuotedHistory(document: Document) {
@@ -621,7 +627,15 @@ function replaceNeutralColors(value: string, role: ColorRole) {
 
 function darkNeutralColor(value: string, role: ColorRole) {
   const rgb = parseRgb(value);
-  if (!rgb || Math.max(...rgb) - Math.min(...rgb) > 18) return null;
+  if (!rgb) return null;
+  const spread = Math.max(...rgb) - Math.min(...rgb);
+  // Receipts commonly use muted blue-grey ink rather than strictly grey text.
+  const mutedInk =
+    role === "foreground" &&
+    spread <= 48 &&
+    rgb[2] >= rgb[0] &&
+    rgb[2] >= rgb[1];
+  if (spread > 18 && !mutedInk) return null;
   const luminance = (rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722) / 255;
   if (role === "background") {
     if (luminance > 0.72) return "#191a19";
@@ -720,8 +734,8 @@ function isSpacerElement(element: HTMLElement) {
 
 function hasMeaningfulSpacerContent(element: HTMLElement) {
   if ((element.textContent ?? "").replace(/[\s\u00a0]/g, "")) return true;
-  if (element.querySelector("img, picture, svg, video, canvas, iframe, table"))
-    return true;
+  const media = "img, picture, svg, video, canvas, iframe, table";
+  if (element.matches(media) || element.querySelector(media)) return true;
   const style = element.getAttribute("style") ?? "";
   return (
     /\b(?:border(?:-[a-z]+)?|background(?:-color|-image)?)\s*:/i.test(style) ||
@@ -731,6 +745,38 @@ function hasMeaningfulSpacerContent(element: HTMLElement) {
 }
 
 function supportsDarkAppearance(document: Document) {
+  // A dark logo or decorative background must not veto adaptation of an
+  // otherwise light receipt. Keep the conservative fallback when there is no
+  // known light surface to adapt, or when the palette cannot be resolved.
+  if (hasAmbiguousPalette(document)) return false;
+  const outerSurface = document.body.firstElementChild;
+  if (
+    [document.documentElement, document.body, outerSurface].some((element) => {
+      if (!element) return false;
+      const background =
+        element.getAttribute("bgcolor") ??
+        element
+          .getAttribute("style")
+          ?.match(/\bbackground(?:-color)?\s*:\s*([^;]+)/i)?.[1];
+      return !!background && isExplicitDarkColor(background);
+    }) ||
+    hasAuthoredDarkSurface(document) ||
+    hasLightArtworkSurface(document) ||
+    hasImageBackedText(document)
+  )
+    return false;
+  const lightSurface = [...document.querySelectorAll("*")].some((element) => {
+    const background = element.getAttribute("bgcolor");
+    if (background && darkNeutralColor(background, "background")) return true;
+    const css =
+      element.localName === "style"
+        ? (element.textContent ?? "")
+        : (element.getAttribute("style") ?? "");
+    return [...css.matchAll(/\bbackground(?:-color)?\s*:\s*([^;}]+)/gi)].some(
+      ([, value]) => !!darkNeutralColor(value, "background"),
+    );
+  });
+  if (lightSurface) return true;
   if (document.querySelector("[background]")) return false;
   if (
     [...document.querySelectorAll("style")].some((element) =>
@@ -752,6 +798,115 @@ function supportsDarkAppearance(document: Document) {
     if (background && isExplicitDarkColor(background)) return false;
   }
   return !hasAmbiguousPalette(document);
+}
+
+function hasLightArtworkSurface(document: Document) {
+  // Transparent artwork (for example a black payment code) may depend on its
+  // white backing. Without inspecting pixels, preserve its authored palette.
+  const artwork = [...document.querySelectorAll("*")].filter(
+    (element) =>
+      !element.textContent?.trim() &&
+      [
+        ...element.querySelectorAll(
+          ":scope > img, :scope > picture, :scope > svg, :scope > a > img",
+        ),
+      ].some((image) => {
+        const width = Number(image.getAttribute("width"));
+        const height = Number(image.getAttribute("height"));
+        return !(width > 0 && width <= 2 && height > 0 && height <= 2);
+      }),
+  );
+  const lightBackground = (css: string) =>
+    [...css.matchAll(/\bbackground(?:-color)?\s*:\s*([^;}]+)/gi)].some(
+      ([, value]) => !!darkNeutralColor(value, "background"),
+    );
+  if (
+    artwork.some((element) => {
+      const background = element.getAttribute("bgcolor");
+      return (
+        (background && darkNeutralColor(background, "background")) ||
+        lightBackground(element.getAttribute("style") ?? "")
+      );
+    })
+  )
+    return true;
+  for (const style of document.querySelectorAll("style")) {
+    const css = (style.textContent ?? "").replace(/\/\*[\s\S]*?\*\//g, "");
+    for (const [, selector, declarations] of css.matchAll(
+      /([^{}]+)\{([^{}]*)\}/g,
+    )) {
+      if (!lightBackground(declarations)) continue;
+      try {
+        if (artwork.some((element) => element.matches(selector.trim())))
+          return true;
+      } catch {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function hasAuthoredDarkSurface(document: Document) {
+  const surfaces = [
+    document.documentElement,
+    document.body,
+    document.body.firstElementChild,
+  ];
+  for (const style of document.querySelectorAll("style")) {
+    const css = (style.textContent ?? "").replace(/\/\*[\s\S]*?\*\//g, "");
+    for (const [, selector, declarations] of css.matchAll(
+      /([^{}]+)\{([^{}]*)\}/g,
+    )) {
+      const darkBackground = [
+        ...declarations.matchAll(/\bbackground(?:-color)?\s*:\s*([^;}]+)/gi),
+      ].some(([, value]) => isExplicitDarkColor(value));
+      if (!darkBackground) continue;
+      try {
+        if (surfaces.some((element) => element?.matches(selector.trim())))
+          return true;
+      } catch {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function hasImageBackedText(document: Document) {
+  const hasText = (element: Element) => !!element.textContent?.trim();
+  const imageBackground =
+    /\b(?:url|(?:repeating-)?(?:linear|radial|conic)-gradient)\s*\(/i;
+  for (const element of document.querySelectorAll("[background], [style]")) {
+    if (
+      hasText(element) &&
+      (element.hasAttribute("background") ||
+        imageBackground.test(element.getAttribute("style") ?? ""))
+    )
+      return true;
+  }
+  // Conservatively inspect every rule, including inactive media branches.
+  // Stripe includes image rules for absent template elements; those must not
+  // disable dark mode for the whole receipt. Unparseable selectors stay light.
+  for (const style of document.querySelectorAll("style")) {
+    const css = (style.textContent ?? "").replace(/\/\*[\s\S]*?\*\//g, "");
+    for (const [, selector, declarations] of css.matchAll(
+      /([^{}]+)\{([^{}]*)\}/g,
+    )) {
+      if (
+        !imageBackground.test(declarations) ||
+        /^\s*@font-face\b/i.test(selector)
+      )
+        continue;
+      try {
+        if ([...document.querySelectorAll(selector.trim())].some(hasText))
+          return true;
+      } catch {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function hasAmbiguousPalette(document: Document) {

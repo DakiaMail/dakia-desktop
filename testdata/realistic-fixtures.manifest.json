@@ -1391,14 +1391,14 @@
         "kind": "faithfully-redacted",
         "detail": "Swedbank-shaped presentation table with fictional message copy and a reserved test asset host."
       },
-      "issue": "HTML corpus: preserve branded signature structure while removing structurally empty spacer rows.",
+      "issue": "HTML corpus: preserve branded signature structure and its authored spacer rows.",
       "provider": {
         "shape": "branded presentation-table signature layout",
         "liveProviderCompatible": false
       },
       "expected": {
         "body": "Keep the visible branded copy and signature text.",
-        "html": "Preserve authored brand colors and the logo while removing empty spacer rows.",
+        "html": "Preserve authored brand colors, the logo, and the signature spacer rows.",
         "snippet": "Not applicable to standalone HTML rendering fixtures.",
         "attachments": "Not applicable to standalone HTML rendering fixtures.",
         "error": "No rendering error is expected.",
@@ -1418,7 +1418,56 @@
         {
           "domain": "frontend.html-message",
           "source": "apps/desktop/src/components/HtmlMessage.test.tsx",
-          "id": "collapses the fixture's empty spacer rows without changing signature structure"
+          "id": "preserves spacer rows that form part of a designed signature"
+        }
+      ]
+    },
+    {
+      "id": "html.stripe-receipt-layout",
+      "path": "apps/desktop/src/test/fixtures/stripe-receipt-layout.html",
+      "sha256": "17a7bec66cd89cb34e9f0640245aaabad7880fde4062ec74d873479e23bf8d38",
+      "provenance": {
+        "kind": "faithfully-redacted",
+        "detail": "Stripe receipt with fictional merchant, payment, receipt, date, and contact details. Provider table nesting, spacer whitespace, and CSS are preserved; account and tracking destinations are redacted. Generic public CDN artwork and documentation URLs are retained."
+      },
+      "issue": "HTML corpus: preserve receipt amount columns and deliberate spacers while adapting light surfaces around decorative artwork in dark mode.",
+      "provider": {
+        "shape": "Stripe presentation-table receipt with decorative header artwork and summary amount columns",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Retain the complete receipt heading, amounts, summary, and footer.",
+        "html": "Keep authored table widths and spacer cells, adapt neutral surfaces and muted ink, and preserve header artwork across repeated light and dark transitions.",
+        "snippet": "Not applicable to standalone HTML rendering fixtures.",
+        "attachments": "Not applicable to standalone HTML rendering fixtures.",
+        "error": "No rendering error or amount truncation is expected.",
+        "resourceLimit": "No MIME resource-limit semantics apply to standalone HTML."
+      },
+      "applicablePaths": ["html-document"],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-10-17",
+        "permittedDomains": [
+          "example.test",
+          "www.w3.org",
+          "parcel.io",
+          "stripe-images.s3.amazonaws.com",
+          "stripe-images.stripecdn.com"
+        ],
+        "permittedAssetUrls": [
+          "https://stripe-images.s3.amazonaws.com/emails/redacted-account/4/twelve_degree_icon@2x.png"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "frontend.html-message",
+          "source": "apps/desktop/src/components/HtmlMessage.test.tsx",
+          "id": "preserves the receipt table contract while adapting neutral surfaces for dark mode"
+        },
+        {
+          "domain": "frontend.html-message",
+          "source": "apps/desktop/src/components/HtmlMessage.test.tsx",
+          "id": "keeps the complete receipt mounted through dark-light-dark theme changes"
         }
       ]
     },
