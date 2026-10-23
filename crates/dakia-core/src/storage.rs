@@ -1402,6 +1402,7 @@ impl Store {
             "CREATE TABLE IF NOT EXISTS message_provider_identities (message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, provider TEXT NOT NULL CHECK(provider = 'gmail'), provider_message_id TEXT NOT NULL CHECK(length(provider_message_id) BETWEEN 1 AND 20))",
             "CREATE TABLE IF NOT EXISTS message_provider_identity_observations (message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, provider TEXT NOT NULL CHECK(provider = 'gmail'))",
             "CREATE INDEX IF NOT EXISTS message_provider_identities_lookup ON message_provider_identities(account_id, provider, provider_message_id)",
+            "CREATE INDEX IF NOT EXISTS message_provider_identity_observations_account ON message_provider_identity_observations(account_id)",
             "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(subject, from_name, from_address, to_addresses, body_text, content='messages', content_rowid='rowid')",
             "CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN INSERT INTO messages_fts(rowid, subject, from_name, from_address, to_addresses, body_text) VALUES (new.rowid, new.subject, new.from_name, new.from_address, new.to_addresses, new.body_text); END",
             "CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN INSERT INTO messages_fts(messages_fts, rowid, subject, from_name, from_address, to_addresses, body_text) VALUES ('delete', old.rowid, old.subject, old.from_name, old.from_address, old.to_addresses, old.body_text); END",
@@ -2749,8 +2750,26 @@ impl Store {
     /// authoritative rebuild after the historical pass completes.
     pub async fn upsert_catalog_messages(&self, messages: &[MailSummary]) -> Result<()> {
         let mut tx = self.pool.begin().await?;
+        let mut gmail_accounts = HashMap::new();
         for message in messages {
-            persist_message(&mut tx, message, ProviderIdentityPolicy::Observed).await?;
+            if !gmail_accounts.contains_key(&message.account_id) {
+                let gmail_account =
+                    account_uses_gmail_provider(&mut tx, &message.account_id).await?;
+                if gmail_account == Some(false) {
+                    clear_provider_identity_for_non_gmail_account(&mut tx, &message.account_id)
+                        .await?;
+                }
+                gmail_accounts.insert(message.account_id.clone(), gmail_account);
+            }
+            persist_message_with_flag_policy_and_account_provider(
+                &mut tx,
+                message,
+                FlagUpdatePolicy::ProviderAuthoritative,
+                ProviderIdentityPolicy::Observed,
+                gmail_accounts[&message.account_id],
+                gmail_accounts[&message.account_id] == Some(false),
+            )
+            .await?;
         }
         tx.commit().await?;
         Ok(())
@@ -6472,6 +6491,10 @@ async fn persist_staged_uidvalidity_replacement_messages_in_transaction(
     mailbox: &str,
     generation: &str,
 ) -> Result<()> {
+    let gmail_account = account_uses_gmail_provider(tx, account_id).await?;
+    if gmail_account == Some(false) {
+        clear_provider_identity_for_non_gmail_account(tx, account_id).await?;
+    }
     let mut after_uid: Option<i64> = None;
     loop {
         let rows: Vec<(i64, String)> = match after_uid {
@@ -6527,7 +6550,15 @@ async fn persist_staged_uidvalidity_replacement_messages_in_transaction(
                     "staged replacement message UID is absent from the finalized snapshot"
                 ));
             }
-            persist_message(tx, &message, provider_identity_policy).await?;
+            persist_message_with_flag_policy_and_account_provider(
+                tx,
+                &message,
+                FlagUpdatePolicy::ProviderAuthoritative,
+                provider_identity_policy,
+                gmail_account,
+                gmail_account == Some(false),
+            )
+            .await?;
         }
         after_uid = rows.last().map(|(uid, _)| *uid);
     }
@@ -6538,6 +6569,56 @@ async fn persist_message_with_flag_policy(
     message: &MailSummary,
     flag_policy: FlagUpdatePolicy,
     provider_identity_policy: ProviderIdentityPolicy,
+) -> Result<()> {
+    persist_message_with_flag_policy_and_account_provider(
+        tx,
+        message,
+        flag_policy,
+        provider_identity_policy,
+        None,
+        false,
+    )
+    .await
+}
+
+async fn account_uses_gmail_provider(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    account_id: &str,
+) -> Result<Option<bool>> {
+    let Some(data) = sqlx::query_scalar::<_, String>("SELECT data FROM accounts WHERE id = ?")
+        .bind(account_id)
+        .fetch_optional(&mut **tx)
+        .await?
+    else {
+        return Ok(None);
+    };
+    Ok(deserialize_account(&data).ok().and_then(|account| {
+        (account.id.to_string() == account_id).then_some(account.provider_id == "gmail")
+    }))
+}
+
+async fn clear_provider_identity_for_non_gmail_account(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    account_id: &str,
+) -> Result<()> {
+    sqlx::query("DELETE FROM message_provider_identities WHERE account_id = ?")
+        .bind(account_id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM message_provider_identity_observations WHERE account_id = ?")
+        .bind(account_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn persist_message_with_flag_policy_and_account_provider(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    message: &MailSummary,
+    flag_policy: FlagUpdatePolicy,
+    provider_identity_policy: ProviderIdentityPolicy,
+    gmail_account: Option<bool>,
+    account_identity_cleanup_complete: bool,
 ) -> Result<()> {
     let provider_identity = message.gmail_message_id.as_deref();
     let suppressed: bool = sqlx::query_scalar(
@@ -6581,15 +6662,12 @@ async fn persist_message_with_flag_policy(
         .bind(expected_read)
         .bind(expected_flagged)
         .execute(&mut **tx).await?;
-    let gmail_account = sqlx::query_scalar::<_, String>("SELECT data FROM accounts WHERE id = ?")
-        .bind(&message.account_id)
-        .fetch_optional(&mut **tx)
-        .await?
-        .map(|data| deserialize_account(&data).map(|account| account.provider_id == "gmail"))
-        .transpose()
-        .ok()
-        .flatten()
-        .unwrap_or(false);
+    let gmail_account = match gmail_account {
+        Some(gmail_account) => gmail_account,
+        None => account_uses_gmail_provider(tx, &message.account_id)
+            .await?
+            .unwrap_or(false),
+    };
     if gmail_account {
         if let Some(provider_message_id) = provider_identity {
             // Resolve the row by the immutable remote locator after the message
@@ -6612,7 +6690,9 @@ async fn persist_message_with_flag_policy(
                 .execute(&mut **tx)
                 .await?;
         }
-    } else if matches!(provider_identity_policy, ProviderIdentityPolicy::Observed) {
+    } else if matches!(provider_identity_policy, ProviderIdentityPolicy::Observed)
+        && !account_identity_cleanup_complete
+    {
         // A replacement row must never inherit an identity from a previous
         // mailbox UID namespace or a provider configuration change. The
         // corresponding observation is equally provider-scoped: retaining it
@@ -7988,6 +8068,268 @@ mod tests {
             vec![7],
             "the restored Gmail account must re-request this identity"
         );
+    }
+
+    #[tokio::test]
+    async fn catalog_batch_provider_lookup_preserves_cross_account_identity_boundaries() {
+        let store = Store::in_memory().await.unwrap();
+        let observation_delete_plan = sqlx::query_as::<_, (i64, i64, i64, String)>(
+            "EXPLAIN QUERY PLAN DELETE FROM message_provider_identity_observations WHERE account_id = ?",
+        )
+        .bind("query-plan@example.test")
+        .fetch_all(&store.pool)
+        .await
+        .unwrap();
+        assert!(
+            observation_delete_plan.iter().any(|(_, _, _, detail)| detail
+                .contains("message_provider_identity_observations_account")),
+            "account-wide provider observation cleanup must use its account index: {observation_delete_plan:?}"
+        );
+        let gmail_id = uuid::Uuid::new_v4();
+        let fastmail_id = uuid::Uuid::new_v4();
+        let mut gmail = account_with_id(gmail_id, "batch-gmail@example.test");
+        gmail.provider_id = "gmail".into();
+        let mut fastmail = account_with_id(fastmail_id, "batch-fastmail@example.test");
+        fastmail.provider_id = "gmail".into();
+        store.save_account(&gmail).await.unwrap();
+        store.save_account(&fastmail).await.unwrap();
+
+        let mut old_provider_row = message("Old provider row", "preview");
+        old_provider_row.id = stable_message_id(fastmail_id, "INBOX", 2);
+        old_provider_row.account_id = fastmail_id.to_string();
+        old_provider_row.uid = 2;
+        old_provider_row.gmail_message_id = Some("old-provider-id".into());
+        store
+            .upsert_catalog_messages(std::slice::from_ref(&old_provider_row))
+            .await
+            .unwrap();
+        fastmail.provider_id = "fastmail".into();
+        store.save_account(&fastmail).await.unwrap();
+
+        let mut gmail_row = message("Gmail batch row", "preview");
+        gmail_row.id = stable_message_id(gmail_id, "INBOX", 1);
+        gmail_row.account_id = gmail_id.to_string();
+        gmail_row.gmail_message_id = Some("batch-provider-id".into());
+        let mut fastmail_row = message("Fastmail batch row", "preview");
+        fastmail_row.id = stable_message_id(fastmail_id, "INBOX", 1);
+        fastmail_row.account_id = fastmail_id.to_string();
+        fastmail_row.gmail_message_id = Some("must-not-cross-provider".into());
+
+        store
+            .upsert_catalog_messages(&[gmail_row.clone(), fastmail_row.clone()])
+            .await
+            .unwrap();
+
+        let gmail_identity: Option<String> = sqlx::query_scalar(
+            "SELECT provider_message_id FROM message_provider_identities WHERE message_id = ?",
+        )
+        .bind(&gmail_row.id)
+        .fetch_optional(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(gmail_identity.as_deref(), Some("batch-provider-id"));
+        let fastmail_identity_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_provider_identities WHERE message_id = ?",
+        )
+        .bind(&fastmail_row.id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(fastmail_identity_count, 0);
+        let fastmail_observation_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_provider_identity_observations WHERE message_id = ?",
+        )
+        .bind(&fastmail_row.id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(fastmail_observation_count, 0);
+        let old_provider_identity_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_provider_identities WHERE message_id = ?",
+        )
+        .bind(&old_provider_row.id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            old_provider_identity_count, 0,
+            "a non-Gmail catalogue batch clears stale identities across that account"
+        );
+        let old_provider_observation_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_provider_identity_observations WHERE message_id = ?",
+        )
+        .bind(&old_provider_row.id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(old_provider_observation_count, 0);
+
+        fastmail.provider_id = "gmail".into();
+        store.save_account(&fastmail).await.unwrap();
+        let mut corrupt_untouched = old_provider_row.clone();
+        corrupt_untouched.id = stable_message_id(fastmail_id, "INBOX", 3);
+        corrupt_untouched.uid = 3;
+        corrupt_untouched.gmail_message_id = Some("corrupt-untouched-id".into());
+        let mut corrupt_touched = corrupt_untouched.clone();
+        corrupt_touched.id = stable_message_id(fastmail_id, "INBOX", 4);
+        corrupt_touched.uid = 4;
+        corrupt_touched.gmail_message_id = Some("corrupt-touched-id".into());
+        store
+            .upsert_catalog_messages(&[corrupt_untouched.clone(), corrupt_touched.clone()])
+            .await
+            .unwrap();
+        sqlx::query("UPDATE accounts SET data = 'invalid-json' WHERE id = ?")
+            .bind(fastmail_id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        corrupt_touched.gmail_message_id = None;
+        store
+            .upsert_catalog_messages(std::slice::from_ref(&corrupt_touched))
+            .await
+            .unwrap();
+        let corrupt_untouched_identity: Option<String> = sqlx::query_scalar(
+            "SELECT provider_message_id FROM message_provider_identities WHERE message_id = ?",
+        )
+        .bind(&corrupt_untouched.id)
+        .fetch_optional(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            corrupt_untouched_identity.as_deref(),
+            Some("corrupt-untouched-id"),
+            "unknown provider state must not authorize account-wide cleanup"
+        );
+        let corrupt_touched_identity_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_provider_identities WHERE message_id = ?",
+        )
+        .bind(&corrupt_touched.id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            corrupt_touched_identity_count, 0,
+            "unknown provider state retains the prior locator-scoped cleanup behavior"
+        );
+
+        fastmail.provider_id = "gmail".into();
+        store.save_account(&fastmail).await.unwrap();
+        let mut mismatched_untouched = corrupt_untouched.clone();
+        mismatched_untouched.id = stable_message_id(fastmail_id, "INBOX", 5);
+        mismatched_untouched.uid = 5;
+        mismatched_untouched.gmail_message_id = Some("mismatch-untouched".into());
+        let mut mismatched_touched = mismatched_untouched.clone();
+        mismatched_touched.id = stable_message_id(fastmail_id, "INBOX", 6);
+        mismatched_touched.uid = 6;
+        mismatched_touched.gmail_message_id = Some("mismatch-touched".into());
+        store
+            .upsert_catalog_messages(&[mismatched_untouched.clone(), mismatched_touched.clone()])
+            .await
+            .unwrap();
+        let mut wrong_identity = gmail.clone();
+        wrong_identity.provider_id = "fastmail".into();
+        sqlx::query("UPDATE accounts SET data = ? WHERE id = ?")
+            .bind(serde_json::to_string(&wrong_identity).unwrap())
+            .bind(fastmail_id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        mismatched_touched.gmail_message_id = None;
+        store
+            .upsert_catalog_messages(std::slice::from_ref(&mismatched_touched))
+            .await
+            .unwrap();
+        let mismatched_untouched_identity: Option<String> = sqlx::query_scalar(
+            "SELECT provider_message_id FROM message_provider_identities WHERE message_id = ?",
+        )
+        .bind(&mismatched_untouched.id)
+        .fetch_optional(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            mismatched_untouched_identity.as_deref(),
+            Some("mismatch-untouched"),
+            "a valid account payload with the wrong embedded ID must not authorize account-wide cleanup"
+        );
+        let mismatched_touched_identity_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_provider_identities WHERE message_id = ?",
+        )
+        .bind(&mismatched_touched.id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(mismatched_touched_identity_count, 0);
+    }
+
+    #[tokio::test]
+    async fn staged_snapshot_finalization_clears_stale_identity_after_provider_change() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let mut account = account_with_id(account_id, "staged-provider-change@example.test");
+        account.provider_id = "gmail".into();
+        store.save_account(&account).await.unwrap();
+
+        let mut archived = message("Stale archived Gmail identity", "preview");
+        archived.id = stable_message_id(account_id, "Archive", 9);
+        archived.account_id = account_id.to_string();
+        archived.mailbox = "Archive".into();
+        archived.uid = 9;
+        archived.gmail_message_id = Some("staged-old-id".into());
+        store
+            .upsert_catalog_messages(std::slice::from_ref(&archived))
+            .await
+            .unwrap();
+
+        account.provider_id = "fastmail".into();
+        store.save_account(&account).await.unwrap();
+        let mut replacement = message("Fastmail replacement", "preview");
+        replacement.id = stable_message_id(account_id, "INBOX", 1);
+        replacement.account_id = account_id.to_string();
+        replacement.uid = 1;
+        replacement.gmail_message_id = None;
+        let generation = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 77, 1, Some(2), None),
+            )
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(account_id, "INBOX", &generation, &[(1, false, false)])
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_message_page_with_provider_identity_observation(
+                account_id,
+                "INBOX",
+                &generation,
+                std::slice::from_ref(&replacement),
+                false,
+            )
+            .await
+            .unwrap();
+        store
+            .finalize_mailbox_snapshot_with_staged_messages(account_id, "INBOX", &generation)
+            .await
+            .unwrap();
+
+        let archived_identity_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_provider_identities WHERE message_id = ?",
+        )
+        .bind(&archived.id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            archived_identity_count, 0,
+            "production snapshot finalization must clear stale Gmail identity across the changed account"
+        );
+        assert!(store
+            .message_by_locator(account_id, "INBOX", 1)
+            .await
+            .unwrap()
+            .is_some());
     }
 
     #[tokio::test]

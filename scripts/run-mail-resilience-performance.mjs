@@ -50,6 +50,46 @@ export function parseMeasurement(output) {
       throw new Error(`Invalid ${field} in Rust performance measurement`);
     }
   }
+  const phaseFields = [
+    "setupMilliseconds",
+    "fixtureGenerationMilliseconds",
+    "fixtureInsertionMilliseconds",
+    "transportSetupMilliseconds",
+    "syncMilliseconds",
+    "syncAuthenticationMilliseconds",
+    "syncInventoryMilliseconds",
+    "syncFinalizationMilliseconds",
+    "serverFinalizationMilliseconds",
+    "assertionMilliseconds",
+  ];
+  if (!measurement.phases || typeof measurement.phases !== "object") {
+    throw new Error("Rust performance measurement did not emit phase timings");
+  }
+  for (const field of phaseFields) {
+    if (
+      !Number.isInteger(measurement.phases[field]) ||
+      measurement.phases[field] < 0
+    ) {
+      throw new Error(`Invalid phases.${field} in Rust performance measurement`);
+    }
+  }
+  if (
+    !measurement.observer ||
+    !Number.isInteger(measurement.observer.callCount) ||
+    measurement.observer.callCount < 1 ||
+    !Number.isInteger(measurement.observer.elapsedNanoseconds) ||
+    measurement.observer.elapsedNanoseconds < 0
+  ) {
+    throw new Error("Invalid observer evidence in Rust performance measurement");
+  }
+  if (
+    measurement.phases.syncAuthenticationMilliseconds +
+      measurement.phases.syncInventoryMilliseconds +
+      measurement.phases.syncFinalizationMilliseconds >
+    measurement.phases.syncMilliseconds
+  ) {
+    throw new Error("Rust sync sub-phases exceed the complete sync duration");
+  }
   return measurement;
 }
 
@@ -195,6 +235,9 @@ export function compareBaseline(current, baseline, thresholdPercent = 20) {
 
 function execute(command, args) {
   return new Promise((resolve) => {
+    const startedAt = new Date().toISOString();
+    const started = process.hrtime.bigint();
+    const loadAverageBefore = os.loadavg();
     const child = spawn(command, args, { shell: false });
     let output = "";
     child.stdout.on("data", (chunk) => {
@@ -212,6 +255,15 @@ function execute(command, args) {
         signal: null,
         output,
         error: error.message,
+        execution: {
+          startedAt,
+          finishedAt: new Date().toISOString(),
+          wallMilliseconds: Number(
+            (process.hrtime.bigint() - started) / 1_000_000n,
+          ),
+          loadAverageBefore,
+          loadAverageAfter: os.loadavg(),
+        },
       }),
     );
     child.once("exit", (exitCode, signal) =>
@@ -220,6 +272,15 @@ function execute(command, args) {
         exitCode,
         signal,
         output,
+        execution: {
+          startedAt,
+          finishedAt: new Date().toISOString(),
+          wallMilliseconds: Number(
+            (process.hrtime.bigint() - started) / 1_000_000n,
+          ),
+          loadAverageBefore,
+          loadAverageAfter: os.loadavg(),
+        },
       }),
     );
   });
@@ -251,7 +312,7 @@ export async function runPerformance({
   }
   const sourceTree = snapshot();
   const report = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     lane: "manual-mailbox-performance",
     status: "running",
     startedAt: now(),
@@ -267,6 +328,7 @@ export async function runPerformance({
     limitations: [
       "Loopback scripted IMAP measures Dakia's production protocol and SQLite paths, not provider latency.",
       "Elapsed time is comparable only on the same idle hardware and build profile.",
+      "Per-command host load is observational context; it cannot prove that competing work did or did not affect a sample.",
       "This runner does not establish native WebKit responsiveness or sustained process memory.",
     ],
   };
@@ -314,7 +376,6 @@ export async function runPerformance({
           expectedCount,
           testName,
           ...result,
-          output: undefined,
         };
         report.finishedAt = now();
         report.sourceTreeAfter = snapshot();
@@ -339,7 +400,12 @@ export async function runPerformance({
           { iteration, expectedCount, testName },
         );
       }
-      report.measurements.push({ iteration, testName, ...measurement });
+      report.measurements.push({
+        iteration,
+        testName,
+        ...measurement,
+        execution: result.execution ?? null,
+      });
     }
   }
 
@@ -353,7 +419,6 @@ export async function runPerformance({
         kind: "resource-soak",
         testName: resourceSoakTest,
         ...result,
-        output: undefined,
       };
       report.finishedAt = now();
       report.sourceTreeAfter = snapshot();
@@ -361,6 +426,7 @@ export async function runPerformance({
     }
     try {
       report.resourceSoak = parseResourceSoak(result.output);
+      report.resourceSoak.execution = result.execution ?? null;
     } catch (error) {
       return fail("invalid-resource-soak-measurement", error, {
         testName: resourceSoakTest,

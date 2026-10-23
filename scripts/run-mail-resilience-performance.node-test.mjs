@@ -19,7 +19,7 @@ const fixtureBuild = {
 };
 const outputFor = (messageCount, elapsedMilliseconds) => {
   const pageCount = Math.ceil(messageCount / 500);
-  return `DAKIA_MAILBOX_PERF {"messageCount":${messageCount},"pageSize":500,"pageCount":${pageCount},"elapsedMilliseconds":${elapsedMilliseconds}}\n`;
+  return `DAKIA_MAILBOX_PERF {"messageCount":${messageCount},"pageSize":500,"pageCount":${pageCount},"elapsedMilliseconds":${elapsedMilliseconds},"phases":{"setupMilliseconds":1,"fixtureGenerationMilliseconds":1,"fixtureInsertionMilliseconds":2,"transportSetupMilliseconds":0,"syncMilliseconds":4,"syncAuthenticationMilliseconds":1,"syncInventoryMilliseconds":2,"syncFinalizationMilliseconds":1,"serverFinalizationMilliseconds":0,"assertionMilliseconds":1},"observer":{"callCount":6,"elapsedNanoseconds":100}}\n`;
 };
 const soakOutput =
   'DAKIA_RESOURCE_SOAK {"reconnectCycles":200,"storeOpenCycles":100,"elapsedMilliseconds":50,"fileDescriptorsBefore":10,"fileDescriptorsAfter":10,"residentBytesBefore":100,"residentBytesAfter":110,"residentGrowthBytes":10,"residentGrowthLimitBytes":67108864}\n';
@@ -53,6 +53,20 @@ test("measurement parsing rejects absent and malformed Rust evidence", () => {
       ),
     /Invalid messageCount/,
   );
+  assert.throws(
+    () =>
+      parseMeasurement(
+        'DAKIA_MAILBOX_PERF {"messageCount":2000,"pageSize":500,"pageCount":4,"elapsedMilliseconds":10}',
+      ),
+    /did not emit phase timings/,
+  );
+  assert.throws(
+    () =>
+      parseMeasurement(
+        'DAKIA_MAILBOX_PERF {"messageCount":2000,"pageSize":500,"pageCount":4,"elapsedMilliseconds":10,"phases":{"setupMilliseconds":0,"fixtureGenerationMilliseconds":0,"fixtureInsertionMilliseconds":0,"transportSetupMilliseconds":0,"syncMilliseconds":1,"syncAuthenticationMilliseconds":1,"syncInventoryMilliseconds":1,"syncFinalizationMilliseconds":1,"serverFinalizationMilliseconds":0,"assertionMilliseconds":0},"observer":{"callCount":6,"elapsedNanoseconds":1}}',
+      ),
+    /sub-phases exceed/,
+  );
   assert.equal(parseResourceSoak(soakOutput).reconnectCycles, 200);
   assert.throws(() => parseResourceSoak("test passed"), /did not emit/);
 });
@@ -85,6 +99,7 @@ test("repeat report keeps every scale and fails closed on source drift", async (
     build: () => fixtureBuild,
   });
   assert.equal(report.status, "passed");
+  assert.equal(report.schemaVersion, 2);
   assert.equal(report.measurements.length, 8);
   assert.equal(calls, 9);
   assert.equal(report.resourceSoak.storeOpenCycles, 100);
@@ -286,7 +301,7 @@ test("failed test cannot produce a passing performance report", async () => {
       status: "failed",
       exitCode: 1,
       signal: null,
-      output: "",
+      output: "fixture failure output",
     }),
     snapshot: () => source,
     hardware: () => ({ fixture: true }),
@@ -294,6 +309,7 @@ test("failed test cannot produce a passing performance report", async () => {
   });
   assert.equal(report.status, "failed");
   assert.equal(report.failure.expectedCount, 2_000);
+  assert.equal(report.failure.output, "fixture failure output");
   assert.equal(report.measurements.length, 0);
 });
 

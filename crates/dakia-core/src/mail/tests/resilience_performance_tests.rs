@@ -5,12 +5,209 @@ use tokio::time::{timeout, Duration, Instant};
 
 async fn measured_mailbox_snapshot(message_count: u32) {
     let started = Instant::now();
-    assert_large_message_snapshot_is_bounded(message_count).await;
+
+    let phase_started = Instant::now();
+    let store = Store::in_memory().await.unwrap();
+    let service = MailService::new(store.clone());
+    let account = test_account();
+    store.save_account(&account).await.unwrap();
+    service
+        .credentials()
+        .set_password(&account, "sync secret")
+        .await
+        .unwrap();
+    let setup = phase_started.elapsed();
+
+    let phase_started = Instant::now();
+    let template = snapshot_test_message(&account, 1);
+    let messages = (1..=message_count)
+        .map(|uid| {
+            let mut message = template.clone();
+            message.id = stable_message_id(account.id, "INBOX", uid);
+            message.thread_id = message.id.clone();
+            message.uid = i64::from(uid);
+            message.message_id = Some(format!("<{uid}@snapshot.example.test>"));
+            message.subject = format!("Snapshot {uid}");
+            message
+        })
+        .collect::<Vec<_>>();
+    let fixture_generation = phase_started.elapsed();
+
+    let phase_started = Instant::now();
+    store.upsert_catalog_messages(&messages).await.unwrap();
+    let fixture_insertion = phase_started.elapsed();
+
+    let phase_started = Instant::now();
+    let (mut client, server) = duplex_imap_client_and_server();
+    let server = tokio::spawn(async move {
+        let (read, mut write) = split(server);
+        let mut read = BufReader::new(read);
+        let mut transcript = Vec::new();
+
+        let tag = scripted_expect_command(
+            &mut read,
+            &mut transcript,
+            "LOGIN \"reader@example.test\" \"sync secret\"",
+        )
+        .await;
+        write
+            .write_all(format!("{tag} OK authenticated\r\n").as_bytes())
+            .await
+            .unwrap();
+
+        let tag = scripted_expect_command(&mut read, &mut transcript, "CAPABILITY").await;
+        write
+            .write_all(format!("* CAPABILITY IMAP4rev1\r\n{tag} OK capability\r\n").as_bytes())
+            .await
+            .unwrap();
+
+        let tag = scripted_expect_command(&mut read, &mut transcript, "LIST \"\" \"*\"").await;
+        write
+            .write_all(
+                format!("* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n{tag} OK listed\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+
+        let select_response = |tag: &str| {
+            format!(
+                "* {message_count} EXISTS\r\n* OK [UIDVALIDITY 77] UIDs valid\r\n* OK [UIDNEXT {}] Predicted next UID\r\n* OK [HIGHESTMODSEQ 900] Mod-sequence\r\n{tag} OK selected\r\n",
+                message_count + 1
+            )
+        };
+        let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+        write
+            .write_all(select_response(&tag).as_bytes())
+            .await
+            .unwrap();
+
+        for (start, end) in mailbox_snapshot_page_ranges(message_count) {
+            let tag = scripted_expect_command(
+                &mut read,
+                &mut transcript,
+                &format!("FETCH {start}:{end} (UID FLAGS)"),
+            )
+            .await;
+            for sequence in start..=end {
+                write
+                    .write_all(
+                        format!("* {sequence} FETCH (UID {sequence} FLAGS ())\r\n").as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            write
+                .write_all(format!("{tag} OK page complete\r\n").as_bytes())
+                .await
+                .unwrap();
+        }
+
+        let tag = scripted_expect_command(&mut read, &mut transcript, "SELECT \"INBOX\"").await;
+        write
+            .write_all(select_response(&tag).as_bytes())
+            .await
+            .unwrap();
+        let tag = scripted_expect_command(&mut read, &mut transcript, "LOGOUT").await;
+        write
+            .write_all(format!("{tag} OK logout\r\n").as_bytes())
+            .await
+            .unwrap();
+        transcript
+    });
+    let transport_setup = phase_started.elapsed();
+
+    let sync_started = Instant::now();
+    let mut observer_calls = 0_u64;
+    let mut observer_nanoseconds = 0_u128;
+    let mut observer_events = Vec::new();
+    let result = service
+        .sync_mailboxes_with_progress_on_client(
+            &mut client,
+            &account,
+            50,
+            vec![MailboxPlan::new("INBOX", "INBOX")],
+            false,
+            |progress| {
+                let observer_started = Instant::now();
+                observer_events.push((progress.phase, sync_started.elapsed()));
+                observer_calls += 1;
+                observer_nanoseconds += observer_started.elapsed().as_nanos();
+            },
+        )
+        .await
+        .unwrap();
+    let sync = sync_started.elapsed();
+
+    let event_elapsed = |phase: &str| {
+        observer_events
+            .iter()
+            .find_map(|(observed, elapsed)| (*observed == phase).then_some(*elapsed))
+            .unwrap_or_default()
+    };
+    let finding_at = event_elapsed("finding");
+    let downloading_at = event_elapsed("downloading");
+    let complete_at = event_elapsed("complete");
+    let sync_authentication = finding_at;
+    let sync_inventory = downloading_at.saturating_sub(finding_at);
+    let sync_finalization = complete_at.saturating_sub(downloading_at);
+
+    let phase_started = Instant::now();
+    let transcript = server.await.unwrap();
+    let server_finalization = phase_started.elapsed();
+
+    let phase_started = Instant::now();
+    assert_eq!(result.synced_count, 0, "the catalogue was already complete");
+    let page_commands = transcript
+        .iter()
+        .filter(|command| command.starts_with("FETCH "))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        page_commands.len(),
+        usize::try_from(message_count.div_ceil(MAILBOX_SNAPSHOT_PAGE_SIZE)).unwrap()
+    );
+    assert_eq!(
+        page_commands.first().unwrap().as_str(),
+        format!(
+            "FETCH {}:{message_count} (UID FLAGS)",
+            message_count - MAILBOX_SNAPSHOT_PAGE_SIZE + 1
+        )
+    );
+    assert_eq!(
+        page_commands.last().unwrap().as_str(),
+        "FETCH 1:500 (UID FLAGS)"
+    );
+    assert!(!transcript.iter().any(|command| command == "UID SEARCH ALL"));
+    assert!(!transcript.iter().any(|command| command.contains("1:*")));
+    assert_eq!(
+        store.mailbox_uids(account.id, "INBOX").await.unwrap().len(),
+        message_count as usize
+    );
+    assert!(
+        store
+            .mailbox_catalog_state(account.id, "INBOX")
+            .await
+            .unwrap()
+            .unwrap()
+            .historical_complete
+    );
+    let assertions = phase_started.elapsed();
     let elapsed = started.elapsed();
+
     println!(
-        "DAKIA_MAILBOX_PERF {{\"messageCount\":{message_count},\"pageSize\":{MAILBOX_SNAPSHOT_PAGE_SIZE},\"pageCount\":{},\"elapsedMilliseconds\":{}}}",
+        "DAKIA_MAILBOX_PERF {{\"messageCount\":{message_count},\"pageSize\":{MAILBOX_SNAPSHOT_PAGE_SIZE},\"pageCount\":{},\"elapsedMilliseconds\":{},\"phases\":{{\"setupMilliseconds\":{},\"fixtureGenerationMilliseconds\":{},\"fixtureInsertionMilliseconds\":{},\"transportSetupMilliseconds\":{},\"syncMilliseconds\":{},\"syncAuthenticationMilliseconds\":{},\"syncInventoryMilliseconds\":{},\"syncFinalizationMilliseconds\":{},\"serverFinalizationMilliseconds\":{},\"assertionMilliseconds\":{}}},\"observer\":{{\"callCount\":{observer_calls},\"elapsedNanoseconds\":{observer_nanoseconds}}}}}",
         message_count.div_ceil(MAILBOX_SNAPSHOT_PAGE_SIZE),
-        elapsed.as_millis()
+        elapsed.as_millis(),
+        setup.as_millis(),
+        fixture_generation.as_millis(),
+        fixture_insertion.as_millis(),
+        transport_setup.as_millis(),
+        sync.as_millis(),
+        sync_authentication.as_millis(),
+        sync_inventory.as_millis(),
+        sync_finalization.as_millis(),
+        server_finalization.as_millis(),
+        assertions.as_millis(),
     );
 }
 

@@ -1,0 +1,1746 @@
+{
+  "schemaVersion": 1,
+  "lane": "mailbox-performance-provider-batch-causal-investigation",
+  "recordedAt": "2026-10-23T08:57:04Z",
+  "status": "causal-contributor-supported-final-acceptance-open",
+  "decision": {
+    "supported": "Repeated provider classification and provider-identity cleanup SQL in catalogue fixture insertion was a material contributor to the measured regression.",
+    "notSupported": [
+      "The experiment does not establish that provider-identity SQL was the only cause of the regression.",
+      "The experiment does not establish current-source performance acceptance.",
+      "The experiment does not characterize a large Gmail mailbox, provider latency, native responsiveness, or long-duration resource behavior."
+    ],
+    "finalAcceptance": "open",
+    "requiredNextEvidence": "After source and dependencies are frozen, run exactly three fixed repeats at 2,000, 30,000, 100,000 and 200,000 messages against the unchanged historical baseline. Do not reset the baseline or retry adaptively."
+  },
+  "historicalBaseline": {
+    "report": "docs/mail-safety-results/remaining-gap-closure-performance-2026-10-21.json",
+    "sourceTreeDigest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+    "sourceTreeFileCount": 933,
+    "repeat": 3,
+    "medianMilliseconds": {
+      "2000": 560,
+      "30000": 7660,
+      "100000": 25662,
+      "200000": 52573
+    },
+    "scope": "Historical loopback scripted IMAP and SQLite debug-profile measurement on an Apple M1 Max. It is retained unchanged and was not reset by this investigation."
+  },
+  "environment": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "os": "macOS 26.6.2 (25G83)",
+    "cpuModel": "Apple M1 Max",
+    "logicalCpuCount": 10,
+    "totalMemoryBytes": 68719476736,
+    "rustc": "rustc 1.89.0 (29483883e 2025-08-04), LLVM 20.1.7, aarch64-apple-darwin",
+    "cargo": "cargo 1.89.0 (c24e10642 2025-06-23)",
+    "rustProfile": "cargo-test-unoptimized-debuginfo",
+    "hostLoad": {
+      "observation": "The accepted causal A/B log recorded one, five and fifteen minute load averages before and after each sample. One-minute values ranged from 346.36 to 390.80.",
+      "interpretation": "The load was extremely high. Interleaving reduced ordering bias but cannot make this an idle-host acceptance run."
+    }
+  },
+  "cohortIdentity": {
+    "gitHeadAtEvidenceWrite": "ad6c0456cd51e9ccf34d5d803983267ce30640e1",
+    "warning": "The frozen test binaries include dirty performance instrumentation and storage variants and are not identified by Git commit or a complete source-manifest digest. Their binary hashes are the durable cohort identifiers.",
+    "pre": {
+      "pathAtMeasurement": "/private/tmp/dakia-perf-pre-provider-batch-a91e447a9eb4eadc",
+      "sha256": "af6189d81bd6fb12829c69f6d39fef16e83b0e8390b5e5427f17c5b8d1665229",
+      "behavior": "Instrumented pre-optimization implementation with per-row provider classification and per-row non-Gmail identity cleanup."
+    },
+    "post": {
+      "pathAtMeasurement": "/private/tmp/dakia-perf-post-provider-batch-cleanup-a91e447a9eb4eadc",
+      "sha256": "23272925d2af4ec645359a75a9b1dbd436f24a5568b56b281e71644d7bc8ae8d",
+      "behavior": "Instrumented implementation with account-cached provider classification and one account-scoped cleanup for a confirmed non-Gmail account."
+    },
+    "dependencyDifferenceFromFinalSource": {
+      "present": true,
+      "detail": "The A/B binaries predate the later Cargo.lock dependency reconciliation, including the Hickory 0.26.2 family and clipboard-win 5.4.3 updates. The final source also contains later safety refinements for corrupt and mismatched account records, the observation account index, and staged production finalization batching.",
+      "effect": "The A/B comparison is evidence for the bounded storage change, not evidence that the final dependency and source cohort passes performance acceptance."
+    }
+  },
+  "acceptedCausalExperiment": {
+    "startedAt": "2026-10-23T08:35:15Z",
+    "finishedAt": "2026-10-23T08:36:21Z",
+    "design": "Twelve fixed samples: three repeats for each pre/post and 2,000/30,000 combination, ordered pre then post within each scale and iteration. There were no adaptive retries.",
+    "rawLog": {
+      "pathAtMeasurement": "/private/tmp/dakia-perf-provider-batch-cleanup-ab-20261023.log",
+      "sha256": "1c3543baef8c5e23ceee1314c29f8a7489d4d4d38d67eb7739f9c6bb6a4e9c9b",
+      "lineCount": 108,
+      "portableCopy": "All twelve parsed measurements, phase timings, observer timings and load observations are embedded below."
+    },
+    "samples": [
+      {
+        "iteration": 1,
+        "scale": "two_thousand",
+        "variant": "pre",
+        "startedAt": "2026-10-23T08:35:15Z",
+        "hostObservationAtStart": "11:35  2 users, load averages: 365.68 360.03 215.57",
+        "loadAverageAtStart": [
+          365.68,
+          360.03,
+          215.57
+        ],
+        "measurement": {
+          "messageCount": 2000,
+          "pageSize": 500,
+          "pageCount": 4,
+          "elapsedMilliseconds": 723,
+          "phases": {
+            "setupMilliseconds": 39,
+            "fixtureGenerationMilliseconds": 3,
+            "fixtureInsertionMilliseconds": 532,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 142,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 103,
+            "syncFinalizationMilliseconds": 38,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 5
+          },
+          "observer": {
+            "callCount": 5,
+            "elapsedNanoseconds": 2042
+          }
+        },
+        "finishedAt": "2026-10-23T08:35:16Z",
+        "hostObservationAtFinish": "11:35  2 users, load averages: 365.68 360.03 215.57",
+        "loadAverageAtFinish": [
+          365.68,
+          360.03,
+          215.57
+        ],
+        "testResult": "passed"
+      },
+      {
+        "iteration": 1,
+        "scale": "two_thousand",
+        "variant": "post",
+        "startedAt": "2026-10-23T08:35:16Z",
+        "hostObservationAtStart": "11:35  2 users, load averages: 365.68 360.03 215.57",
+        "loadAverageAtStart": [
+          365.68,
+          360.03,
+          215.57
+        ],
+        "measurement": {
+          "messageCount": 2000,
+          "pageSize": 500,
+          "pageCount": 4,
+          "elapsedMilliseconds": 496,
+          "phases": {
+            "setupMilliseconds": 32,
+            "fixtureGenerationMilliseconds": 4,
+            "fixtureInsertionMilliseconds": 325,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 127,
+            "syncAuthenticationMilliseconds": 1,
+            "syncInventoryMilliseconds": 86,
+            "syncFinalizationMilliseconds": 39,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 5
+          },
+          "observer": {
+            "callCount": 5,
+            "elapsedNanoseconds": 2458
+          }
+        },
+        "finishedAt": "2026-10-23T08:35:17Z",
+        "hostObservationAtFinish": "11:35  2 users, load averages: 365.68 360.03 215.57",
+        "loadAverageAtFinish": [
+          365.68,
+          360.03,
+          215.57
+        ],
+        "testResult": "passed"
+      },
+      {
+        "iteration": 1,
+        "scale": "thirty_thousand",
+        "variant": "pre",
+        "startedAt": "2026-10-23T08:35:18Z",
+        "hostObservationAtStart": "11:35  2 users, load averages: 365.68 360.03 215.57",
+        "loadAverageAtStart": [
+          365.68,
+          360.03,
+          215.57
+        ],
+        "measurement": {
+          "messageCount": 30000,
+          "pageSize": 500,
+          "pageCount": 60,
+          "elapsedMilliseconds": 10413,
+          "phases": {
+            "setupMilliseconds": 28,
+            "fixtureGenerationMilliseconds": 38,
+            "fixtureInsertionMilliseconds": 8105,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 2176,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 1502,
+            "syncFinalizationMilliseconds": 673,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 64
+          },
+          "observer": {
+            "callCount": 5,
+            "elapsedNanoseconds": 2750
+          }
+        },
+        "finishedAt": "2026-10-23T08:35:28Z",
+        "hostObservationAtFinish": "11:35  2 users, load averages: 346.36 356.08 216.69",
+        "loadAverageAtFinish": [
+          346.36,
+          356.08,
+          216.69
+        ],
+        "testResult": "passed"
+      },
+      {
+        "iteration": 1,
+        "scale": "thirty_thousand",
+        "variant": "post",
+        "startedAt": "2026-10-23T08:35:28Z",
+        "hostObservationAtStart": "11:35  2 users, load averages: 346.36 356.08 216.69",
+        "loadAverageAtStart": [
+          346.36,
+          356.08,
+          216.69
+        ],
+        "measurement": {
+          "messageCount": 30000,
+          "pageSize": 500,
+          "pageCount": 60,
+          "elapsedMilliseconds": 8509,
+          "phases": {
+            "setupMilliseconds": 38,
+            "fixtureGenerationMilliseconds": 37,
+            "fixtureInsertionMilliseconds": 6055,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 2286,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 1594,
+            "syncFinalizationMilliseconds": 690,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 90
+          },
+          "observer": {
+            "callCount": 5,
+            "elapsedNanoseconds": 2917
+          }
+        },
+        "finishedAt": "2026-10-23T08:35:37Z",
+        "hostObservationAtFinish": "11:35  2 users, load averages: 354.18 357.54 218.02",
+        "loadAverageAtFinish": [
+          354.18,
+          357.54,
+          218.02
+        ],
+        "testResult": "passed"
+      },
+      {
+        "iteration": 2,
+        "scale": "two_thousand",
+        "variant": "pre",
+        "startedAt": "2026-10-23T08:35:37Z",
+        "hostObservationAtStart": "11:35  2 users, load averages: 354.18 357.54 218.02",
+        "loadAverageAtStart": [
+          354.18,
+          357.54,
+          218.02
+        ],
+        "measurement": {
+          "messageCount": 2000,
+          "pageSize": 500,
+          "pageCount": 4,
+          "elapsedMilliseconds": 742,
+          "phases": {
+            "setupMilliseconds": 26,
+            "fixtureGenerationMilliseconds": 2,
+            "fixtureInsertionMilliseconds": 570,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 137,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 96,
+            "syncFinalizationMilliseconds": 40,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 5
+          },
+          "observer": {
+            "callCount": 5,
+            "elapsedNanoseconds": 1834
+          }
+        },
+        "finishedAt": "2026-10-23T08:35:37Z",
+        "hostObservationAtFinish": "11:35  2 users, load averages: 354.18 357.54 218.02",
+        "loadAverageAtFinish": [
+          354.18,
+          357.54,
+          218.02
+        ],
+        "testResult": "passed"
+      },
+      {
+        "iteration": 2,
+        "scale": "two_thousand",
+        "variant": "post",
+        "startedAt": "2026-10-23T08:35:37Z",
+        "hostObservationAtStart": "11:35  2 users, load averages: 354.18 357.54 218.02",
+        "loadAverageAtStart": [
+          354.18,
+          357.54,
+          218.02
+        ],
+        "measurement": {
+          "messageCount": 2000,
+          "pageSize": 500,
+          "pageCount": 4,
+          "elapsedMilliseconds": 740,
+          "phases": {
+            "setupMilliseconds": 24,
+            "fixtureGenerationMilliseconds": 3,
+            "fixtureInsertionMilliseconds": 489,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 165,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 118,
+            "syncFinalizationMilliseconds": 46,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 58
+          },
+          "observer": {
+            "callCount": 5,
+            "elapsedNanoseconds": 2750
+          }
+        },
+        "finishedAt": "2026-10-23T08:35:38Z",
+        "hostObservationAtFinish": "11:35  2 users, load averages: 365.78 359.89 219.67",
+        "loadAverageAtFinish": [
+          365.78,
+          359.89,
+          219.67
+        ],
+        "testResult": "passed"
+      },
+      {
+        "iteration": 2,
+        "scale": "thirty_thousand",
+        "variant": "pre",
+        "startedAt": "2026-10-23T08:35:38Z",
+        "hostObservationAtStart": "11:35  2 users, load averages: 365.78 359.89 219.67",
+        "loadAverageAtStart": [
+          365.78,
+          359.89,
+          219.67
+        ],
+        "measurement": {
+          "messageCount": 30000,
+          "pageSize": 500,
+          "pageCount": 60,
+          "elapsedMilliseconds": 13803,
+          "phases": {
+            "setupMilliseconds": 40,
+            "fixtureGenerationMilliseconds": 41,
+            "fixtureInsertionMilliseconds": 8538,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 5017,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 4277,
+            "syncFinalizationMilliseconds": 739,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 165
+          },
+          "observer": {
+            "callCount": 5,
+            "elapsedNanoseconds": 3083
+          }
+        },
+        "finishedAt": "2026-10-23T08:35:52Z",
+        "hostObservationAtFinish": "11:35  2 users, load averages: 385.69 364.40 222.91",
+        "loadAverageAtFinish": [
+          385.69,
+          364.4,
+          222.91
+        ],
+        "testResult": "passed"
+      },
+      {
+        "iteration": 2,
+        "scale": "thirty_thousand",
+        "variant": "post",
+        "startedAt": "2026-10-23T08:35:52Z",
+        "hostObservationAtStart": "11:35  2 users, load averages: 385.69 364.40 222.91",
+        "loadAverageAtStart": [
+          385.69,
+          364.4,
+          222.91
+        ],
+        "measurement": {
+          "messageCount": 30000,
+          "pageSize": 500,
+          "pageCount": 60,
+          "elapsedMilliseconds": 8648,
+          "phases": {
+            "setupMilliseconds": 158,
+            "fixtureGenerationMilliseconds": 75,
+            "fixtureInsertionMilliseconds": 6236,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 2110,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 1439,
+            "syncFinalizationMilliseconds": 670,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 67
+          },
+          "observer": {
+            "callCount": 5,
+            "elapsedNanoseconds": 3001
+          }
+        },
+        "finishedAt": "2026-10-23T08:36:01Z",
+        "hostObservationAtFinish": "11:36  2 users, load averages: 390.80 366.25 225.23",
+        "loadAverageAtFinish": [
+          390.8,
+          366.25,
+          225.23
+        ],
+        "testResult": "passed"
+      },
+      {
+        "iteration": 3,
+        "scale": "two_thousand",
+        "variant": "pre",
+        "startedAt": "2026-10-23T08:36:01Z",
+        "hostObservationAtStart": "11:36  2 users, load averages: 390.80 366.25 225.23",
+        "loadAverageAtStart": [
+          390.8,
+          366.25,
+          225.23
+        ],
+        "measurement": {
+          "messageCount": 2000,
+          "pageSize": 500,
+          "pageCount": 4,
+          "elapsedMilliseconds": 712,
+          "phases": {
+            "setupMilliseconds": 36,
+            "fixtureGenerationMilliseconds": 2,
+            "fixtureInsertionMilliseconds": 533,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 134,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 95,
+            "syncFinalizationMilliseconds": 38,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 4
+          },
+          "observer": {
+            "callCount": 5,
+            "elapsedNanoseconds": 1460
+          }
+        },
+        "finishedAt": "2026-10-23T08:36:01Z",
+        "hostObservationAtFinish": "11:36  2 users, load averages: 390.80 366.25 225.23",
+        "loadAverageAtFinish": [
+          390.8,
+          366.25,
+          225.23
+        ],
+        "testResult": "passed"
+      },
+      {
+        "iteration": 3,
+        "scale": "two_thousand",
+        "variant": "post",
+        "startedAt": "2026-10-23T08:36:01Z",
+        "hostObservationAtStart": "11:36  2 users, load averages: 390.80 366.25 225.23",
+        "loadAverageAtStart": [
+          390.8,
+          366.25,
+          225.23
+        ],
+        "measurement": {
+          "messageCount": 2000,
+          "pageSize": 500,
+          "pageCount": 4,
+          "elapsedMilliseconds": 539,
+          "phases": {
+            "setupMilliseconds": 25,
+            "fixtureGenerationMilliseconds": 2,
+            "fixtureInsertionMilliseconds": 361,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 144,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 100,
+            "syncFinalizationMilliseconds": 42,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 4
+          },
+          "observer": {
+            "callCount": 5,
+            "elapsedNanoseconds": 2000
+          }
+        },
+        "finishedAt": "2026-10-23T08:36:02Z",
+        "hostObservationAtFinish": "11:36  2 users, load averages: 390.80 366.25 225.23",
+        "loadAverageAtFinish": [
+          390.8,
+          366.25,
+          225.23
+        ],
+        "testResult": "passed"
+      },
+      {
+        "iteration": 3,
+        "scale": "thirty_thousand",
+        "variant": "pre",
+        "startedAt": "2026-10-23T08:36:02Z",
+        "hostObservationAtStart": "11:36  2 users, load averages: 390.80 366.25 225.23",
+        "loadAverageAtStart": [
+          390.8,
+          366.25,
+          225.23
+        ],
+        "measurement": {
+          "messageCount": 30000,
+          "pageSize": 500,
+          "pageCount": 60,
+          "elapsedMilliseconds": 10966,
+          "phases": {
+            "setupMilliseconds": 31,
+            "fixtureGenerationMilliseconds": 38,
+            "fixtureInsertionMilliseconds": 8622,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 2206,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 1536,
+            "syncFinalizationMilliseconds": 668,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 67
+          },
+          "observer": {
+            "callCount": 5,
+            "elapsedNanoseconds": 4749
+          }
+        },
+        "finishedAt": "2026-10-23T08:36:13Z",
+        "hostObservationAtFinish": "11:36  2 users, load averages: 372.01 363.43 226.69",
+        "loadAverageAtFinish": [
+          372.01,
+          363.43,
+          226.69
+        ],
+        "testResult": "passed"
+      },
+      {
+        "iteration": 3,
+        "scale": "thirty_thousand",
+        "variant": "post",
+        "startedAt": "2026-10-23T08:36:13Z",
+        "hostObservationAtStart": "11:36  2 users, load averages: 372.01 363.43 226.69",
+        "loadAverageAtStart": [
+          372.01,
+          363.43,
+          226.69
+        ],
+        "measurement": {
+          "messageCount": 30000,
+          "pageSize": 500,
+          "pageCount": 60,
+          "elapsedMilliseconds": 8073,
+          "phases": {
+            "setupMilliseconds": 28,
+            "fixtureGenerationMilliseconds": 38,
+            "fixtureInsertionMilliseconds": 5771,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 2162,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 1494,
+            "syncFinalizationMilliseconds": 667,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 73
+          },
+          "observer": {
+            "callCount": 5,
+            "elapsedNanoseconds": 2876
+          }
+        },
+        "finishedAt": "2026-10-23T08:36:21Z",
+        "hostObservationAtFinish": "11:36  2 users, load averages: 362.48 361.60 226.85",
+        "loadAverageAtFinish": [
+          362.48,
+          361.6,
+          226.85
+        ],
+        "testResult": "passed"
+      }
+    ],
+    "summaries": [
+      {
+        "messageCount": 2000,
+        "pre": {
+          "elapsedMilliseconds": [
+            723,
+            742,
+            712
+          ],
+          "medianElapsedMilliseconds": 723,
+          "phaseMilliseconds": {
+            "setupMilliseconds": [
+              39,
+              26,
+              36
+            ],
+            "fixtureGenerationMilliseconds": [
+              3,
+              2,
+              2
+            ],
+            "fixtureInsertionMilliseconds": [
+              532,
+              570,
+              533
+            ],
+            "transportSetupMilliseconds": [
+              0,
+              0,
+              0
+            ],
+            "syncMilliseconds": [
+              142,
+              137,
+              134
+            ],
+            "syncAuthenticationMilliseconds": [
+              0,
+              0,
+              0
+            ],
+            "syncInventoryMilliseconds": [
+              103,
+              96,
+              95
+            ],
+            "syncFinalizationMilliseconds": [
+              38,
+              40,
+              38
+            ],
+            "serverFinalizationMilliseconds": [
+              0,
+              0,
+              0
+            ],
+            "assertionMilliseconds": [
+              5,
+              5,
+              4
+            ]
+          },
+          "medianPhaseMilliseconds": {
+            "setupMilliseconds": 36,
+            "fixtureGenerationMilliseconds": 2,
+            "fixtureInsertionMilliseconds": 533,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 137,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 96,
+            "syncFinalizationMilliseconds": 38,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 5
+          },
+          "observerCallCount": [
+            5,
+            5,
+            5
+          ],
+          "observerElapsedNanoseconds": [
+            2042,
+            1834,
+            1460
+          ],
+          "medianObserverElapsedNanoseconds": 1834
+        },
+        "post": {
+          "elapsedMilliseconds": [
+            496,
+            740,
+            539
+          ],
+          "medianElapsedMilliseconds": 539,
+          "phaseMilliseconds": {
+            "setupMilliseconds": [
+              32,
+              24,
+              25
+            ],
+            "fixtureGenerationMilliseconds": [
+              4,
+              3,
+              2
+            ],
+            "fixtureInsertionMilliseconds": [
+              325,
+              489,
+              361
+            ],
+            "transportSetupMilliseconds": [
+              0,
+              0,
+              0
+            ],
+            "syncMilliseconds": [
+              127,
+              165,
+              144
+            ],
+            "syncAuthenticationMilliseconds": [
+              1,
+              0,
+              0
+            ],
+            "syncInventoryMilliseconds": [
+              86,
+              118,
+              100
+            ],
+            "syncFinalizationMilliseconds": [
+              39,
+              46,
+              42
+            ],
+            "serverFinalizationMilliseconds": [
+              0,
+              0,
+              0
+            ],
+            "assertionMilliseconds": [
+              5,
+              58,
+              4
+            ]
+          },
+          "medianPhaseMilliseconds": {
+            "setupMilliseconds": 25,
+            "fixtureGenerationMilliseconds": 3,
+            "fixtureInsertionMilliseconds": 361,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 144,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 100,
+            "syncFinalizationMilliseconds": 42,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 5
+          },
+          "observerCallCount": [
+            5,
+            5,
+            5
+          ],
+          "observerElapsedNanoseconds": [
+            2458,
+            2750,
+            2000
+          ],
+          "medianObserverElapsedNanoseconds": 2458
+        },
+        "elapsedChangePercent": -25.44951590594744,
+        "fixtureInsertionChangePercent": -32.270168855534706
+      },
+      {
+        "messageCount": 30000,
+        "pre": {
+          "elapsedMilliseconds": [
+            10413,
+            13803,
+            10966
+          ],
+          "medianElapsedMilliseconds": 10966,
+          "phaseMilliseconds": {
+            "setupMilliseconds": [
+              28,
+              40,
+              31
+            ],
+            "fixtureGenerationMilliseconds": [
+              38,
+              41,
+              38
+            ],
+            "fixtureInsertionMilliseconds": [
+              8105,
+              8538,
+              8622
+            ],
+            "transportSetupMilliseconds": [
+              0,
+              0,
+              0
+            ],
+            "syncMilliseconds": [
+              2176,
+              5017,
+              2206
+            ],
+            "syncAuthenticationMilliseconds": [
+              0,
+              0,
+              0
+            ],
+            "syncInventoryMilliseconds": [
+              1502,
+              4277,
+              1536
+            ],
+            "syncFinalizationMilliseconds": [
+              673,
+              739,
+              668
+            ],
+            "serverFinalizationMilliseconds": [
+              0,
+              0,
+              0
+            ],
+            "assertionMilliseconds": [
+              64,
+              165,
+              67
+            ]
+          },
+          "medianPhaseMilliseconds": {
+            "setupMilliseconds": 31,
+            "fixtureGenerationMilliseconds": 38,
+            "fixtureInsertionMilliseconds": 8538,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 2206,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 1536,
+            "syncFinalizationMilliseconds": 673,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 67
+          },
+          "observerCallCount": [
+            5,
+            5,
+            5
+          ],
+          "observerElapsedNanoseconds": [
+            2750,
+            3083,
+            4749
+          ],
+          "medianObserverElapsedNanoseconds": 3083
+        },
+        "post": {
+          "elapsedMilliseconds": [
+            8509,
+            8648,
+            8073
+          ],
+          "medianElapsedMilliseconds": 8509,
+          "phaseMilliseconds": {
+            "setupMilliseconds": [
+              38,
+              158,
+              28
+            ],
+            "fixtureGenerationMilliseconds": [
+              37,
+              75,
+              38
+            ],
+            "fixtureInsertionMilliseconds": [
+              6055,
+              6236,
+              5771
+            ],
+            "transportSetupMilliseconds": [
+              0,
+              0,
+              0
+            ],
+            "syncMilliseconds": [
+              2286,
+              2110,
+              2162
+            ],
+            "syncAuthenticationMilliseconds": [
+              0,
+              0,
+              0
+            ],
+            "syncInventoryMilliseconds": [
+              1594,
+              1439,
+              1494
+            ],
+            "syncFinalizationMilliseconds": [
+              690,
+              670,
+              667
+            ],
+            "serverFinalizationMilliseconds": [
+              0,
+              0,
+              0
+            ],
+            "assertionMilliseconds": [
+              90,
+              67,
+              73
+            ]
+          },
+          "medianPhaseMilliseconds": {
+            "setupMilliseconds": 38,
+            "fixtureGenerationMilliseconds": 38,
+            "fixtureInsertionMilliseconds": 6055,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 2162,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 1494,
+            "syncFinalizationMilliseconds": 670,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 73
+          },
+          "observerCallCount": [
+            5,
+            5,
+            5
+          ],
+          "observerElapsedNanoseconds": [
+            2917,
+            3001,
+            2876
+          ],
+          "medianObserverElapsedNanoseconds": 2917
+        },
+        "elapsedChangePercent": -22.405617362757617,
+        "fixtureInsertionChangePercent": -29.081752166783794
+      }
+    ],
+    "historicalBaselineComparison": [
+      {
+        "messageCount": 2000,
+        "postMedianMilliseconds": 539,
+        "historicalBaselineMedianMilliseconds": 560,
+        "changePercent": -3.75
+      },
+      {
+        "messageCount": 30000,
+        "postMedianMilliseconds": 8509,
+        "historicalBaselineMedianMilliseconds": 7660,
+        "changePercent": 11.08355091383812
+      }
+    ],
+    "interpretation": "The post variant reduced the fixture-insertion median at both measured sizes while the sync median remained close at 2,000 and 30,000 messages. This localizes a material contributor to catalogue fixture insertion. It does not time a large initial production snapshot finalization."
+  },
+  "earlyLookupOnlyExperiment": {
+    "startedAt": "2026-10-23T08:32:33Z",
+    "finishedAt": "2026-10-23T08:33:47Z",
+    "status": "diagnostic-only-not-final",
+    "reason": "This earlier pass cached provider classification but did not yet replace per-row non-Gmail cleanup with one account-scoped cleanup. Its first 2,000-message pre sample was a 4,529 ms outlier, and host load collection failed because the attempted sysctl call was denied. It is retained separately and was not selected as the final causal A/B.",
+    "postBinary": {
+      "pathAtMeasurement": "/private/tmp/dakia-perf-post-provider-batch-a91e447a9eb4eadc",
+      "sha256": "60334e48b86095d48ef21f7686172d07b89d8ea75d8754cc915c495ad02efa4e"
+    },
+    "rawLog": {
+      "pathAtMeasurement": "/private/tmp/dakia-perf-provider-batch-ab-20261023.log",
+      "sha256": "581c5bad8e86e77d4e4d111181e6a82668d282467dec71bffe4a02ce25289274",
+      "lineCount": 108
+    },
+    "samples": [
+      {
+        "iteration": 1,
+        "scale": "two_thousand",
+        "variant": "pre",
+        "startedAt": "2026-10-23T08:32:33Z",
+        "hostObservationAtStart": null,
+        "measurement": {
+          "messageCount": 2000,
+          "pageSize": 500,
+          "pageCount": 4,
+          "elapsedMilliseconds": 4529,
+          "phases": {
+            "setupMilliseconds": 201,
+            "fixtureGenerationMilliseconds": 4,
+            "fixtureInsertionMilliseconds": 4038,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 278,
+            "syncAuthenticationMilliseconds": 1,
+            "syncInventoryMilliseconds": 236,
+            "syncFinalizationMilliseconds": 40,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 5
+          },
+          "observer": {
+            "callCount": 5,
+            "elapsedNanoseconds": 2583
+          }
+        },
+        "finishedAt": "2026-10-23T08:32:39Z",
+        "hostObservationAtFinish": null,
+        "testResult": "passed"
+      },
+      {
+        "iteration": 1,
+        "scale": "two_thousand",
+        "variant": "post",
+        "startedAt": "2026-10-23T08:32:39Z",
+        "hostObservationAtStart": null,
+        "measurement": {
+          "messageCount": 2000,
+          "pageSize": 500,
+          "pageCount": 4,
+          "elapsedMilliseconds": 679,
+          "phases": {
+            "setupMilliseconds": 37,
+            "fixtureGenerationMilliseconds": 3,
+            "fixtureInsertionMilliseconds": 487,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 143,
+            "syncAuthenticationMilliseconds": 1,
+            "syncInventoryMilliseconds": 103,
+            "syncFinalizationMilliseconds": 38,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 6
+          },
+          "observer": {
+            "callCount": 5,
+            "elapsedNanoseconds": 2292
+          }
+        },
+        "finishedAt": "2026-10-23T08:32:41Z",
+        "hostObservationAtFinish": null,
+        "testResult": "passed"
+      },
+      {
+        "iteration": 1,
+        "scale": "thirty_thousand",
+        "variant": "pre",
+        "startedAt": "2026-10-23T08:32:41Z",
+        "hostObservationAtStart": null,
+        "measurement": {
+          "messageCount": 30000,
+          "pageSize": 500,
+          "pageCount": 60,
+          "elapsedMilliseconds": 11302,
+          "phases": {
+            "setupMilliseconds": 32,
+            "fixtureGenerationMilliseconds": 39,
+            "fixtureInsertionMilliseconds": 8956,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 2203,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 1517,
+            "syncFinalizationMilliseconds": 686,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 70
+          },
+          "observer": {
+            "callCount": 5,
+            "elapsedNanoseconds": 2376
+          }
+        },
+        "finishedAt": "2026-10-23T08:32:53Z",
+        "hostObservationAtFinish": null,
+        "testResult": "passed"
+      },
+      {
+        "iteration": 1,
+        "scale": "thirty_thousand",
+        "variant": "post",
+        "startedAt": "2026-10-23T08:32:53Z",
+        "hostObservationAtStart": null,
+        "measurement": {
+          "messageCount": 30000,
+          "pageSize": 500,
+          "pageCount": 60,
+          "elapsedMilliseconds": 9808,
+          "phases": {
+            "setupMilliseconds": 27,
+            "fixtureGenerationMilliseconds": 38,
+            "fixtureInsertionMilliseconds": 7374,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 2287,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 1610,
+            "syncFinalizationMilliseconds": 675,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 81
+          },
+          "observer": {
+            "callCount": 5,
+            "elapsedNanoseconds": 2916
+          }
+        },
+        "finishedAt": "2026-10-23T08:33:02Z",
+        "hostObservationAtFinish": null,
+        "testResult": "passed"
+      },
+      {
+        "iteration": 2,
+        "scale": "two_thousand",
+        "variant": "pre",
+        "startedAt": "2026-10-23T08:33:02Z",
+        "hostObservationAtStart": null,
+        "measurement": {
+          "messageCount": 2000,
+          "pageSize": 500,
+          "pageCount": 4,
+          "elapsedMilliseconds": 875,
+          "phases": {
+            "setupMilliseconds": 51,
+            "fixtureGenerationMilliseconds": 6,
+            "fixtureInsertionMilliseconds": 676,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 137,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 97,
+            "syncFinalizationMilliseconds": 39,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 4
+          },
+          "observer": {
+            "callCount": 5,
+            "elapsedNanoseconds": 4584
+          }
+        },
+        "finishedAt": "2026-10-23T08:33:03Z",
+        "hostObservationAtFinish": null,
+        "testResult": "passed"
+      },
+      {
+        "iteration": 2,
+        "scale": "two_thousand",
+        "variant": "post",
+        "startedAt": "2026-10-23T08:33:03Z",
+        "hostObservationAtStart": null,
+        "measurement": {
+          "messageCount": 2000,
+          "pageSize": 500,
+          "pageCount": 4,
+          "elapsedMilliseconds": 666,
+          "phases": {
+            "setupMilliseconds": 28,
+            "fixtureGenerationMilliseconds": 2,
+            "fixtureInsertionMilliseconds": 485,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 144,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 104,
+            "syncFinalizationMilliseconds": 38,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 5
+          },
+          "observer": {
+            "callCount": 5,
+            "elapsedNanoseconds": 1999
+          }
+        },
+        "finishedAt": "2026-10-23T08:33:04Z",
+        "hostObservationAtFinish": null,
+        "testResult": "passed"
+      },
+      {
+        "iteration": 2,
+        "scale": "thirty_thousand",
+        "variant": "pre",
+        "startedAt": "2026-10-23T08:33:04Z",
+        "hostObservationAtStart": null,
+        "measurement": {
+          "messageCount": 30000,
+          "pageSize": 500,
+          "pageCount": 60,
+          "elapsedMilliseconds": 10968,
+          "phases": {
+            "setupMilliseconds": 27,
+            "fixtureGenerationMilliseconds": 38,
+            "fixtureInsertionMilliseconds": 8654,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 2178,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 1506,
+            "syncFinalizationMilliseconds": 671,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 70
+          },
+          "observer": {
+            "callCount": 5,
+            "elapsedNanoseconds": 3040
+          }
+        },
+        "finishedAt": "2026-10-23T08:33:15Z",
+        "hostObservationAtFinish": null,
+        "testResult": "passed"
+      },
+      {
+        "iteration": 2,
+        "scale": "thirty_thousand",
+        "variant": "post",
+        "startedAt": "2026-10-23T08:33:15Z",
+        "hostObservationAtStart": null,
+        "measurement": {
+          "messageCount": 30000,
+          "pageSize": 500,
+          "pageCount": 60,
+          "elapsedMilliseconds": 9422,
+          "phases": {
+            "setupMilliseconds": 26,
+            "fixtureGenerationMilliseconds": 37,
+            "fixtureInsertionMilliseconds": 7122,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 2166,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 1475,
+            "syncFinalizationMilliseconds": 690,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 68
+          },
+          "observer": {
+            "callCount": 5,
+            "elapsedNanoseconds": 3625
+          }
+        },
+        "finishedAt": "2026-10-23T08:33:24Z",
+        "hostObservationAtFinish": null,
+        "testResult": "passed"
+      },
+      {
+        "iteration": 3,
+        "scale": "two_thousand",
+        "variant": "pre",
+        "startedAt": "2026-10-23T08:33:24Z",
+        "hostObservationAtStart": null,
+        "measurement": {
+          "messageCount": 2000,
+          "pageSize": 500,
+          "pageCount": 4,
+          "elapsedMilliseconds": 757,
+          "phases": {
+            "setupMilliseconds": 29,
+            "fixtureGenerationMilliseconds": 2,
+            "fixtureInsertionMilliseconds": 582,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 137,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 97,
+            "syncFinalizationMilliseconds": 39,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 5
+          },
+          "observer": {
+            "callCount": 5,
+            "elapsedNanoseconds": 2625
+          }
+        },
+        "finishedAt": "2026-10-23T08:33:25Z",
+        "hostObservationAtFinish": null,
+        "testResult": "passed"
+      },
+      {
+        "iteration": 3,
+        "scale": "two_thousand",
+        "variant": "post",
+        "startedAt": "2026-10-23T08:33:25Z",
+        "hostObservationAtStart": null,
+        "measurement": {
+          "messageCount": 2000,
+          "pageSize": 500,
+          "pageCount": 4,
+          "elapsedMilliseconds": 619,
+          "phases": {
+            "setupMilliseconds": 28,
+            "fixtureGenerationMilliseconds": 2,
+            "fixtureInsertionMilliseconds": 449,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 133,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 95,
+            "syncFinalizationMilliseconds": 38,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 4
+          },
+          "observer": {
+            "callCount": 5,
+            "elapsedNanoseconds": 3376
+          }
+        },
+        "finishedAt": "2026-10-23T08:33:26Z",
+        "hostObservationAtFinish": null,
+        "testResult": "passed"
+      },
+      {
+        "iteration": 3,
+        "scale": "thirty_thousand",
+        "variant": "pre",
+        "startedAt": "2026-10-23T08:33:26Z",
+        "hostObservationAtStart": null,
+        "measurement": {
+          "messageCount": 30000,
+          "pageSize": 500,
+          "pageCount": 60,
+          "elapsedMilliseconds": 11288,
+          "phases": {
+            "setupMilliseconds": 28,
+            "fixtureGenerationMilliseconds": 38,
+            "fixtureInsertionMilliseconds": 8963,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 2194,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 1527,
+            "syncFinalizationMilliseconds": 666,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 63
+          },
+          "observer": {
+            "callCount": 5,
+            "elapsedNanoseconds": 2834
+          }
+        },
+        "finishedAt": "2026-10-23T08:33:37Z",
+        "hostObservationAtFinish": null,
+        "testResult": "passed"
+      },
+      {
+        "iteration": 3,
+        "scale": "thirty_thousand",
+        "variant": "post",
+        "startedAt": "2026-10-23T08:33:37Z",
+        "hostObservationAtStart": null,
+        "measurement": {
+          "messageCount": 30000,
+          "pageSize": 500,
+          "pageCount": 60,
+          "elapsedMilliseconds": 9379,
+          "phases": {
+            "setupMilliseconds": 26,
+            "fixtureGenerationMilliseconds": 37,
+            "fixtureInsertionMilliseconds": 7022,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 2227,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 1467,
+            "syncFinalizationMilliseconds": 759,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 65
+          },
+          "observer": {
+            "callCount": 5,
+            "elapsedNanoseconds": 3083
+          }
+        },
+        "finishedAt": "2026-10-23T08:33:47Z",
+        "hostObservationAtFinish": null,
+        "testResult": "passed"
+      }
+    ],
+    "summaries": [
+      {
+        "messageCount": 2000,
+        "pre": {
+          "elapsedMilliseconds": [
+            4529,
+            875,
+            757
+          ],
+          "medianElapsedMilliseconds": 875,
+          "phaseMilliseconds": {
+            "setupMilliseconds": [
+              201,
+              51,
+              29
+            ],
+            "fixtureGenerationMilliseconds": [
+              4,
+              6,
+              2
+            ],
+            "fixtureInsertionMilliseconds": [
+              4038,
+              676,
+              582
+            ],
+            "transportSetupMilliseconds": [
+              0,
+              0,
+              0
+            ],
+            "syncMilliseconds": [
+              278,
+              137,
+              137
+            ],
+            "syncAuthenticationMilliseconds": [
+              1,
+              0,
+              0
+            ],
+            "syncInventoryMilliseconds": [
+              236,
+              97,
+              97
+            ],
+            "syncFinalizationMilliseconds": [
+              40,
+              39,
+              39
+            ],
+            "serverFinalizationMilliseconds": [
+              0,
+              0,
+              0
+            ],
+            "assertionMilliseconds": [
+              5,
+              4,
+              5
+            ]
+          },
+          "medianPhaseMilliseconds": {
+            "setupMilliseconds": 51,
+            "fixtureGenerationMilliseconds": 4,
+            "fixtureInsertionMilliseconds": 676,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 137,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 97,
+            "syncFinalizationMilliseconds": 39,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 5
+          },
+          "observerCallCount": [
+            5,
+            5,
+            5
+          ],
+          "observerElapsedNanoseconds": [
+            2583,
+            4584,
+            2625
+          ],
+          "medianObserverElapsedNanoseconds": 2625
+        },
+        "post": {
+          "elapsedMilliseconds": [
+            679,
+            666,
+            619
+          ],
+          "medianElapsedMilliseconds": 666,
+          "phaseMilliseconds": {
+            "setupMilliseconds": [
+              37,
+              28,
+              28
+            ],
+            "fixtureGenerationMilliseconds": [
+              3,
+              2,
+              2
+            ],
+            "fixtureInsertionMilliseconds": [
+              487,
+              485,
+              449
+            ],
+            "transportSetupMilliseconds": [
+              0,
+              0,
+              0
+            ],
+            "syncMilliseconds": [
+              143,
+              144,
+              133
+            ],
+            "syncAuthenticationMilliseconds": [
+              1,
+              0,
+              0
+            ],
+            "syncInventoryMilliseconds": [
+              103,
+              104,
+              95
+            ],
+            "syncFinalizationMilliseconds": [
+              38,
+              38,
+              38
+            ],
+            "serverFinalizationMilliseconds": [
+              0,
+              0,
+              0
+            ],
+            "assertionMilliseconds": [
+              6,
+              5,
+              4
+            ]
+          },
+          "medianPhaseMilliseconds": {
+            "setupMilliseconds": 28,
+            "fixtureGenerationMilliseconds": 2,
+            "fixtureInsertionMilliseconds": 485,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 143,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 103,
+            "syncFinalizationMilliseconds": 38,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 5
+          },
+          "observerCallCount": [
+            5,
+            5,
+            5
+          ],
+          "observerElapsedNanoseconds": [
+            2292,
+            1999,
+            3376
+          ],
+          "medianObserverElapsedNanoseconds": 2292
+        },
+        "elapsedChangePercent": -23.885714285714286,
+        "fixtureInsertionChangePercent": -28.254437869822485
+      },
+      {
+        "messageCount": 30000,
+        "pre": {
+          "elapsedMilliseconds": [
+            11302,
+            10968,
+            11288
+          ],
+          "medianElapsedMilliseconds": 11288,
+          "phaseMilliseconds": {
+            "setupMilliseconds": [
+              32,
+              27,
+              28
+            ],
+            "fixtureGenerationMilliseconds": [
+              39,
+              38,
+              38
+            ],
+            "fixtureInsertionMilliseconds": [
+              8956,
+              8654,
+              8963
+            ],
+            "transportSetupMilliseconds": [
+              0,
+              0,
+              0
+            ],
+            "syncMilliseconds": [
+              2203,
+              2178,
+              2194
+            ],
+            "syncAuthenticationMilliseconds": [
+              0,
+              0,
+              0
+            ],
+            "syncInventoryMilliseconds": [
+              1517,
+              1506,
+              1527
+            ],
+            "syncFinalizationMilliseconds": [
+              686,
+              671,
+              666
+            ],
+            "serverFinalizationMilliseconds": [
+              0,
+              0,
+              0
+            ],
+            "assertionMilliseconds": [
+              70,
+              70,
+              63
+            ]
+          },
+          "medianPhaseMilliseconds": {
+            "setupMilliseconds": 28,
+            "fixtureGenerationMilliseconds": 38,
+            "fixtureInsertionMilliseconds": 8956,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 2194,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 1517,
+            "syncFinalizationMilliseconds": 671,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 70
+          },
+          "observerCallCount": [
+            5,
+            5,
+            5
+          ],
+          "observerElapsedNanoseconds": [
+            2376,
+            3040,
+            2834
+          ],
+          "medianObserverElapsedNanoseconds": 2834
+        },
+        "post": {
+          "elapsedMilliseconds": [
+            9808,
+            9422,
+            9379
+          ],
+          "medianElapsedMilliseconds": 9422,
+          "phaseMilliseconds": {
+            "setupMilliseconds": [
+              27,
+              26,
+              26
+            ],
+            "fixtureGenerationMilliseconds": [
+              38,
+              37,
+              37
+            ],
+            "fixtureInsertionMilliseconds": [
+              7374,
+              7122,
+              7022
+            ],
+            "transportSetupMilliseconds": [
+              0,
+              0,
+              0
+            ],
+            "syncMilliseconds": [
+              2287,
+              2166,
+              2227
+            ],
+            "syncAuthenticationMilliseconds": [
+              0,
+              0,
+              0
+            ],
+            "syncInventoryMilliseconds": [
+              1610,
+              1475,
+              1467
+            ],
+            "syncFinalizationMilliseconds": [
+              675,
+              690,
+              759
+            ],
+            "serverFinalizationMilliseconds": [
+              0,
+              0,
+              0
+            ],
+            "assertionMilliseconds": [
+              81,
+              68,
+              65
+            ]
+          },
+          "medianPhaseMilliseconds": {
+            "setupMilliseconds": 26,
+            "fixtureGenerationMilliseconds": 37,
+            "fixtureInsertionMilliseconds": 7122,
+            "transportSetupMilliseconds": 0,
+            "syncMilliseconds": 2227,
+            "syncAuthenticationMilliseconds": 0,
+            "syncInventoryMilliseconds": 1475,
+            "syncFinalizationMilliseconds": 690,
+            "serverFinalizationMilliseconds": 0,
+            "assertionMilliseconds": 68
+          },
+          "observerCallCount": [
+            5,
+            5,
+            5
+          ],
+          "observerElapsedNanoseconds": [
+            2916,
+            3625,
+            3083
+          ],
+          "medianObserverElapsedNanoseconds": 3083
+        },
+        "elapsedChangePercent": -16.530829199149537,
+        "fixtureInsertionChangePercent": -20.477891916033943
+      }
+    ]
+  },
+  "instrumentation": {
+    "source": "crates/dakia-core/src/mail/tests/resilience_performance_tests.rs",
+    "runner": "scripts/run-mail-resilience-performance.mjs",
+    "runnerTests": "scripts/run-mail-resilience-performance.node-test.mjs",
+    "phases": [
+      "setupMilliseconds",
+      "fixtureGenerationMilliseconds",
+      "fixtureInsertionMilliseconds",
+      "transportSetupMilliseconds",
+      "syncMilliseconds",
+      "syncAuthenticationMilliseconds",
+      "syncInventoryMilliseconds",
+      "syncFinalizationMilliseconds",
+      "serverFinalizationMilliseconds",
+      "assertionMilliseconds"
+    ],
+    "observer": "Each sample records progress-observer call count and total elapsed nanoseconds. Every accepted causal sample made five calls; observed totals were microseconds and do not explain the millisecond-scale difference.",
+    "runnerBehavior": "Report schema version 2 requires all phases and observer fields, retains failed Rust output, records subprocess wall time and load averages, and fails closed on malformed evidence."
+  },
+  "productionPathScope": {
+    "implemented": [
+      "Catalogue batches cache provider classification per account and perform one account cleanup only for a confirmed non-Gmail account.",
+      "The staged UIDVALIDITY replacement finalization path resolves provider classification once and uses the same bounded cleanup behavior.",
+      "Missing, invalid JSON, and valid JSON with a mismatched embedded account ID are not treated as confirmed non-Gmail; they retain the legacy touched-locator cleanup.",
+      "An account_id index supports observation cleanup without a full-table scan."
+    ],
+    "testsPassed": [
+      "catalog_batch_provider_lookup_preserves_cross_account_identity_boundaries",
+      "staged_snapshot_finalization_clears_stale_identity_after_provider_change",
+      "provider_change_clears_gmail_identity_observation_before_later_backfill",
+      "observed_missing_gmail_ids_do_not_starve_older_backfill_rows"
+    ],
+    "timingLimit": "The accepted A/B times catalogue fixture insertion followed by an already-complete no-op sync. The staged production finalization path is covered semantically but does not have a dedicated 30,000-message initial-snapshot timing here.",
+    "gmailLimit": "The resilience fixture account is Fastmail. Gmail continues to write identity and observation rows, and the new observation index adds an index write. Large Gmail mailbox performance is uncharacterized."
+  },
+  "validation": {
+    "runnerNodeTests": {
+      "passed": 9,
+      "failed": 0,
+      "skipped": 0
+    },
+    "strictClippy": {
+      "command": "cargo clippy -p dakia-core --lib --locked -- -D warnings",
+      "status": "passed"
+    },
+    "focusedRust": "The listed storage and provider-identity tests passed. The live Gmail identity proof remained ignored and is a skip, not a pass.",
+    "restrictedSandboxFullSuite": {
+      "command": "cargo test -p dakia-core --lib --locked --quiet",
+      "testsDiscovered": 790,
+      "status": "interrupted-invalid-environment-evidence",
+      "exitCode": 130,
+      "detail": "The restricted sandbox run reported widespread loopback, TLS and network-heavy failures and was interrupted before completion. It was not an isolated normal source-gate environment and is neither passing evidence nor a product-regression conclusion. The main full source gates must run in their established environment."
+    }
+  },
+  "limitations": [
+    "The source and dependency cohort differs from both the historical baseline and final current source.",
+    "The accepted A/B host was under extreme concurrent load.",
+    "Only 2,000 and 30,000 messages were measured; 100,000 and 200,000 remain unmeasured for this change.",
+    "The A/B isolates a fixture-insertion contributor but does not prove the entire production sync regression is resolved.",
+    "No large Gmail mailbox, native WebKit responsiveness, provider latency, or sustained resource soak was measured.",
+    "Temporary binary and raw-log paths are recorded for provenance, but this checked-in document embeds the portable parsed evidence because temporary artifacts can disappear."
+  ]
+}
