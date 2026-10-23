@@ -35,6 +35,19 @@ function objectArguments(argumentsList, label) {
   return paths;
 }
 
+function skipFunctionsArgumentState(argumentsList) {
+  const supported = ["--skip-functions", "-skip-functions"];
+  return {
+    count: argumentsList.filter((argument) => supported.includes(argument))
+      .length,
+    hasUnsupportedEqualsForm: argumentsList.some(
+      (argument) =>
+        argument.startsWith("--skip-functions=") ||
+        argument.startsWith("-skip-functions="),
+    ),
+  };
+}
+
 function observedObjectState(value, label) {
   if (!Array.isArray(value) || value.length === 0) {
     fail(`${label} export receipt has no observed object state`);
@@ -218,8 +231,20 @@ function parseExportReceipt({
       "Function JSON export receipt must use llvm-cov export's JSON-compatible output",
     );
   }
-  if (format === "lcov" && !argumentsSet.has("--skip-functions")) {
-    fail("Line-and-branch export receipt does not require --skip-functions");
+  const skipFunctions = skipFunctionsArgumentState(receipt.producer.arguments);
+  if (
+    format === "lcov" &&
+    (skipFunctions.count !== 1 || skipFunctions.hasUnsupportedEqualsForm)
+  ) {
+    fail(
+      "Line-and-branch export receipt requires exactly one bare skip-functions argument",
+    );
+  }
+  if (
+    format === "json" &&
+    (skipFunctions.count !== 0 || skipFunctions.hasUnsupportedEqualsForm)
+  ) {
+    fail("Function JSON export receipt must not skip functions");
   }
   const objectPaths = objectArguments(receipt.producer.arguments, label);
   const observedObjectPaths = objectStateBefore.map((entry) => entry.path);
@@ -413,7 +438,7 @@ function renderRecord(record, functions) {
   for (const line of record.lines) {
     if (line.startsWith("FN:") || line.startsWith("FNDA:")) {
       fail(
-        `Expected --skip-functions LCOV but found function record in ${record.path}`,
+        `Expected skip-functions LCOV but found function record in ${record.path}`,
       );
     }
     if (line.startsWith("FNF:") || line.startsWith("FNH:")) continue;
@@ -444,7 +469,8 @@ function sameExportCohort(lineBranch, functions) {
       (argument) =>
         argument !== "-format=lcov" &&
         argument !== "-format=text" &&
-        argument !== "--skip-functions",
+        argument !== "--skip-functions" &&
+        argument !== "-skip-functions",
     );
   if (
     JSON.stringify(normalizeArguments(lineBranch.arguments)) !==
@@ -551,7 +577,7 @@ export function normalizeRustCoverageLcov({
         lcovSha256: createHash("sha256").update(output).digest("hex"),
       },
       linesBranches: {
-        producer: "llvm-cov lcov --skip-functions",
+        producer: "llvm-cov lcov with skip-functions",
         lines: after.lines,
         branches: after.branches,
         unchangedFromInput: true,

@@ -294,6 +294,31 @@ test("accepts cargo-llvm-cov's JSON-compatible -format=text export invocation", 
   }
 });
 
+test("accepts cargo-llvm-cov's single-dash LCOV skip-functions argument", () => {
+  const paths = fixture({
+    mutateReceipts: (receipts) => ({
+      ...receipts,
+      lineBranch: {
+        ...receipts.lineBranch,
+        producer: {
+          ...receipts.lineBranch.producer,
+          arguments: receipts.lineBranch.producer.arguments.map((argument) =>
+            argument === "--skip-functions" ? "-skip-functions" : argument,
+          ),
+        },
+      },
+    }),
+  });
+  try {
+    assert.equal(
+      normalize(paths).summary.functions.metric,
+      "llvm-instrumentation-instantiations",
+    );
+  } finally {
+    rmSync(paths.directory, { recursive: true, force: true });
+  }
+});
+
 test("rejects a profile typo before accepting either export", () => {
   const paths = fixture();
   try {
@@ -460,7 +485,119 @@ test("rejects swapped profile, source, object-set and output provenance", () => 
           },
         },
       }),
-      error: /does not require --skip-functions/,
+      error: /requires exactly one bare skip-functions argument/,
+    },
+    {
+      name: "ambiguous bare skip functions",
+      mutateReceipts: (r) => ({
+        ...r,
+        lineBranch: {
+          ...r.lineBranch,
+          producer: {
+            ...r.lineBranch.producer,
+            arguments: [...r.lineBranch.producer.arguments, "-skip-functions"],
+          },
+        },
+      }),
+      error: /requires exactly one bare skip-functions argument/,
+    },
+    {
+      name: "equals-form LCOV skip functions",
+      mutateReceipts: (r) => ({
+        ...r,
+        lineBranch: {
+          ...r.lineBranch,
+          producer: {
+            ...r.lineBranch.producer,
+            arguments: r.lineBranch.producer.arguments.map((argument) =>
+              argument === "--skip-functions"
+                ? "--skip-functions=true"
+                : argument,
+            ),
+          },
+        },
+      }),
+      error: /requires exactly one bare skip-functions argument/,
+    },
+    {
+      name: "single-dash equals-form LCOV skip functions",
+      mutateReceipts: (r) => ({
+        ...r,
+        lineBranch: {
+          ...r.lineBranch,
+          producer: {
+            ...r.lineBranch.producer,
+            arguments: r.lineBranch.producer.arguments.map((argument) =>
+              argument === "--skip-functions"
+                ? "-skip-functions=true"
+                : argument,
+            ),
+          },
+        },
+      }),
+      error: /requires exactly one bare skip-functions argument/,
+    },
+    {
+      name: "bare JSON skip functions",
+      mutateReceipts: (r) => ({
+        ...r,
+        functions: {
+          ...r.functions,
+          producer: {
+            ...r.functions.producer,
+            arguments: [...r.functions.producer.arguments, "-skip-functions"],
+          },
+        },
+      }),
+      error: /Function JSON export receipt must not skip functions/,
+    },
+    {
+      name: "long-form bare JSON skip functions",
+      mutateReceipts: (r) => ({
+        ...r,
+        functions: {
+          ...r.functions,
+          producer: {
+            ...r.functions.producer,
+            arguments: [...r.functions.producer.arguments, "--skip-functions"],
+          },
+        },
+      }),
+      error: /Function JSON export receipt must not skip functions/,
+    },
+    {
+      name: "equals-form JSON skip functions",
+      mutateReceipts: (r) => ({
+        ...r,
+        functions: {
+          ...r.functions,
+          producer: {
+            ...r.functions.producer,
+            arguments: [
+              ...r.functions.producer.arguments,
+              "-skip-functions=true",
+            ],
+          },
+        },
+      }),
+      error: /Function JSON export receipt must not skip functions/,
+    },
+    {
+      name: "long-form equals JSON skip functions",
+      mutateReceipts: (r) => ({
+        ...r,
+        functions: {
+          ...r.functions,
+          producer: {
+            ...r.functions.producer,
+            arguments: [
+              ...r.functions.producer.arguments,
+              "--skip-functions=true",
+            ],
+          },
+        },
+      }),
+      error: /Function JSON export receipt must not skip functions/,
     },
   ];
   for (const entry of cases) {
@@ -563,7 +700,7 @@ test("rejects ambiguous, covered-empty, missing and duplicated function mappings
   }
 });
 
-test("rejects LCOV that was not exported with --skip-functions", () => {
+test("rejects LCOV that still contains function records after skip-functions export", () => {
   const paths = fixture();
   try {
     writeFileSync(
@@ -575,7 +712,7 @@ test("rejects LCOV that was not exported with --skip-functions", () => {
     writeFileSync(paths.lineBranchReceipt, JSON.stringify(receipt, null, 2));
     assert.throws(
       () => normalize(paths),
-      /Expected --skip-functions LCOV but found function record/,
+      /Expected skip-functions LCOV but found function record/,
     );
   } finally {
     rmSync(paths.directory, { recursive: true, force: true });

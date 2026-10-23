@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "before": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "c9076b46e5937de89ee653639fdf446530682f81d3890f4fa33c3b20f2cfbe6e",
+    "fileCount": 1032
+  },
+  "after": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "1a4e54640bbfd1ed6907ea7364856f2f79d894393604532858e798b984dd8d65",
+    "fileCount": 1032
+  },
+  "changedFiles": [
+    {
+      "path": "scripts/run-large-mailbox-tls-smoke.mjs",
+      "before": {
+        "path": "scripts/run-large-mailbox-tls-smoke.mjs",
+        "bytes": 21645,
+        "sha256": "668f57c4a710224793c15c83deeaa5e2c0c41dc735f409466145ce23aa11e4fc",
+        "state": "present"
+      },
+      "after": {
+        "path": "scripts/run-large-mailbox-tls-smoke.mjs",
+        "bytes": 22806,
+        "sha256": "f735c80d3d36e1e26b57045905bbe7ff40c39eae004b59d314333284d72122a3",
+        "state": "present"
+      }
+    },
+    {
+      "path": "scripts/run-large-mailbox-tls-smoke.node-test.mjs",
+      "before": {
+        "path": "scripts/run-large-mailbox-tls-smoke.node-test.mjs",
+        "bytes": 16353,
+        "sha256": "7898b96a5fcd2169a501a0fc27017554eaff66485f6b03c165d875e0184ec443",
+        "state": "present"
+      },
+      "after": {
+        "path": "scripts/run-large-mailbox-tls-smoke.node-test.mjs",
+        "bytes": 21910,
+        "sha256": "a2434e2bb4f0a461ae3e50699ddc50998a026451f08f7695a8be72d77588b614",
+        "state": "present"
+      }
+    }
+  ],
+  "unchangedFileCount": 1030,
+  "scope": {
+    "performance": "Performance runner, Rust test source, all production Rust and dependency manifests are byte-identical. The c907 fixed comparison remains its own source identity with equivalent measured inputs. It is not rerun.",
+    "gmail": "Wrapper, Rust proof, production/provider/storage source and dependencies are byte-identical. The c907 read-only proof retains its own receipt and is carried as component equivalence only.",
+    "30k": "Production/Rust/fixture/audit/CLI sources are unchanged; runner lifecycle logic changed. A fresh full runner acceptance is required.",
+    "native": "A fresh acceptance-source build and live observations are required; no historical native result is promoted."
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "status": "failed-workflow-after-successful-instrumented-tests-and-exports",
+  "source": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "1a4e54640bbfd1ed6907ea7364856f2f79d894393604532858e798b984dd8d65",
+    "fileCount": 1032
+  },
+  "sourceAfterRecovered": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "1a4e54640bbfd1ed6907ea7364856f2f79d894393604532858e798b984dd8d65",
+    "fileCount": 1032
+  },
+  "instrumentedRustTests": "all recorded workspace suites passed; core779 passed15ignored, desktop227 passed",
+  "exports": [
+    {
+      "exitCode": 0,
+      "profilePath": "/private/tmp/dakia-current-coverage-20261023-acceptance/cargo-target/llvm-cov-target/dakia-desktop.profdata",
+      "profileSha256Before": "127659353ff996431940fc51af596a2467478e7ac9967a16b303562d5cba8d2d",
+      "profileSha256After": "127659353ff996431940fc51af596a2467478e7ac9967a16b303562d5cba8d2d",
+      "objectCount": 19,
+      "skipArguments": [
+        "-skip-functions"
+      ]
+    },
+    {
+      "exitCode": 0,
+      "profilePath": "/private/tmp/dakia-current-coverage-20261023-acceptance/cargo-target/llvm-cov-target/dakia-desktop.profdata",
+      "profileSha256Before": "127659353ff996431940fc51af596a2467478e7ac9967a16b303562d5cba8d2d",
+      "profileSha256After": "127659353ff996431940fc51af596a2467478e7ac9967a16b303562d5cba8d2d",
+      "objectCount": 19,
+      "skipArguments": []
+    }
+  ],
+  "failure": "Provenance expected --skip-functions while Cargo0.9.1 emitted valid LLVM -skip-functions. Downstream normalizer also required the long form.",
+  "privateFinalizerFailure": "zsh reserved status variable prevented the automatic after-source capture; main separately recovered and compared an unchanged governed source snapshot before any edits.",
+  "normalizationAccepted": false,
+  "baselineChanged": false,
+  "artifactsRetained": "/private/tmp/dakia-current-coverage-20261023-acceptance",
+  "log": {
+    "path": "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/coverage-current.log",
+    "sha256": "f49dbef1ca3613af7cd371fd2c1895f7378e810e5d48a9dd880ec0501adef95b"
+  },
+  "followup": "Fresh source-bound cohort after both flag-contract corrections and Linux titlebar cfg guard. The failed target, profiles and objects remain preserved; no prior coverage evidence is reused."
+}

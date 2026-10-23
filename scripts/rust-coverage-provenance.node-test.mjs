@@ -16,6 +16,7 @@ import {
   createRustCoverageProvenance,
   prepareRustCoverageSource,
 } from "./create-rust-coverage-provenance.mjs";
+import { normalizeRustCoverageLcov } from "./normalize-rust-coverage-lcov.mjs";
 
 function sha256(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
@@ -41,7 +42,24 @@ function fixture({ lcovSkipFunctionsArgument = "--skip-functions" } = {}) {
   writeFileSync(lcov, "SF:src/a.rs\nDA:1,1\nBRDA:1,0,0,1\nend_of_record\n");
   writeFileSync(
     json,
-    JSON.stringify({ data: [{ functions: [], totals: {} }] }),
+    JSON.stringify({
+      data: [
+        {
+          functions: [
+            {
+              filenames: ["src/a.rs"],
+              name: "a::observed",
+              count: 1,
+              regions: [[1, 1, 1, 2, 1, 0, 0, 0]],
+            },
+          ],
+          totals: {
+            instantiations: { count: 1, covered: 1 },
+            functions: { count: 1, covered: 1 },
+          },
+        },
+      ],
+    }),
   );
   execFileSync("git", ["init", "--quiet"], { cwd: directory });
   writeFileSync(join(directory, "tracked.rs"), "fn checked_in() {}\n");
@@ -155,6 +173,30 @@ test("coverage provenance accepts Cargo's captured single-dash LCOV skip-functio
     const result = createRustCoverageProvenance(options(paths));
     assert.equal(result.lineBranchReceipt.format, "lcov");
     assert.equal(result.functionsReceipt.format, "json");
+  } finally {
+    rmSync(paths.directory, { recursive: true, force: true });
+  }
+});
+
+test("single-dash Cargo export flows through paired provenance receipts into normalization", () => {
+  const paths = fixture({ lcovSkipFunctionsArgument: "-skip-functions" });
+  try {
+    const provenance = createRustCoverageProvenance(options(paths));
+    const normalized = normalizeRustCoverageLcov({
+      lineBranchLcov: paths.lcov,
+      functionsJson: paths.json,
+      profile: paths.profile,
+      expectedProfileSha256: sha256(paths.profile),
+      sourceDigest: provenance.manifest.sourceTree.digest,
+      sourceManifest: paths.sourceManifest,
+      lineBranchReceipt: options(paths).line_branch_receipt,
+      functionsReceipt: options(paths).functions_receipt,
+    });
+    assert.match(normalized.output, /^SF:src\/a\.rs\nFN:1,a::observed/m);
+    assert.deepEqual(normalized.summary.linesBranches.branches, {
+      found: 1,
+      hit: 1,
+    });
   } finally {
     rmSync(paths.directory, { recursive: true, force: true });
   }
