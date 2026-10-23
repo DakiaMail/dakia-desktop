@@ -578,7 +578,7 @@ test("manual workflow remains dispatch-only and runs bounded infrastructure", ()
   );
 });
 
-test("coverage lane uses branch-capable Rust coverage and a lock-matched Vitest provider", () => {
+test("coverage lane uses branch-capable Rust coverage and an isolated lock-reproducible Vitest provider", () => {
   const workflow = readFileSync(
     join(root, ".github/workflows/manual-validation.yml"),
     "utf8",
@@ -692,8 +692,31 @@ test("coverage lane uses branch-capable Rust coverage and a lock-matched Vitest 
   );
   assert.match(
     coverageJob,
-    /npm install --ignore-scripts --no-save --package-lock=false --no-audit --legacy-peer-deps "vitest@\$locked_vitest_version" "@vitest\/coverage-v8@\$locked_vitest_version"/,
+    /coverage_provider_root="\$RUNNER_TEMP\/dakia-vitest-coverage-provider"/,
   );
+  assert.match(
+    coverageJob,
+    /cp scripts\/coverage-provider\/package\.json scripts\/coverage-provider\/package-lock\.json/,
+  );
+  assert.match(
+    coverageJob,
+    /cd "\$coverage_provider_root"\n\s+npm ci --ignore-scripts --no-audit/,
+  );
+  assert.match(
+    coverageJob,
+    /cp scripts\/coverage-provider\/package-lock\.json[\s\\]+"\$GITHUB_WORKSPACE\/coverage\/vitest-coverage-provider\.package-lock\.json"/,
+  );
+  assert.match(
+    coverageJob,
+    /sha256sum "\$GITHUB_WORKSPACE\/coverage\/vitest-coverage-provider\.package-lock\.json"/,
+  );
+  assert.match(coverageJob, /cmp "\$root_tree_before" "\$root_tree_after"/);
+  assert.match(
+    coverageJob,
+    /ln -s "\$coverage_provider_root\/node_modules\/@vitest\/coverage-v8" "\$coverage_provider_link"/,
+  );
+  assert.doesNotMatch(coverageJob, /--legacy-peer-deps/);
+  assert.doesNotMatch(coverageJob, /npm install/);
   assert.match(
     coverageJob,
     /installed_vitest_version="\$\(node -p "require\('\.\/node_modules\/vitest\/package\.json'\)\.version"\)"/,
@@ -710,6 +733,10 @@ test("coverage lane uses branch-capable Rust coverage and a lock-matched Vitest 
     coverageJob,
     /test "\$installed_provider_version" = "\$locked_vitest_version"/,
   );
+  assert.match(
+    coverageJob,
+    /test "\$installed_provider_vitest_version" = "\$locked_vitest_version"/,
+  );
   assert.doesNotMatch(
     coverageJob,
     /@vitest\/coverage-v8@(?!\$locked_vitest_version)/,
@@ -720,7 +747,7 @@ test("coverage lane uses branch-capable Rust coverage and a lock-matched Vitest 
     "Generate Rust coverage reports without the LLVM full-LCOV crash path",
   );
   const providerInstallIndex = coverageJob.indexOf(
-    "npm install --ignore-scripts --no-save --package-lock=false --no-audit",
+    "npm ci --ignore-scripts --no-audit",
   );
   const runtimeCheckIndex = coverageJob.indexOf(
     'test "$installed_vitest_version" = "$locked_vitest_version"',

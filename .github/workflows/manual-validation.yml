@@ -156,15 +156,44 @@ jobs:
         run: git lfs pull --include='apps/desktop/src-tauri/resources/email-classifier-v2/model.onnx,apps/desktop/src-tauri/resources/email-classifier-v2/tokenizer.json'
       - name: Prepare the required Tauri CLI sidecar
         run: npm run bundle:cli:dev
-      - name: Install the lock-matched Vitest coverage provider for this manual lane
+      - name: Install the isolated lock-reproducible Vitest coverage provider
         run: |
           locked_vitest_version="$(node -p "require('./package-lock.json').packages['node_modules/vitest'].version")"
           test -n "$locked_vitest_version"
-          npm install --ignore-scripts --no-save --package-lock=false --no-audit --legacy-peer-deps "vitest@$locked_vitest_version" "@vitest/coverage-v8@$locked_vitest_version"
+          declared_provider_version="$(node -p "require('./scripts/coverage-provider/package.json').dependencies['@vitest/coverage-v8']")"
+          locked_provider_version="$(node -p "require('./scripts/coverage-provider/package-lock.json').packages['node_modules/@vitest/coverage-v8'].version")"
+          locked_provider_vitest_version="$(node -p "require('./scripts/coverage-provider/package-lock.json').packages['node_modules/vitest'].version")"
+          test "$declared_provider_version" = "$locked_vitest_version"
+          test "$locked_provider_version" = "$locked_vitest_version"
+          test "$locked_provider_vitest_version" = "$locked_vitest_version"
+          root_tree_before="$RUNNER_TEMP/dakia-root-node-modules-before-coverage.json"
+          root_tree_after="$RUNNER_TEMP/dakia-root-node-modules-after-coverage.json"
+          npm ls --all --json > "$root_tree_before"
+          coverage_provider_root="$RUNNER_TEMP/dakia-vitest-coverage-provider"
+          mkdir -p "$coverage_provider_root"
+          cp scripts/coverage-provider/package.json scripts/coverage-provider/package-lock.json \
+            "$coverage_provider_root/"
+          (
+            cd "$coverage_provider_root"
+            npm ci --ignore-scripts --no-audit
+          )
+          mkdir -p "$GITHUB_WORKSPACE/coverage"
+          cp scripts/coverage-provider/package-lock.json \
+            "$GITHUB_WORKSPACE/coverage/vitest-coverage-provider.package-lock.json"
+          sha256sum "$GITHUB_WORKSPACE/coverage/vitest-coverage-provider.package-lock.json" > \
+            "$GITHUB_WORKSPACE/coverage/vitest-coverage-provider.package-lock.sha256"
+          npm ls --all --json > "$root_tree_after"
+          cmp "$root_tree_before" "$root_tree_after"
+          coverage_provider_link="$PWD/node_modules/@vitest/coverage-v8"
+          test ! -e "$coverage_provider_link"
+          test ! -L "$coverage_provider_link"
+          ln -s "$coverage_provider_root/node_modules/@vitest/coverage-v8" "$coverage_provider_link"
           installed_vitest_version="$(node -p "require('./node_modules/vitest/package.json').version")"
           installed_provider_version="$(node -p "require('./node_modules/@vitest/coverage-v8/package.json').version")"
+          installed_provider_vitest_version="$(node -p "require('$coverage_provider_root/node_modules/vitest/package.json').version")"
           test "$installed_vitest_version" = "$locked_vitest_version"
           test "$installed_provider_version" = "$locked_vitest_version"
+          test "$installed_provider_vitest_version" = "$locked_vitest_version"
       - name: Generate Rust coverage reports without the LLVM full-LCOV crash path
         run: |
           mkdir -p coverage
