@@ -26,6 +26,8 @@ mod mail_command_identity_tests;
 mod mail_command_tls_tests;
 #[cfg(test)]
 mod mail_safety_tests;
+#[cfg(all(test, feature = "native-mail-safety-fixture"))]
+mod message_content_uncached_tls_tests;
 #[cfg(test)]
 mod mime_reader_artifact_tests;
 #[cfg(feature = "native-mail-safety-fixture")]
@@ -100,7 +102,7 @@ use tokio::sync::{watch, Notify, Semaphore};
 use url::Url;
 use uuid::Uuid;
 
-use account_locks::AccountOperationLocks;
+use account_locks::{AccountOperationGuard, AccountOperationLocks};
 use realtime::{RealtimeSyncManager, RealtimeSyncStatus};
 use send_recovery_bridge::{
     acknowledge_send_recovery_seed, list_send_recoveries, open_send_recovery_window,
@@ -1357,6 +1359,12 @@ async fn enabled_account_for_operation(
     if !account.enabled {
         return Err("Account is disabled".to_owned());
     }
+    // Every caller holds the account operation lock, but account replacement
+    // commits its durable reset intent before old catalogue rows are cleared.
+    // Do not send a flag, mailbox, unsubscribe, compose, or sender action to
+    // the replacement provider while those retained rows still name the prior
+    // namespace.
+    ensure_account_namespace_is_not_pending(&state.store, account_id).await?;
     Ok(account)
 }
 
@@ -3131,6 +3139,32 @@ fn message_identity_changed_error() -> String {
     "This message changed. Refresh the mailbox before trying again.".to_owned()
 }
 
+fn account_namespace_reset_pending_error() -> String {
+    "This account is updating. Refresh the mailbox after the update finishes.".to_owned()
+}
+
+async fn account_namespace_reset_is_pending(
+    store: &Store,
+    account_id: Uuid,
+) -> Result<bool, String> {
+    Ok(store
+        .mail_rebuild_jobs()
+        .await
+        .map_err(error)?
+        .into_iter()
+        .any(|job| job.account_id == account_id && job.reset_before_sync))
+}
+
+async fn ensure_account_namespace_is_not_pending(
+    store: &Store,
+    account_id: Uuid,
+) -> Result<(), String> {
+    if account_namespace_reset_is_pending(store, account_id).await? {
+        return Err(account_namespace_reset_pending_error());
+    }
+    Ok(())
+}
+
 fn same_message_epoch_identity(target: &MailSummary, current: &MailSummary) -> bool {
     target.id == current.id
         && target.account_id == current.account_id
@@ -3251,9 +3285,26 @@ async fn load_message_content(
     message_id: &str,
     expected_uid_validity: Option<i64>,
 ) -> Result<MessageContent, String> {
+    let initial = current_message_at_epoch(&state.store, message_id, expected_uid_validity).await?;
+    let account_id = Uuid::parse_str(&initial.account_id).map_err(error)?;
+    // An account update can retain the same account ID, mailbox, UID, and
+    // UIDVALIDITY while a durable reset replaces its provider namespace. Hold
+    // the account boundary from the authoritative reread through cache lookup,
+    // fetch, and publication so old catalogue rows cannot be hydrated from the
+    // replacement provider.
+    let _operation = state.account_operations.acquire(account_id).await;
     let target = current_message_at_epoch(&state.store, message_id, expected_uid_validity).await?;
+    if !same_message_epoch_identity(&initial, &target) {
+        return Err(message_identity_changed_error());
+    }
+    if account_namespace_reset_is_pending(&state.store, account_id).await? {
+        return Err(account_namespace_reset_pending_error());
+    }
     if let Some(cached) = cached_message_content(&state.store, &target).await? {
         if !looks_like_misclassified_text_body(&cached) {
+            if account_namespace_reset_is_pending(&state.store, account_id).await? {
+                return Err(account_namespace_reset_pending_error());
+            }
             return Ok(cached);
         }
     }
@@ -3273,6 +3324,9 @@ async fn load_message_content(
         }
         if let Some(cached) = cached_message_content(&state.store, &target).await? {
             if !looks_like_misclassified_text_body(&cached) {
+                if account_namespace_reset_is_pending(&state.store, account_id).await? {
+                    return Err(account_namespace_reset_pending_error());
+                }
                 return Ok(cached);
             }
         }
@@ -3286,13 +3340,18 @@ async fn load_message_content(
 
     let result = async {
         confirm_message_epoch(&state.store, &target).await?;
+        if account_namespace_reset_is_pending(&state.store, account_id).await? {
+            return Err(account_namespace_reset_pending_error());
+        }
         let cached_before_fetch = cached_message_content(&state.store, &target).await?;
         if let Some(cached) = &cached_before_fetch {
             if !looks_like_misclassified_text_body(cached) {
+                if account_namespace_reset_is_pending(&state.store, account_id).await? {
+                    return Err(account_namespace_reset_pending_error());
+                }
                 return Ok(cached.clone());
             }
         }
-        let account_id = Uuid::parse_str(&target.account_id).map_err(error)?;
         let account = state
             .store
             .account(account_id)
@@ -3307,6 +3366,13 @@ async fn load_message_content(
         if !same_message_epoch_identity(&target, &fetched) {
             return Err(message_identity_changed_error());
         }
+        // A separate process does not share this process-local lock. Check the
+        // durable replacement intent again before publishing or returning
+        // content fetched against an account configuration that may have been
+        // superseded while the provider request was in flight.
+        if account_namespace_reset_is_pending(&state.store, account_id).await? {
+            return Err(account_namespace_reset_pending_error());
+        }
         if !state
             .store
             .publish_message_content_at_epoch(&target, &fetched)
@@ -3315,8 +3381,14 @@ async fn load_message_content(
         {
             return Err(message_identity_changed_error());
         }
-        let canonical = confirm_message_epoch(&state.store, &target).await?;
-        Ok(content_from_message(canonical))
+        // The durable catalogue projection deliberately stores only metadata.
+        // Return the complete, provider-parsed snapshot after the second epoch
+        // check instead of rebuilding Reader content from that projection.
+        // `fetched` was already matched to `target` before publication, and
+        // the confirmation fences a replacement or deletion that happened
+        // while the result was being committed.
+        confirm_message_epoch(&state.store, &target).await?;
+        Ok(content_from_message(fetched))
     }
     .await;
     if let Err(release_error) = claim.release().await {
@@ -3474,39 +3546,46 @@ async fn save_attachment<R: tauri::Runtime>(
     attachment_id: String,
     expected_uid_validity: Option<i64>,
 ) -> Result<String, String> {
-    let (target, account, epoch) =
+    let operation =
         remote_message_at_epoch(state.inner(), &message_id, expected_uid_validity).await?;
+    let target = &operation.target;
     let attachment = MailService::new(state.store.clone())
         .fetch_attachment_at_epoch(
-            &account,
+            &operation.account,
             &target.mailbox,
             target.uid as u32,
             &attachment_id,
-            epoch,
+            operation.epoch,
         )
         .await
         .map_err(error)?;
-    confirm_message_epoch(&state.store, &target).await?;
+    ensure_account_namespace_is_not_pending(&state.store, operation.account.id).await?;
+    confirm_message_epoch(&state.store, target).await?;
     save_to_downloads(&app, &attachment.attachment, &attachment.bytes).map_err(error)
 }
 
 #[tauri::command]
-async fn export_message(
-    app: tauri::AppHandle,
+async fn export_message<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: State<'_, Arc<AppState>>,
     message_id: String,
     expected_uid_validity: Option<i64>,
 ) -> Result<String, String> {
-    let (target, account, epoch) =
+    let operation =
         remote_message_at_epoch(state.inner(), &message_id, expected_uid_validity).await?;
-    let account_id = account.id;
-    let _operation = state.account_operations.acquire(account_id).await;
-    confirm_message_epoch(&state.store, &target).await?;
+    let target = &operation.target;
+    confirm_message_epoch(&state.store, target).await?;
     let bytes = MailService::new(state.store.clone())
-        .fetch_raw_message_at_epoch(&account, &target.mailbox, target.uid as u32, epoch)
+        .fetch_raw_message_at_epoch(
+            &operation.account,
+            &target.mailbox,
+            target.uid as u32,
+            operation.epoch,
+        )
         .await
         .map_err(error)?;
-    confirm_message_epoch(&state.store, &target).await?;
+    ensure_account_namespace_is_not_pending(&state.store, operation.account.id).await?;
+    confirm_message_epoch(&state.store, target).await?;
     save_eml_to_downloads(&app, &target.subject, &bytes).map_err(error)
 }
 
@@ -3517,30 +3596,32 @@ async fn save_all_attachments<R: tauri::Runtime>(
     message_id: String,
     expected_uid_validity: Option<i64>,
 ) -> Result<Vec<String>, String> {
-    let (target, _account, _epoch) =
+    let operation =
         remote_message_at_epoch(state.inner(), &message_id, expected_uid_validity).await?;
-    let attachments = fetch_full_remote_message_at_epoch(state.inner(), &target)
+    let target = &operation.target;
+    let attachments = fetch_full_remote_message_at_epoch(state.inner(), &operation)
         .await?
         .attachments
         .into_iter()
         .filter(|item| is_downloadable_attachment(&item.attachment))
         .collect::<Vec<_>>();
-    confirm_message_epoch(&state.store, &target).await?;
+    confirm_message_epoch(&state.store, target).await?;
     let total_count = attachments.len();
     let mut saved = Vec::with_capacity(attachments.len());
     #[cfg(feature = "native-mail-safety-fixture")]
     let mut fixture_partial_after_first_save = false;
     for attachment in attachments {
+        ensure_account_namespace_is_not_pending(&state.store, operation.account.id).await?;
         #[cfg(feature = "native-mail-safety-fixture")]
         let confirmation = if fixture_partial_after_first_save {
             Err("fixture-only partial-save fault after one successful file".into())
         } else {
-            confirm_message_epoch(&state.store, &target)
+            confirm_message_epoch(&state.store, target)
                 .await
                 .map(|_| ())
         };
         #[cfg(not(feature = "native-mail-safety-fixture"))]
-        let confirmation = confirm_message_epoch(&state.store, &target)
+        let confirmation = confirm_message_epoch(&state.store, target)
             .await
             .map(|_| ());
         save_attachment_batch_step(&mut saved, total_count, confirmation, || {
@@ -3549,7 +3630,7 @@ async fn save_all_attachments<R: tauri::Runtime>(
         #[cfg(all(test, feature = "native-mail-safety-fixture"))]
         attachment_command_artifact_tests::after_successful_bulk_save_for_test(
             &state.store,
-            &target,
+            target,
             saved.len(),
         )
         .await;
@@ -3594,15 +3675,16 @@ async fn forward_attachments(
     message_id: String,
     expected_uid_validity: Option<i64>,
 ) -> Result<Vec<DroppedAttachment>, String> {
-    let (target, _account, _epoch) =
+    let operation =
         remote_message_at_epoch(state.inner(), &message_id, expected_uid_validity).await?;
-    let attachments = fetch_full_remote_message_at_epoch(state.inner(), &target)
+    let target = &operation.target;
+    let attachments = fetch_full_remote_message_at_epoch(state.inner(), &operation)
         .await?
         .attachments
         .into_iter()
         .filter(|item| is_downloadable_attachment(&item.attachment))
         .collect::<Vec<_>>();
-    confirm_message_epoch(&state.store, &target).await?;
+    confirm_message_epoch(&state.store, target).await?;
     if attachments.len() > MAX_DROPPED_ATTACHMENTS {
         return Err(format!(
             "This message has more than {MAX_DROPPED_ATTACHMENTS} attachments"
@@ -3619,6 +3701,7 @@ async fn forward_attachments(
     {
         return Err("The original attachments exceed the forwarding limit".into());
     }
+    ensure_account_namespace_is_not_pending(&state.store, operation.account.id).await?;
     Ok(attachments
         .into_iter()
         .map(|attachment| DroppedAttachment {
@@ -3918,37 +4001,45 @@ mod attachment_presentation_command_tests {
 
 async fn fetch_full_remote_message_at_epoch(
     state: &Arc<AppState>,
-    target: &MailSummary,
+    operation: &RemoteMessageOperation,
 ) -> Result<MailSummary, String> {
-    let account_id = Uuid::parse_str(&target.account_id).map_err(error)?;
-    let account = state
-        .store
-        .account(account_id)
-        .await
-        .map_err(error)?
-        .ok_or_else(|| "Account not found".to_owned())?;
+    let target = &operation.target;
     confirm_message_epoch(&state.store, target).await?;
     let fetched = MailService::new(state.store.clone())
-        .fetch_full_message(&account, &target.mailbox, target.uid as u32)
+        .fetch_full_message(&operation.account, &target.mailbox, target.uid as u32)
         .await
         .map_err(error)?;
     if !same_message_epoch_identity(target, &fetched) {
         return Err(message_identity_changed_error());
     }
+    ensure_account_namespace_is_not_pending(&state.store, operation.account.id).await?;
     confirm_message_epoch(&state.store, target).await?;
     Ok(fetched)
+}
+
+struct RemoteMessageOperation {
+    target: MailSummary,
+    account: Account,
+    epoch: i64,
+    _account_operation: AccountOperationGuard,
 }
 
 async fn remote_message_at_epoch(
     state: &Arc<AppState>,
     message_id: &str,
     expected_uid_validity: Option<i64>,
-) -> Result<(MailSummary, Account, i64), String> {
+) -> Result<RemoteMessageOperation, String> {
+    let initial = current_message_at_epoch(&state.store, message_id, expected_uid_validity).await?;
+    let account_id = Uuid::parse_str(&initial.account_id).map_err(error)?;
+    let account_operation = state.account_operations.acquire(account_id).await;
     let target = current_message_at_epoch(&state.store, message_id, expected_uid_validity).await?;
+    if !same_message_epoch_identity(&initial, &target) {
+        return Err(message_identity_changed_error());
+    }
+    ensure_account_namespace_is_not_pending(&state.store, account_id).await?;
     let epoch = target
         .mailbox_uid_validity
         .ok_or_else(message_identity_changed_error)?;
-    let account_id = Uuid::parse_str(&target.account_id).map_err(error)?;
     let account = state
         .store
         .account(account_id)
@@ -3956,7 +4047,12 @@ async fn remote_message_at_epoch(
         .map_err(error)?
         .ok_or_else(|| "Account not found".to_owned())?;
     confirm_message_epoch(&state.store, &target).await?;
-    Ok((target, account, epoch))
+    Ok(RemoteMessageOperation {
+        target,
+        account,
+        epoch,
+        _account_operation: account_operation,
+    })
 }
 
 struct OpenDroppedFile {
@@ -4408,8 +4504,8 @@ fn verified_native_mail_safety_download_directory(
     Ok(downloads)
 }
 
-fn save_eml_to_downloads(
-    app: &tauri::AppHandle,
+fn save_eml_to_downloads<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     subject: &str,
     bytes: &[u8],
 ) -> anyhow::Result<String> {
@@ -5406,6 +5502,25 @@ async fn update_account(
         MailRebuildCancellationDisposition::Retain,
     );
     let _operation = state.account_operations.acquire(input.id).await;
+    // Coordinate this supported account-configuration mutation with a CLI
+    // provider operation in another process. This is intentionally distinct
+    // from the per-account in-process lock and is held through credential
+    // writes, account publication, and watcher reconciliation.
+    let _profile_operation = match state.store.acquire_profile_operation_guard().await {
+        Ok(guard) => guard,
+        Err(profile_error) => {
+            // Cancellation was requested before this lock. Re-arm a retained
+            // rebuild before reporting a busy or unavailable profile lock so
+            // a CLI operation cannot leave it cancelled indefinitely. This
+            // read is cleanup only; the authoritative configuration reread is
+            // below, after the profile operation guard is held.
+            if let Ok(Some(current_account)) = state.store.account(input.id).await {
+                resume_scheduled_mail_rebuild(app.clone(), state.inner().clone(), current_account)
+                    .await;
+            }
+            return Err(error(profile_error));
+        }
+    };
     let mut account = state
         .store
         .account(input.id)
@@ -6390,37 +6505,42 @@ async fn set_message_starred(
     let message =
         current_message_at_epoch(&state.store, &message_id, expected_uid_validity).await?;
     let account_id = Uuid::parse_str(&message.account_id).map_err(error)?;
-    let _operation = state.account_operations.acquire(account_id).await;
-    let message = require_current_message_target(
-        &state.store,
-        account_id,
-        &message.mailbox,
-        message.uid as u32,
-        Some(&message_id),
-        expected_uid_validity,
-    )
-    .await?;
-    let account = enabled_account_for_operation(state.inner(), account_id).await?;
-    MailService::new(state.store.clone())
-        .set_flagged_at_epoch(
-            &account,
+    let message = {
+        let _operation = state.account_operations.acquire(account_id).await;
+        let message = require_current_message_target(
+            &state.store,
+            account_id,
             &message.mailbox,
             message.uid as u32,
-            starred,
-            expected_uid_validity.expect("target validated"),
+            Some(&message_id),
+            expected_uid_validity,
         )
-        .await
-        .map_err(error)?;
-    if !state
-        .store
-        .set_message_flagged_at_epoch(&message, starred)
-        .await
-        .map_err(error)?
-    {
-        return Err(message_identity_changed_error());
-    }
+        .await?;
+        let account = enabled_account_for_operation(state.inner(), account_id).await?;
+        MailService::new(state.store.clone())
+            .set_flagged_at_epoch(
+                &account,
+                &message.mailbox,
+                message.uid as u32,
+                starred,
+                expected_uid_validity.expect("target validated"),
+            )
+            .await
+            .map_err(error)?;
+        if !state
+            .store
+            .set_message_flagged_at_epoch(&message, starred)
+            .await
+            .map_err(error)?
+        {
+            return Err(message_identity_changed_error());
+        }
+        confirm_message_epoch(&state.store, &message).await?
+    };
     if starred {
         // The loader carries the captured epoch through its cache publication.
+        // Run it after releasing the account operation lock: Reader hydration
+        // uses that same boundary to fence a replacement provider namespace.
         // Ignore a fetch failure, but never fall back to a replacement row.
         let _ =
             load_message_content(state.inner(), &message.id, message.mailbox_uid_validity).await;

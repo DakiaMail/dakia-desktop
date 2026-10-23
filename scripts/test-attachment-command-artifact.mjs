@@ -62,21 +62,55 @@ async function startNoSmtpProbe() {
   };
 }
 
+async function verifyExecutionReceipt(path, nonce, test) {
+  const receipt = JSON.parse(await readFile(path, "utf8"));
+  const expectedKeys = ["nonce", "schemaVersion", "test"];
+  if (
+    !receipt ||
+    Array.isArray(receipt) ||
+    Object.keys(receipt).sort().join(",") !== expectedKeys.join(",") ||
+    receipt.schemaVersion !== 1 ||
+    receipt.nonce !== nonce ||
+    receipt.test !== test
+  ) {
+    throw new Error("uncached Reader test did not write its exact nonce-bound receipt");
+  }
+}
+
 const root = await mkdtemp(
   join(tmpdir(), "dakia-attachment-command-artifact-"),
 );
 const nonce = randomUUID();
 const profile = join(root, "profile");
+const uncachedReaderProfile = join(root, "uncached-reader-profile");
+const namespaceRaceProfile = join(root, "namespace-race-profile");
+const namespaceAttachmentRaceProfile = join(root, "namespace-attachment-race-profile");
+const namespaceMutationRaceProfile = join(root, "namespace-mutation-race-profile");
 const downloads = join(root, "Downloads");
 const tls = join(root, "tls");
 const portFile = join(root, "imap-port");
+const replacementPortFile = join(root, "replacement-imap-port");
 const artifact = join(root, "tauri-attachment-command.json");
 const frontendResults = join(root, "reader-results.json");
+const uncachedReaderReceipt = join(root, "uncached-reader-receipt.json");
+const namespaceRaceReceipt = join(root, "namespace-race-receipt.json");
+const namespaceAttachmentRaceReceipt = join(root, "namespace-attachment-race-receipt.json");
+const namespaceMutationRaceReceipt = join(root, "namespace-mutation-race-receipt.json");
+const replacementTranscript = join(root, "replacement-imap-transcript.jsonl");
 let server;
+let replacementServer;
 let smtpProbe;
 
 try {
-  await Promise.all([mkdir(profile), mkdir(downloads), mkdir(tls)]);
+  await Promise.all([
+    mkdir(profile),
+    mkdir(uncachedReaderProfile),
+    mkdir(namespaceRaceProfile),
+    mkdir(namespaceAttachmentRaceProfile),
+    mkdir(namespaceMutationRaceProfile),
+    mkdir(downloads),
+    mkdir(tls),
+  ]);
   await Promise.all([
     writeFile(
       join(root, ".dakia-native-mail-safety-root"),
@@ -88,7 +122,31 @@ try {
       "dakia-native-mail-safety-fixture-v1\n",
       { mode: 0o600 },
     ),
+    writeFile(
+      join(uncachedReaderProfile, ".dakia-native-mail-safety-profile"),
+      "dakia-native-mail-safety-fixture-v1\n",
+      { mode: 0o600 },
+    ),
+    writeFile(
+      join(namespaceRaceProfile, ".dakia-native-mail-safety-profile"),
+      "dakia-native-mail-safety-fixture-v1\n",
+      { mode: 0o600 },
+    ),
+    writeFile(
+      join(namespaceAttachmentRaceProfile, ".dakia-native-mail-safety-profile"),
+      "dakia-native-mail-safety-fixture-v1\n",
+      { mode: 0o600 },
+    ),
+    writeFile(
+      join(namespaceMutationRaceProfile, ".dakia-native-mail-safety-profile"),
+      "dakia-native-mail-safety-fixture-v1\n",
+      { mode: 0o600 },
+    ),
+    writeFile(replacementTranscript, "", { mode: 0o600 }),
     writeFile(join(root, ".dakia-attachment-command-artifact"), `${nonce}\n`, {
+      mode: 0o600,
+    }),
+    writeFile(join(root, ".dakia-message-content-uncached-tls"), `${nonce}\n`, {
       mode: 0o600,
     }),
   ]);
@@ -194,6 +252,24 @@ try {
     { stdio: "inherit", env: process.env },
   );
   const port = await waitForPort(portFile, server);
+  replacementServer = spawn(
+    "node",
+    [
+      "scripts/attachment-command-fixture-server.mjs",
+      "--cert",
+      join(tls, "server.crt"),
+      "--key",
+      join(tls, "server.key"),
+      "--port-file",
+      replacementPortFile,
+      "--reader-body",
+      "Fictional replacement provider body must not reach the retained Reader row.",
+      "--transcript",
+      replacementTranscript,
+    ],
+    { stdio: "inherit", env: process.env },
+  );
+  const replacementPort = await waitForPort(replacementPortFile, replacementServer);
   smtpProbe = await startNoSmtpProbe();
   const env = {
     ...process.env,
@@ -214,6 +290,126 @@ try {
     DAKIA_NATIVE_MAIL_SAFETY_PASSWORD: "synthetic-only-password",
   };
   delete env.DAKIA_NATIVE_MAIL_SAFETY_SECOND_ACCOUNT;
+
+  await run(
+    "cargo",
+    [
+      "test",
+      "-p",
+      "dakia-desktop",
+      "--lib",
+      "--locked",
+      "--features",
+      "native-mail-safety-fixture",
+      "message_content_uncached_tls_tests::first_uncached_reader_command_keeps_provider_mime_body_and_downloadable_attachments",
+      "--",
+      "--exact",
+      "--ignored",
+    ],
+    {
+      ...env,
+      DAKIA_MESSAGE_CONTENT_UNCACHED_TLS_ROOT: root,
+      DAKIA_MESSAGE_CONTENT_UNCACHED_TLS_NONCE: nonce,
+      DAKIA_MESSAGE_CONTENT_UNCACHED_TLS_RECEIPT: uncachedReaderReceipt,
+      DAKIA_NATIVE_MAIL_SAFETY_DATA_DIR: uncachedReaderProfile,
+    },
+  );
+  await verifyExecutionReceipt(
+    uncachedReaderReceipt,
+    nonce,
+    "first_uncached_reader_command_keeps_provider_mime_body_and_downloadable_attachments",
+  );
+
+  await run(
+    "cargo",
+    [
+      "test",
+      "-p",
+      "dakia-desktop",
+      "--lib",
+      "--locked",
+      "--features",
+      "native-mail-safety-fixture",
+      "message_content_uncached_tls_tests::reader_command_rejects_a_pending_same_epoch_provider_namespace_replacement",
+      "--",
+      "--exact",
+      "--ignored",
+    ],
+    {
+      ...env,
+      DAKIA_MESSAGE_CONTENT_UNCACHED_TLS_ROOT: root,
+      DAKIA_MESSAGE_CONTENT_UNCACHED_TLS_NONCE: nonce,
+      DAKIA_MESSAGE_CONTENT_UNCACHED_TLS_RECEIPT: namespaceRaceReceipt,
+      DAKIA_MESSAGE_CONTENT_REPLACEMENT_IMAP_PORT: String(replacementPort),
+      DAKIA_NATIVE_MAIL_SAFETY_DATA_DIR: uncachedReaderProfile,
+    },
+  );
+  await verifyExecutionReceipt(
+    namespaceRaceReceipt,
+    nonce,
+    "reader_command_rejects_a_pending_same_epoch_provider_namespace_replacement",
+  );
+
+  await run(
+    "cargo",
+    [
+      "test",
+      "-p",
+      "dakia-desktop",
+      "--lib",
+      "--locked",
+      "--features",
+      "native-mail-safety-fixture",
+      "message_content_uncached_tls_tests::attachment_commands_reject_a_pending_same_epoch_provider_namespace_replacement",
+      "--",
+      "--exact",
+      "--ignored",
+    ],
+    {
+      ...env,
+      DAKIA_MESSAGE_CONTENT_UNCACHED_TLS_ROOT: root,
+      DAKIA_MESSAGE_CONTENT_UNCACHED_TLS_NONCE: nonce,
+      DAKIA_MESSAGE_CONTENT_UNCACHED_TLS_RECEIPT: namespaceAttachmentRaceReceipt,
+      DAKIA_MESSAGE_CONTENT_REPLACEMENT_IMAP_PORT: String(replacementPort),
+      DAKIA_NATIVE_MAIL_SAFETY_DATA_DIR: uncachedReaderProfile,
+    },
+  );
+  await verifyExecutionReceipt(
+    namespaceAttachmentRaceReceipt,
+    nonce,
+    "attachment_commands_reject_a_pending_same_epoch_provider_namespace_replacement",
+  );
+
+  await run(
+    "cargo",
+    [
+      "test",
+      "-p",
+      "dakia-desktop",
+      "--lib",
+      "--locked",
+      "--features",
+      "native-mail-safety-fixture",
+      "message_content_uncached_tls_tests::mutation_commands_reject_a_pending_same_epoch_provider_namespace_replacement",
+      "--",
+      "--exact",
+      "--ignored",
+    ],
+    {
+      ...env,
+      DAKIA_MESSAGE_CONTENT_UNCACHED_TLS_ROOT: root,
+      DAKIA_MESSAGE_CONTENT_UNCACHED_TLS_NONCE: nonce,
+      DAKIA_MESSAGE_CONTENT_UNCACHED_TLS_RECEIPT: namespaceMutationRaceReceipt,
+      DAKIA_MESSAGE_CONTENT_REPLACEMENT_IMAP_PORT: String(replacementPort),
+      DAKIA_MESSAGE_CONTENT_REPLACEMENT_IMAP_TRANSCRIPT: replacementTranscript,
+      DAKIA_NATIVE_MAIL_SAFETY_DATA_DIR: uncachedReaderProfile,
+    },
+  );
+  await verifyExecutionReceipt(
+    namespaceMutationRaceReceipt,
+    nonce,
+    "mutation_commands_reject_a_pending_same_epoch_provider_namespace_replacement",
+  );
 
   await run(
     "cargo",
@@ -274,6 +470,7 @@ try {
     throw new Error("attachment command artifact unexpectedly contacted SMTP");
   }
 } finally {
+  await stopFixture(replacementServer);
   await stopFixture(server);
   await smtpProbe?.close();
   if (process.env.DAKIA_KEEP_ATTACHMENT_COMMAND_ARTIFACTS === "1") {

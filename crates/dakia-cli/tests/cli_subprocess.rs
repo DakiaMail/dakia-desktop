@@ -8,11 +8,16 @@ use std::{
     collections::BTreeSet,
     path::Path,
     process::{Output, Stdio},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 use tempfile::TempDir;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
+    net::TcpListener,
     process::{Child, Command},
     sync::Barrier,
     task::JoinSet,
@@ -386,6 +391,115 @@ async fn sync_rejects_an_unknown_account_and_preserves_the_ndjson_contract() {
     assert_eq!(empty.status.code(), Some(0));
     assert_eq!(empty.stderr, b"");
     assert_eq!(empty.stdout, b"");
+}
+
+#[tokio::test]
+async fn sync_waits_for_the_profile_operation_guard_before_contacting_the_provider() {
+    let temporary = TempDir::new().expect("create profile-operation CLI directory");
+    let profile = temporary.path().join("profile");
+    let nonce = Uuid::new_v4().to_string();
+    let label = format!("profile-operation-{nonce}");
+    let (mut account, _) = seed_profile(&profile, &label).await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind owned loopback IMAP endpoint");
+    let endpoint_port = listener
+        .local_addr()
+        .expect("read owned loopback endpoint")
+        .port();
+    account.imap_host = "127.0.0.1".into();
+    account.imap_port = endpoint_port;
+    let database = profile.join("dakia.db");
+    let coordinator = Store::open(&database)
+        .await
+        .expect("open desktop-side profile coordinator");
+    coordinator
+        .save_account(&account)
+        .await
+        .expect("save owned loopback account endpoint");
+    let guard = coordinator
+        .acquire_profile_operation_guard()
+        .await
+        .expect("desktop-side operation holds the profile");
+
+    let connections = Arc::new(AtomicUsize::new(0));
+    let endpoint_connections = connections.clone();
+    let endpoint = tokio::spawn(async move {
+        let (socket, _) = listener
+            .accept()
+            .await
+            .expect("accept the post-release CLI connection");
+        endpoint_connections.fetch_add(1, Ordering::SeqCst);
+        drop(socket);
+    });
+    let profile_arg = profile.to_string_lossy().into_owned();
+    let account_id = account.id.to_string();
+    let mut held_cli = Command::new(env!("CARGO_BIN_EXE_dakia"));
+    held_cli
+        .args([
+            "--data-dir",
+            &profile_arg,
+            "--json",
+            "sync",
+            "--account",
+            &account_id,
+            "--limit",
+            "1",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let held_output = timeout(
+        Duration::from_secs(15),
+        held_cli.spawn().expect("start held CLI").wait_with_output(),
+    )
+    .await
+    .expect("held CLI did not reach the coordinator deadline")
+    .expect("collect held CLI output");
+    assert_eq!(held_output.status.code(), Some(1));
+    assert_eq!(held_output.stdout, b"");
+    assert_eq!(
+        held_output.stderr,
+        b"Error: timed out waiting for another Dakia process to finish a profile operation\n"
+    );
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        0,
+        "the held CLI must fail at the coordinator before the owned endpoint accepts a connection"
+    );
+
+    drop(guard);
+    let released = run(&[
+        "--data-dir",
+        &profile_arg,
+        "--json",
+        "sync",
+        "--account",
+        &account_id,
+        "--limit",
+        "1",
+    ])
+    .await;
+    timeout(Duration::from_secs(2), endpoint)
+        .await
+        .expect("released CLI did not reach the owned endpoint")
+        .expect("owned endpoint task panicked");
+    assert_eq!(connections.load(Ordering::SeqCst), 1);
+    assert_eq!(released.status.code(), Some(1));
+    assert_eq!(released.stdout, b"");
+    let released_error = String::from_utf8_lossy(&released.stderr);
+    assert!(
+        released_error.contains(&format!("sync failed for {label}@example.test")),
+        "the released CLI must bind its terminal failure to the nonce-bound owned account: {released_error:?}"
+    );
+    assert!(
+        released_error.contains("IMAP TLS handshake failed"),
+        "the released CLI must report the owned endpoint's controlled TLS failure: {released_error:?}"
+    );
+    assert!(
+        !released_error.contains("timed out waiting for another Dakia process"),
+        "the released CLI must no longer be blocked by the coordinator: {released_error:?}"
+    );
 }
 
 #[tokio::test]

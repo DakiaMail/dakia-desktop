@@ -173,6 +173,10 @@ function parseJson(bytes, label) {
   }
 }
 
+function normalizeSemanticWhitespace(value) {
+  return value.replace(/\s+/gu, " ").trim();
+}
+
 async function requireSourceRoot(path) {
   const canonical = await realpath(path);
   const info = await lstat(canonical);
@@ -909,12 +913,18 @@ export async function verifyInputs({
       }
       if (label === "AX") {
         const ax = file.bytes.toString("utf8");
-        for (const required of [expectedSubject, expectedText]) {
-          if (!ax.includes(required))
-            throw new Error(
-              `UI fixture ${uid} AX evidence lacks ${JSON.stringify(required)}`,
-            );
-        }
+        if (!ax.includes(expectedSubject))
+          throw new Error(
+            `UI fixture ${uid} AX evidence lacks ${JSON.stringify(expectedSubject)}`,
+          );
+        if (
+          !normalizeSemanticWhitespace(ax).includes(
+            normalizeSemanticWhitespace(expectedText),
+          )
+        )
+          throw new Error(
+            `UI fixture ${uid} AX evidence lacks ${JSON.stringify(expectedText)}`,
+          );
         if (
           ax.includes("The contents of this message cannot be decoded.") ||
           /\bRetry\b/.test(ax)

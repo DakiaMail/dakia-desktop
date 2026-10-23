@@ -387,9 +387,12 @@ test("ordinary pull-request workflow preserves the cost and release boundaries",
     "utf8",
   );
   assert.match(workflow, /cancel-in-progress: true/);
+  const jobs = workflow.slice(
+    workflow.indexOf("\njobs:\n") + "\njobs:\n".length,
+  );
   assert.deepEqual(
-    [...workflow.matchAll(/^  ([a-z][a-z0-9-]+):$/gm)].map((match) => match[1]),
-    ["analytics", "classify", "validate"],
+    [...jobs.matchAll(/^  ([a-z][a-z0-9_-]+):$/gm)].map((match) => match[1]),
+    ["analytics", "classify", "validate_non_tauri", "tauri", "validate"],
   );
   assert.match(
     workflow,
@@ -398,8 +401,78 @@ test("ordinary pull-request workflow preserves the cost and release boundaries",
   );
   assert.match(
     workflow,
-    /validate:\n\s+name: Validate applicable scopes[\s\S]*?timeout-minutes: 20/,
+    /validate_non_tauri:\n\s+name: Validate non-Tauri scopes[\s\S]*?timeout-minutes: 20/,
     "the cold-cache activation run must have time to populate the shared Cargo cache",
+  );
+  const requiredGate = workflow.match(/\n  validate:\n([\s\S]*)$/)?.[1];
+  assert.ok(requiredGate, "expected the required validation gate");
+  assert.match(requiredGate, /name: Validate applicable scopes/);
+  assert.match(
+    requiredGate,
+    /needs: \[analytics, classify, validate_non_tauri, tauri\]/,
+  );
+  assert.match(requiredGate, /if: always\(\)/);
+  assert.match(requiredGate, /timeout-minutes: 2/);
+  assert.match(
+    requiredGate,
+    /ANALYTICS_RESULT: \$\{\{ needs\.analytics\.result \}\}/,
+  );
+  assert.match(
+    requiredGate,
+    /CLASSIFY_RESULT: \$\{\{ needs\.classify\.result \}\}/,
+  );
+  assert.match(
+    requiredGate,
+    /NON_TAURI_RESULT: \$\{\{ needs\.validate_non_tauri\.result \}\}/,
+  );
+  assert.match(
+    requiredGate,
+    /TAURI_SELECTED: \$\{\{ needs\.classify\.outputs\.tauri_boundary \}\}/,
+  );
+  assert.match(requiredGate, /TAURI_RESULT: \$\{\{ needs\.tauri\.result \}\}/);
+  assert.match(
+    requiredGate,
+    /test "\$ANALYTICS_RESULT" = success[\s\S]*test "\$CLASSIFY_RESULT" = success[\s\S]*test "\$NON_TAURI_RESULT" = success[\s\S]*if \[ "\$TAURI_SELECTED" = true \]; then[\s\S]*test "\$TAURI_RESULT" = success[\s\S]*else[\s\S]*test "\$TAURI_RESULT" = skipped/,
+    "the required context must reject any selected lane that did not pass",
+  );
+  assert.equal(
+    [...workflow.matchAll(/^    name: Validate applicable scopes$/gm)].length,
+    1,
+    "the branch-protection context must be emitted by exactly one job",
+  );
+  const requiredGateRunBlock = workflowRunBlock(workflow, "enforce_results");
+  const runRequiredGate = (overrides = {}) =>
+    spawnSync("bash", ["-euc", requiredGateRunBlock], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        ANALYTICS_RESULT: "success",
+        CLASSIFY_RESULT: "success",
+        NON_TAURI_RESULT: "success",
+        TAURI_SELECTED: "true",
+        TAURI_RESULT: "success",
+        ...overrides,
+      },
+    });
+  assert.equal(runRequiredGate().status, 0);
+  for (const failure of [
+    { ANALYTICS_RESULT: "failure" },
+    { CLASSIFY_RESULT: "failure" },
+    { NON_TAURI_RESULT: "failure" },
+    { TAURI_RESULT: "failure" },
+    { TAURI_RESULT: "skipped" },
+  ]) {
+    assert.notEqual(runRequiredGate(failure).status, 0);
+  }
+  assert.equal(
+    runRequiredGate({ TAURI_SELECTED: "false", TAURI_RESULT: "skipped" })
+      .status,
+    0,
+  );
+  assert.notEqual(
+    runRequiredGate({ TAURI_SELECTED: "false", TAURI_RESULT: "success" })
+      .status,
+    0,
   );
   assert.doesNotMatch(workflow, /runs-on:\s*macos/i);
   assert.doesNotMatch(workflow, /setup:worktree/);
@@ -461,24 +534,65 @@ test("ordinary pull-request workflow preserves the cost and release boundaries",
     workflow,
     /name: Audit changed dependency lockfiles[\s\S]*cargo \+1\.89\.0 install cargo-audit --version 0\.22\.2 --locked[\s\S]*npm run audit:dependencies:npm/,
   );
-  const tauriStep = workflow.match(
-    /id: tauri_boundary[\s\S]*?(?=\n      - id:|\n      - name: Report selected scopes)/,
-  )?.[0];
-  assert.ok(tauriStep, "expected a Tauri boundary step");
-  assert.doesNotMatch(tauriStep, /tauri-contract-inventory/);
-  for (const runner of [
-    "test-realtime-delivery",
-    "test-mime-reader-artifact",
-    "test-attachment-command-artifact",
-    "test-mail-command-tls",
-    "test-unsubscribe-command-tls",
+  const tauriJob = workflow.match(/\n  tauri:\n([\s\S]*)$/)?.[1];
+  assert.ok(tauriJob, "expected a separate Tauri boundary job");
+  assert.match(tauriJob, /name: Validate Linux Tauri boundary/);
+  assert.match(tauriJob, /needs: classify/);
+  assert.match(
+    tauriJob,
+    /if: needs\.classify\.outputs\.tauri_boundary == 'true'/,
+  );
+  assert.match(tauriJob, /runs-on: ubuntu-24\.04/);
+  assert.match(tauriJob, /timeout-minutes: 20/);
+  assert.match(
+    tauriJob,
+    /printf '%s\\n' 'http:\/\/archive\.ubuntu\.com\/ubuntu' \| sudo tee \/etc\/apt\/apt-mirrors\.txt >\/dev\/null/,
+    "the Tauri job must avoid the runner's intermittently slow Azure mirror",
+  );
+  assert.equal(
+    [...tauriJob.matchAll(/Acquire::Retries=0/g)].length,
+    2,
+    "both apt update and install must disable adaptive retries",
+  );
+  assert.match(
+    tauriJob,
+    /sudo timeout --signal=TERM --kill-after=15s 360s/,
+    "dependency acquisition must fail within a deterministic bound",
+  );
+  assert.match(tauriJob, /--yes --no-install-recommends/);
+  const tauriSteps = tauriJob.slice(
+    tauriJob.indexOf("\n    steps:\n") + "\n    steps:\n".length,
+  );
+  assert.doesNotMatch(
+    tauriSteps,
+    /\n        (?:continue-on-error|if):/,
+    "selected Tauri steps must not be skipped or softened",
+  );
+  for (const pkgConfigName of [
+    "gtk+-3.0",
+    "webkit2gtk-4.1",
+    "ayatana-appindicator3-0.1",
+    "librsvg-2.0",
   ]) {
     assert.match(
-      tauriStep,
-      new RegExp(`node scripts/${runner}\\.mjs`),
-      `${runner} must remain in the existing Tauri boundary job`,
+      tauriJob,
+      new RegExp(pkgConfigName.replaceAll("+", "\\+")),
+      `the Tauri job must verify ${pkgConfigName}`,
     );
   }
+  const tauriRunBlock = workflowRunBlock(workflow, "tauri_boundary");
+  assert.deepEqual(tauriRunBlock.split("\n"), [
+    "npm run bundle:cli:dev",
+    "cargo clippy -p dakia-desktop --all-targets -- -D warnings",
+    "cargo test -p dakia-desktop",
+    "node scripts/test-realtime-delivery.mjs",
+    "node scripts/test-mime-reader-artifact.mjs",
+    "node scripts/test-attachment-command-artifact.mjs",
+    "node scripts/test-mail-command-tls.mjs",
+    "node scripts/test-unsubscribe-command-tls.mjs",
+    "cargo test --locked -p tauri-plugin-updater --lib",
+  ]);
+  assert.doesNotMatch(tauriRunBlock, /tauri-contract-inventory/);
   assert.doesNotMatch(
     workflow,
     /cargo test -p dakia-desktop tauri_contracts_tests/,
@@ -490,11 +604,17 @@ function workflowRunBlock(workflow, stepId) {
   assert.ok(stepStart >= 0, `expected workflow step ${stepId}`);
   const runStart = workflow.indexOf("        run: |\n", stepStart);
   assert.ok(runStart >= 0, `expected run block for ${stepId}`);
-  const nextStep = workflow.indexOf("\n      - ", runStart);
-  const block = workflow.slice(
-    runStart + "        run: |\n".length,
-    nextStep === -1 ? undefined : nextStep,
-  );
+  const blockStart = runStart + "        run: |\n".length;
+  const nextStep = workflow.indexOf("\n      - ", blockStart);
+  const nextJobMatch = workflow
+    .slice(blockStart)
+    .match(/\n  [a-z][a-z0-9_-]*:\n/);
+  const nextJob =
+    nextJobMatch?.index === undefined ? -1 : blockStart + nextJobMatch.index;
+  const blockEnd = [nextStep, nextJob]
+    .filter((offset) => offset >= 0)
+    .sort((left, right) => left - right)[0];
+  const block = workflow.slice(blockStart, blockEnd);
   return block
     .split("\n")
     .filter((line) => line.length > 0)

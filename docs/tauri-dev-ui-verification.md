@@ -218,3 +218,34 @@ oracles and mutation-sensitive rejection checks on Linux and macOS. The full
 synthetic shell suite runs only on macOS. Neither source suite creates or mounts
 a disk image. Actual image creation, native save failure, and recovery remain
 separate manual evidence.
+
+## Preparing sealed fictional profile copies
+
+Use `scripts/native-profile-fixture.mjs` for the filesystem preparation step of
+schema and recovery checks. It accepts an owned sealed source directory with
+mode 0500 or 0700 and a private mode-0600 manifest. The manifest declares exact
+filenames, byte counts, numeric modes and SHA-256 values, explicit owned markers,
+and files that must be absent. The contract is `dakia-native-profile-fixture-v1`,
+with `schemaVersion`, `files`, `ownedMarkers` and `expectedAbsentFiles` fields.
+Each file entry has `path`, `bytes`, `mode` and `sha256` fields. It must include
+`dakia.db` and `vault.key`; it cannot contain arbitrary relative paths.
+
+```sh
+node scripts/native-profile-fixture.mjs prepare \
+  --source SEALED_FICTIONAL_PROFILE \
+  --manifest PRIVATE_MANIFEST_JSON \
+  --output-root NEW_PRIVATE_DIRECTORY_UNDER_OS_TEMP
+```
+
+The new output contains `profile/` and a preparation receipt. Directories use
+0700 and copied files use 0600, including copies of read-only backup files. The
+source remains unchanged. Existing output paths are rejected. Retain the complete
+source and output; this helper never installs a profile in Application Support,
+launches an app or changes the approved application identity.
+
+After the candidate exits, `compare --baseline PRIVATE_MANIFEST_JSON --after
+PROFILE_COPY --policy future-profile-durable` verifies the named database, key and
+owned markers while requiring the WAL to remain absent. The generic policy
+reports an inventory without an acceptance verdict. Neither comparison proves a
+schema migration, complete-profile quiescence, process exit or native UI result.
+Those require the separate production Store and native observations above.

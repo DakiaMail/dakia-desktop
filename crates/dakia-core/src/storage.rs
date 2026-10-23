@@ -40,6 +40,8 @@ const VAULT_KEY_LEN: usize = 32;
 const VAULT_NONCE_LEN: usize = 12;
 const PROFILE_MIGRATION_LOCK_WAIT: Duration = Duration::from_secs(10);
 const PROFILE_MIGRATION_LOCK_POLL: Duration = Duration::from_millis(50);
+const PROFILE_OPERATION_LOCK_WAIT: Duration = Duration::from_secs(10);
+const PROFILE_OPERATION_LOCK_POLL: Duration = Duration::from_millis(50);
 /// Foreground-opened, non-starred mail is useful offline, but it must never
 /// grow into a second unbounded mail store. Starred mail has its own durable,
 /// authoritative cache and is intentionally not counted here.
@@ -160,6 +162,11 @@ fn message_content_fetch_owner() -> &'static str {
 pub struct Store {
     pool: SqlitePool,
     vault_key: Arc<[u8; VAULT_KEY_LEN]>,
+    /// `open` resolves this once through any database symlinks. Long-running
+    /// profile operations use the stable sibling inode rather than a caller's
+    /// spelling of the profile path. In-memory stores intentionally have no
+    /// filesystem coordinator.
+    database_path: Option<Arc<PathBuf>>,
 }
 
 #[derive(Clone, Copy)]
@@ -1105,6 +1112,26 @@ impl Drop for ProfileMigrationLock {
     }
 }
 
+/// Exclusive, profile-wide coordination across supported processes for a
+/// long-running operation such as changing an account's provider namespace.
+/// It is not a database transaction and deliberately does not make direct
+/// database writers safe. Dropping it releases the advisory lock, including
+/// when the task holding it is cancelled or its process exits.
+pub struct ProfileOperationGuard {
+    file: Option<File>,
+}
+
+impl Drop for ProfileOperationGuard {
+    fn drop(&mut self) {
+        let Some(file) = self.file.as_ref() else {
+            return;
+        };
+        if let Err(error) = File::unlock(file) {
+            tracing::warn!(error = %error, "could not release profile operation lock");
+        }
+    }
+}
+
 fn canonical_database_lock_identity(database_path: &Path) -> Result<PathBuf> {
     let mut candidate = database_path.to_path_buf();
     let mut visited_symlinks = HashSet::new();
@@ -1166,6 +1193,23 @@ fn profile_migration_lock_path(database_path: &Path) -> Result<PathBuf> {
     Ok(canonical_database.with_file_name(format!(".{file_name}.migration.lock")))
 }
 
+fn profile_operation_lock_path_from_canonical_database(
+    canonical_database: &Path,
+) -> Result<PathBuf> {
+    let file_name = canonical_database
+        .file_name()
+        .ok_or_else(|| anyhow!("profile database path has no file name"))?
+        .to_string_lossy();
+    Ok(canonical_database.with_file_name(format!(".{file_name}.operations.lock")))
+}
+
+#[cfg(test)]
+fn profile_operation_lock_path(database_path: &Path) -> Result<PathBuf> {
+    profile_operation_lock_path_from_canonical_database(&canonical_database_lock_identity(
+        database_path,
+    )?)
+}
+
 fn open_profile_migration_lock_file(database_path: &Path, create: bool) -> Result<Option<File>> {
     let lock_path = match profile_migration_lock_path(database_path) {
         Ok(path) => path,
@@ -1218,6 +1262,43 @@ fn open_profile_migration_lock(database_path: &Path) -> Result<File> {
         .ok_or_else(|| anyhow!("profile migration lock was not created"))
 }
 
+fn open_profile_operation_lock_file(canonical_database: &Path) -> Result<File> {
+    let lock_path = profile_operation_lock_path_from_canonical_database(canonical_database)?;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    options
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    let file = options
+        .open(&lock_path)
+        .with_context(|| "open profile operation lock")?;
+    let metadata = file
+        .metadata()
+        .with_context(|| "inspect profile operation lock")?;
+    if !metadata.file_type().is_file() {
+        return Err(anyhow!("profile operation lock is not a regular file"));
+    }
+    #[cfg(unix)]
+    {
+        let effective_user = unsafe { libc::geteuid() };
+        if metadata.uid() != effective_user {
+            return Err(anyhow!(
+                "profile operation lock is not owned by the current user"
+            ));
+        }
+        if metadata.mode() & 0o777 != 0o600 {
+            return Err(anyhow!(
+                "profile operation lock permissions must be owner read/write only"
+            ));
+        }
+        if metadata.nlink() != 1 {
+            return Err(anyhow!("profile operation lock must not have hard links"));
+        }
+    }
+    Ok(file)
+}
+
 async fn acquire_profile_migration_lock_file_until(
     file: File,
     deadline: Instant,
@@ -1235,6 +1316,28 @@ async fn acquire_profile_migration_lock_file_until(
             }
             Err(TryLockError::Error(error)) => {
                 return Err(error).with_context(|| "acquire profile migration lock");
+            }
+        }
+    }
+}
+
+async fn acquire_profile_operation_lock_file_until(
+    file: File,
+    deadline: Instant,
+) -> Result<ProfileOperationGuard> {
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(ProfileOperationGuard { file: Some(file) }),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                tokio::time::sleep(PROFILE_OPERATION_LOCK_POLL).await;
+            }
+            Err(TryLockError::WouldBlock) => {
+                return Err(anyhow!(
+                    "timed out waiting for another Dakia process to finish a profile operation"
+                ));
+            }
+            Err(TryLockError::Error(error)) => {
+                return Err(error).with_context(|| "acquire profile operation lock");
             }
         }
     }
@@ -1338,7 +1441,16 @@ impl Store {
                 Err(error) => return Err(error.into()),
             }
         };
-        let store = Self { pool, vault_key };
+        // Cache the settled physical database identity only after SQLite has
+        // created the file and migration has finished. A later caller cannot
+        // make this Store coordinate a different profile by changing a path
+        // alias underneath it.
+        let canonical_database_path = Arc::new(canonical_database_lock_identity(path)?);
+        let store = Self {
+            pool,
+            vault_key,
+            database_path: Some(canonical_database_path),
+        };
         store.migrate_with_busy_retry().await?;
         drop(migration_lock);
         Ok(store)
@@ -1349,9 +1461,29 @@ impl Store {
         let store = Self {
             pool,
             vault_key: Arc::new(random_bytes()?),
+            database_path: None,
         };
         store.migrate_with_busy_retry().await?;
         Ok(store)
+    }
+
+    /// Coordinates one supported, long-running profile operation across
+    /// desktop and CLI processes. It has no effect for in-memory stores.
+    ///
+    /// Callers must hold the returned guard around the complete operation,
+    /// including provider I/O and durable account publication. Store methods
+    /// do not acquire it themselves because doing so could deadlock a caller
+    /// that correctly holds it already.
+    pub async fn acquire_profile_operation_guard(&self) -> Result<ProfileOperationGuard> {
+        let Some(canonical_database) = self.database_path.as_deref() else {
+            return Ok(ProfileOperationGuard { file: None });
+        };
+        let file = open_profile_operation_lock_file(canonical_database)?;
+        acquire_profile_operation_lock_file_until(
+            file,
+            Instant::now() + PROFILE_OPERATION_LOCK_WAIT,
+        )
+        .await
     }
 
     async fn migrate_with_busy_retry(&self) -> Result<()> {
@@ -5447,14 +5579,23 @@ impl Store {
         // remains capped at 500.
         let limit = query.limit.unwrap_or(100).clamp(1, 501) as i64;
         let projection = mail_summary_projection("m", "''", "NULL", "''");
-        let mut sql = format!("WITH matching AS (SELECT {projection}, ROW_NUMBER() OVER (PARTITION BY m.account_id, m.thread_id ORDER BY m.received_at DESC, m.id DESC) AS thread_rank FROM messages m");
-        if !query.text.trim().is_empty() {
-            sql.push_str(" JOIN messages_fts f ON f.rowid=m.rowid");
-        }
+        let has_text = !query.text.trim().is_empty();
+        // SQLite may otherwise choose the account/mailbox index as the outer
+        // loop, then repeatedly probe the FTS table while evaluating the
+        // window. On a large cached mailbox that can leave an exact search
+        // pending behind a full table walk. Materializing the FTS rowids first
+        // fixes the join order without limiting candidates: the window still
+        // chooses the newest matching message for every conversation.
+        let mut sql = if has_text {
+            format!(
+                "WITH fts_matches AS MATERIALIZED (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?), matching AS (SELECT {projection}, ROW_NUMBER() OVER (PARTITION BY m.account_id, m.thread_id ORDER BY m.received_at DESC, m.id DESC) AS thread_rank FROM fts_matches f JOIN messages m ON m.rowid = f.rowid"
+            )
+        } else {
+            format!(
+                "WITH matching AS (SELECT {projection}, ROW_NUMBER() OVER (PARTITION BY m.account_id, m.thread_id ORDER BY m.received_at DESC, m.id DESC) AS thread_rank FROM messages m"
+            )
+        };
         sql.push_str(" WHERE 1=1");
-        if !query.text.trim().is_empty() {
-            sql.push_str(" AND messages_fts MATCH ?");
-        }
         if !query.account_ids.is_empty() {
             sql.push_str(" AND m.account_id IN (");
             sql.push_str(&vec!["?"; query.account_ids.len()].join(","));
@@ -5526,7 +5667,7 @@ impl Store {
         sql.push_str(" ORDER BY received_at DESC, id DESC LIMIT ?");
 
         let mut statement = sqlx::query_as::<_, MailSummary>(&sql);
-        if !query.text.trim().is_empty() {
+        if has_text {
             statement = statement.bind(fts_query(&query.text));
         }
         for account_id in &query.account_ids {
@@ -7291,12 +7432,459 @@ mod storage_remote_identity_tests;
 #[path = "storage_smart_inbox_visibility_tests.rs"]
 mod storage_smart_inbox_visibility_tests;
 #[cfg(test)]
+mod profile_operation_tests {
+    use super::*;
+    use std::{
+        future::pending,
+        process::Command,
+        thread,
+        time::{Duration, Instant},
+    };
+    use tempfile::tempdir;
+    use tokio::sync::oneshot;
+
+    const CHILD_MODE: &str = "DAKIA_PROFILE_OPERATION_COORDINATOR_CHILD";
+    const CHILD_DATABASE: &str = "DAKIA_PROFILE_OPERATION_COORDINATOR_DATABASE";
+    const CHILD_READY: &str = "DAKIA_PROFILE_OPERATION_COORDINATOR_READY";
+    const CHILD_RELEASE: &str = "DAKIA_PROFILE_OPERATION_COORDINATOR_RELEASE";
+    const CHILD_COMPLETED: &str = "DAKIA_PROFILE_OPERATION_COORDINATOR_COMPLETED";
+    const CHILD_NONCE: &str = "DAKIA_PROFILE_OPERATION_COORDINATOR_NONCE";
+
+    fn child_value(name: &str) -> String {
+        std::env::var(name).unwrap_or_else(|_| panic!("bounded child requires {name}"))
+    }
+
+    fn wait_for_child_file(
+        child: &mut std::process::Child,
+        path: &Path,
+        deadline: Instant,
+        label: &str,
+    ) {
+        loop {
+            if path.exists() {
+                return;
+            }
+            if let Some(status) = child.try_wait().expect("poll profile-operation child") {
+                panic!("profile-operation child exited before {label}: {status}");
+            }
+            if Instant::now() >= deadline {
+                child.kill().expect("stop stalled profile-operation child");
+                let _ = child.wait();
+                panic!("profile-operation child did not {label} before its bound");
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_operation_guard_coordinates_aliases_across_processes() {
+        use std::os::unix::fs::symlink;
+
+        if let Some(mode) = std::env::var_os(CHILD_MODE) {
+            assert!(
+                mode == "1" || mode == "kill-hold",
+                "the isolated child has one of two bounded valid modes"
+            );
+            let database = PathBuf::from(child_value(CHILD_DATABASE));
+            let ready = PathBuf::from(child_value(CHILD_READY));
+            let release = PathBuf::from(child_value(CHILD_RELEASE));
+            let completed = PathBuf::from(child_value(CHILD_COMPLETED));
+            let nonce = child_value(CHILD_NONCE);
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("create isolated profile-operation runtime")
+                .block_on(async move {
+                    let store = Store::open(&database)
+                        .await
+                        .expect("child opens the alias profile");
+                    let guard = store
+                        .acquire_profile_operation_guard()
+                        .await
+                        .expect("child acquires profile operation guard");
+                    std::fs::write(
+                        &ready,
+                        format!("dakia-profile-operation-guard-acquired-v1\n{nonce}\n"),
+                    )
+                    .expect("write child guard receipt");
+                    if mode == "kill-hold" {
+                        pending::<()>().await;
+                    }
+                    let deadline = Instant::now() + Duration::from_secs(30);
+                    while !release.exists() {
+                        assert!(
+                            Instant::now() < deadline,
+                            "parent did not release the bounded profile-operation child"
+                        );
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                    }
+                    drop(guard);
+                    std::fs::write(
+                        &completed,
+                        format!("dakia-profile-operation-coordinator-v1\n{nonce}\n"),
+                    )
+                    .expect("write child completion receipt");
+                });
+            return;
+        }
+
+        let temporary = tempdir().expect("create profile-operation watchdog directory");
+        let database = temporary.path().join("dakia.db");
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("initialize profile runtime")
+            .block_on(async {
+                drop(
+                    Store::open(&database)
+                        .await
+                        .expect("initialize real profile"),
+                );
+            });
+        let alias = temporary.path().join("dakia-alias.db");
+        symlink(&database, &alias).expect("create profile database alias");
+        let ready = temporary.path().join("child-ready");
+        let release = temporary.path().join("child-release");
+        let completed = temporary.path().join("child-completed");
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let mut child = Command::new(std::env::current_exe().expect("test executable"))
+            .arg("--exact")
+            .arg("storage::profile_operation_tests::profile_operation_guard_coordinates_aliases_across_processes")
+            .arg("--nocapture")
+            .env(CHILD_MODE, "1")
+            .env(CHILD_DATABASE, &alias)
+            .env(CHILD_READY, &ready)
+            .env(CHILD_RELEASE, &release)
+            .env(CHILD_COMPLETED, &completed)
+            .env(CHILD_NONCE, &nonce)
+            .spawn()
+            .expect("start isolated profile-operation child");
+        wait_for_child_file(
+            &mut child,
+            &ready,
+            Instant::now() + Duration::from_secs(30),
+            "acquire the alias profile guard",
+        );
+        assert_eq!(
+            std::fs::read_to_string(&ready).expect("read child acquisition receipt"),
+            format!("dakia-profile-operation-guard-acquired-v1\n{nonce}\n"),
+            "the child must acquire the guard before the parent accepts readiness"
+        );
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("create parent profile-operation runtime");
+        let parent_store = runtime
+            .block_on(Store::open(&database))
+            .expect("Store::open remains available while an operation is active");
+        let waiting_store = parent_store.clone();
+        let mut waiting_guard =
+            runtime.spawn(async move { waiting_store.acquire_profile_operation_guard().await });
+        assert!(
+            runtime
+                .block_on(async {
+                    tokio::time::timeout(Duration::from_millis(150), &mut waiting_guard).await
+                })
+                .is_err(),
+            "the real path must wait for the child holding the alias guard"
+        );
+
+        std::fs::write(&release, b"release\n").expect("release isolated child");
+        wait_for_child_file(
+            &mut child,
+            &completed,
+            Instant::now() + Duration::from_secs(30),
+            "write the nonce-bound completion receipt",
+        );
+        assert!(
+            child
+                .wait()
+                .expect("reap profile-operation child")
+                .success(),
+            "profile-operation child must exit successfully"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&completed).expect("read child completion receipt"),
+            format!("dakia-profile-operation-coordinator-v1\n{nonce}\n"),
+            "a renamed or early-exiting child cannot satisfy the parent"
+        );
+        drop(
+            runtime
+                .block_on(async {
+                    tokio::time::timeout(Duration::from_secs(5), &mut waiting_guard).await
+                })
+                .expect("real-path acquisition remained bounded")
+                .expect("real-path guard task completed")
+                .expect("real-path guard acquired after child release"),
+        );
+
+        let killed_ready = temporary.path().join("killed-child-ready");
+        let killed_release = temporary.path().join("killed-child-release");
+        let killed_completed = temporary.path().join("killed-child-completed");
+        let killed_nonce = uuid::Uuid::new_v4().to_string();
+        let mut killed_child = Command::new(std::env::current_exe().expect("test executable"))
+            .arg("--exact")
+            .arg("storage::profile_operation_tests::profile_operation_guard_coordinates_aliases_across_processes")
+            .arg("--nocapture")
+            .env(CHILD_MODE, "kill-hold")
+            .env(CHILD_DATABASE, &alias)
+            .env(CHILD_READY, &killed_ready)
+            .env(CHILD_RELEASE, &killed_release)
+            .env(CHILD_COMPLETED, &killed_completed)
+            .env(CHILD_NONCE, &killed_nonce)
+            .spawn()
+            .expect("start child retained only for parent-owned termination");
+        wait_for_child_file(
+            &mut killed_child,
+            &killed_ready,
+            Instant::now() + Duration::from_secs(30),
+            "acquire the guard before parent-owned termination",
+        );
+        assert_eq!(
+            std::fs::read_to_string(&killed_ready).expect("read terminated child receipt"),
+            format!("dakia-profile-operation-guard-acquired-v1\n{killed_nonce}\n"),
+            "the terminated child must have held the intended guard"
+        );
+        let killed_wait_store = parent_store;
+        let mut after_kill_guard =
+            runtime.spawn(async move { killed_wait_store.acquire_profile_operation_guard().await });
+        assert!(
+            runtime
+                .block_on(async {
+                    tokio::time::timeout(Duration::from_millis(150), &mut after_kill_guard).await
+                })
+                .is_err(),
+            "the parent must wait while the child process is alive"
+        );
+        killed_child
+            .kill()
+            .expect("terminate only the child process started by this test");
+        assert!(
+            !killed_child
+                .wait()
+                .expect("reap parent-owned terminated child")
+                .success(),
+            "the child must not write a normal completion receipt after termination"
+        );
+        assert!(
+            !killed_completed.exists(),
+            "termination is not a completed operation"
+        );
+        drop(
+            runtime
+                .block_on(async {
+                    tokio::time::timeout(Duration::from_secs(5), &mut after_kill_guard).await
+                })
+                .expect("OS release after child termination remained bounded")
+                .expect("post-termination acquisition task completed")
+                .expect("OS released the terminated child's operation guard"),
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_profile_operation_owner_releases_the_guard() {
+        let directory = tempdir().expect("create cancellable profile directory");
+        let database = directory.path().join("dakia.db");
+        let store = Store::open(&database).await.expect("initialize profile");
+        let owner_store = store.clone();
+        let (acquired_tx, acquired_rx) = oneshot::channel();
+        let owner = tokio::spawn(async move {
+            let _guard = owner_store
+                .acquire_profile_operation_guard()
+                .await
+                .expect("acquire cancellable profile-operation guard");
+            acquired_tx.send(()).expect("publish acquired guard");
+            pending::<()>().await;
+        });
+        acquired_rx.await.expect("owner acquired its guard");
+        owner.abort();
+        assert!(owner
+            .await
+            .expect_err("profile-operation owner must be cancelled")
+            .is_cancelled());
+        drop(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                store.acquire_profile_operation_guard(),
+            )
+            .await
+            .expect("cancelled guard release remained bounded")
+            .expect("cancelled guard release permits reacquisition"),
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_profile_operation_waiter_does_not_release_its_owner() {
+        let directory = tempdir().expect("create profile-operation waiter directory");
+        let database = directory.path().join("dakia.db");
+        let store = Store::open(&database).await.expect("initialize profile");
+        let owner = store
+            .acquire_profile_operation_guard()
+            .await
+            .expect("acquire owner guard");
+        let waiting_store = store.clone();
+        let mut waiting =
+            tokio::spawn(async move { waiting_store.acquire_profile_operation_guard().await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), &mut waiting)
+                .await
+                .is_err(),
+            "the second guard must wait behind its owner"
+        );
+        waiting.abort();
+        match waiting.await {
+            Ok(_) => panic!("waiting guard task must be cancelled"),
+            Err(error) => assert!(error.is_cancelled()),
+        }
+
+        let next_store = store.clone();
+        let mut next =
+            tokio::spawn(async move { next_store.acquire_profile_operation_guard().await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), &mut next)
+                .await
+                .is_err(),
+            "cancelling a waiter must not unlock the owner"
+        );
+        drop(owner);
+        drop(
+            tokio::time::timeout(Duration::from_secs(5), &mut next)
+                .await
+                .expect("post-owner acquisition remained bounded")
+                .expect("post-owner acquisition task completed")
+                .expect("owner release permits the next guard"),
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_operation_guards_do_not_cross_profiles_or_coordinate_in_memory_stores() {
+        let directory = tempdir().expect("create independent profile directories");
+        let first = Store::open(directory.path().join("first.db"))
+            .await
+            .expect("open first profile");
+        let second = Store::open(directory.path().join("second.db"))
+            .await
+            .expect("open second profile");
+        let first_guard = first
+            .acquire_profile_operation_guard()
+            .await
+            .expect("acquire first profile guard");
+        drop(
+            tokio::time::timeout(
+                Duration::from_millis(250),
+                second.acquire_profile_operation_guard(),
+            )
+            .await
+            .expect("different profile did not wait")
+            .expect("acquire second profile guard"),
+        );
+        drop(first_guard);
+
+        let in_memory = Store::in_memory().await.expect("open in-memory store");
+        let first_in_memory = in_memory
+            .acquire_profile_operation_guard()
+            .await
+            .expect("in-memory stores do not require an operation inode");
+        drop(
+            in_memory
+                .acquire_profile_operation_guard()
+                .await
+                .expect("in-memory operation guards do not contend"),
+        );
+        drop(first_in_memory);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn profile_operation_guard_reuses_its_single_owner_only_inode() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let directory = tempdir().expect("create persistent operation lock directory");
+        let database = directory.path().join("dakia.db");
+        let store = Store::open(&database).await.expect("initialize profile");
+        let lock_path = profile_operation_lock_path(&database).expect("operation lock path");
+        let first = store
+            .acquire_profile_operation_guard()
+            .await
+            .expect("create first operation lock");
+        let first_metadata = std::fs::metadata(&lock_path).expect("inspect first operation lock");
+        assert!(first_metadata.is_file());
+        assert_eq!(first_metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(first_metadata.uid(), unsafe { libc::geteuid() });
+        assert_eq!(first_metadata.nlink(), 1);
+        let first_inode = first_metadata.ino();
+        drop(first);
+        assert!(
+            lock_path.is_file(),
+            "operation lock inode must persist after unlock"
+        );
+
+        let second = store
+            .acquire_profile_operation_guard()
+            .await
+            .expect("reuse persistent operation lock");
+        assert_eq!(
+            std::fs::metadata(&lock_path)
+                .expect("inspect reused operation lock")
+                .ino(),
+            first_inode,
+            "operation guard never replaces its coordinating inode"
+        );
+        drop(second);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unsafe_profile_operation_lock_paths_fail_closed() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempdir().expect("create unsafe operation lock directory");
+        let database = directory.path().join("dakia.db");
+        let store = Store::open(&database).await.expect("initialize profile");
+        let lock_path = profile_operation_lock_path(&database).expect("operation lock path");
+        let target = directory.path().join("preserved-target");
+        std::fs::write(&target, b"preserve").expect("write preserved target");
+        symlink(&target, &lock_path).expect("substitute lock path with symlink");
+        let error = match store.acquire_profile_operation_guard().await {
+            Ok(_) => panic!("symlink operation lock must be refused"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("open profile operation lock"),
+            "{error:#}"
+        );
+        assert_eq!(
+            std::fs::read(&target).expect("read preserved target"),
+            b"preserve"
+        );
+
+        std::fs::remove_file(&lock_path).expect("remove unsafe symlink fixture");
+        std::fs::write(&lock_path, b"lock").expect("create lock hard-link source");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600))
+            .expect("restrict hard-link fixture permissions");
+        let hard_link = directory.path().join("operation-lock-hard-link");
+        std::fs::hard_link(&lock_path, &hard_link).expect("add lock hard link");
+        let error = match store.acquire_profile_operation_guard().await {
+            Ok(_) => panic!("hard-linked operation lock must be refused"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("must not have hard links"),
+            "{error:#}"
+        );
+    }
+}
+#[cfg(test)]
 // The snapshot implementation is intentionally kept beside the feature's
 // storage helpers below this long-standing test module. Keep this narrowly
 // scoped until the module is split into its own test file.
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+    use std::{path::PathBuf, process::Command, thread};
 
     #[test]
     fn sqlite_contention_helpers_classify_synthetic_error_chains() {
@@ -10866,6 +11454,137 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn large_fts_conversation_search_finishes_in_a_bounded_child_process() {
+        if let Some(child) = std::env::var_os("DAKIA_STORAGE_SEARCH_SCALE_CHILD") {
+            assert_eq!(
+                child,
+                std::ffi::OsString::from("1"),
+                "the isolated large-search worker has one valid mode"
+            );
+            let ready = PathBuf::from(
+                std::env::var_os("DAKIA_STORAGE_SEARCH_SCALE_READY")
+                    .expect("the bounded parent supplies a fixture-ready signal"),
+            );
+            let completed = PathBuf::from(
+                std::env::var_os("DAKIA_STORAGE_SEARCH_SCALE_COMPLETED")
+                    .expect("the bounded parent supplies a search-completed signal"),
+            );
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("create isolated large-search runtime")
+                .block_on(large_fts_conversation_search_worker(ready, completed));
+            return;
+        }
+
+        let temporary = tempfile::tempdir().expect("create large-search watchdog directory");
+        let ready = temporary.path().join("fixture-ready");
+        let completed = temporary.path().join("search-completed");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(
+                "storage::tests::large_fts_conversation_search_finishes_in_a_bounded_child_process",
+            )
+            .arg("--nocapture")
+            .env("DAKIA_STORAGE_SEARCH_SCALE_CHILD", "1")
+            .env("DAKIA_STORAGE_SEARCH_SCALE_READY", &ready)
+            .env("DAKIA_STORAGE_SEARCH_SCALE_COMPLETED", &completed)
+            .spawn()
+            .expect("start isolated large-search worker");
+        let setup_deadline = Instant::now() + Duration::from_secs(90);
+        let mut search_deadline = None;
+        loop {
+            if let Some(status) = child.try_wait().expect("poll large-search worker") {
+                assert!(status.success(), "large-search worker failed: {status}");
+                assert!(
+                    ready.exists(),
+                    "large-search worker exited before fixture setup"
+                );
+                assert!(
+                    completed.exists(),
+                    "large-search worker exited before completing both search assertions"
+                );
+                return;
+            }
+            if search_deadline.is_none() && ready.exists() {
+                search_deadline = Some(Instant::now() + Duration::from_secs(30));
+            }
+            let deadline = search_deadline.unwrap_or(setup_deadline);
+            if Instant::now() >= deadline {
+                child.kill().expect("stop stalled large-search worker");
+                let _ = child.wait();
+                if search_deadline.is_some() {
+                    panic!("30k local conversation search exceeded the 30-second bound");
+                }
+                panic!("30k local conversation fixture setup exceeded the 90-second bound");
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    async fn large_fts_conversation_search_worker(ready: PathBuf, completed: PathBuf) {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let newest = Utc::now();
+        let mut messages = (0..30_000)
+            .map(|index| {
+                let mut item = message(
+                    &format!("Fictional large mailbox {index}"),
+                    "Fictional large mailbox background body",
+                );
+                item.id = format!("large-search-{index}");
+                item.thread_id = format!("large-search-thread-{index}");
+                item.account_id = account_id.to_string();
+                item.uid = index + 1;
+                item.received_at = newest - chrono::Duration::seconds(index);
+                item
+            })
+            .collect::<Vec<_>>();
+        let retained = messages
+            .get_mut(1)
+            .expect("the 30k fixture contains the retained message");
+        retained.subject = "Fictional retained multipart Reader message".into();
+        retained.snippet = "Fictional retained multipart text.".into();
+        store.upsert_messages(&messages).await.unwrap();
+        std::fs::write(ready, b"fixture-ready").expect("signal completed large-search setup");
+
+        let popular = store
+            .search_conversation_page(&SearchQuery {
+                text: "Fictional".into(),
+                account_ids: vec![account_id],
+                mailbox: Some("INBOX".into()),
+                limit: Some(1),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(popular.conversations.len(), 1);
+        assert_eq!(popular.conversations[0].latest.id, "large-search-0");
+        assert!(popular.next_cursor.is_some());
+
+        let full_phrase = store
+            .search_conversation_page(&SearchQuery {
+                text: "Fictional retained multipart Reader message".into(),
+                account_ids: vec![account_id],
+                mailbox: Some("INBOX".into()),
+                limit: Some(1),
+                cursor: Some(MailCursor {
+                    received_at: newest,
+                    id: "large-search-0".into(),
+                }),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(full_phrase.conversations.len(), 1);
+        assert_eq!(full_phrase.conversations[0].latest.id, "large-search-1");
+        assert!(full_phrase.next_cursor.is_none());
+        std::fs::write(completed, b"search-completed")
+            .expect("signal completed large-search assertions");
     }
 
     #[tokio::test]

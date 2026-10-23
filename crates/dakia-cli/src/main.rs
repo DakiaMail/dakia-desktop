@@ -3,8 +3,9 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use clap::{Args, Parser, Subcommand};
 use dakia_core::{
     ai::{AiConfig, AiProvider, AiService},
-    mailbox_action_destination, ComposeMessage, EmailClassificationInput, LocalEmailClassifier,
-    MailService, MailboxAction, ModelClassificationUpdate, SearchQuery, Store,
+    mailbox_action_destination, Account, AccountAuth, ComposeMessage, EmailClassificationInput,
+    LocalEmailClassifier, MailService, MailboxAction, ModelClassificationUpdate, SearchQuery,
+    Store,
 };
 use directories::ProjectDirs;
 use secrecy::SecretString;
@@ -21,6 +22,8 @@ use uuid::Uuid;
 
 const REMOTE_SEARCH_CONCURRENCY: usize = 4;
 const CLASSIFICATION_BATCH_SIZE: usize = 64;
+const ACCOUNT_NAMESPACE_RESET_PENDING: &str =
+    "account is updating; refresh the mailbox after the update finishes";
 
 #[derive(Parser)]
 #[command(
@@ -218,6 +221,7 @@ async fn main() -> Result<()> {
             AccountCommand::List => print_value(&store.accounts().await?, cli.json)?,
         },
         Command::Sync(args) => {
+            let _profile_operation = store.acquire_profile_operation_guard().await?;
             let mail = MailService::new(store.clone());
             let accounts = store
                 .accounts()
@@ -229,22 +233,8 @@ async fn main() -> Result<()> {
                 bail!("account not found");
             }
             for account in accounts {
-                let count = if args.refresh_gmail_categories {
-                    if account.provider_id != "gmail" {
-                        if args.account.is_some() {
-                            bail!("Gmail category refresh requires a Gmail account");
-                        }
-                        continue;
-                    }
-                    mail.refresh_gmail_category_metadata(&account)
-                        .await
-                        .with_context(|| {
-                            format!("Gmail category refresh failed for {}", account.email)
-                        })?
-                } else {
-                    mail.sync_all(&account, args.limit)
-                        .await
-                        .with_context(|| format!("sync failed for {}", account.email))?
+                let Some(count) = sync_account(&store, &mail, &account, &args).await? else {
+                    continue;
                 };
                 if cli.json {
                     print_value(
@@ -266,6 +256,7 @@ async fn main() -> Result<()> {
             }
         }
         Command::Classify(args) => {
+            let _profile_operation = store.acquire_profile_operation_guard().await?;
             let classified = run_classification(&store, args).await?;
             if cli.json {
                 println!("{}", serde_json::json!({"classified" : classified}));
@@ -287,6 +278,14 @@ async fn main() -> Result<()> {
                 limit: Some(args.limit),
                 cursor: None,
             };
+            // Local-only search deliberately remains available for retained
+            // metadata. Remote search can fetch and publish provider data, so
+            // retain the profile operation guard through its output.
+            let _profile_operation = if args.remote {
+                Some(store.acquire_profile_operation_guard().await?)
+            } else {
+                None
+            };
             let results = if args.remote {
                 search_local_and_remote(&store, &query).await?
             } else {
@@ -307,12 +306,14 @@ async fn main() -> Result<()> {
             }
         }
         Command::Show(args) => {
+            let _profile_operation = store.acquire_profile_operation_guard().await?;
             let message =
                 fetch_message(&store, &args.message_id, args.expected_uid_validity).await?;
             print_value(&message, cli.json)?;
         }
         Command::Attachment { command } => match command {
             AttachmentCommand::List(args) => {
+                let _profile_operation = store.acquire_profile_operation_guard().await?;
                 let message =
                     fetch_message(&store, &args.message_id, args.expected_uid_validity).await?;
                 let attachments = message
@@ -323,10 +324,12 @@ async fn main() -> Result<()> {
                 print_value(&attachments, cli.json)?;
             }
             AttachmentCommand::Download(args) => {
+                let _profile_operation = store.acquire_profile_operation_guard().await?;
                 download_attachment(&store, args, cli.json).await?;
             }
         },
         Command::Archive(args) => {
+            let _profile_operation = store.acquire_profile_operation_guard().await?;
             apply_mailbox_action(
                 &store,
                 &message_receipts(&args.message_id, &args.expected_uid_validity)?,
@@ -336,6 +339,7 @@ async fn main() -> Result<()> {
             .await?
         }
         Command::Spam(args) => {
+            let _profile_operation = store.acquire_profile_operation_guard().await?;
             apply_mailbox_action(
                 &store,
                 &message_receipts(&args.message_id, &args.expected_uid_validity)?,
@@ -346,6 +350,7 @@ async fn main() -> Result<()> {
         }
         Command::Trash(args) => {
             require_confirmation(args.yes, "trash")?;
+            let _profile_operation = store.acquire_profile_operation_guard().await?;
             apply_mailbox_action(
                 &store,
                 &message_receipts(
@@ -359,6 +364,7 @@ async fn main() -> Result<()> {
         }
         Command::Delete(args) => {
             require_confirmation(args.yes, "permanently delete")?;
+            let _profile_operation = store.acquire_profile_operation_guard().await?;
             apply_mailbox_action(
                 &store,
                 &message_receipts(
@@ -375,6 +381,11 @@ async fn main() -> Result<()> {
                 .account(args.account)
                 .await?
                 .context("account not found")?;
+            // Refuse to begin collecting a compose while this account is
+            // already between provider namespaces. A change that starts
+            // during local preparation is caught against this snapshot after
+            // the operation guard is acquired below.
+            ensure_account_namespace_is_not_pending(&store, account.id).await?;
             let body = match args.body {
                 Some(body) => body,
                 None => {
@@ -383,23 +394,28 @@ async fn main() -> Result<()> {
                     body
                 }
             };
-            let response = MailService::new(store)
-                .send(
-                    &account,
-                    &ComposeMessage {
-                        account_id: account.id,
-                        to: args.to,
-                        cc: args.cc,
-                        bcc: args.bcc,
-                        subject: args.subject,
-                        body_text: body,
-                        body_html: args.html_body,
-                        in_reply_to: args.in_reply_to,
-                        references: args.references,
-                        attachments: read_outbound_attachments(&args.attachments)?,
-                    },
-                )
-                .await?;
+            let attachments = read_outbound_attachments(&args.attachments)?;
+            // Do not hold a profile lock while waiting on stdin or the local
+            // filesystem. The account captured above detects a completed
+            // replacement during that preparation before SMTP is attempted.
+            let _profile_operation = store.acquire_profile_operation_guard().await?;
+            let response = send_compose_message(
+                &store,
+                &account,
+                ComposeMessage {
+                    account_id: account.id,
+                    to: args.to,
+                    cc: args.cc,
+                    bcc: args.bcc,
+                    subject: args.subject,
+                    body_text: body,
+                    body_html: args.html_body,
+                    in_reply_to: args.in_reply_to,
+                    references: args.references,
+                    attachments,
+                },
+            )
+            .await?;
             if cli.json {
                 println!(
                     "{}",
@@ -411,6 +427,7 @@ async fn main() -> Result<()> {
         }
         Command::Ai { command } => match command {
             AiCommand::Summarize(args) => {
+                let _profile_operation = store.acquire_profile_operation_guard().await?;
                 let messages = ai_messages_at_receipts(
                     &store,
                     &message_receipts(&args.message_id, &args.expected_uid_validity)?,
@@ -425,6 +442,10 @@ async fn main() -> Result<()> {
 }
 
 async fn run_classification(store: &Store, args: ClassifyArgs) -> Result<usize> {
+    // Classification may persist model output for any account in the local
+    // catalogue. A provider replacement deliberately leaves that catalogue in
+    // place until its reset sync runs, so fail before reading or changing it.
+    ensure_no_account_namespace_resets_pending(store).await?;
     let owner = Uuid::new_v4().to_string();
     let result = run_owned_classification(store, args, &owner).await;
     let release = store.release_classification_revision(&owner).await;
@@ -432,6 +453,38 @@ async fn run_classification(store: &Store, args: ClassifyArgs) -> Result<usize> 
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error),
         (Ok(classified), Ok(())) => Ok(classified),
+    }
+}
+
+async fn sync_account(
+    store: &Store,
+    mail: &MailService,
+    account: &Account,
+    args: &SyncArgs,
+) -> Result<Option<usize>> {
+    ensure_account_namespace_is_not_pending(store, account.id).await?;
+    if args.refresh_gmail_categories {
+        if account.provider_id != "gmail" {
+            if args.account.is_some() {
+                bail!("Gmail category refresh requires a Gmail account");
+            }
+            return Ok(None);
+        }
+        let count = mail
+            .refresh_gmail_category_metadata(account)
+            .await
+            .with_context(|| format!("Gmail category refresh failed for {}", account.email))?;
+        // Do not present a successful refresh after a replacement becomes
+        // durable while provider work was in flight.
+        ensure_account_namespace_is_still_current(store, account).await?;
+        Ok(Some(count))
+    } else {
+        let count = mail
+            .sync_all(account, args.limit)
+            .await
+            .with_context(|| format!("sync failed for {}", account.email))?;
+        ensure_account_namespace_is_still_current(store, account).await?;
+        Ok(Some(count))
     }
 }
 
@@ -569,10 +622,13 @@ async fn search_remote(store: &Store, query: &SearchQuery) -> Result<Vec<dakia_c
         let text = text.clone();
         let mailbox = mailbox.clone();
         async move {
-            MailService::new(store)
+            ensure_account_namespace_is_not_pending(&store, account.id).await?;
+            let hits = MailService::new(store.clone())
                 .search_remote(&account, &text, mailbox.as_deref(), per_account_limit)
                 .await
-                .with_context(|| format!("remote search failed for {}", account.email))
+                .with_context(|| format!("remote search failed for {}", account.email))?;
+            ensure_account_namespace_is_still_current(&store, &account).await?;
+            Ok::<_, anyhow::Error>(hits)
         }
     })
     .await;
@@ -671,6 +727,7 @@ async fn fetch_message(
         .account(account_id)
         .await?
         .context("account not found")?;
+    ensure_account_namespace_is_still_current(store, &account).await?;
     let fetched = MailService::new(store.clone())
         .fetch_message_at_epoch(
             &account,
@@ -682,6 +739,7 @@ async fn fetch_message(
             receipt.expected_uid_validity,
         )
         .await?;
+    ensure_account_namespace_is_still_current(store, &account).await?;
     let current = message_at_receipt(store, &receipt).await?;
     if !same_message_target(&summary, &current) {
         bail!("message changed while reading it; no content was displayed");
@@ -731,7 +789,108 @@ async fn message_at_receipt(
     if current_uid_validity != receipt.expected_uid_validity {
         bail!("message changed since it was selected; rerun search and try again");
     }
+    let account_id =
+        Uuid::parse_str(&summary.account_id).context("stored message has an invalid account ID")?;
+    ensure_account_namespace_is_not_pending(store, account_id).await?;
     Ok(summary)
+}
+
+async fn ensure_no_account_namespace_resets_pending(store: &Store) -> Result<()> {
+    if store
+        .mail_rebuild_jobs()
+        .await?
+        .into_iter()
+        .any(|job| job.reset_before_sync)
+    {
+        bail!(ACCOUNT_NAMESPACE_RESET_PENDING);
+    }
+    Ok(())
+}
+
+async fn ensure_account_namespace_is_not_pending(store: &Store, account_id: Uuid) -> Result<()> {
+    if store
+        .mail_rebuild_jobs()
+        .await?
+        .into_iter()
+        .any(|job| job.account_id == account_id && job.reset_before_sync)
+    {
+        bail!(ACCOUNT_NAMESPACE_RESET_PENDING);
+    }
+    Ok(())
+}
+
+async fn ensure_account_namespace_is_still_current(
+    store: &Store,
+    captured: &Account,
+) -> Result<()> {
+    ensure_account_namespace_is_not_pending(store, captured.id).await?;
+    let current = store
+        .account(captured.id)
+        .await?
+        .context("account not found")?;
+    if !captured.enabled || !current.enabled {
+        bail!("account is disabled");
+    }
+    if !same_mail_namespace(captured, &current) {
+        bail!("account changed while the operation was running; refresh the mailbox and try again");
+    }
+    Ok(())
+}
+
+async fn ensure_send_account_is_still_current(store: &Store, captured: &Account) -> Result<()> {
+    ensure_account_namespace_is_still_current(store, captured).await?;
+    let current = store
+        .account(captured.id)
+        .await?
+        .context("account not found")?;
+    if !same_smtp_transport(captured, &current) {
+        bail!("account changed while the operation was running; refresh the mailbox and try again");
+    }
+    Ok(())
+}
+
+fn same_mail_namespace(existing: &Account, candidate: &Account) -> bool {
+    existing.provider_id == candidate.provider_id
+        && match (&existing.auth, &candidate.auth) {
+            (
+                AccountAuth::Password {
+                    username: existing_username,
+                },
+                AccountAuth::Password {
+                    username: candidate_username,
+                },
+            ) => existing_username == candidate_username,
+            (
+                AccountAuth::OAuth2 {
+                    username: existing_username,
+                    provider: existing_provider,
+                    ..
+                },
+                AccountAuth::OAuth2 {
+                    username: candidate_username,
+                    provider: candidate_provider,
+                    ..
+                },
+            ) => existing_username == candidate_username && existing_provider == candidate_provider,
+            _ => false,
+        }
+        && existing
+            .imap_host
+            .trim()
+            .eq_ignore_ascii_case(candidate.imap_host.trim())
+        && existing.imap_port == candidate.imap_port
+        && existing.imap_security == candidate.imap_security
+        && existing.archive_mailbox == candidate.archive_mailbox
+        && existing.spam_mailbox == candidate.spam_mailbox
+}
+
+fn same_smtp_transport(existing: &Account, candidate: &Account) -> bool {
+    existing
+        .smtp_host
+        .trim()
+        .eq_ignore_ascii_case(candidate.smtp_host.trim())
+        && existing.smtp_port == candidate.smtp_port
+        && existing.smtp_security == candidate.smtp_security
 }
 
 fn same_message_target(
@@ -775,6 +934,7 @@ async fn apply_mailbox_action(
             .account(account_id)
             .await?
             .with_context(|| format!("account not found for message {message_id}"))?;
+        ensure_account_namespace_is_still_current(store, &account).await?;
         let service = MailService::new(store.clone());
         let remote_receipt = service
             .apply_action_at_epoch_with_receipt(
@@ -786,6 +946,13 @@ async fn apply_mailbox_action(
             )
             .await
             .with_context(|| format!("mailbox action failed for {message_id}"))?;
+        ensure_account_namespace_is_still_current(store, &account).await?;
+        let current = message_at_receipt(store, receipt_target).await?;
+        if !same_message_target(&summary, &current) {
+            bail!(
+                "message changed while the mailbox action completed; local state was not updated"
+            );
+        }
         let destination = mailbox_action_destination(action).unwrap_or_default();
         let publication = store
             .move_message_at_epoch(&summary, destination, &remote_receipt)
@@ -794,6 +961,7 @@ async fn apply_mailbox_action(
             bail!("message changed while the mailbox action completed; sync before trying another action");
         }
         if mailbox_action_destination(action).is_some() && !publication.destination_mapped {
+            ensure_account_namespace_is_still_current(store, &account).await?;
             service.sync_all(&account, 250).await.context(
                 "mailbox action completed, but Dakia could not reconcile its destination",
             )?;
@@ -838,6 +1006,7 @@ async fn download_attachment(
         .account(account_id)
         .await?
         .context("account not found")?;
+    ensure_account_namespace_is_still_current(store, &account).await?;
     let attachment = MailService::new(store.clone())
         .fetch_attachment_at_epoch(
             &account,
@@ -848,6 +1017,7 @@ async fn download_attachment(
         )
         .await
         .context("attachment not found")?;
+    ensure_account_namespace_is_still_current(store, &account).await?;
     // The provider request above may take long enough for another process to
     // replace this mailbox generation. Never create a user-visible file for a
     // stale attachment response.
@@ -875,6 +1045,20 @@ async fn download_attachment(
         println!("saved {}", args.output.display());
         Ok(())
     }
+}
+
+async fn send_compose_message(
+    store: &Store,
+    captured_account: &Account,
+    message: ComposeMessage,
+) -> Result<String> {
+    // Keep the account observed when the command started. Reloading by UUID
+    // after stdin or attachment work would silently redirect a send to a
+    // replacement SMTP configuration after its reset job completes.
+    ensure_send_account_is_still_current(store, captured_account).await?;
+    MailService::new(store.clone())
+        .send(captured_account, &message)
+        .await
 }
 
 fn read_outbound_attachments(
@@ -1012,7 +1196,9 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use clap::error::ErrorKind;
-    use dakia_core::{classification::ModelClassification, provider, AccountDraft, MailSummary};
+    use dakia_core::{
+        classification::ModelClassification, provider, AccountDraft, MailRebuildJob, MailSummary,
+    };
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -1083,6 +1269,233 @@ mod tests {
 
     fn old_generation_receipt(message_id: &str) -> Vec<MessageReceipt> {
         message_receipts(&[message_id.to_owned()], &[77]).unwrap()
+    }
+
+    async fn store_with_pending_namespace_replacement() -> (Store, Account, String) {
+        let (store, message_id) = store_with_reused_message_generation().await;
+        let mut replacement = store
+            .accounts()
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("fixture account");
+        // Keep the account UUID, mailbox UID, and UIDVALIDITY unchanged. The
+        // only safe reason none of the production CLI paths can touch this
+        // deliberately unreachable endpoint is the durable reset fence.
+        replacement.imap_host = "127.0.0.1".into();
+        replacement.imap_port = 1;
+        store
+            .save_account_with_reset_mail_rebuild_job(
+                &replacement,
+                &MailRebuildJob {
+                    account_id: replacement.id,
+                    phase: "provider-identity-replacement".into(),
+                    completed: 0,
+                    total: None,
+                    reset_before_sync: true,
+                },
+            )
+            .await
+            .unwrap();
+        (store, replacement, message_id)
+    }
+
+    fn assert_pending_namespace_reset(error: anyhow::Error) {
+        assert_eq!(error.to_string(), ACCOUNT_NAMESPACE_RESET_PENDING);
+    }
+
+    fn fictional_compose(account_id: Uuid) -> ComposeMessage {
+        ComposeMessage {
+            account_id,
+            to: vec!["recipient@example.test".into()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "must not send".into(),
+            body_text: "fictional".into(),
+            body_html: None,
+            in_reply_to: None,
+            references: None,
+            attachments: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_namespace_reset_blocks_cli_network_content_and_local_mutations() {
+        let (store, replacement, message_id) = store_with_pending_namespace_replacement().await;
+        let receipt = message_receipts(std::slice::from_ref(&message_id), &[78]).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("must-not-exist.bin");
+
+        assert_pending_namespace_reset(
+            fetch_message(&store, &message_id, Some(78))
+                .await
+                .unwrap_err(),
+        );
+        assert_pending_namespace_reset(
+            download_attachment(
+                &store,
+                DownloadAttachmentArgs {
+                    message_id: message_id.clone(),
+                    expected_uid_validity: Some(78),
+                    attachment_id: "attachment-id".into(),
+                    output: output.clone(),
+                },
+                false,
+            )
+            .await
+            .unwrap_err(),
+        );
+        assert!(
+            !output.exists(),
+            "a blocked attachment must not create a file"
+        );
+        assert_pending_namespace_reset(
+            apply_mailbox_action(&store, &receipt, MailboxAction::Archive, false)
+                .await
+                .unwrap_err(),
+        );
+        assert_eq!(
+            store.message(&message_id).await.unwrap().unwrap().mailbox,
+            "INBOX",
+            "a blocked action must not update the retained catalogue row"
+        );
+        assert_pending_namespace_reset(
+            ai_messages_at_receipts(&store, &receipt).await.unwrap_err(),
+        );
+
+        let mail = MailService::new(store.clone());
+        assert_pending_namespace_reset(
+            sync_account(
+                &store,
+                &mail,
+                &replacement,
+                &SyncArgs {
+                    account: Some(replacement.id),
+                    limit: 1,
+                    refresh_gmail_categories: false,
+                },
+            )
+            .await
+            .unwrap_err(),
+        );
+        assert_pending_namespace_reset(
+            search_remote(
+                &store,
+                &SearchQuery {
+                    text: "fictional".into(),
+                    account_ids: vec![replacement.id],
+                    mailbox: None,
+                    from: None,
+                    unread_only: false,
+                    read_only: false,
+                    flagged_only: false,
+                    unflagged_only: false,
+                    category: None,
+                    limit: Some(1),
+                    cursor: None,
+                },
+            )
+            .await
+            .unwrap_err(),
+        );
+        assert_pending_namespace_reset(
+            send_compose_message(&store, &replacement, fictional_compose(replacement.id))
+                .await
+                .unwrap_err(),
+        );
+        assert_pending_namespace_reset(
+            run_classification(
+                &store,
+                ClassifyArgs {
+                    model_dir: directory.path().join("missing-model"),
+                    all: false,
+                },
+            )
+            .await
+            .unwrap_err(),
+        );
+    }
+
+    #[tokio::test]
+    async fn namespace_recheck_rejects_a_completed_replacement_but_allows_display_changes() {
+        let (store, _) = store_with_reused_message_generation().await;
+        let captured = store
+            .accounts()
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("fixture account");
+        let mut display_only = captured.clone();
+        display_only.display_name = "Renamed local label".into();
+        store.save_account(&display_only).await.unwrap();
+        ensure_account_namespace_is_still_current(&store, &captured)
+            .await
+            .expect("a local display-name change does not replace the IMAP namespace");
+
+        let mut replacement = display_only;
+        replacement.imap_host = "replacement.invalid".into();
+        store.save_account(&replacement).await.unwrap();
+        assert_eq!(
+            ensure_account_namespace_is_still_current(&store, &captured)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "account changed while the operation was running; refresh the mailbox and try again"
+        );
+        assert_eq!(
+            send_compose_message(&store, &captured, fictional_compose(captured.id))
+                .await
+                .unwrap_err()
+                .to_string(),
+            "account changed while the operation was running; refresh the mailbox and try again",
+            "a send captured before a completed replacement must not use the replacement SMTP account"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_recheck_rejects_smtp_only_changes_and_disabled_accounts_before_network() {
+        let (store, _) = store_with_reused_message_generation().await;
+        let captured = store
+            .accounts()
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("fixture account");
+        let mut smtp_only_change = captured.clone();
+        // Keep IMAP identity unchanged, then make SMTP intentionally
+        // unreachable. Reaching it would mean the send fence failed.
+        smtp_only_change.smtp_host = "127.0.0.1".into();
+        smtp_only_change.smtp_port = 1;
+        store.save_account(&smtp_only_change).await.unwrap();
+        assert_eq!(
+            send_compose_message(&store, &captured, fictional_compose(captured.id))
+                .await
+                .unwrap_err()
+                .to_string(),
+            "account changed while the operation was running; refresh the mailbox and try again"
+        );
+
+        let mut disabled = captured.clone();
+        disabled.enabled = false;
+        store.save_account(&disabled).await.unwrap();
+        assert_eq!(
+            send_compose_message(&store, &captured, fictional_compose(captured.id))
+                .await
+                .unwrap_err()
+                .to_string(),
+            "account is disabled"
+        );
+        assert_eq!(
+            ensure_account_namespace_is_still_current(&store, &captured)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "account is disabled",
+            "read and mailbox operation checks also reject a disable that occurred in flight"
+        );
     }
 
     #[test]

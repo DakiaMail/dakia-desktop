@@ -21,6 +21,15 @@ const tinyPng = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL/7wAAAABJRU5ErkJggg==",
   "base64",
 );
+const faithfulNativeUid4AxSlice = `\t\t\t\t38 container Synthetic nested alternatives
+\t\t\t\t\t39 heading Synthetic nested alternatives, Value: 1
+\t\t\t\t\t\t40 text Synthetic nested alternatives
+\t\t\t\t\t41 container Message from sender@example.test
+\t\t\t\t\t\t49 container Synthetic nested alternatives
+\t\t\t\t\t\t\t50 scroll area
+\t\t\t\t\t\t\t\t51 HTML content Description: Email content, URL: about:srcdoc
+\t\t\t\t\t\t\t\t\t52 container
+\t\t\t\t\t\t\t\t\t\t53 text Visible  HTML  body.`;
 
 function sourceManifest(files) {
   const digest = createHash("sha256");
@@ -421,6 +430,36 @@ try {
   await rm(positive.root, { recursive: true, force: true });
 }
 
+assert.equal(
+  faithfulNativeUid4AxSlice.includes(visible[0][1]),
+  false,
+  "the old exact substring check must fail the faithful native AX slice",
+);
+const nativeWhitespacePositive = await fixtureRoot(
+  async ({ observationPath, observation }) => {
+    const fixture = observation.fixtures[0];
+    const changed = Buffer.from(`${faithfulNativeUid4AxSlice}\n`);
+    await rm(fixture.ax.path);
+    await ownedWrite(fixture.ax.path, changed);
+    fixture.ax.sha256 = sha256(changed);
+    await rm(observationPath);
+    await ownedWrite(observationPath, `${JSON.stringify(observation)}\n`);
+  },
+);
+try {
+  const verified = await verifyInputs({
+    root: nativeWhitespacePositive.root,
+    sourceRoot: nativeWhitespacePositive.sourceRoot,
+    sourceManifestPath: nativeWhitespacePositive.manifestPath,
+    sourceManifestSha256: nativeWhitespacePositive.manifestSha256,
+    observationPath: nativeWhitespacePositive.observationPath,
+    expectedApprovalRecordSha256: nativeWhitespacePositive.approvalRecordSha256,
+  });
+  assert.equal(verified.transcriptRecordCount, 39);
+} finally {
+  await rm(nativeWhitespacePositive.root, { recursive: true, force: true });
+}
+
 await rejects(
   "missing raw",
   async ({ root, transcript }) => {
@@ -696,6 +735,21 @@ await rejects(
     await ownedWrite(observationPath, `${JSON.stringify(observation)}\n`);
   },
   /AX evidence lacks "Synthetic nested alternatives"/,
+);
+await rejects(
+  "AX whitespace normalization does not accept altered visible text",
+  async ({ observationPath, observation }) => {
+    const fixture = observation.fixtures[0];
+    const changed = Buffer.from(
+      `${faithfulNativeUid4AxSlice.replace("Visible  HTML  body.", "Visible  HTML  bodx.")}\n`,
+    );
+    await rm(fixture.ax.path);
+    await ownedWrite(fixture.ax.path, changed);
+    fixture.ax.sha256 = sha256(changed);
+    await rm(observationPath);
+    await ownedWrite(observationPath, `${JSON.stringify(observation)}\n`);
+  },
+  /AX evidence lacks "Visible HTML body\."/,
 );
 await rejects(
   "bad exit",

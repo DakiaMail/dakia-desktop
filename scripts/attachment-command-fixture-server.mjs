@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { appendFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:tls";
 import { parseArgs } from "node:util";
@@ -8,6 +9,8 @@ const { values } = parseArgs({
     cert: { type: "string" },
     key: { type: "string" },
     "port-file": { type: "string" },
+    "reader-body": { type: "string" },
+    transcript: { type: "string" },
   },
 });
 if (!values.cert || !values.key || !values["port-file"]) {
@@ -18,6 +21,10 @@ const unsafeBytes = Buffer.from("fictional attachment bytes\0\xff", "binary");
 const safeBytes = Buffer.from("fictional safe attachment bytes\n", "utf8");
 const unsafeEncoded = unsafeBytes.toString("base64");
 const safeEncoded = safeBytes.toString("base64");
+const readerBody =
+  values["reader-body"] ??
+  "Fictional provider MIME reaches the Reader through the real command path.";
+const readerBodyBytes = Buffer.from(`${readerBody}\r\n`, "utf8");
 const message = [
   "From: Fictional Provider <provider@localhost>",
   "To: Fictional Reader <fictional-reader@localhost>",
@@ -29,7 +36,7 @@ const message = [
   "--fixture-boundary",
   'Content-Type: text/plain; charset="utf-8"',
   "",
-  "Fictional provider MIME reaches the Reader through the real command path.",
+  readerBody,
   "--fixture-boundary",
   'Content-Type: application/octet-stream; name="../../quarterly-report.pdf.command"',
   'Content-Disposition: attachment; filename="../../quarterly-report.pdf.command"',
@@ -72,10 +79,24 @@ const partHeaders = new Map([
     ),
   ],
 ]);
-const bodyStructure = `(("TEXT" "PLAIN" ("CHARSET" "utf-8") NIL NIL "7BIT" 72 1 NIL NIL NIL) ("APPLICATION" "OCTET-STREAM" ("NAME" "../../quarterly-report.pdf.command") NIL NIL "BASE64" ${unsafeEncoded.length} NIL ("ATTACHMENT" ("FILENAME" "../../quarterly-report.pdf.command")) NIL NIL) ("TEXT" "PLAIN" ("NAME" "meeting-notes.txt") NIL NIL "BASE64" ${safeEncoded.length} NIL ("ATTACHMENT" ("FILENAME" "meeting-notes.txt")) NIL NIL) "MIXED" ("BOUNDARY" "fixture-boundary") NIL NIL)`;
+const bodyStructure = `(("TEXT" "PLAIN" ("CHARSET" "utf-8") NIL NIL "7BIT" ${readerBodyBytes.length} 1 NIL NIL NIL) ("APPLICATION" "OCTET-STREAM" ("NAME" "../../quarterly-report.pdf.command") NIL NIL "BASE64" ${unsafeEncoded.length} NIL ("ATTACHMENT" ("FILENAME" "../../quarterly-report.pdf.command")) NIL NIL) ("TEXT" "PLAIN" ("NAME" "meeting-notes.txt") NIL NIL "BASE64" ${safeEncoded.length} NIL ("ATTACHMENT" ("FILENAME" "meeting-notes.txt")) NIL NIL) "MIXED" ("BOUNDARY" "fixture-boundary") NIL NIL)`;
 
 let connectionCount = 0;
 const sockets = new Set();
+function record(event) {
+  if (!values.transcript) return;
+  // Keep the no-wire assertion useful without recording commands, passwords,
+  // message data, or other protocol payloads.
+  appendFileSync(values.transcript, `${JSON.stringify(event)}\n`, { mode: 0o600 });
+}
+
+function commandKind(command) {
+  if (/^UID STORE /i.test(command)) return "uid-store";
+  if (/^UID (MOVE|COPY) /i.test(command)) return "uid-mailbox-mutation";
+  if (/^(UID )?EXPUNGE$/i.test(command)) return "expunge";
+  return "other";
+}
+
 function tagged(tag, line) {
   return `${tag} OK ${line}\r\n`;
 }
@@ -95,6 +116,7 @@ const server = createServer(
   },
   (socket) => {
     sockets.add(socket);
+    record({ event: "opened" });
     socket.once("close", () => sockets.delete(socket));
     const connection = ++connectionCount;
     let buffered = "";
@@ -113,6 +135,7 @@ const server = createServer(
         }
         const tag = line.slice(0, firstSpace);
         const command = line.slice(firstSpace + 1);
+        record({ event: "command", kind: commandKind(command) });
         if (/^CAPABILITY$/i.test(command)) {
           socket.write(`* CAPABILITY IMAP4rev1 AUTH=PLAIN\r\n${tagged(tag, "capability")}`);
         } else if (/^LOGIN /i.test(command)) {
@@ -139,6 +162,14 @@ const server = createServer(
               `* 42 FETCH (UID 42 BODY[${section}.MIME]`,
               headers,
               `\r\n)\r\n${tagged(tag, "attachment headers")}`,
+            ),
+          );
+        } else if (/^UID FETCH 42 \(BODY\.PEEK\[1\]\)$/i.test(command)) {
+          socket.write(
+            literal(
+              "* 42 FETCH (UID 42 BODY[1]",
+              readerBodyBytes,
+              `\r\n)\r\n${tagged(tag, "Reader body")}`,
             ),
           );
         } else if (/^UID FETCH 42 \(BODY\.PEEK\[2\]\)$/i.test(command)) {
