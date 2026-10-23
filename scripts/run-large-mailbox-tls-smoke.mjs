@@ -133,6 +133,24 @@ export async function boundedCommand({
   let primaryFailure;
   let ownershipUnresolved = false;
   let failure;
+  const cleanupObservations = [];
+  const observeCleanup = (operation, error, signal = null) => {
+    const previous = cleanupObservations.find(
+      (entry) =>
+        entry.operation === operation &&
+        entry.code === error.code &&
+        entry.signal === signal,
+    );
+    if (previous) previous.count += 1;
+    else if (cleanupObservations.length < 16)
+      cleanupObservations.push({
+        operation,
+        signal,
+        code: error.code ?? null,
+        message: String(error.message),
+        count: 1,
+      });
+  };
   try {
     if (signal?.aborted) throw new Error("run interrupted before phase launch");
     child = spawnChild(command, args, {
@@ -143,17 +161,20 @@ export async function boundedCommand({
     });
     // Each command owns the process group created by this exact spawn. Kill the
     // whole group on deadline so Cargo cannot leave compiler descendants alive.
+    // null means permission prevented an existence observation. It never
+    // proves disappearance: only an explicit ESRCH/false can finish cleanup.
     const groupExists = () => {
-      if (ownedGroupExists) return ownedGroupExists(child);
-      if (process.platform === "win32") return !closedYet;
-      if (!child.pid) return false;
       try {
+        if (ownedGroupExists) return ownedGroupExists(child);
+        if (process.platform === "win32") return !closedYet;
+        if (!child.pid) return false;
         process.kill(-child.pid, 0);
         return true;
       } catch (error) {
         if (error.code === "ESRCH") return false;
-        failure ??= error;
-        return true;
+        observeCleanup("probe", error);
+        if (error.code !== "EPERM") failure ??= error;
+        return null;
       }
     };
     const terminate = () => {
@@ -170,7 +191,10 @@ export async function boundedCommand({
               ? child.kill(signal)
               : process.kill(-child.pid, signal);
         } catch (error) {
-          if (error.code !== "ESRCH") failure ??= error;
+          if (error.code !== "ESRCH") {
+            observeCleanup("signal", error, signal);
+            failure ??= error;
+          }
         }
       };
       const finish = () => {
@@ -182,13 +206,13 @@ export async function boundedCommand({
       send("SIGTERM");
       // A leader exiting on TERM does not prove its descendants exited.
       escalation = setTimeout(() => {
-        if (groupExists()) send("SIGKILL");
+        if (groupExists() !== false) send("SIGKILL");
       }, terminationGraceMs);
       groupPoll = setInterval(() => {
-        if (!groupExists() && closedYet) finish();
+        if (groupExists() === false && closedYet) finish();
       }, 20);
       detachDeadline = setTimeout(() => {
-        ownershipUnresolved = groupExists() || !closedYet;
+        ownershipUnresolved = groupExists() !== false || !closedYet;
         if (ownershipUnresolved) {
           failure ??= new Error(
             "owned command failed to close after termination",
@@ -237,9 +261,13 @@ export async function boundedCommand({
     let result;
     try {
       result = await closed;
-      if (!terminationPromise && groupExists()) {
-        failure ??= new Error("owned command left live descendants");
-        terminate();
+      if (!terminationPromise) {
+        const remainingGroup = groupExists();
+        if (remainingGroup !== false) {
+          if (remainingGroup === true)
+            failure ??= new Error("owned command left live descendants");
+          terminate();
+        }
       }
       if (terminationPromise) await terminationPromise;
     } finally {
@@ -259,7 +287,13 @@ export async function boundedCommand({
               ? "run interrupted"
               : `command exited ${result.code ?? result.signal}`,
         );
-      error.phaseResult = { ...result, timedOut, aborted, ownershipUnresolved };
+      error.phaseResult = {
+        ...result,
+        timedOut,
+        aborted,
+        ownershipUnresolved,
+        cleanupObservations,
+      };
       throw error;
     }
     return {
@@ -267,6 +301,7 @@ export async function boundedCommand({
       timedOut,
       aborted,
       stdout: Buffer.concat(stdout).toString("utf8"),
+      cleanupObservations,
     };
   } catch (error) {
     primaryFailure = error;
@@ -396,6 +431,7 @@ export async function runLargeMailboxSmoke(options = {}) {
         signal: controller.signal,
       });
       entry.status = "passed";
+      entry.cleanupObservations = result.cleanupObservations ?? [];
       return result;
     } catch (error) {
       entry.failure = String(error.message);

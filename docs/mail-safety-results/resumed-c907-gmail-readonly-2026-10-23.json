@@ -1,0 +1,41 @@
+{
+  "coreEvidence": {
+    "cachePublished": true,
+    "displayRepresentatives": 1,
+    "distinctPhysicalLocators": true,
+    "epochFencedStore": true,
+    "expectedBodySha256": "13fd2499ca784a799eab087ec855ec10fbf08f998a42eb20ff775b52ef666f49",
+    "expectedSubjectSha256": "13fd2499ca784a799eab087ec855ec10fbf08f998a42eb20ff775b52ef666f49",
+    "labelCopiesDeduplicated": true,
+    "limitations": [
+      "does_not_exercise_sync_all_or_snapshot_finalization",
+      "does_not_validate_dakia_list_parser_or_mailbox_plan_resolution",
+      "live_copies_share_both_rfc_and_gmail_ids_but_thread_key_proves_gmail_identity_precedence",
+      "does_not_prove_reader_frontend_or_native_webview_rendering"
+    ],
+    "outcome": "passed",
+    "parserVerified": true,
+    "physicalCopies": 2,
+    "productionFullFetch": true,
+    "profileSchemaVersion": 3,
+    "providerIdentityMatchedAcrossCopies": true,
+    "providerIdentitySelectedThreadKey": true,
+    "providerIdentitySurvivedReopen": true,
+    "providerScope": "dedicated_disposable_gmail",
+    "resultCode": "b004_production_gmail_identity_store_reopen_label_dedup",
+    "rfcMessageIdMatchedAcrossCopies": true,
+    "roundtripId": "45bacd384f0c4a74893f14e4fea23d9a",
+    "schemaVersion": 2,
+    "sourceDigest": "c9076b46e5937de89ee653639fdf446530682f81d3890f4fa33c3b20f2cfbe6e",
+    "storeReopenVerified": true
+  },
+  "credentialsFileUnchanged": true,
+  "outcome": "passed",
+  "rawProviderObservationsRetained": false,
+  "remoteMutationRequested": false,
+  "resultCode": "b004_provider_identity_proof_wrapper_passed",
+  "roundtripId": "45bacd384f0c4a74893f14e4fea23d9a",
+  "runnerSha256": "bcca15636abb8d81879b0c85f178936805f505a720045ae1e6afd555e29c79bc",
+  "schemaVersion": 1,
+  "sourceDigest": "c9076b46e5937de89ee653639fdf446530682f81d3890f4fa33c3b20f2cfbe6e"
+}
