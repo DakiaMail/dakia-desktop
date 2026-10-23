@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "lane": "native-WebKit",
+  "status": "partial-failed",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "c56d2d806d8623dd14c858c8a8362729655496036405ad8c24162fce02a9a85b",
+    "fileCount": 939,
+    "unchangedBeforeAfter": true
+  },
+  "runtime": {
+    "appPid": 90808,
+    "appExitCode": 0,
+    "harnessExitCode": 0,
+    "desktopSha256": "3034b987470efa198afe82d792e2613f82b03c051ce5dc85f9bf500024e39d4f",
+    "cliSha256": "ea9e1145a681334673c1947b55f206a488fc2817b7c54222845151bf66a7e8ad",
+    "signatureScope": "ad-hoc fictional acceptance wrapper",
+    "originalApprovedAppRestored": true,
+    "cleanupSentinel": "dakia-native-provider-reader-post-exit-complete-v1"
+  },
+  "passed": [
+    {
+      "scope": "translation and remote-content rendering",
+      "result": "The mounted Reader showed local translation with zero controlled contacts. Before consent, no contact reached either owned listener. After one explicit grant, five HTTP requests and four expected TLS ClientHello attempts matched the fixture allowlist, and no unexpected HTTP or TLS contact was recorded. The permission reset counter did not grow after the later message switch and return. Embedded local images remained visibly loaded."
+    },
+    {
+      "scope": "history and external flag evidence",
+      "result": "Five visible expand/collapse history states completed. External-flag evidence is retained separately in native-external-flag-acceptance-2026-10-21.json."
+    },
+    {
+      "scope": "native attachment save safety",
+      "result": "The safe-first production artifact passed. EACCES and a real 64 MiB HFS+ ENOSPC save both produced visible failure with no final or partial file, restored the owned Downloads state, and then saved the exact 32-byte attachment at mode 0600 with quarantine. Leaf-symlink saving left the canary unchanged and produced a separate 28-byte quarantined mode-0600 file. A positive bulk save produced exact quarantined mode-0600 files, and the warning remained visible for the partial case."
+    },
+    {
+      "scope": "collision and shared-profile boundaries",
+      "result": "The 10,000-collision partial bulk operation retained the first saved attachment and produced its visible partial-result observation within 7,969 ms, including tool and observation overhead. The bounded shared-profile check ran eight read-only CLI readers while the desktop and realtime IMAP connections remained active, preserving the recorded logical Store state."
+    },
+    {
+      "scope": "offline rollback",
+      "result": "After the proxy disconnected, mark-unread for UID 5 showed an error. Cached UID 4 and UID 5 remained readable after reopen, and all eight recorded rows, flags, and body hashes matched before and after the rollback."
+    }
+  ],
+  "failed": [
+    {
+      "scope": "native Compose mailto seed",
+      "result": "The physical CR mailto case opened a Compose window with blank To and Subject fields and no warning. The URL seed database key was present, but the visible fail-closed seed behavior was not established. No Compose send was attempted and no UID 6 or UID 7 mail was created."
+    }
+  ],
+  "notRun": [
+    "MS-H-016 forward-upgrade confirmation. A generic harness message saying H016 completed was not treated as an H016 run.",
+    "Two remaining startup-alert exits.",
+    "Held-sync/send and leap-second native replay.",
+    "The eleven physical mailto cases and detached-account workflow.",
+    "The full L013 native resource cohort. Only baseline and Reader samples of six planned phases were captured; no cohort result is claimed.",
+    "Notification delivery. Notifications were unavailable and stayed fail-closed."
+  ],
+  "artifactHashes": {
+    "sourceBeforeBuild": "32d7a7768bcca89e24ce5c90dddab06d0b040d73440001fba32fb33ec809b3ff",
+    "sourceAfterRun": "3e92f39ac97cbfc445d85b2e4db0f6419f74c785a1c30b68492c14d6d11b373e",
+    "postExitHandoff": "daa7a5258b6db65c885a652a57869fa60e17c84eeec37e549bfb1f216e16cc06",
+    "nativeAclAcceptance": "6f7a065739ff8d15f6b487986283a6102a326d169407f2409e1b6526e43de6da",
+    "sharedProfileAcceptance": "163a9a499fea45e066fd23cb1dca6f8147040f5f3b0779543beea018c9de0634",
+    "translationNoContact": "5cb1f1e1c9190d9fa1074330ff9ff03b2173673f35a935c34ed5e996c488d39b",
+    "remoteConsentCounter": "c55313223d713f6c52a7d26b64b902dd0e325b6a2aa94ac4118efe7837723409",
+    "permissionResetCounter": "1bb95a7231ce8fcd518e05313c0ff96306037b2fed54454f31d39dc820aae628",
+    "bulkCollisionObservation": "52b0fb8e4a0d98cce752cd20c9a54dbb45573735323da8c91aaf7bc4aeb575b7",
+    "positiveBulkFiles": "364c385ded0b7b102e9fbc6b743fe4d26da3cba04f047b5a20973188cd7f6454",
+    "offlinePreservation": "b4c9e557b4572c40c553bff1c89b09e6245dd6cd29b34c9d7a00a89d18debab3",
+    "enospcFailure": "19ca51e3d456a9cd07904878ca366a258a567b7c1da38ea267a1f7ea0e466c45",
+    "enospcRetry": "2a96eeaa8f6c5e7f2f920b4e1285a44addcb98c804db0fa1136feda6c22f9b06",
+    "leafSymlink": "0b78d0fbc2e5613f48b59a7cce17db7dd38457069775b0251be2d38bb219fa76"
+  },
+  "limitations": [
+    "This partial-failed checkpoint does not close native acceptance by arithmetic from its passed slices.",
+    "The wrapper is fictional and ad-hoc signed, not a Developer ID signed, notarized, stapled, or distributed release candidate.",
+    "The native Compose seed failure requires a handshake fix and replay.",
+    "No physical sleep/wake result was collected."
+  ]
+}

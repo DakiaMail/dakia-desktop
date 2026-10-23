@@ -1,0 +1,236 @@
+{
+  "schemaVersion": 1,
+  "status": "partial-failed-acceptance",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "67018628cfa5601b987996ccee872283365cb888eb575a8d87bc501c9234f03b",
+    "fileCount": 736
+  },
+  "sourceAfterRun": {
+    "status": "passed",
+    "baseline": {
+      "algorithm": "sha256-path-and-content-manifest",
+      "digest": "67018628cfa5601b987996ccee872283365cb888eb575a8d87bc501c9234f03b",
+      "fileCount": 736
+    },
+    "current": {
+      "algorithm": "sha256-path-and-content-manifest",
+      "digest": "67018628cfa5601b987996ccee872283365cb888eb575a8d87bc501c9234f03b",
+      "fileCount": 736
+    }
+  },
+  "runtime": {
+    "pid": 64141,
+    "executable": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/Dakia Fictional Provider Reader.app/Contents/MacOS/dakia-desktop",
+    "executableSha256": "5eebf1c72e7052b45197953d802353616a229d2dbcd7b6e23f052e11ac64196b",
+    "webviewUrl": "http://127.0.0.1:1420/",
+    "bundleIdentifier": "dev.dakia.fictional-provider-reader.wrapper",
+    "processExitCode": 0,
+    "isolatedAccounts": 2,
+    "initialProviderMessages": 6
+  },
+  "passedChecks": [
+    "Live Wry ACL probe passed; exact runtime/static inventories remain in its separate report.",
+    "Actual local-provider arrival after mounted Reader appeared without manual Sync, then opened with exact expected body.",
+    "Preview/background flags were all unread; opening account-one UID3 changed only that UID to Seen at the checked boundary.",
+    "Zero HTTP/TLS contacts before consent through reading, five real history transitions, and English translation preparation.",
+    "Both embedded SVG green panels rendered visibly before consent; active-content canaries stayed inert.",
+    "Five history transitions grew/shrank the actual native surface and preserved Reader controls.",
+    "After transport settled, HTTP4/TLS4 stayed unchanged for 27.664 seconds across watcher updates, history transitions, and forward preparation; every HTTP request had no Referer.",
+    "Switching away/back reset remote permission and caused no new contacts.",
+    "Individual save, bulk collision naming, exact bytes, unsafe warning, mode0600, quarantine, and no auto-open passed.",
+    "Injected partial save added exactly one file and showed Saved 1 of 2 attachments.",
+    "Denied destination added no files and showed Saved 0 of 2 attachments; permissions restored.",
+    "Malformed MIME produced bounded Reader error; later valid mail remained readable.",
+    "Extreme tall message bottom reached visibly using actual native scroll and Cmd+Down.",
+    "Same-UID/Message-ID account-two body and attachment stayed distinct through unified inbox, scoped search, detached Reader and Forward; compose From remained account two; no external send.",
+    "Owned proxy disconnect acknowledged disabled=true/activeSockets=0; cached Reader stayed readable, search reported incomplete offline results, uncached content showed a fetch error and Try again.",
+    "Proxy resume acknowledged, fresh connections established; Try again reached malformed MIME rather than retaining the network error.",
+    "Source digest was unchanged after build and after clean app quit."
+  ],
+  "failedAcceptance": [
+    {
+      "check": "Post-consent redirect matrix",
+      "expectedHTTP": 5,
+      "observedHTTP": 4,
+      "observedTLS": 4,
+      "detail": "Redirect endpoint was requested but its target GET never arrived; native WebKit reported network connection lost. Exact five-request allowlist did not pass."
+    },
+    {
+      "check": "Reply preparation",
+      "detail": "Fictional provider@localhost sender is rejected by existing recipient validation, so Reply returns before compose. Forward preparation did run; Reply privacy remains unverified."
+    },
+    {
+      "check": "Embedded images after consent",
+      "detail": "Both panels rendered before consent and again after message reset, but the post-consent Reader exposed only alt image nodes. Native replay must verify visible post-consent rendering."
+    }
+  ],
+  "additionalFindings": [
+    "WebKit startup console recorded two unhandled notification.registerListener Command not found rejections.",
+    "Remote-content/history controls have poor contrast over white email content in dark mode."
+  ],
+  "limitations": [
+    "English fixture translation reports already in English; this is preparation evidence, not actual offline translation inference or egress proof.",
+    "Physical Mac sleep/wake was explicitly declined and was not performed.",
+    "Fictional loopback dev wrapper is not packaged distribution/signing/notarization/Gatekeeper proof.",
+    "No new Gmail send or other live-provider mutation occurred.",
+    "This checkpoint is not a clean overall native acceptance pass."
+  ],
+  "evidence": [
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/account-two-detached-forward.png",
+      "sha256": "86b2784262f541e6f9e34ab39c03b553b1c0ed692054f95eb9472706fb38f8da",
+      "bytes": 175553
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/after-consent-settled.json",
+      "sha256": "884336af63b336297ab04e667623f17a57eca59356304fe9cc8f24dcf04eb5e1",
+      "bytes": 1575
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/after-forward-counter.json",
+      "sha256": "41468f6a46def447869f79e35b8c00463f02d15759f6239f46940056e499df15",
+      "bytes": 1575
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/after-permission-reset-counter.json",
+      "sha256": "28e076fa5ebf5aac86834cda05c92f9dc5b26ac46a472643f36897a3d3a668fd",
+      "bytes": 1575
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/flags-after-reader.json",
+      "sha256": "5d604bff819ea1a9acaf4c41e19b19e5193bee2bf745f27b1e64fb490e27ac55",
+      "bytes": 122
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/flags-before-reader.json",
+      "sha256": "ccc13e81dbdf703a9245b28ad27ec447ea46aa91b280cb648097ab878c61c2fb",
+      "bytes": 116
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/forward-native.png",
+      "sha256": "51b6a0b2fcc3f907e3a93a6b529c03b868e0f8e7377fb020c21b26ff45cdb33f",
+      "bytes": 248059
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/history-collapse-1.png",
+      "sha256": "da2998f7f4c925759c6aa82db0a0d3cf2d7ade222ec14e2dd683de6c29377d09",
+      "bytes": 489795
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/history-collapse-2.png",
+      "sha256": "d9115da57dc42d21f25eee54dc7a5fbfa8dc10c328baaf2f3f00655a2469ba98",
+      "bytes": 489797
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/history-expand-1.png",
+      "sha256": "475b0932802b77ce6ea66d4ac5d9b412f927f7d0db4718e6597f37b8fb9e2300",
+      "bytes": 526276
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/history-expand-2.png",
+      "sha256": "c2a7dcf90cb2379ad50fb4cc663e1b60fc248b113b45eb706298cc43d8ac2e89",
+      "bytes": 526275
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/history-expand-3.png",
+      "sha256": "38516e9534aa3b0489a25ddb103dbcaff1db3b6d23b389f0623b7c4d7d7a248e",
+      "bytes": 526271
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/imap-proxy-state.json",
+      "sha256": "84e509024050cd5d9f71b2a32e8f6d7b17573b870a8de8df3475a9f8db57ad8a",
+      "bytes": 185
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/imap-proxy.json",
+      "sha256": "158b1e65575582effbc4752073577d0c2e9a535b55c5b510a0567894c01171aa",
+      "bytes": 130
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/long-message-bottom.png",
+      "sha256": "5e0b532a9c5ce377a25af2011a75f9ab36558116ab8cbdbfefc71d51c824065a",
+      "bytes": 338340
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/native-acceptance-plan.json",
+      "sha256": "5510ee1d0591ffa069357ce049db394e57eac077dcdd882020858b94606a4fce",
+      "bytes": 4193
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/native-acl-acceptance.json",
+      "sha256": "790b25a8748457157d0d028e9c70de22905b60ac1ea2bcaf10c92dcc63e09236",
+      "bytes": 30475
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/native-runtime-files.json",
+      "sha256": "c8df3160723961b11339135ce96e273a83204e1510e6d39172487287ad783dd0",
+      "bytes": 1749
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/network-requests.json",
+      "sha256": "0115e8dcc3dac3b2025f8f7da9e5e470a708897a3aead1997aa53ecaa53b0413",
+      "bytes": 1575
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/post-mount-arrival.json",
+      "sha256": "5084cfa7abc171f82cfec601e1e893dccc3f5252d9118c19b9b54f785fc4d77b",
+      "bytes": 253
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/reader-before-consent.png",
+      "sha256": "4a81c7e664fac7787bb96c4633d3cc26ec8c9570c090eaf8ba69b723b5e0bb9f",
+      "bytes": 488973
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/reconnect-reader-ax.txt",
+      "sha256": "e08eafc3a3870b5935a0443a5fd4ca83eea1673e22c5a16b90a78d2707d52ceb",
+      "bytes": 3302
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/reconnect-reader.png",
+      "sha256": "3faaa4ff8383a6e5860306dd58a38f8984b6d598f3a31ad10087b0b9aa694456",
+      "bytes": 299626
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/saved-bulk-evidence.json",
+      "sha256": "18f48c76292ef044220c3a870e5373e6a6a84d6156f1ce47e22056050079bf36",
+      "bytes": 710
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/saved-individual-evidence.json",
+      "sha256": "ba5d07656bee619f5fcc5ec5ca3bbd8304c274f9c75d86ffb51f71167b88699a",
+      "bytes": 242
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/saved-partial-evidence.json",
+      "sha256": "c634db144df41d217cad89bfa98ffed31ec196a3166d58e89c47e9074881f7a5",
+      "bytes": 856
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/sleep-wake-fixture.json",
+      "sha256": "ddff2501af448ff4438d97837dc07aae8816baf0374411f2faeb637f285a1de3",
+      "bytes": 359
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/source-after-build.json",
+      "sha256": "5323b4458529b3e2c56e52acaf30232edc1d180ac68e70dbf12aec5a84463f06",
+      "bytes": 378
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/source-after-run.json",
+      "sha256": "5323b4458529b3e2c56e52acaf30232edc1d180ac68e70dbf12aec5a84463f06",
+      "bytes": 378
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/source-before-build.json",
+      "sha256": "1ab0c63e51d2aa43e4efac9bc88c65008986327e8547ffd6c0acc0c61becc7ca",
+      "bytes": 154
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8fJ2XN/tauri.json",
+      "sha256": "551a7497e19597db3fd2056b6bbaff8322571efcf6e3cad7c1eafcfc819c8055",
+      "bytes": 339
+    }
+  ]
+}

@@ -1,0 +1,135 @@
+{
+  "command": "search",
+  "arguments": {
+    "query": {
+      "text": "  雪 \"töö\" +tag  ",
+      "account_ids": ["11111111-1111-4111-8111-111111111111"],
+      "mailbox": "Archive/Arved",
+      "from": null,
+      "unread_only": true,
+      "read_only": false,
+      "flagged_only": false,
+      "unflagged_only": true,
+      "category": "transactions",
+      "limit": 500,
+      "cursor": {
+        "received_at": "2026-10-21T08:00:00Z",
+        "id": "account-a:INBOX:雪-042"
+      }
+    }
+  },
+  "response": {
+    "conversations": [
+      {
+        "id": "11111111-1111-4111-8111-111111111111:unicode-thread",
+        "accountId": "11111111-1111-4111-8111-111111111111",
+        "threadId": "unicode-thread",
+        "messages": [
+          {
+            "id": "unicode-message",
+            "account_id": "11111111-1111-4111-8111-111111111111",
+            "mailbox": "Archive/Arved",
+            "uid": 42,
+            "mailbox_uid_validity": 77,
+            "message_id": "<unicode@example.test>",
+            "in_reply_to": null,
+            "reference_ids": null,
+            "thread_id": "unicode-thread",
+            "subject": "雪 töö tag",
+            "from_name": "Fictional Sender",
+            "from_address": "sender@example.test",
+            "to_addresses": "reader@example.test",
+            "cc_addresses": "",
+            "bcc_addresses": "",
+            "reply_to_addresses": "",
+            "received_at": "2026-10-21T08:00:00Z",
+            "snippet": "Unicode local result",
+            "body_text": "",
+            "body_html": null,
+            "content_state": "catalogue",
+            "unsubscribe_kind": null,
+            "is_read": false,
+            "is_flagged": false,
+            "has_attachments": false,
+            "category": "transactions",
+            "classification_confidence": null,
+            "classification_source": null,
+            "classification_signals": ""
+          }
+        ],
+        "sourceMessages": [
+          {
+            "id": "unicode-message",
+            "account_id": "11111111-1111-4111-8111-111111111111",
+            "mailbox": "Archive/Arved",
+            "uid": 42,
+            "mailbox_uid_validity": 77,
+            "message_id": "<unicode@example.test>",
+            "in_reply_to": null,
+            "reference_ids": null,
+            "thread_id": "unicode-thread",
+            "subject": "雪 töö tag",
+            "from_name": "Fictional Sender",
+            "from_address": "sender@example.test",
+            "to_addresses": "reader@example.test",
+            "cc_addresses": "",
+            "bcc_addresses": "",
+            "reply_to_addresses": "",
+            "received_at": "2026-10-21T08:00:00Z",
+            "snippet": "Unicode local result",
+            "body_text": "",
+            "body_html": null,
+            "content_state": "catalogue",
+            "unsubscribe_kind": null,
+            "is_read": false,
+            "is_flagged": false,
+            "has_attachments": false,
+            "category": "transactions",
+            "classification_confidence": null,
+            "classification_source": null,
+            "classification_signals": ""
+          }
+        ],
+        "latest": {
+          "id": "unicode-message",
+          "account_id": "11111111-1111-4111-8111-111111111111",
+          "mailbox": "Archive/Arved",
+          "uid": 42,
+          "mailbox_uid_validity": 77,
+          "message_id": "<unicode@example.test>",
+          "in_reply_to": null,
+          "reference_ids": null,
+          "thread_id": "unicode-thread",
+          "subject": "雪 töö tag",
+          "from_name": "Fictional Sender",
+          "from_address": "sender@example.test",
+          "to_addresses": "reader@example.test",
+          "cc_addresses": "",
+          "bcc_addresses": "",
+          "reply_to_addresses": "",
+          "received_at": "2026-10-21T08:00:00Z",
+          "snippet": "Unicode local result",
+          "body_text": "",
+          "body_html": null,
+          "content_state": "catalogue",
+          "unsubscribe_kind": null,
+          "is_read": false,
+          "is_flagged": false,
+          "has_attachments": false,
+          "category": "transactions",
+          "classification_confidence": null,
+          "classification_source": null,
+          "classification_signals": ""
+        },
+        "messageCount": 1,
+        "unread": true,
+        "hasAttachments": false,
+        "participants": ["sender@example.test"]
+      }
+    ],
+    "nextCursor": {
+      "received_at": "2026-10-21T08:00:00Z",
+      "id": "unicode-message"
+    }
+  }
+}

@@ -71,6 +71,18 @@ Therefore:
 
 ## Unambiguous Computer Use verification
 
+For repeated fictional-mailbox checks, reuse the previously approved test
+application name, bundle identifier, and application path. Use the harness’s
+sealed approved-identity record and guarded replacement/recovery path. Each run
+still needs fresh executable hashes, process identity, source provenance, and
+webview URL verification. Reusing a display name alone is not identity proof.
+Never overwrite an installed user app to reuse its identity.
+
+The fictional provider harness can also build an isolated ad-hoc packaged
+candidate for bundled-content acceptance. Its live URL is `tauri://localhost`,
+which must be reported as packaged evidence. It does not establish live Vite
+dev behavior, Developer ID signing, notarization, or public release acceptance.
+
 When the UI tool cannot target the raw dev executable, use a temporary,
 uniquely identified wrapper around a binary compiled from the current checkout.
 The wrapper is a test harness, not a release artifact.
@@ -117,8 +129,10 @@ only that a browser tab opened is also incomplete.
 
 ## Other lessons from the email-link investigation
 
-- HTML email renders in a layout-contained nested Shadow DOM so it participates
-  in normal reader flow without a measured iframe height. Continue to remove
+- HTML email renders in an opaque sandboxed iframe without `allow-same-origin`.
+  Its trusted resize bridge caps the outer height at 6000 pixels; longer content
+  must remain reachable through internal scrolling. Verify both growth and
+  shrinkage in WebKit, including repeated history disclosure cycles. Continue to remove
   email-authored scripts, inline `on*` handlers, frames, forms, `srcdoc`, and
   SVG mutation elements before mounting it.
 - Remove every sanitized anchor's navigable `href`, store the validated
@@ -144,3 +158,94 @@ State exactly what was verified and what was not. A good handoff includes:
 
 If the window identity was not proven, say that verification is blocked rather
 than presenting screenshots from an uncertain build.
+
+## Fictional attachment filesystem acceptance
+
+`scripts/native-attachment-fault-acceptance.sh` exercises real macOS filesystem
+failures against the owned profile created by
+`scripts/native-provider-reader-acceptance.sh`. Keep fixture artifacts, prove the
+exact executable and live URL, and leave the app running until Downloads has
+been restored. The helper rejects unrelated roots, symlinks, stale evidence,
+changed mount identities, and oversized images.
+
+Before saving `meeting-notes.txt` or using Save all, run the leaf collision case:
+
+```sh
+./scripts/native-attachment-fault-acceptance.sh leaf-prepare --root "$RUN_ROOT"
+# Click Save quarterly-report.pdf.command in Reader once; wait for completion.
+./scripts/native-attachment-fault-acceptance.sh leaf-check --root "$RUN_ROOT"
+```
+
+The check requires the symlink and its canary to remain unchanged, exact saved
+bytes, a collision filename, mode 0600, and macOS quarantine. Record the visible
+warning, completion feedback, and absence of automatic opening separately.
+
+With the UI idle, prepare and fill the bounded volume:
+
+```sh
+./scripts/native-attachment-fault-acceptance.sh enospc-prepare --root "$RUN_ROOT" --ui-idle
+./scripts/native-attachment-fault-acceptance.sh enospc-fill --root "$RUN_ROOT"
+```
+
+This creates and validates an exact 64 MiB read-write HFS+ image before moving
+the original fictional Downloads directory. It mounts only at that owned path.
+The bounded fill requires actual ENOSPC and verifies the remaining free space.
+If an interrupted large-block fill left the authenticated filler and ENOSPC log,
+`enospc-fill-resume` validates their identity before bounded tail appends. Do not
+repeat image preparation or bypass a failed identity check.
+
+After a passing fill, click Save meeting-notes.txt once. Verify a visible error
+and cleared spinner, then check the filesystem and restore it:
+
+```sh
+./scripts/native-attachment-fault-acceptance.sh enospc-check --root "$RUN_ROOT"
+./scripts/native-attachment-fault-acceptance.sh enospc-restore --root "$RUN_ROOT" --ui-idle
+# Retry Save meeting-notes.txt once; wait for visible success.
+./scripts/native-attachment-fault-acceptance.sh enospc-retry-check --root "$RUN_ROOT"
+```
+
+The failure check rejects final or partial attachment files. Restoration checks
+the exact image, device, and original directory identity. The retry check requires
+exact bytes, safe permissions, quarantine, and no partial files. Detach and
+restore before quitting the app or ending its outer fixture harness.
+
+Stop on any unexpected failure and retain the root and evidence. An incomplete
+run is not a pass. Inspect the recorded image and mount identity before cleanup;
+do not force-detach a guessed device or remove a mounted fixture root.
+
+`native-attachment-fault-acceptance.node-test.mjs` runs extracted filesystem
+oracles and mutation-sensitive rejection checks on Linux and macOS. The full
+synthetic shell suite runs only on macOS. Neither source suite creates or mounts
+a disk image. Actual image creation, native save failure, and recovery remain
+separate manual evidence.
+
+## Preparing sealed fictional profile copies
+
+Use `scripts/native-profile-fixture.mjs` for the filesystem preparation step of
+schema and recovery checks. It accepts an owned sealed source directory with
+mode 0500 or 0700 and a private mode-0600 manifest. The manifest declares exact
+filenames, byte counts, numeric modes and SHA-256 values, explicit owned markers,
+and files that must be absent. The contract is `dakia-native-profile-fixture-v1`,
+with `schemaVersion`, `files`, `ownedMarkers` and `expectedAbsentFiles` fields.
+Each file entry has `path`, `bytes`, `mode` and `sha256` fields. It must include
+`dakia.db` and `vault.key`; it cannot contain arbitrary relative paths.
+
+```sh
+node scripts/native-profile-fixture.mjs prepare \
+  --source SEALED_FICTIONAL_PROFILE \
+  --manifest PRIVATE_MANIFEST_JSON \
+  --output-root NEW_PRIVATE_DIRECTORY_UNDER_OS_TEMP
+```
+
+The new output contains `profile/` and a preparation receipt. Directories use
+0700 and copied files use 0600, including copies of read-only backup files. The
+source remains unchanged. Existing output paths are rejected. Retain the complete
+source and output; this helper never installs a profile in Application Support,
+launches an app or changes the approved application identity.
+
+After the candidate exits, `compare --baseline PRIVATE_MANIFEST_JSON --after
+PROFILE_COPY --policy future-profile-durable` verifies the named database, key and
+owned markers while requiring the WAL to remain absent. The generic policy
+reports an inventory without an acceptance verdict. Neither comparison proves a
+schema migration, complete-profile quiescence, process exit or native UI result.
+Those require the separate production Store and native observations above.

@@ -1,0 +1,122 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-10-21T16:19:39.671615+00:00",
+  "status": "reviewed-preparation-full-source-baseline-pending",
+  "priorPreflight": {
+    "path": "docs/mail-safety-results/native-packaged-same-identity-f6-preflight-2026-10-21.json",
+    "sha256": "70c7bd53da2e853910ade47e23f7362712de0d6c36bc5e1c63a31872cc7e3a5f"
+  },
+  "source": {
+    "digest": "f8209887faad2ed25f965c55ef7a3680f7663852bfa33674406dc02da5b6063c",
+    "fileCount": 935,
+    "manifest": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-plist-safe.json",
+    "manifestSha256": "8e7c088c29283931b0f1f5e1d23109489b9c00679d46daff5d2527e1b4677979"
+  },
+  "governedArtifacts": [
+    {
+      "path": "scripts/native-provider-reader-acceptance.sh",
+      "sha256": "9569ff75d6a7caebee868c4695586cf7875b287e5caa7db98ae4c8ed0156f93c",
+      "purpose": "fictional provider, packaged custom-protocol build, sealed identity transaction, runtime evidence, and H016 hold"
+    },
+    {
+      "path": "scripts/native-provider-reader-fixture.node-test.mjs",
+      "sha256": "5fcd0c143ab3fc661d7a5fd3d7b98acade7f212be0b4354a9159c42c5dc78012",
+      "purpose": "extracted executable harness tests, rejection tests, and transaction sensitivity"
+    },
+    {
+      "path": "scripts/native-fictional-imap-proxy.mjs",
+      "sha256": "150a549459486c9ddace45f0cec034200273635eaff85d88389fb6f0e500264a",
+      "purpose": "nonce-owned fictional IMAP disconnect, bounded hold, automatic release, and explicit resume control"
+    },
+    {
+      "path": "scripts/native-fictional-imap-proxy.node-test.mjs",
+      "sha256": "48d41090fedfcddbe41c3529f2f7e0c8c4719a9961794b895a9dcd27f0b8779f",
+      "purpose": "loopback byte preservation, hold timing, rejection, automatic recovery, and stale-PID independence tests"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/lib.rs",
+      "sha256": "9cfd6d212aad7205fb7714a7dd91b5d37600c9913041eecf39a7a19c20dbb914",
+      "purpose": "feature-only fictional mailbox setup and per-run WebKit data-store propagation"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/native_acl_acceptance.rs",
+      "sha256": "2bf3fb340b6562c24a3cfb270a040c47da23b6a6b2cd7c005fcd558062d7d9e5",
+      "purpose": "feature-only local and remote Wry ACL probes with atomic evidence"
+    },
+    {
+      "path": "scripts/native-shared-profile-acceptance.mjs",
+      "sha256": "876bd2610e0961b074f4280b7ff1ee9e0cc501805ed1fbf6636c1d7907aaaccb",
+      "purpose": "bounded read-only bundled CLI waves against the live fictional desktop profile"
+    },
+    {
+      "path": "scripts/native-shared-profile-acceptance.node-test.mjs",
+      "sha256": "d3cc3a4f0466c224862465bdd86b85568bc1601653d23753d9d7471e1caaac49",
+      "purpose": "shared-profile command, identity, and no-mutation contract tests"
+    },
+    {
+      "path": "scripts/native-attachment-fault-acceptance.sh",
+      "sha256": "5caadb830454fa2eb8af4da21dbed0e998b40a24fdb466f360fa5d2389e915cf",
+      "purpose": "guarded native leaf-symlink and bounded HFS+ ENOSPC acceptance"
+    },
+    {
+      "path": "scripts/test-native-attachment-fault-acceptance.sh",
+      "sha256": "48282a04379d3e39b39d3c303935024b2a4605fcc65bf8998c9d47f6e6202b50",
+      "purpose": "shell rejection and synthetic recovery checks"
+    },
+    {
+      "path": "scripts/native-attachment-fault-acceptance.node-test.mjs",
+      "sha256": "125525b7dc8b7e7440de6e40abcc6c8382eb34e1ee73d8241048b19537b9aebf",
+      "purpose": "portable extracted filesystem oracle and sensitivity tests"
+    }
+  ],
+  "privateReviewedArtifacts": [
+    {
+      "path": "/private/tmp/dakia-g013-native-attachment-helper.py",
+      "sha256": "852cfc3388a298dd471c33ef713784e90022670bd03d4f9fd27f78bd865d2ee0"
+    },
+    {
+      "path": "/private/tmp/dakia-g013-run-safe-first.py",
+      "sha256": "a4ab1295180780a463f9ac4c810b5c1e7511e6d28a3e3fd3975fa58ca12123d0"
+    },
+    {
+      "path": "/private/tmp/dakia-g013-fullfetch-runner/final-build-provenance-plist-safe.json",
+      "sha256": "109d06ec2669ec58660134866c5f415ea36a1e0046e973add059248e38924867"
+    },
+    {
+      "path": "/private/tmp/dakia-g013-fullfetch-runner/final-execution-binding-plist-safe.json",
+      "sha256": "7e4a285d446a4122e80e042c611f24a8bab31f990cf1967e8f99ec60aa67158a"
+    },
+    {
+      "path": "/private/tmp/dakia-native-translation-arrival.py",
+      "sha256": "843efa3079bbbb018d1a568f1918c10328a6f6e24ba914b52c027e0d95473a13"
+    },
+    {
+      "path": "/private/tmp/dakia-l013-native-resource-runner-plist-safe.mjs",
+      "sha256": "efc75500f48a692c5fe65fbb3c7375e1a05b2e2cdae05839a2d0305051ab0816"
+    },
+    {
+      "path": "/private/tmp/dakia-l013-native-resource-collector.mjs",
+      "sha256": "bae216586e2a000169e644c71e0650d72a247a5d62b7ebaa0ee1bc6b6aed415b"
+    },
+    {
+      "path": "/private/tmp/dakia-h016-provider-reader-adapter.mjs",
+      "sha256": "965c3f774e5561c106212896f735fe89cd51d4c87f76914072b1933c2e0a1813"
+    },
+    {
+      "path": "/private/tmp/dakia-h016-faithful-upgrade-provider-reader.mjs",
+      "sha256": "d06ec3717c2ef726e7adf7e2915e33e4bc394257b92bd7689ac98e8a2efb09fd"
+    }
+  ],
+  "requiredGates": [
+    "new full-source three-run report passes unchanged f820/935 source",
+    "all private helpers retain reviewed hashes and runtime ownership requirements",
+    "existing owned compiler cache may be reused only while the exact generated .app path is absent; retained compile-only and signed rmzFqM bundles remain untouched",
+    "exact same approved app path, name and bundle ID",
+    "no UI or H016 acceptance before actual candidate identity is proved"
+  ],
+  "nativeTargetDirectory": "/private/tmp/dakia-native-packaged-final-f6c8094e-20261021-target",
+  "runtimeDataStore": "Static JSON field omitted; exact owned runtime-context receipt binds canonical v4 UUID to16bytes injected before main window build. Main and detached/ACL windows validate and share the value.",
+  "releaseBoundary": "Private ad-hoc fixture-enabled debug candidate only; no Developer ID, notarization, installation, update publication, or public release claim.",
+  "runtimeExecuted": false,
+  "structuredIdentity": "All harness, shared-profile and resource identity consumers parse bounded owned canonical plist bytes, reject duplicate keys, and compare exact top-level values; pretty XML and binary plists are accepted."
+}

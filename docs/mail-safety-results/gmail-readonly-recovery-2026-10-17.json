@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "outcome": "passed",
+  "stage": "inbox_observation",
+  "completedAtUtc": "2026-10-17T20:15:14.129694+00:00",
+  "provider": "gmail",
+  "authenticationMethod": "app_password",
+  "accountScope": "one explicit disposable allowlisted account",
+  "operations": [
+    "IMAP read-neutral authentication/discovery",
+    "SMTP authentication and QUIT",
+    "read-only exact INBOX UUID search and body observation"
+  ],
+  "readNeutralImapMessageFetchLimit": 0,
+  "roundtripInboxSyncLimit": 1,
+  "roundtripRemoteSearchLimit": 10,
+  "roundtripMessageLimit": 0,
+  "remoteMutationRequested": false,
+  "roundtripId": "45bacd384f0c4a74893f14e4fea23d9a",
+  "roundtripObservation": "exact_message_verified",
+  "sourceRevision": "fccbace81192c5b5354f681e2feb2b66971e88cf",
+  "executableSha256": "cf22e6c500d9f6f5ce92482dd487cb657d23df0bf4987aa23195d46b71d993ba",
+  "evidenceScope": "Read-only recovery of the one previously submitted disposable Gmail test message; no additional submission.",
+  "limitations": [
+    "Source revision identifies the base commit of a modified checkout; executable SHA-256 identifies the tested binary.",
+    "This does not prove native WebKit rendering or other provider accounts.",
+    "The original submission was confirmed by the user in Sent and Inbox; this recovery independently verified exact Inbox content."
+  ]
+}

@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "status": "passed-source-applied-native-pending",
+  "recordedAtUtc": "2026-10-22T07:32:48.645Z",
+  "scope": "The c2 source candidate passed three standard noninteractive source cycles and was applied to the primary checkout. The applied delta contains the fatal-exit bridge and local AI child-stdin handling paths. This receipt does not establish c2 native, provider, deep, performance, audit, or release acceptance.",
+  "sourceTree": {
+    "digest": "c2e8ba357d822b2ef086e497916e77f6555a422605e7a4b99acfb1e81e379888",
+    "fileCount": 956
+  },
+  "sourceLane": {
+    "runs": 3,
+    "commandsPerRun": [17, 17, 17],
+    "status": "passed",
+    "sessionExitCode": 0,
+    "noRecordedRetryOrFailure": true,
+    "privateReport": {
+      "path": "/private/tmp/dakia-next-fatal-cmdq-ai-evidence-20261022/source-repeat3.json",
+      "sha256": "bb82a69f301b8f908caa61071fdb7141cb5e33057c35bd81b3f8159096cff0c3"
+    },
+    "privateFinalReceipt": {
+      "path": "/private/tmp/dakia-next-fatal-cmdq-ai-evidence-20261022/final-source-receipt.json",
+      "sha256": "69bd7f46e80c7e275a22a30ed67e9559e185f90ae6efb048269030b9dccf10bb"
+    }
+  },
+  "application": {
+    "status": "applied-and-source-equivalent",
+    "from": {
+      "algorithm": "sha256-path-and-content-manifest",
+      "digest": "09a533c681e40a8a36fbb0159a5c5de025c43c88dbca3dbdc7b0abec91aad2c4",
+      "fileCount": 956
+    },
+    "to": {
+      "algorithm": "sha256-path-and-content-manifest",
+      "digest": "c2e8ba357d822b2ef086e497916e77f6555a422605e7a4b99acfb1e81e379888",
+      "fileCount": 956
+    },
+    "changedPaths": [
+      "apps/desktop/src-tauri/src/lib.rs",
+      "crates/dakia-core/src/ai.rs",
+      "crates/dakia-core/tests/ai_privacy.rs"
+    ],
+    "privateJournal": {
+      "path": "/private/tmp/dakia-source-application-c2.08d976um/journal.json",
+      "sha256": "da94f33760ef341b81ed1524a374d9182ebb7e2c53ec1421efd5ee87eb81dc52"
+    }
+  },
+  "boundedChange": {
+    "fatalExit": "Regular packaged Quit uses the normal exit path while fatal recovery requests exit status 1; current native execution remains pending.",
+    "aiChildStdin": "Local AI child stdin is null so an optional fixture process cannot inherit the source runner stdin; this does not enable desktop AI commands."
+  },
+  "evidenceBeforeApplication": {
+    "fatalHelperUnitChecks": "14 of 14 rebound fatal-helper unit checks passed before native launch."
+  },
+  "limitations": [
+    "The earlier 09a5 native Cmd-Q exit-0 failure remains historical evidence until the c2 binary is exercised.",
+    "No c2 native build, WebKit interaction, provider probe, deep lane, performance lane, dependency audit, or release check is represented as passed by this receipt.",
+    "No all-programme or original 69-gap closure is implied."
+  ]
+}

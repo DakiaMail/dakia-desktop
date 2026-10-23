@@ -1,0 +1,116 @@
+{
+  "schemaVersion": 1,
+  "lane": "fixture-contract-repair",
+  "recordedAt": "2026-10-21T14:52:54Z",
+  "revision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "workingTree": "modified or unavailable",
+  "environment": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "node": "v22.23.2"
+  },
+  "status": "passed",
+  "files": [
+    {
+      "path": "scripts/fixture-process-lifecycle.mjs",
+      "sha256": "48ef4c8c577ca49df3607cea7b3e8119da4d2cab0ac5cbc89cf2870d84e7dcd1"
+    },
+    {
+      "path": "scripts/fixture-process-lifecycle.node-test.mjs",
+      "sha256": "e861492fb2209de1cfa7d40ca86184eb99fa35a4c261b8e4fa94eb1e49e58fac"
+    },
+    {
+      "path": "scripts/test-attachment-command-artifact.mjs",
+      "sha256": "199d0247d7b304ae1f8f0887b778d1c6e8ba31261be01eac0ad9aaf197cfa3b0"
+    },
+    {
+      "path": "scripts/test-mail-command-tls.mjs",
+      "sha256": "9212fcff310af6c0f70f438a9779e8ceaffca3cf8fc526cc48912ab1d6646c22"
+    },
+    {
+      "path": "scripts/mail-command-tls-fixture-server.mjs",
+      "sha256": "b9d179112e852f33c39b477f2f7b576fb1e51f4ae2fa177996864851cec414d8"
+    }
+  ],
+  "checks": [
+    {
+      "command": "cargo test -p dakia-desktop --locked --features native-mail-safety-fixture --lib",
+      "status": "passed",
+      "passed": 205,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "command": "node --test scripts/fixture-process-lifecycle.node-test.mjs",
+      "status": "passed",
+      "passed": 3,
+      "failed": 0,
+      "coverage": [
+        "already signal-terminated child",
+        "SIGTERM to SIGKILL escalation",
+        "bounded no-exit rejection with listener removal and unref"
+      ]
+    },
+    {
+      "command": "node scripts/test-realtime-delivery.mjs",
+      "status": "passed",
+      "exitCode": 0
+    },
+    {
+      "command": "node scripts/test-mime-reader-artifact.mjs",
+      "status": "passed",
+      "exitCode": 0
+    },
+    {
+      "command": "node scripts/test-attachment-command-artifact.mjs",
+      "status": "passed",
+      "exitCode": 0,
+      "smtpConnections": 0
+    },
+    {
+      "command": "node scripts/test-mail-command-tls.mjs",
+      "status": "passed",
+      "exitCode": 0,
+      "smtpConnections": 0,
+      "imapSessions": 9
+    },
+    {
+      "command": "node --check and npx prettier --check for the five recorded files",
+      "status": "passed"
+    }
+  ],
+  "sensitivityEvidence": [
+    {
+      "status": "observed-failure-before-repair",
+      "failure": "DAKIA_NATIVE_MAIL_SAFETY_SMTP_HOST required",
+      "meaning": "The strict fixture contract rejected callers that omitted the controlled SMTP endpoint.",
+      "durableEvidence": "docs/mail-safety-results/remaining-gap-closure-source-fixture-contract-failure-2026-10-21.json"
+    },
+    {
+      "status": "observed-failure-before-repair",
+      "failure": "IMAP connection closed during command after LIST arrived where the stale fixture expected SELECT",
+      "meaning": "The exact transcript oracle rejected the outdated command ordering before it was updated to LIST, SELECT, then UID MOVE. Permanent deletion now requires CAPABILITY, LIST, SELECT, UID STORE, and UID EXPUNGE in order."
+    }
+  ],
+  "contractEvidence": [
+    "Both non-send artifact runners provide owned ephemeral loopback SMTP endpoints and assert that no SMTP connection occurred.",
+    "Production fixture guards remain mandatory and unchanged.",
+    "Fixture process cleanup is bounded across ordinary exit, signal exit, SIGTERM escalation, and missing exit after SIGKILL.",
+    "The complete ordered IMAP transcript is compared after the fixture has stopped and flushed its records."
+  ],
+  "independentReview": {
+    "reviewer": "native_harness_review",
+    "status": "go",
+    "blockers": [],
+    "reviewed": [
+      "strict fixture environment and zero-SMTP assertions",
+      "IMAP transcript ordering and oracle strength",
+      "bounded child-process cleanup and sensitivity tests"
+    ]
+  },
+  "limitations": [
+    "This is focused fixture-contract repair evidence, not the required three-run full source baseline.",
+    "It is not native WebKit, packaged-app, provider, deep, fuzz, performance, audit, upgrade, signing, notarization, or release evidence.",
+    "The separately retained failed source attempt remains failed and is not counted as a pass."
+  ]
+}

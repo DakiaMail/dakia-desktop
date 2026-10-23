@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "outcome": "failed",
+  "stage": "timeout",
+  "completedAtUtc": "2026-10-20T22:08:23.480238+00:00",
+  "provider": "gmail",
+  "authenticationMethod": "app_password",
+  "accountScope": "one explicit disposable allowlisted account",
+  "operations": [
+    "IMAP read-neutral authentication/discovery",
+    "SMTP authentication and QUIT",
+    "read-only exact INBOX UUID search and body observation"
+  ],
+  "readNeutralImapMessageFetchLimit": 0,
+  "roundtripInboxSyncLimit": 1,
+  "roundtripRemoteSearchLimit": 10,
+  "roundtripMessageLimit": 0,
+  "remoteMutationRequested": false,
+  "roundtripId": "45bacd384f0c4a74893f14e4fea23d9a",
+  "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "executableSha256": "7acfa4183e8d0b9b089ca76ddb58cf424b3fc72d72d3a8b231a3a885a2979799",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "7126a3b01086f50ffb453b8ddc7ba68909c25258f31058b256c2393d6c521162",
+    "fileCount": 743
+  },
+  "explicitBuildLog": "/private/tmp/dakia-provider-final-frozen-build-2026-10-21.log",
+  "diagnostic": "Overall 45-second provider recovery timeout; completed operation stage is not recorded by this version. Subsequent unauthenticated certificate-verified IMAP and SMTP greetings succeeded; the timed-out phase remains unresolved.",
+  "connectivityDiagnostic": "/private/tmp/dakia-provider-recovery-frozen-20261021/unauthenticated-connectivity.json"
+}

@@ -6,6 +6,20 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+# Deliberately opt-in: only the standalone cargo-fuzz crate exposes the
+# byte-oriented MIME exercise API. Production builds do not include it.
+fuzzing = []
+# Compiles the explicitly loopback-only trust seam used by the isolated native
+# mail-safety acceptance harness. Normal application and release builds never
+# include this feature, so their IMAP connector remains WebPKI-only.
+native-mail-safety-fixture = []
+# Builds a dedicated SQLite I/O-fault integration binary. Use
+# scripts/run-sqlite-fault-injection.sh so bundled SQLite instruments its
+# default VFS without enabling unavailable Tcl hooks. Ordinary builds leave
+# this disabled.
+sqlite-fault-injection = ["dep:libsqlite3-sys"]
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
@@ -14,6 +28,8 @@ chrono.workspace = true
 directories.workspace = true
 fastembed = { version = "=5.13.1", default-features = false, features = ["ort-download-binaries-native-tls"] }
 lettre.workspace = true
+libc.workspace = true
+libsqlite3-sys = { version = "=0.30.1", features = ["bundled"], optional = true }
 mail-auth = { version = "0.10", default-features = false, features = ["ring"] }
 mail-parser.workspace = true
 percent-encoding.workspace = true
@@ -37,3 +53,8 @@ webpki-roots.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+
+[[test]]
+name = "sqlite_fault_injection"
+path = "tests/sqlite_fault_injection.rs"
+required-features = ["sqlite-fault-injection"]

@@ -6,6 +6,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { MantineProvider } from "@mantine/core";
+import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReaderWindowSeed } from "./readerWindow";
 import type { MailSummary, MailThread } from "./types";
@@ -25,9 +26,12 @@ const mocks = vi.hoisted(() => ({
     trashMessagesFromSender: vi.fn(),
   },
   closeReaderWindow: vi.fn(),
+  notifyReaderWindowReady: vi.fn(),
   notifyReaderWindowMutated: vi.fn(),
   notifyReaderWindowFailed: vi.fn(),
   onReaderTarget: vi.fn(),
+  hasNativeReaderSeedHandoff: vi.fn(),
+  rememberReaderSeed: vi.fn(),
   readReaderSeed: vi.fn(),
   openComposeWindow: vi.fn(),
   showNativeMessage: vi.fn(),
@@ -40,9 +44,12 @@ vi.mock("./composeWindow", () => ({
 }));
 vi.mock("./readerWindow", () => ({
   closeReaderWindow: mocks.closeReaderWindow,
+  notifyReaderWindowReady: mocks.notifyReaderWindowReady,
   notifyReaderWindowMutated: mocks.notifyReaderWindowMutated,
   notifyReaderWindowFailed: mocks.notifyReaderWindowFailed,
   onReaderTarget: mocks.onReaderTarget,
+  hasNativeReaderSeedHandoff: mocks.hasNativeReaderSeedHandoff,
+  rememberReaderSeed: mocks.rememberReaderSeed,
   readReaderSeed: mocks.readReaderSeed,
 }));
 vi.mock("./nativeFeedback", () => ({
@@ -63,6 +70,7 @@ vi.mock("./components/Reader", () => ({
     onAddressContextMenu,
     onPermanentDelete,
     onSendAgain,
+    onSummarize,
     onUnsubscribe,
   }: {
     message?: MailSummary;
@@ -72,16 +80,24 @@ vi.mock("./components/Reader", () => ({
     onAddressContextMenu: (message: MailSummary, address: string) => void;
     onPermanentDelete: (message: MailSummary) => void;
     onSendAgain: (message: MailSummary) => void;
+    onSummarize: () => void;
     onUnsubscribe: (message: MailSummary) => void;
   }) => (
     <div>
       <span data-testid="focused-message">{message?.id}</span>
+      <span data-testid="focused-subject">{message?.subject}</span>
+      <span data-testid="focused-epoch">
+        {message?.mailbox_uid_validity ?? "none"}
+      </span>
       <span data-testid="conversation-count">{messages?.length}</span>
       <button type="button" onClick={onArchive}>
         Archive
       </button>
       <button type="button" onClick={() => message && onSendAgain(message)}>
         Send again
+      </button>
+      <button type="button" onClick={onSummarize}>
+        Summarize
       </button>
       <button
         type="button"
@@ -118,6 +134,7 @@ const messages: MailSummary[] = [
     account_id: "account-1",
     mailbox: "INBOX",
     uid: 1,
+    mailbox_uid_validity: 77,
     thread_id: "thread-1",
     subject: "Project",
     from_address: "mara@example.com",
@@ -134,6 +151,7 @@ const messages: MailSummary[] = [
     account_id: "account-1",
     mailbox: "INBOX",
     uid: 2,
+    mailbox_uid_validity: 77,
     thread_id: "thread-1",
     subject: "Project",
     from_address: "alex@example.com",
@@ -185,6 +203,7 @@ describe("ReaderWindowApp", () => {
     ]);
     mocks.api.conversationForTarget.mockResolvedValue(thread);
     mocks.api.aiAvailable.mockResolvedValue(false);
+    mocks.api.summarize.mockResolvedValue("Summary");
     mocks.api.action.mockResolvedValue(undefined);
     mocks.api.setRead.mockResolvedValue(undefined);
     mocks.api.showEmailAddressContextMenu.mockResolvedValue(undefined);
@@ -202,6 +221,9 @@ describe("ReaderWindowApp", () => {
       failed: 0,
     });
     mocks.onReaderTarget.mockResolvedValue(() => undefined);
+    mocks.notifyReaderWindowReady.mockResolvedValue(undefined);
+    mocks.showNativeMessage.mockResolvedValue(undefined);
+    mocks.hasNativeReaderSeedHandoff.mockReturnValue(false);
     mocks.notifyReaderWindowMutated.mockResolvedValue(undefined);
   });
 
@@ -223,7 +245,7 @@ describe("ReaderWindowApp", () => {
       localMessageId: "message-2",
     });
     await waitFor(() =>
-      expect(mocks.api.setRead).toHaveBeenCalledWith("message-2", true),
+      expect(mocks.api.setRead).toHaveBeenCalledWith("message-2", true, 77),
     );
     expect(mocks.notifyReaderWindowMutated).toHaveBeenCalledWith({
       accountId: "account-1",
@@ -231,6 +253,103 @@ describe("ReaderWindowApp", () => {
       messageIds: ["message-2"],
       mutation: "read",
     });
+  });
+
+  it("shows feedback and closes when a native Reader handoff does not arrive", async () => {
+    vi.useFakeTimers();
+    try {
+      mocks.readReaderSeed.mockReturnValue(undefined);
+      mocks.hasNativeReaderSeedHandoff.mockReturnValue(true);
+      const { ReaderWindowApp } = await import("./ReaderWindowApp");
+      render(
+        <MantineProvider>
+          <ReaderWindowApp />
+        </MantineProvider>,
+      );
+
+      await act(async () => {
+        vi.advanceTimersByTime(5_000);
+        await Promise.resolve();
+      });
+      expect(mocks.closeReaderWindow).toHaveBeenCalled();
+      expect(mocks.showNativeMessage).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(String),
+        "warning",
+      );
+      expect(mocks.api.conversationForTarget).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("closes a native Reader even when handoff feedback is unavailable", async () => {
+    mocks.readReaderSeed.mockReturnValue(undefined);
+    mocks.hasNativeReaderSeedHandoff.mockReturnValue(true);
+    mocks.onReaderTarget.mockRejectedValue(new Error("listener unavailable"));
+    mocks.showNativeMessage.mockRejectedValue(new Error("dialog unavailable"));
+    const { ReaderWindowApp } = await import("./ReaderWindowApp");
+
+    render(
+      <MantineProvider>
+        <ReaderWindowApp />
+      </MantineProvider>,
+    );
+
+    await waitFor(() => expect(mocks.closeReaderWindow).toHaveBeenCalledOnce());
+  });
+
+  it("closes a restored Reader if it cannot register for later retargets", async () => {
+    mocks.hasNativeReaderSeedHandoff.mockReturnValue(false);
+    mocks.onReaderTarget.mockRejectedValue(new Error("listener unavailable"));
+    const { ReaderWindowApp } = await import("./ReaderWindowApp");
+
+    render(
+      <MantineProvider>
+        <ReaderWindowApp />
+      </MantineProvider>,
+    );
+
+    await waitFor(() => expect(mocks.closeReaderWindow).toHaveBeenCalledOnce());
+    expect(mocks.notifyReaderWindowReady).not.toHaveBeenCalled();
+  });
+
+  it("never starts unsubscribe while rendering and binds the explicit action to the visible message epoch", async () => {
+    const { ReaderWindowApp } = await import("./ReaderWindowApp");
+    render(
+      <MantineProvider>
+        <ReaderWindowApp />
+      </MantineProvider>,
+    );
+
+    expect(await screen.findByTestId("focused-message")).toHaveTextContent(
+      "message-1",
+    );
+    expect(mocks.api.unsubscribe).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Unsubscribe" }));
+
+    await waitFor(() =>
+      expect(mocks.api.unsubscribe).toHaveBeenCalledWith("message-1", 77),
+    );
+  });
+
+  it("summarizes the displayed conversation with immutable mailbox epochs", async () => {
+    const { ReaderWindowApp } = await import("./ReaderWindowApp");
+    render(
+      <MantineProvider>
+        <ReaderWindowApp />
+      </MantineProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Summarize" }));
+
+    await waitFor(() =>
+      expect(mocks.api.summarize).toHaveBeenCalledWith(expect.any(Object), [
+        { messageId: "message-1", expectedUidValidity: 77 },
+        { messageId: "message-2", expectedUidValidity: 77 },
+      ]),
+    );
   });
 
   it("only closes after every mailbox action succeeds and refreshes main", async () => {
@@ -255,6 +374,24 @@ describe("ReaderWindowApp", () => {
 
     fireEvent.click(archive);
     await waitFor(() => expect(mocks.api.action).toHaveBeenCalledTimes(2));
+    expect(mocks.api.action).toHaveBeenNthCalledWith(
+      1,
+      "account-1",
+      "INBOX",
+      1,
+      "archive",
+      "message-1",
+      77,
+    );
+    expect(mocks.api.action).toHaveBeenNthCalledWith(
+      2,
+      "account-1",
+      "INBOX",
+      2,
+      "archive",
+      "message-2",
+      77,
+    );
     expect(mocks.closeReaderWindow).not.toHaveBeenCalled();
     expect(mocks.notifyReaderWindowMutated).toHaveBeenCalledWith({
       accountId: "account-1",
@@ -271,6 +408,14 @@ describe("ReaderWindowApp", () => {
     fireEvent.click(screen.getByRole("button", { name: "Archive" }));
     await waitFor(() => expect(mocks.closeReaderWindow).toHaveBeenCalledOnce());
     expect(mocks.api.action).toHaveBeenCalledTimes(3);
+    expect(mocks.api.action).toHaveBeenLastCalledWith(
+      "account-1",
+      "INBOX",
+      1,
+      "archive",
+      "message-1",
+      77,
+    );
     expect(mocks.notifyReaderWindowMutated).toHaveBeenCalledWith({
       accountId: "account-1",
       threadId: "thread-1",
@@ -298,6 +443,9 @@ describe("ReaderWindowApp", () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Unsubscribe" }));
+    await waitFor(() =>
+      expect(mocks.api.unsubscribe).toHaveBeenCalledWith("message-1", 77),
+    );
     expect(
       await screen.findByText("feedback.unsubscribeSuccess"),
     ).toBeVisible();
@@ -585,6 +733,7 @@ describe("ReaderWindowApp", () => {
         body: "Exact original body",
         bodyHtml: "<p>Exact <strong>original</strong> body</p>",
         forwardMessageId: "message-1",
+        forwardMessageUidValidity: 77,
       }),
     );
   });
@@ -608,6 +757,8 @@ describe("ReaderWindowApp", () => {
       "INBOX",
       1,
       "delete",
+      "message-1",
+      77,
     );
     expect(mocks.notifyReaderWindowMutated).toHaveBeenCalledWith({
       accountId: "account-1",
@@ -633,6 +784,35 @@ describe("ReaderWindowApp", () => {
       }),
     );
     expect(mocks.showNativeMessage).toHaveBeenCalled();
+    expect(mocks.closeReaderWindow).toHaveBeenCalled();
+  });
+
+  it("rejects a detached Reader conversation returned for another account", async () => {
+    const wrongAccountMessages = messages.map((message) => ({
+      ...message,
+      account_id: "account-2",
+    }));
+    mocks.api.conversationForTarget.mockResolvedValueOnce({
+      ...thread,
+      id: "account-2:thread-1",
+      accountId: "account-2",
+      messages: wrongAccountMessages,
+      latest: wrongAccountMessages[1],
+    });
+    const { ReaderWindowApp } = await import("./ReaderWindowApp");
+    render(
+      <MantineProvider>
+        <ReaderWindowApp />
+      </MantineProvider>,
+    );
+
+    await waitFor(() =>
+      expect(mocks.notifyReaderWindowFailed).toHaveBeenCalledWith({
+        accountId: "account-1",
+      }),
+    );
+    expect(mocks.api.setRead).not.toHaveBeenCalled();
+    expect(screen.getByTestId("focused-message")).toBeEmptyDOMElement();
     expect(mocks.closeReaderWindow).toHaveBeenCalled();
   });
 
@@ -679,6 +859,102 @@ describe("ReaderWindowApp", () => {
     await act(async () => resolveFirst(thread));
     expect(screen.getByTestId("focused-message")).toHaveTextContent(
       retargetedMessage.id,
+    );
+  });
+
+  it("keeps the event target after StrictMode setup replays", async () => {
+    const retargetedMessage = {
+      ...messages[1],
+      id: "message-retargeted-from-event",
+      thread_id: "thread-2",
+      subject: "Event target wins",
+    };
+    const retargetedThread = {
+      ...thread,
+      id: "account-1:thread-2",
+      threadId: "thread-2",
+      messages: [retargetedMessage],
+      latest: retargetedMessage,
+    };
+    mocks.readReaderSeed.mockReturnValue({
+      target: { accountId: "account-1", threadId: "thread-1" },
+      focusedMessageId: "message-1",
+    });
+    mocks.hasNativeReaderSeedHandoff.mockReturnValue(false);
+    mocks.api.conversationForTarget.mockResolvedValue(retargetedThread);
+    const { ReaderWindowApp } = await import("./ReaderWindowApp");
+    render(
+      <MantineProvider>
+        <StrictMode>
+          <ReaderWindowApp />
+        </StrictMode>
+      </MantineProvider>,
+    );
+
+    await waitFor(() => expect(mocks.onReaderTarget).toHaveBeenCalled());
+    await act(async () => {
+      mocks.onReaderTarget.mock.calls.at(-1)?.[0]({
+        target: { accountId: "account-1", threadId: "thread-2" },
+        focusedMessageId: retargetedMessage.id,
+      });
+    });
+    expect(await screen.findByTestId("focused-message")).toHaveTextContent(
+      retargetedMessage.id,
+    );
+
+    expect(screen.getByTestId("focused-message")).toHaveTextContent(
+      retargetedMessage.id,
+    );
+    expect(mocks.rememberReaderSeed).toHaveBeenCalledWith({
+      target: { accountId: "account-1", threadId: "thread-2" },
+      focusedMessageId: retargetedMessage.id,
+    });
+    expect(mocks.rememberReaderSeed).not.toHaveBeenCalledWith({
+      target: { accountId: "account-1", threadId: "thread-1" },
+      focusedMessageId: "message-1",
+    });
+  });
+
+  it("replaces a reader target whose stable message id is reused in a new UIDVALIDITY epoch", async () => {
+    const replacementMessage = {
+      ...messages[0],
+      subject: "Replacement epoch message",
+      mailbox_uid_validity: 78,
+    };
+    const replacementThread = {
+      ...thread,
+      messages: [replacementMessage],
+      latest: replacementMessage,
+    };
+    mocks.api.conversationForTarget
+      .mockResolvedValueOnce(thread)
+      .mockResolvedValueOnce(replacementThread);
+    const { ReaderWindowApp } = await import("./ReaderWindowApp");
+    render(
+      <MantineProvider>
+        <ReaderWindowApp />
+      </MantineProvider>,
+    );
+    await screen.findByTestId("focused-message");
+    await waitFor(() => expect(mocks.onReaderTarget).toHaveBeenCalled());
+
+    await act(async () => {
+      mocks.onReaderTarget.mock.calls[0][0]({
+        target: { accountId: "account-1", threadId: "thread-1" },
+        focusedMessageId: replacementMessage.id,
+      });
+    });
+
+    expect(await screen.findByTestId("focused-subject")).toHaveTextContent(
+      "Replacement epoch message",
+    );
+    expect(screen.getByTestId("focused-epoch")).toHaveTextContent("78");
+
+    fireEvent.click(screen.getByRole("button", { name: "Summarize" }));
+    await waitFor(() =>
+      expect(mocks.api.summarize).toHaveBeenLastCalledWith(expect.any(Object), [
+        { messageId: "message-1", expectedUidValidity: 78 },
+      ]),
     );
   });
 });

@@ -1,0 +1,11 @@
+{
+  "recordedAtUtc": "2026-10-17T21:25:37.768953+00:00",
+  "kind": "retained-harness-failure",
+  "status": "failed",
+  "passedTests": 3,
+  "failedTests": 1,
+  "cause": "The artifact harness decoded UTF-8 JSON as Latin-1, corrupting a fictional Unicode subject. The harness now uses TextDecoder.",
+  "sourceEvidence": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-mime-reader-artifact-SuasWn/frontend-results.json",
+  "sha256": "f494aef2980db0919bdfb5b784a372d6502e36227c61550a080c4ac6d4dbad68",
+  "subsequentFocusedResult": "4/4 passed; final full-source repeat evidence recorded separately"
+}

@@ -1,0 +1,123 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-21",
+  "lane": "deep",
+  "status": "passed",
+  "acceptance": "bounded-diagnostic-pass",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "d9315b74058af365cd11d5e9bba375988ee09945ec0f0cc49b49c7005cd26f71",
+    "fileCount": 929
+  },
+  "sourceTreeAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "d9315b74058af365cd11d5e9bba375988ee09945ec0f0cc49b49c7005cd26f71",
+    "fileCount": 929
+  },
+  "environment": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "node": "v22.23.2",
+    "cargoBuildJobs": 2,
+    "cargoFuzz": "cargo-fuzz 0.13.2",
+    "rustc": "rustc 1.101.0-nightly (5d8fec066 2026-10-16)",
+    "fuzzTargetDirectory": "/private/tmp/dakia-mail-safety-expanded-fuzz-target-20261021",
+    "fuzzTargetDirectoryState": "Reused the target cache compiled during the prior fresh campaign; each campaign used its own disposable fuzz directory."
+  },
+  "command": {
+    "executable": "node",
+    "arguments": [
+      "scripts/run-mail-safety.mjs",
+      "--lane",
+      "deep",
+      "--output",
+      "docs/mail-safety-results/remaining-gap-closure-deep-final-2026-10-21.json"
+    ],
+    "environment": {
+      "CARGO_BUILD_JOBS": "2",
+      "DAKIA_CARGO_FUZZ_BIN": "/private/tmp/dakia-mail-safety-tools/bin/cargo-fuzz",
+      "DAKIA_FUZZ_TARGET_DIR": "/private/tmp/dakia-mail-safety-expanded-fuzz-target-20261021",
+      "ASAN_OPTIONSSupplied": "quarantine_size_mb=64:thread_local_quarantine_size_kb=64",
+      "cargoFuzzAddressSanitizerPolicy": "cargo-fuzz 0.13.2 appends detect_odr_violation=0; this campaign did not override that existing tool policy or disable any additional ASan check.",
+      "unchangedFuzzArguments": [
+        "-max_total_time=30",
+        "-timeout=10",
+        "-rss_limit_mb=512",
+        "-max_len=1048576"
+      ]
+    }
+  },
+  "startedAt": "2026-10-21T14:42:10.269Z",
+  "finishedAt": "2026-10-21T14:43:31.270Z",
+  "runner": {
+    "generatedReportSha256BeforeEnrichment": "19d9f58e8c59b072ac853e51a0f8799e13c2200f97409cfb5522b83c62bd022b",
+    "rawLog": "/private/tmp/dakia-remaining-gap-closure-deep-final-20261021.log",
+    "rawLogSha256": "5a43abee285c946bf43059f8c84d0d34a181eb86d70dc187859270d1d4eb4f67"
+  },
+  "independentServers": [
+    {
+      "name": "GreenMail public-root TLS rejection",
+      "status": "passed",
+      "tests": 1
+    },
+    {
+      "name": "GreenMail trusted IMAP/SMTP round trip",
+      "status": "passed",
+      "tests": 1
+    },
+    {
+      "name": "Dovecot trusted production-connector round trip",
+      "status": "passed",
+      "tests": 1
+    }
+  ],
+  "fuzz": {
+    "seedCount": 75,
+    "seedManifestSha256": "3c7b7baad7f2b08377a371ef9bd398b60b201ab3362df63397bab1088dfbabf3",
+    "targets": {
+      "mime_budget": {
+        "status": "passed",
+        "executionCount": 38689,
+        "elapsedSeconds": 31,
+        "crashArtifact": false
+      },
+      "attachment_metadata": {
+        "status": "passed",
+        "executionCount": 116887,
+        "elapsedSeconds": 31,
+        "crashArtifact": false
+      }
+    },
+    "successCleanup": "The runner removed the disposable fuzz directory and target logs after both targets passed. The raw runner log retains the final fuzzer summaries and execution counts."
+  },
+  "priorOomDiagnostic": {
+    "report": "docs/mail-safety-results/remaining-gap-closure-deep-2026-10-21.json",
+    "reportSha256BeforeThisRun": "52b96a5585bcabf9bb2d7024e70e458f961bfadb5cf8d12f6c91b15372c86fb9",
+    "result": "The preceding fresh campaign hit libFuzzer OOM at 523 MiB RSS with the 512 MiB limit after 37047 fuzzer iterations. It retained a zero-byte OOM marker; direct exact-binary replay of that marker passed in 0 ms.",
+    "reasonForDiagnosticConfiguration": "The OOM log showed 44,235,742 B live allocations and 263,440,391 B quarantined. This run lowers ASan quarantine capacity while retaining the same RSS, input-size, timeout, and cargo-fuzz ODR settings.",
+    "independentReview": "Read-only review approved the bounded rerun as diagnostic evidence and required retaining the original OOM. A clean result does not provide equivalent temporal use-after-free sensitivity because the quarantine is smaller."
+  },
+  "evidenceCorrection": {
+    "invalidPrematureReport": "docs/mail-safety-results/remaining-gap-closure-deep-premature-report-2026-10-21.json",
+    "reason": "That historical record remains explicitly invalid because it confused an unfinished current campaign with the unrelated 07tp0x directory. It is not used as evidence for this run."
+  },
+  "limitations": [
+    "This is a bounded diagnostic run with reduced ASan quarantine, so it weakens temporal use-after-free detection relative to the original default-quarantine attempt.",
+    "The original OOM remains a failed campaign and must not be counted as a pass.",
+    "This lane does not establish native WebKit, live-provider, packaged-release, or performance acceptance."
+  ],
+  "governedRunnerPolicyAfterThisEvidence": {
+    "script": "scripts/run-mail-safety-fuzz.sh",
+    "defaultWhenAsanOptionsIsUnsetOrEmpty": "quarantine_size_mb=64:thread_local_quarantine_size_kb=64",
+    "explicitCallerOptions": "Preserved verbatim without appending or replacing options.",
+    "unchangedFuzzLimits": [
+      "-max_total_time=30",
+      "-timeout=10",
+      "-rss_limit_mb=512",
+      "-max_len=1048576"
+    ],
+    "temporalSafetyLimit": "A 64 MiB quarantine reduces temporal use-after-free detection sensitivity compared with the failed default-quarantine campaign.",
+    "retainedOomDiagnosis": "The preceding OOM had 44,235,742 B live allocations and 263,440,391 B quarantined at the 512 MiB RSS limit. It remains failed evidence and is not hidden by this policy.",
+    "evidenceScope": "The recorded diagnostic campaign supplied these same two quarantine limits externally. This entry documents the subsequent runner default and does not retroactively alter that run."
+  }
+}

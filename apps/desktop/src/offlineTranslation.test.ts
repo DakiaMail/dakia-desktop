@@ -136,6 +136,48 @@ describe("offline translation runtime", () => {
     expect(buffers.config).toEqual({ "beam-size": "1" });
   });
 
+  it("reads translation assets only from the local protocol and never puts message content in request metadata", async () => {
+    const messageCanaries = [
+      "private.subject@example.test",
+      "The private email body must stay local.",
+      "fictional-api-key",
+    ];
+    const requests: Array<{ url: string; body: unknown }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL, init?: RequestInit) => {
+        const url = String(input);
+        requests.push({ url, body: init?.body });
+        if (!url.startsWith("asset://localhost/")) {
+          throw new Error(
+            `offline translation rejected non-local request ${url}`,
+          );
+        }
+        return {
+          ok: true,
+          arrayBuffer: async () => new TextEncoder().encode(url).buffer,
+        } as Response;
+      }),
+    );
+    const backing = new DakiaTranslationBacking({});
+
+    await backing.loadTranslationModel({ from: "et", to: "en" });
+
+    expect(requests.map(({ url }) => url)).toEqual([
+      "asset://localhost//models/model.bin",
+      "asset://localhost//models/shortlist.bin",
+      "asset://localhost//models/source.spm",
+      "asset://localhost//models/target.spm",
+    ]);
+    for (const request of requests) {
+      expect(request.body).toBeUndefined();
+      const serialized = JSON.stringify(request);
+      for (const canary of messageCanaries) {
+        expect(serialized).not.toContain(canary);
+      }
+    }
+  });
+
   it("rejects non-English targets and unreadable local artifacts", async () => {
     const backing = new DakiaTranslationBacking({});
     await expect(
@@ -309,6 +351,26 @@ describe("offline translation runtime", () => {
       "https://example.test/path?x=1&y=2",
     );
     expect(parsed.querySelector(".outlook")).not.toBeNull();
+  });
+
+  it("normalizes translation HTML through an inert parser", () => {
+    vi.stubGlobal(
+      "DOMParser",
+      class {
+        constructor() {
+          throw new Error("live parser must not run before translation");
+        }
+      },
+    );
+    try {
+      const normalized = normalizeHtmlForTranslation(
+        '<img src="https://images.example.test/open.png"><p>Translate this</p>',
+      );
+      expect(normalized).toContain("Translate this");
+      expect(normalized).toContain("images.example.test/open.png");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it.each([

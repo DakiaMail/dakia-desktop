@@ -1,0 +1,405 @@
+{
+  "schemaVersion": 1,
+  "lane": "native-packaged-checkpoint",
+  "recordedAt": "2026-10-21T19:05:40Z",
+  "status": "partial-with-one-product-failure-and-open-gates",
+  "scope": "Isolated fictional-mailbox acceptance of the current ad-hoc arm64 packaged Tauri app. This checkpoint separates completed native evidence from failures, work still in progress, and release work that was not run.",
+  "source": {
+    "revision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+    "treeDigest": "5bcd262aab449b72708b8f9a8991f414abbe56169468d3ccd6293e42195f28c4",
+    "fileCount": 937,
+    "threeRunSourceBaseline": {
+      "status": "passed",
+      "runs": 3,
+      "path": "remaining-gap-closure-three-run-source-csp-bridge-safe-2026-10-21.json",
+      "sha256": "9f160438951c4781fd23a6539701d085567b0f35279b4167c0663df50c352bc1",
+      "claimLimit": "This establishes the repeated source lane only. Native, provider, performance, fuzz, upgrade, signing, notarization, and publication remain separate evidence."
+    }
+  },
+  "runtimeIdentity": {
+    "runRoot": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OaVD6G",
+    "applicationName": "Dakia Fictional Provider Reader",
+    "bundleIdentifier": "dev.dakia.fictional-provider-reader.run-OTAMH2",
+    "executable": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/Dakia Fictional Provider Reader.app/Contents/MacOS/dakia-desktop",
+    "executableSha256": "96cccb6b9c580e621f22644de26d898042dcd36607b8b4dd6007cccd7076ce69",
+    "architecture": "arm64",
+    "webviewUrl": "tauri://localhost",
+    "appPidDuringAcceptance": 4591,
+    "harnessPidDuringAcceptance": 83392,
+    "finalProcessStatus": "The app exited normally with status 0 and the fixture harness exited with status 0. The guarded identity swap was restored.",
+    "fixtureDataStoreIdentifier": "9e77d6fc-0ad5-4617-8b08-8bb4c587a8e0",
+    "buildBoundary": "Ad-hoc fixture-enabled debug app built for aarch64-apple-darwin. It is not a Developer ID signed, notarized, stapled, updater-signed, installed, or published release.",
+    "evidence": [
+      {
+        "path": "native-build-mode.json",
+        "sha256": "497c6ef0f2806112baadfc6b114fe6fbcbcc8b14bd1cb4c76e86b7bfc1f3c621"
+      },
+      {
+        "path": "native-runtime-files.json",
+        "sha256": "ac2fd9b2205c0c0d590e7cc54e9c13f3078b8be4a5d350076833d989e9b205e5"
+      },
+      {
+        "path": "native-data-store-identifier.json",
+        "sha256": "8053ec1469514a3ff92c67302bc210aa8c9128e160ba21cb25fe16f2b36b2d67"
+      }
+    ]
+  },
+  "gates": [
+    {
+      "id": "packaged-wry-acl",
+      "status": "passed",
+      "result": "The packaged local probe reached the Tauri IPC dispatcher and its registered mail commands were rejected by ACL. The main read-only control succeeded, the remote-origin probe stayed isolated, static window scopes were denied, and no fixture side effects were observed.",
+      "evidence": [
+        {
+          "path": "native-acl-acceptance.json",
+          "sha256": "f69693fe7b35448fc21049533057084a42c028835daf9a4c2ac7235da166781c"
+        }
+      ]
+    },
+    {
+      "id": "packaged-webkit-csp-translation-history",
+      "status": "passed",
+      "result": "The original Estonian body rendered in packaged WebKit, the English translation rendered, Show original restored the Estonian body, and the quoted-history disclosure completed five visible expand and collapse states with both growth and shrinkage.",
+      "evidence": [
+        {
+          "path": "native-ui-evidence/003-arrival-original.ax.txt",
+          "sha256": "65db38f86aa93381682da5cf8bf945d7367a29a3f3653d9f83bee02dbca8593b"
+        },
+        {
+          "path": "native-ui-evidence/004-translated-visible.ax.txt",
+          "sha256": "a3dad17e1672bc77234c481cbcd2530241da52e1a63585edc3a39e301996480e"
+        },
+        {
+          "path": "native-ui-evidence/005-restored-original.ax.txt",
+          "sha256": "a2524d701380a440d9fc4baceacde6aa3748ad02d3a8af45dc1d0aa52f341c21"
+        },
+        {
+          "path": "native-ui-evidence/008-history-expanded-1.ax.txt",
+          "sha256": "f92cc7a94fdcec3420c2ebef57ed1a913f8138d31bce8ab450deb563d753c077"
+        },
+        {
+          "path": "native-ui-evidence/history-step-2.ax.txt",
+          "sha256": "ea9a0dded77def4179e54c0270e183308ce2432dce5e1f4d5b4d199b4d82d682"
+        },
+        {
+          "path": "native-ui-evidence/history-step-3.ax.txt",
+          "sha256": "ed584cd43b7a4d1cd3a72fa255ffc5c5fb872ca47d0de88c4a24b08e72e2cd01"
+        },
+        {
+          "path": "native-ui-evidence/history-step-4.ax.txt",
+          "sha256": "ea9a0dded77def4179e54c0270e183308ce2432dce5e1f4d5b4d199b4d82d682"
+        },
+        {
+          "path": "native-ui-evidence/history-step-5.ax.txt",
+          "sha256": "ed584cd43b7a4d1cd3a72fa255ffc5c5fb872ca47d0de88c4a24b08e72e2cd01"
+        }
+      ]
+    },
+    {
+      "id": "remote-content-session-consent",
+      "status": "passed",
+      "result": "Initial display made zero HTTP requests and zero TLS contacts. Per-message consent produced exactly five controlled HTTP requests and four negative TLS probe contacts. History changes and switching messages produced no additional contacts, and the new message showed Load remote content again.",
+      "counts": {
+        "beforeConsent": {
+          "httpRequests": 0,
+          "tlsContacts": 0
+        },
+        "afterConsent": {
+          "httpRequests": 5,
+          "tlsProbeContacts": 4,
+          "unexpectedHttpTlsContacts": 0
+        },
+        "afterHistoryAndMessageSwitch": {
+          "httpRequests": 5,
+          "tlsProbeContacts": 4,
+          "additionalContacts": 0
+        }
+      },
+      "evidence": [
+        {
+          "path": "native-ui-evidence/007-before-remote-grant-counters.json",
+          "sha256": "484cb66b0fb93505f0670703c862b0c76b999d643858145a385d32169d0fe26b"
+        },
+        {
+          "path": "native-ui-evidence/remote-after-history-counters.json",
+          "sha256": "97aa2f248ea733985bf61837244b1e2e3bd5ca3cb2f78ef7a7dbf054e4d20669"
+        },
+        {
+          "path": "native-ui-evidence/remote-after-switch-counters.json",
+          "sha256": "b0450edbadf981aeb43a687cf483a1c36b0e695b0584b67dd915f2557b50794a"
+        },
+        {
+          "path": "native-ui-evidence/009-consent-reset.ax.txt",
+          "sha256": "030f1a9082c806753ba87abe3567b75d94083761fa984c12fec1021f4701dcae"
+        }
+      ]
+    },
+    {
+      "id": "attachment-eacces-recovery",
+      "status": "passed",
+      "result": "A real permission failure produced visible error feedback and no final or partial attachment. The owned Downloads directory was restored and a visible retry saved the exact 32-byte safe attachment with mode 0600 and macOS quarantine.",
+      "evidence": [
+        {
+          "path": "native-ui-evidence/010-attachment-permission-error.ax.txt",
+          "sha256": "92ccb3b44ff354329fd58e6aa4a315249837242d042dd31b82fc557923a6dffe"
+        },
+        {
+          "path": "native-attachment-g013-evidence/eacces-check.json",
+          "sha256": "32a115d5f543ef26997bec8133765bae0fd9ed9bd7cdface2c2ae71f7f1bd4ce"
+        },
+        {
+          "path": "native-attachment-g013-evidence/eacces-restore.json",
+          "sha256": "5335838c866b048e039f19b49299298293be714be7f1fc61d92bd96d3e67bf4e"
+        },
+        {
+          "path": "native-attachment-g013-evidence/eacces-retry-check.json",
+          "sha256": "ec3586226720313c4b772f3564a0d810f49af69b4c43c43036338408dc0f4fc0"
+        }
+      ]
+    },
+    {
+      "id": "attachment-enospc-recovery",
+      "status": "passed",
+      "result": "A bounded 64 MiB owned HFS+ volume produced a real disk-full failure with visible feedback and no final or partial attachment. The exact mounted device was detached, the original Downloads directory was restored, and retry saved the exact 32-byte attachment with mode 0600 and quarantine.",
+      "evidence": [
+        {
+          "path": "native-ui-evidence/012-attachment-disk-full-error.ax.txt",
+          "sha256": "375723599340c25b3b4ff0059d131df782d4bcb6ed3d1567b4f655a4515195ca"
+        },
+        {
+          "path": "native-attachment-fault-evidence/enospc-check.json",
+          "sha256": "a2d43acb3681b47ac7fbb51acb2f797d090eded76721e30f4bf47dbe9a8a4c6f"
+        },
+        {
+          "path": "native-attachment-fault-evidence/enospc-restore.json",
+          "sha256": "fe916f9a6b82b1fbc86547118b8580c35a9251e12d1de93503723f72f076646b"
+        },
+        {
+          "path": "native-attachment-fault-evidence/enospc-retry-check.json",
+          "sha256": "d870fc859ab109eec9018aca997bff657f33dfa16792982e8a0e88a95ad7a796"
+        }
+      ]
+    },
+    {
+      "id": "attachment-partial-bulk-10000-collisions",
+      "status": "passed-with-performance-follow-up",
+      "result": "Save all against 10,000 pre-created collisions completed with visible partial-success feedback: one safe attachment was saved and one unsafe attachment failed. The saved file had exact 32-byte content, mode 0600, and quarantine. The 10,000 owned collision files were removed by guarded cleanup.",
+      "performanceObservation": "The operation took about four minutes while performing roughly 20,000 file fsyncs and 10,000 directory fsyncs. Correctness passed, but responsiveness and the collision-loop implementation require optimization and a repeat performance check.",
+      "evidence": [
+        {
+          "path": "native-ui-evidence/022-partial-bulk-completed.ax.txt",
+          "sha256": "be2fca95a5feb96727c143eecb25c558d721655b92608c67394d454d4ac820e0"
+        },
+        {
+          "path": "native-ui-evidence/022-partial-bulk-completed.png",
+          "sha256": "c8f3435dc3cbe9cc8f98ad6c12737b359d5111c372544b7ff3cf3921cd2356a4"
+        },
+        {
+          "path": "native-attachment-g013-evidence/bulk-post-ui-check.json",
+          "sha256": "9519fc4bafd2e9cfbccc93ce695cf2a376f9846eb03d191c0d85a64be1ce95dd"
+        },
+        {
+          "path": "native-attachment-g013-evidence/bulk-cleanup.json",
+          "sha256": "f047aa7a03b8e7d5307536d4fd283b045126e10066a90bbd5e0e5b2943aafb73"
+        }
+      ]
+    },
+    {
+      "id": "attachment-leaf-symlink-collision",
+      "status": "passed",
+      "result": "Saving the unsafe 28-byte attachment did not follow or overwrite the owned leaf symlink. The canary and symlink remained unchanged, and Dakia created a distinct collision copy with mode 0600 and quarantine. Visible UI reported one attachment saved.",
+      "evidence": [
+        {
+          "path": "native-ui-evidence/023-leaf-symlink-save.ax.txt",
+          "sha256": "bc6499e2f5928b6008571368a4a7b636b976c006b3a44ff281fc9bd7db3236a9"
+        },
+        {
+          "path": "native-ui-evidence/023-leaf-symlink-save.png",
+          "sha256": "cbfdbdd9b7cd0e7ff738955bc274264e9d9ad46516644fffbc74011fd3fab2bf"
+        },
+        {
+          "path": "native-attachment-fault-evidence/leaf-check.json",
+          "sha256": "6f485543e883ec159d1ed0021351aa39c4249511db9324262f75c4168063e74a"
+        }
+      ]
+    },
+    {
+      "id": "malformed-and-long-message-reader",
+      "status": "passed",
+      "result": "Malformed UID 2 produced a bounded user-visible error. A separate valid long message remained scrollable to its bottom marker.",
+      "evidence": [
+        {
+          "path": "native-ui-evidence/014-malformed-message.ax.txt",
+          "sha256": "0337e3121f9ff9d30383c7a24bfaa388cf812e66416f8f68c47ff9720370c6b3"
+        },
+        {
+          "path": "native-ui-evidence/015-long-email-bottom.ax.txt",
+          "sha256": "644cce0e788f8f5a32728b2e0c6f9a93caaeec417f07e14fd2472ecf130314e7"
+        }
+      ]
+    },
+    {
+      "id": "offline-cached-read-and-rollback-uid3",
+      "status": "passed-narrowly",
+      "result": "The selected fictional UID 3 remained unread during prefetch, opened from cached content while disconnected, showed a failed unread mutation, and restored only that selected row's prior UI state.",
+      "claimLimit": "This does not establish rollback behavior for every row, every mutation, or the full offline mailbox.",
+      "evidence": [
+        {
+          "path": "native-ui-evidence/002-prefetch-remains-unread.json",
+          "sha256": "d40722b8d156092f60ba8bd98a3af696ea84ad2e7f3e31bcb0bd3a1e56864611"
+        },
+        {
+          "path": "native-ui-evidence/016-offline-cached-reader.ax.txt",
+          "sha256": "c279b3ea3f950e8aaf4f98918231f2247e6da509da9b5f4aa84398f8dd2a1a32"
+        },
+        {
+          "path": "native-ui-evidence/017-offline-unread-transition.ax.txt",
+          "sha256": "e66c1f2c9d3e53a871c4de9568a3b999fca5b7a910f56ce709ee0137b9066199"
+        },
+        {
+          "path": "native-ui-evidence/018-offline-unread-rollback.ax.txt",
+          "sha256": "460d2142e4bf7ab302a6c2962f08839c9a352276f22901fe75c969212883ef56"
+        }
+      ]
+    },
+    {
+      "id": "g013-production-full-fetch-uid5",
+      "status": "passed",
+      "result": "The current TLS wrapper exercised production MailService::fetch_full_message for account one, INBOX UID 5, parsed safe and unsafe attachments, published through Store, reopened the Reader cache, and preserved exact decoded attachment hashes.",
+      "evidence": [
+        {
+          "path": "g013-safe-first-mailservice-artifact.json",
+          "sha256": "6e9cd54933adc3d997dbb85d6f032fd721a91496b068a6c1ee516611da27dbc9"
+        }
+      ]
+    },
+    {
+      "id": "native-mailto-cr-to-compose-seed",
+      "status": "failed",
+      "result": "Activating the physical native mailto link opened a real compose window at tauri://localhost/?view=compose&seedKey=98fdb3d1-26d6-41c8-9f1a-5b5c23ece4a5, but To, subject, and body were blank and the expected invalid-recipient warning never appeared. The window was closed unsent.",
+      "diagnosis": "The packaged fixture uses one isolated WKWebsiteDataStore identifier across windows, but the localStorage seed written by the main webview was not visible to the newly created compose webview. The persistent LocalStorage database did not contain the seed. The handoff must use a committed cross-webview store or a native payload channel and be retested. Reader-window handoff needs the same acceptance check.",
+      "safetyOutcome": "No message was sent and no SMTP submission was requested.",
+      "evidence": [
+        {
+          "path": "native-ui-evidence/mailto-native-mailto-cr-to.ax.txt",
+          "sha256": "9600556d6cdbc3ab8836ba1ff902b033e54e02bd99e414cd66662f061074d685"
+        },
+        {
+          "path": "native-ui-evidence/mailto-native-mailto-cr-to.png",
+          "sha256": "448e7f8cc6c32c40a61fb786bd7d93d09302687f5eef1971b98d75d6c1ffeb21"
+        }
+      ]
+    },
+    {
+      "id": "compose-window-during-long-bulk-save",
+      "status": "observed-not-an-acceptance-pass",
+      "result": "A separate unsent compose window opened through the UI while the 10,000-collision Save all operation was still running and showed Preparing new message. It was closed without sending.",
+      "claimLimit": "This is evidence that the UI could open another native window during the long operation. It does not establish compose readiness, seeded fields, or send behavior.",
+      "evidence": [
+        {
+          "path": "native-ui-evidence/021-compose-during-bulk.ax.txt",
+          "sha256": "1f1a32958f3211aa94f8add27afac8dc4b7cab372ac132d2e7aefc78803ca3de"
+        },
+        {
+          "path": "native-ui-evidence/021-compose-during-bulk.png",
+          "sha256": "3bcda456dd3a0ca5b401807b844443a1cd137dd8b530c7fd5cc8fe3de9e4776c"
+        }
+      ]
+    },
+    {
+      "id": "positive-save-all-two-attachments",
+      "status": "passed",
+      "result": "After the collision cleanup, Save all displayed Saved 2 attachments. Filesystem verification found the exact 32-byte safe file and 28-byte unsafe file, both with mode 0600 and quarantine, with no partial files.",
+      "evidence": [
+        {
+          "path": "native-ui-evidence/024-positive-bulk-save.ax.txt",
+          "sha256": "483c5ec1fb3824faf90c62f1ea391c7eb17fd1eba80725acfbeef4290f5a08cd"
+        },
+        {
+          "path": "native-ui-evidence/024-positive-bulk-save.png",
+          "sha256": "1a9455bc0f0c0bb44654193bc1ef61c741dc890a3372396cfef33ebb30453e53"
+        },
+        {
+          "path": "native-attachment-g013-evidence/bulk-success-check.json",
+          "sha256": "9dbc34d1fe45d1b4e36edaaaecf8b820ff783418618af5e0a04fdb351995eb05"
+        }
+      ]
+    }
+  ],
+  "skippedOrNotRun": [
+    {
+      "id": "uid6-uid7-and-send",
+      "status": "not-run",
+      "reason": "No UID 6 or UID 7 scenario and no send-lifecycle acceptance had run at this checkpoint. No external or fictional SMTP send was performed."
+    },
+    {
+      "id": "h016-forward-upgrade",
+      "status": "not-run",
+      "reason": "The previous-stable forward-upgrade GUI acceptance had not run."
+    },
+    {
+      "id": "remaining-fixed-startup-alerts",
+      "status": "not-run",
+      "reason": "Two planned fixed startup-error alert cases had not run."
+    },
+    {
+      "id": "native-resource-cohort",
+      "status": "incomplete",
+      "reason": "A third resource sample during a repeated Reader state exists, but the required final cohort and lifecycle comparison did not complete."
+    },
+    {
+      "id": "simultaneous-desktop-cli-profile",
+      "status": "inconclusive-harness-failure",
+      "reason": "The read-only shared-profile helper stopped because its primary-positive search expected one result while fictional UID 3 and UID 5 shared the same subject. This is a fixture assertion defect, so this run establishes neither a pass nor a product failure for simultaneous desktop and bundled CLI access."
+    },
+    {
+      "id": "notification-delivery",
+      "status": "not-run-unavailable",
+      "reason": "Launch Services returned NSOSStatusErrorDomain -10814 for the exact approved fixture bundle after successful registration while the TextEdit control resolved. Dakia continued with notifications unavailable; no notification delivery claim was made.",
+      "evidence": [
+        {
+          "path": "launch-services-registration-unavailable.json",
+          "sha256": "fd5b3cfb35b699299248fcf6c29728608539021b0c6192cc86b09ef554bb6b9e"
+        }
+      ]
+    },
+    {
+      "id": "physical-sleep-wake",
+      "status": "skipped-user-declined",
+      "reason": "The user explicitly declined interrupting the Mac for physical sleep and wake acceptance. Fixture metadata is not counted as a pass."
+    },
+    {
+      "id": "developer-id-notarization-stapling-updater-publication",
+      "status": "skipped-not-authorized",
+      "reason": "This run used an ad-hoc debug fixture app. Developer ID signing, notarization, stapling, Tauri updater signing, installed-client update behavior, public reachability, latest.json, and release publication were not authorized or attempted."
+    }
+  ],
+  "waivers": [
+    {
+      "id": "macos-x86_64-native-acceptance",
+      "status": "waived-unavailable-architecture",
+      "reason": "The available native host and candidate are Apple Silicon arm64. No Intel macOS native run was performed, so x86_64 is recorded as a waiver and not a pass."
+    }
+  ],
+  "checkpointLimits": [
+    "This is a completed run checkpoint, not the final native acceptance report.",
+    "A passing source lane does not replace native WebKit, provider, upgrade, signing, notarization, or installed-client evidence.",
+    "The compose seed failure is a product acceptance failure even though no message was sent.",
+    "The 10,000-collision partial-save result is a correctness pass with a separate responsiveness and implementation-cost follow-up."
+  ],
+  "finalization": {
+    "status": "passed",
+    "sourceAfterRun": {
+      "path": "source-after-run.json",
+      "sha256": "78b1d8198c43649f667d7dc60aad277418112657134e8bd40a6fee51e25c8c3d",
+      "digest": "5bcd262aab449b72708b8f9a8991f414abbe56169468d3ccd6293e42195f28c4",
+      "fileCount": 937
+    },
+    "identityRestore": {
+      "path": "approved-identity-swap-f42820a9-96b2-4835-ac7e-e96f66410acf-restored.json",
+      "sha256": "e91745941c5702d15c4a6504f7955b0046aba806a462115a6c9ca8cae8608da2"
+    },
+    "filesystem": "The owned Downloads directory was restored, the ENOSPC volume was detached, and no test mount remained.",
+    "upgradeClaim": "No H016 upgrade acceptance ran. A generic cleanup log line does not count as upgrade evidence."
+  }
+}

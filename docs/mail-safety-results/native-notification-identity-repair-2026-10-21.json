@@ -1,0 +1,192 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T16:46:55Z",
+  "lane": "focused-source-and-harness",
+  "status": "passed-focused-native-replay-pending",
+  "scope": "Packaged macOS startup continues when notification identity initialization fails, notification delivery remains unavailable until identity initialization succeeds, macOS windows cannot bypass that gate through plugin notify/show commands, and the fictional packaged harness registers and resolves only its sealed application bundle before launch.",
+  "historicalFailure": {
+    "report": "docs/mail-safety-results/packaged-native-notification-startup-failure-2026-10-21.json",
+    "sourceDigest": "f8209887faad2ed25f965c55ef7a3680f7663852bfa33674406dc02da5b6063c",
+    "failure": "notify_rust::set_application failure propagated from Tauri setup and the packaged process aborted with SIGABRT before UI acceptance"
+  },
+  "behavior": [
+    "The notification identity initializer is nonfallible at the Tauri setup boundary and reports failure without returning an error from setup.",
+    "The macOS notification command refuses delivery before constructing or showing notification content unless the managed identity state is available.",
+    "Missing managed readiness state fails closed with the same unavailable result.",
+    "Main and Settings may inspect and request notification permission on macOS, but plugin notify and show permissions are absent.",
+    "Settings uses the same identity-gated application command as new-mail notifications.",
+    "Linux and Windows retain their platform-scoped notification plugin capability.",
+    "The native harness registers the exact sealed fictional application with LaunchServices and requires the bundle identifier to resolve to that exact canonical path before direct execution."
+  ],
+  "checks": [
+    {
+      "command": "cargo check -p dakia-desktop --locked --lib",
+      "status": "passed"
+    },
+    {
+      "command": "cargo check -p dakia-desktop --locked --features native-mail-safety-fixture --lib",
+      "status": "passed"
+    },
+    {
+      "command": "cargo test -p dakia-desktop --locked --lib desktop_notification_tests -- --nocapture",
+      "status": "passed",
+      "passed": 3,
+      "failed": 0
+    },
+    {
+      "command": "cargo test -p dakia-desktop --locked --lib bridge_security_tests -- --nocapture",
+      "status": "passed",
+      "passed": 8,
+      "failed": 0
+    },
+    {
+      "command": "cargo test -p dakia-desktop --locked --features native-mail-safety-fixture --lib native_acl_acceptance::tests::exhaustive_inventory_is_source_coupled_and_rejects_post_acl_outcomes -- --nocapture",
+      "status": "passed",
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "command": "cargo test -p dakia-desktop --locked --features native-mail-safety-fixture --lib",
+      "status": "passed-outside-sandbox",
+      "passed": 210,
+      "failed": 0,
+      "environmentNote": "The first sandboxed attempt passed 191 and failed 19 because the sandbox denied every affected loopback listener bind with EPERM. The identical full suite passed outside the sandbox, where its isolated fictional IMAP, SMTP, translation, updater and ACL listeners could bind."
+    },
+    {
+      "command": "node scripts/tauri-contract-inventory.mjs",
+      "status": "passed",
+      "commands": 54,
+      "nativeEvents": 12,
+      "frontendEvents": 11
+    },
+    {
+      "command": "node --test scripts/tauri-contract-inventory.node-test.mjs",
+      "status": "passed",
+      "passed": 11,
+      "failed": 0
+    },
+    {
+      "command": "npx vitest run apps/desktop/src/notifications.test.ts --maxWorkers=1",
+      "status": "passed",
+      "passed": 16,
+      "failed": 0
+    },
+    {
+      "command": "cargo fmt --all -- --check",
+      "status": "passed"
+    },
+    {
+      "command": "bash -n scripts/native-provider-reader-acceptance.sh && node --check scripts/native-provider-reader-fixture.node-test.mjs && node --test scripts/native-provider-reader-fixture.node-test.mjs",
+      "status": "passed",
+      "passed": 1,
+      "failed": 0,
+      "durationSeconds": 12.7
+    },
+    {
+      "command": "read-only Swift LaunchServices helper compile and nonexistent-bundle query with an exclusive private module cache",
+      "status": "passed",
+      "sideEffects": "No application registration or launch was performed."
+    }
+  ],
+  "regressionSensitivity": [
+    {
+      "mutation": "Removed the readiness check before the injected notification show boundary.",
+      "command": "cargo test -p dakia-desktop --locked --lib desktop_notification_tests::notification_identity_failure_is_nonfatal_and_blocks_the_show_boundary -- --exact --nocapture",
+      "status": "failed-as-expected",
+      "diagnostic": "an unavailable identity must reject delivery: ()",
+      "restoration": "The source was restored to SHA-256 fc22e09df5a24124f60c6cfdf5977eb2e8e1fddf40b96546f60f7bad65810cd7 and the unchanged test passed."
+    },
+    {
+      "mutation": "Restored notification:default to the macOS main and Settings notification capability.",
+      "command": "cargo test -p dakia-desktop --locked --lib bridge_security_tests::macos_main_and_settings_cannot_bypass_identity_gating_with_plugin_notify -- --exact --nocapture",
+      "status": "failed-as-expected",
+      "diagnostic": "main must not bypass notification identity gating through plugin:notification|notify: plugin notification not found",
+      "restoration": "The capability was restored to SHA-256 c59322219c6d5cec8aa6c8810b22f234235e3d4d42a152ee41292a1035c2523f and the unchanged test passed."
+    },
+    {
+      "mutation": "Restored the old frontend Settings plugin-delivery path.",
+      "status": "failed-as-expected",
+      "failed": 2,
+      "passed": 14,
+      "log": "/private/tmp/dakia-notification-frontend-before-fix-20261021.log",
+      "logSha256": "1466c218e3082902c13503a27f6696edcd7a7b3d5bff0ff6052da58b0a2878e0"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "apps/desktop/src-tauri/src/lib.rs",
+      "sha256": "fc22e09df5a24124f60c6cfdf5977eb2e8e1fddf40b96546f60f7bad65810cd7",
+      "bytes": 271302
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/bridge_security_tests.rs",
+      "sha256": "2e100acc439f279f0c0f14d5e8e796ff48d7e6d63b23c8190795c8b33bf6477c",
+      "bytes": 15210
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/native_acl_acceptance.rs",
+      "sha256": "31afb344e1d0923f606bcfb707ce6b7c888000176c2fa80087e0b28332049334",
+      "bytes": 68855
+    },
+    {
+      "path": "apps/desktop/src-tauri/capabilities/default.json",
+      "sha256": "34b379fa2f3ce986deb0c95243dbc2df5fac2d052e0506cc3c7380b337f8f6d3",
+      "bytes": 566
+    },
+    {
+      "path": "apps/desktop/src-tauri/capabilities/settings.json",
+      "sha256": "91aefb33278f0b03e7055549872af629f09a141229d2bfb3b3ad6e73fdb9d9d3",
+      "bytes": 391
+    },
+    {
+      "path": "apps/desktop/src-tauri/capabilities/notification-permission-macos.json",
+      "sha256": "c59322219c6d5cec8aa6c8810b22f234235e3d4d42a152ee41292a1035c2523f",
+      "bytes": 430
+    },
+    {
+      "path": "apps/desktop/src-tauri/capabilities/notification-non-macos.json",
+      "sha256": "a20a367a4ed3a6a601a4edc0a32a9303eba3f2ca0e3be179e5edf1fba87cabf8",
+      "bytes": 310
+    },
+    {
+      "path": "apps/desktop/src-tauri/permissions/mail-commands.toml",
+      "sha256": "d3570d18f4619453f8635f7e045b46e914c651cce50ee89528559692317b2047",
+      "bytes": 3138
+    },
+    {
+      "path": "apps/desktop/src/notifications.ts",
+      "sha256": "8f40c15f4f6b61b7b5adf6bf64b6f7a3df0d2f44428f074c347780a753430c36",
+      "bytes": 5741
+    },
+    {
+      "path": "apps/desktop/src/notifications.test.ts",
+      "sha256": "7e5044563731e587ba0b0dbcee8fee58a6e82158d5dc0b4c73b551c5c384f380",
+      "bytes": 12341
+    },
+    {
+      "path": "scripts/native-provider-reader-acceptance.sh",
+      "sha256": "2d543a203f94aff48e4c696e4c1bd6a60e6afa3db2b282a871251fa9f0935ab7",
+      "bytes": 101028
+    },
+    {
+      "path": "scripts/native-provider-reader-fixture.node-test.mjs",
+      "sha256": "bfa4e4a876915bd7e655ad5ff0246ca9e82e13c6e482f70045f48e2f26b2bbde",
+      "bytes": 77921
+    }
+  ],
+  "independentReview": {
+    "status": "approved",
+    "backendAndCapabilities": "No material blocker. Setup is fail-soft, delivery is fail-closed, macOS plugin-send IPC is removed, Settings uses the guarded command, and non-mac plugin delivery remains scoped.",
+    "harness": "No material blocker. The final private Swift cache handling, exact flag binding, post-lookup validation, receipt provenance and fail-closed preexisting-path behavior were approved."
+  },
+  "baseline": {
+    "historical": "The three clean source runs for f820 remain evidence for that historical source only.",
+    "current": "A new three-run unchanged-source baseline is pending after this repair and supersedes f820 for current-source claims."
+  },
+  "limitations": [
+    "No packaged application was launched after this repair, so LaunchServices registration, startup continuation and notification identity still require the controlled native replay.",
+    "No OS notification was displayed, clicked or attributed during focused verification.",
+    "The source and harness checks do not establish Developer ID signing, notarization, stapling, updater signing or publication.",
+    "The initial sandboxed full feature attempt is retained as an environment failure, not a flaky product-test failure or a pass."
+  ]
+}

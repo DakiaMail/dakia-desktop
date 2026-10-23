@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-20T19:31:49Z",
+  "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "lane": "source-security-audit",
+  "before": {
+    "status": "failed",
+    "logPath": "/private/tmp/dakia-rust-audit-2026-10-20.log",
+    "logSha256": "3e4b40c3e6d257e4f9c5e6bf838d888a2a28fa2262b0e716f5a070fd08330165",
+    "affectedVersions": [
+      {
+        "package": "rustls-webpki",
+        "version": "0.103.15",
+        "advisory": "RUSTSEC-2026-0382",
+        "patchedVersion": "0.103.16"
+      },
+      {
+        "package": "webpki-root-certs",
+        "version": "1.0.9",
+        "advisory": "RUSTSEC-2026-0383",
+        "patchedVersion": "1.0.10"
+      },
+      {
+        "package": "webpki-roots",
+        "version": "0.26.11",
+        "advisory": "RUSTSEC-2026-0381",
+        "patchedVersion": "1.0.10"
+      },
+      {
+        "package": "webpki-roots",
+        "version": "1.0.8",
+        "advisory": "RUSTSEC-2026-0381",
+        "patchedVersion": "1.0.10"
+      }
+    ]
+  },
+  "remediation": {
+    "sqlxRuntimeFeature": {
+      "from": "runtime-tokio-rustls",
+      "to": "runtime-tokio",
+      "rationale": "Dakia uses SQLx only for SQLite storage; this removes SQLx's unused network TLS dependency path while preserving the separate mail TLS stack."
+    },
+    "lockedVersions": {
+      "rustls-webpki": "0.103.16",
+      "webpki-root-certs": "1.0.10",
+      "webpki-roots": "1.0.10"
+    },
+    "minimumSupportedRust": "1.89",
+    "upstreamDeclaredRustVersion": "1.71",
+    "newAdvisorySuppressions": []
+  },
+  "after": {
+    "status": "passed",
+    "command": "DAKIA_CARGO_AUDIT_BIN=/private/tmp/dakia-mail-safety-tools/bin/cargo-audit DAKIA_AUDIT_OFFLINE=true scripts/audit-dependencies.sh",
+    "logPath": "/private/tmp/dakia-rust-audit-2026-10-20-after.log",
+    "logSha256": "9ed4d953e71d61c7be0fe2357e6896ebe5d04723441019807265dec114bb014c",
+    "vulnerabilities": 0,
+    "allowedWarnings": 10
+  },
+  "advisoryDatabase": {
+    "refreshedBeforeFailureAudit": true,
+    "revision": "e6f94f3760d5e6c54c1b05f204002263bc025524",
+    "commitTime": "2026-10-20T19:24:19Z",
+    "afterAuditMode": "offline"
+  },
+  "preexistingTargetScopedExceptions": [
+    "RUSTSEC-2023-0071",
+    "RUSTSEC-2024-0429"
+  ],
+  "limitations": [
+    "The four remediated advisories have no suppression. The audit gate separately proves the two preexisting target-scoped exceptions unreachable for supported macOS builds before cargo-audit runs.",
+    "This source-lane record does not replace a locked workspace build or packaged native verification."
+  ],
+  "finalCombinedGate": {
+    "command": "DAKIA_CARGO_AUDIT_BIN=/private/tmp/dakia-mail-safety-tools/bin/cargo-audit npm run audit:dependencies:npm",
+    "exitCode": 0,
+    "capturedAt": "2026-10-20T19:57:02.881285+00:00",
+    "cargoLockSha256": "15488306522bcb4858723a227675ebe592360bc8786c6f8950a800550c267c92",
+    "log": "/private/tmp/dakia-full-dependency-audit-2026-10-20.log",
+    "logSha256": "dbf7241d72263f36c0f26e85450323643f27e50023822c29052c032965fcca26",
+    "rustVulnerabilities": 0,
+    "allowedRustWarnings": 10,
+    "npmVulnerabilities": 0,
+    "setupAttempt": "First invocation lacked cargo-audit on PATH and exited before auditing; rerun used installed explicit tool path."
+  }
+}

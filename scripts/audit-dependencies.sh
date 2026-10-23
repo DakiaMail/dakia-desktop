@@ -47,6 +47,13 @@ fi
 
 cd "$repo_root"
 
+if ! command -v node >/dev/null 2>&1; then
+  echo "node is required to verify vendored crate provenance before the dependency audit." >&2
+  exit 1
+fi
+
+node "$repo_root/scripts/verify-vendored-crates.mjs"
+
 supported_targets="aarch64-apple-darwin"
 
 assert_unreachable() {
@@ -54,7 +61,7 @@ assert_unreachable() {
   advisory=$2
 
   for target in $supported_targets; do
-    if ! tree_output=$(cargo tree --workspace --locked --target "$target" -i "$package" 2>&1); then
+    if ! tree_output=$(cargo tree --workspace --locked --offline --target "$target" -i "$package" 2>&1); then
       echo "$tree_output" >&2
       echo "Could not prove $advisory reachability for $target." >&2
       exit 1

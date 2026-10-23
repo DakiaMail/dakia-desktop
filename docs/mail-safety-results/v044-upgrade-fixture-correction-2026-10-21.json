@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "lane": "previous-stable-upgrade-fixture-review",
+  "status": "corrected-fixture-native-pending",
+  "recordedAt": "2026-10-21T07:44:37.057308+00:00",
+  "revision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "supersededAcceptanceClaims": [
+    {
+      "report": "v044-forward-cli-upgrade-2026-10-21.json",
+      "sha256": "b0c83d026b0cf28ec696200d29792ef461409ff657c05bbd859c4422da8c7b82",
+      "originalArtifactRetained": true,
+      "interpretation": "Historical bounded account/search/startup observations only; invalid cache fixture cannot establish faithful prior-release Reader preservation."
+    },
+    {
+      "report": "v044-native-process-forward-upgrade-2026-10-21.json",
+      "sha256": "cf4b67072ef90d15074ef4a94832dd4afce1c5ffd51a670d5e166427f75cea5b",
+      "originalArtifactRetained": true,
+      "interpretation": "Historical bounded account/search/startup observations only; invalid cache fixture cannot establish faithful prior-release Reader preservation."
+    }
+  ],
+  "finding": "The manually seeded old profile placed the complete starred body only in messages. Published v0.4.4 persists that body in starred_message_bodies presentation version 3. Account and search checks did not establish cached Reader preservation.",
+  "productionDefectEstablished": false,
+  "productionMigrationChangedForFixture": false,
+  "faithfulInput": {
+    "path": "/private/tmp/dakia-forward-upgrade-20261021/h016-faithful-pre-candidate-backup",
+    "databaseSha256": "ce9a8ed68a41013a09c3d25e6d867e3d97aa4e579018a183cf388d232fa73330",
+    "report": "/private/tmp/dakia-forward-upgrade-20261021/h016-evidence/faithful-v044/h016-faithful-profile-report.json",
+    "reportSha256": "9373ddf1d36769d642668ebff46c7bca82871494fb8253a63838a01a20c6dd03"
+  },
+  "limitations": [
+    "Packaged GUI display of the faithful cached body remains pending.",
+    "The faithful migration probe predates the concurrent startup-lock fix.",
+    "Downgrade remains unsupported; restore the complete pre-upgrade backup."
+  ]
+}

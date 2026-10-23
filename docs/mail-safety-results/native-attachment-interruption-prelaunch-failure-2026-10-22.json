@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "status": "failed-before-gui",
+  "exitCode": 1,
+  "sourceDigest": "0e1a6829efb3c3e8620d68b0e9d8864f39f12d7b844ed2f792c8abd0474fb953",
+  "runRoot": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.HH171j",
+  "error": "ownership sentinel mode must be 0600",
+  "stage": "attachment interruption proxy startup",
+  "guiOpened": false,
+  "appAcceptance": false,
+  "logSha256": "7115974cfb2e77d311e909c3dc4b3703f58291970bba5660bb9baefcd04644e8",
+  "overlayLogSha256": "4ab72a1beb0a7f783a3ec4cae30d5371e7890e1a9f8cfc48651c0e0d35663c8e",
+  "fix": "Pending explicit0600fixturemarker and prepare-only opt-in proxy startup regression",
+  "limitations": [
+    "This is a fixture-harness failure, not a Dakia mail-behavior result.",
+    "No native attachment failure or retry was exercised."
+  ]
+}

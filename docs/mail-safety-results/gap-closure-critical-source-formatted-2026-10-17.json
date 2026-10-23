@@ -1,0 +1,124 @@
+{
+  "schemaVersion": 1,
+  "lane": "source",
+  "revision": "fccbace81192c5b5354f681e2feb2b66971e88cf",
+  "workingTree": "modified or unavailable",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "d3940f8a61be772c0d3ced404df63e195c28ba2e7deee12cac307f81b590276c",
+    "fileCount": 687
+  },
+  "environment": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "node": "v22.23.2"
+  },
+  "startedAt": "2026-10-17T20:16:51.038Z",
+  "finishedAt": "2026-10-17T20:17:11.437Z",
+  "status": "failed",
+  "runs": [
+    {
+      "iteration": 1,
+      "status": "failed",
+      "commands": [
+        {
+          "command": "node",
+          "args": [
+            "scripts/validate-mail-safety-catalogue.mjs"
+          ],
+          "startedAt": "2026-10-17T20:16:51.038Z",
+          "finishedAt": "2026-10-17T20:16:51.377Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/validate-realistic-fixtures.mjs"
+          ],
+          "startedAt": "2026-10-17T20:16:51.377Z",
+          "finishedAt": "2026-10-17T20:16:51.497Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "node",
+          "args": [
+            "scripts/tauri-contract-inventory.mjs"
+          ],
+          "startedAt": "2026-10-17T20:16:51.497Z",
+          "finishedAt": "2026-10-17T20:16:51.641Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "npm",
+          "args": [
+            "run",
+            "typecheck"
+          ],
+          "startedAt": "2026-10-17T20:16:51.641Z",
+          "finishedAt": "2026-10-17T20:16:55.209Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "npm",
+          "args": [
+            "run",
+            "format:check"
+          ],
+          "startedAt": "2026-10-17T20:16:55.209Z",
+          "finishedAt": "2026-10-17T20:16:56.961Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "cargo",
+          "args": [
+            "fmt",
+            "--all",
+            "--",
+            "--check"
+          ],
+          "startedAt": "2026-10-17T20:16:56.961Z",
+          "finishedAt": "2026-10-17T20:16:57.467Z",
+          "status": "passed",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "command": "cargo",
+          "args": [
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--locked",
+            "--",
+            "-D",
+            "warnings"
+          ],
+          "startedAt": "2026-10-17T20:16:57.467Z",
+          "finishedAt": "2026-10-17T20:17:11.437Z",
+          "status": "failed",
+          "exitCode": 101,
+          "signal": null
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "Ignored credentialed/independent-server tests are separate evidence.",
+    "Native WebKit, packaged upgrades, live providers, audits, performance, and fuzzing are not established by this source run."
+  ],
+  "sourceTreeAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "d3940f8a61be772c0d3ced404df63e195c28ba2e7deee12cac307f81b590276c",
+    "fileCount": 687
+  }
+}

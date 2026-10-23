@@ -1,0 +1,23 @@
+X-Dakia-Corpus-Case: international-reader-semantics
+Date: Tue, 28 Jul 2026 12:30:00 +0000
+From: =?UTF-8?Q?Fictional_=C5=A0ender?= <sender@example.test>
+To: recipient@example.test,
+ second@example.test
+Subject: =?UTF-8?Q?Fictional_=F0=9F=8C=8D_reader_message?=
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="international"
+
+--international
+Content-Type: text/plain; charset=utf-8; format=flowed; delsp=yes
+
+Tere, maailma 👋 
+jätkub samal real.
+مرحبا بالعالم
+שלום עולם
+-- 
+Fictional signature
+--international
+Content-Type: text/html; charset=utf-8
+
+<p>Tere, maailma 👋</p><p dir="rtl">مرحبا بالعالم</p><p>שלום עולם</p><p>--<br>Fictional signature</p>
+--international--

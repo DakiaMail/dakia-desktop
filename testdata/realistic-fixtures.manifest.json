@@ -1,9 +1,18 @@
 {
   "schemaVersion": 1,
   "fixtureRoots": [
-    { "path": "crates/dakia-core/testdata/mime", "extension": ".eml" },
-    { "path": "crates/dakia-core/tests/fixtures", "extension": ".eml" },
-    { "path": "apps/desktop/src/test/fixtures", "extension": ".html" }
+    {
+      "path": "crates/dakia-core/testdata/mime",
+      "extension": ".eml"
+    },
+    {
+      "path": "crates/dakia-core/tests/fixtures",
+      "extension": ".eml"
+    },
+    {
+      "path": "apps/desktop/src/test/fixtures",
+      "extension": ".html"
+    }
   ],
   "fixtures": [
     {
@@ -27,17 +36,71 @@
         "error": "No complete-parse error is expected.",
         "resourceLimit": "No resource-limit error is expected for this bounded fixture."
       },
-      "applicablePaths": ["complete-rfc822", "catalogue", "header"],
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
       "redaction": {
         "reviewer": "Dakia maintainers",
         "reviewedOn": "2026-07-30",
-        "permittedDomains": ["redacted.example"]
+        "permittedDomains": [
+          "redacted.example"
+        ]
       },
       "exercisedBy": [
         {
           "domain": "rust.mail.parse-paths",
           "source": "crates/dakia-core/src/mail.rs",
           "id": "every_mime_corpus_fixture_uses_all_publication_parse_paths"
+        }
+      ]
+    },
+    {
+      "id": "mime.ambiguous-inline-identities",
+      "path": "crates/dakia-core/testdata/mime/ambiguous-inline-identities.eml",
+      "sha256": "061751183e39b29b0b241ec7e9ae0568e90cb1b087502edcffb97500492e3364",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Synthetic multipart/related message with a root HTML Content-ID collision and image/PDF Content-Location collision."
+      },
+      "issue": "MIME corpus: only unique outer-message Content-ID and Content-Location references may become embedded resources.",
+      "provider": {
+        "shape": "multipart/related root HTML, inline image, and PDF with colliding inline identities",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Use the fictional HTML body.",
+        "html": "Leave both ambiguous cid: and Content-Location resources unresolved.",
+        "snippet": "Derive normal preview text from the HTML body.",
+        "attachments": "Keep logo.png and source.pdf downloadable because each reference is ambiguous in the outer MIME namespace.",
+        "error": "No complete-parse error is expected.",
+        "resourceLimit": "Selective parsing fetches bounded MIME headers for all outer leaves before it decides whether to fetch an inline payload."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header",
+        "storage-round-trip",
+        "selective-bodystructure"
+      ],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-10-17",
+        "permittedDomains": [
+          "example.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail.rs",
+          "id": "every_mime_corpus_fixture_uses_all_publication_parse_paths"
+        },
+        {
+          "domain": "rust.mail.selective-bodystructure",
+          "source": "crates/dakia-core/src/mail.rs",
+          "id": "realistic_selective_bodystructure_fixtures_match_complete_parser_and_starred_storage"
         }
       ]
     },
@@ -72,7 +135,9 @@
       "redaction": {
         "reviewer": "Dakia maintainers",
         "reviewedOn": "2026-07-30",
-        "permittedDomains": ["example.test"]
+        "permittedDomains": [
+          "example.test"
+        ]
       },
       "exercisedBy": [
         {
@@ -84,6 +149,47 @@
           "domain": "rust.mail.selective-bodystructure",
           "source": "crates/dakia-core/src/mail.rs",
           "id": "realistic_selective_bodystructure_fixtures_match_complete_parser_and_starred_storage"
+        }
+      ]
+    },
+    {
+      "id": "mime.empty-alternative-leaf",
+      "path": "crates/dakia-core/testdata/mime/empty-alternative-leaf.eml",
+      "sha256": "51e1fababdf7db6f771d2115f569c737adec938fb353c963d4e2729c9ca74607",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Synthetic multipart/alternative with an empty plain leaf followed by visible HTML."
+      },
+      "issue": "MIME corpus: an empty alternative leaf must not suppress a later visible HTML body.",
+      "provider": {
+        "shape": "multipart/alternative with empty text/plain and visible text/html",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Use text derived from the visible HTML leaf.",
+        "html": "Retain Visible HTML after an empty plain part.",
+        "snippet": "Derive normal preview text from the visible HTML body.",
+        "attachments": "No attachments are expected.",
+        "error": "No complete-parse error is expected.",
+        "resourceLimit": "No resource-limit error is expected for this bounded fixture."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-10-18",
+        "permittedDomains": [
+          "example.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "id": "governed_mime_corpus_survives_parse_reopen_and_declared_reader_semantics"
         }
       ]
     },
@@ -108,11 +214,17 @@
         "error": "Unsupported charset leaves that cannot be decoded stay errors rather than invented text.",
         "resourceLimit": "No resource-limit error is expected for this bounded fixture."
       },
-      "applicablePaths": ["complete-rfc822", "catalogue", "header"],
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
       "redaction": {
         "reviewer": "Dakia maintainers",
         "reviewedOn": "2026-07-30",
-        "permittedDomains": ["example.test"]
+        "permittedDomains": [
+          "example.test"
+        ]
       },
       "exercisedBy": [
         {
@@ -143,11 +255,17 @@
         "error": "No complete-parse error is expected.",
         "resourceLimit": "No resource-limit error is expected for this bounded fixture."
       },
-      "applicablePaths": ["complete-rfc822", "catalogue", "header"],
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
       "redaction": {
         "reviewer": "Dakia maintainers",
         "reviewedOn": "2026-07-30",
-        "permittedDomains": ["example.test"]
+        "permittedDomains": [
+          "example.test"
+        ]
       },
       "exercisedBy": [
         {
@@ -178,11 +296,17 @@
         "error": "No complete-parse error is expected.",
         "resourceLimit": "No resource-limit error is expected for this bounded fixture."
       },
-      "applicablePaths": ["complete-rfc822", "catalogue", "header"],
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
       "redaction": {
         "reviewer": "Dakia maintainers",
         "reviewedOn": "2026-07-30",
-        "permittedDomains": ["example.test"]
+        "permittedDomains": [
+          "example.test"
+        ]
       },
       "exercisedBy": [
         {
@@ -217,13 +341,14 @@
         "complete-rfc822",
         "catalogue",
         "header",
-        "selective-bodystructure",
-        "storage-round-trip"
+        "selective-bodystructure"
       ],
       "redaction": {
         "reviewer": "Dakia maintainers",
         "reviewedOn": "2026-07-30",
-        "permittedDomains": ["example.test"]
+        "permittedDomains": [
+          "example.test"
+        ]
       },
       "exercisedBy": [
         {
@@ -268,7 +393,9 @@
       "redaction": {
         "reviewer": "Dakia maintainers",
         "reviewedOn": "2026-07-30",
-        "permittedDomains": ["example.test"]
+        "permittedDomains": [
+          "example.test"
+        ]
       },
       "exercisedBy": [
         {
@@ -304,11 +431,17 @@
         "error": "Complete parsing must return the stable MIME content undecodable error.",
         "resourceLimit": "No resource-limit error is expected; this is an encoding failure."
       },
-      "applicablePaths": ["complete-rfc822", "catalogue", "header"],
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
       "redaction": {
         "reviewer": "Dakia maintainers",
         "reviewedOn": "2026-07-30",
-        "permittedDomains": ["example.test"]
+        "permittedDomains": [
+          "example.test"
+        ]
       },
       "exercisedBy": [
         {
@@ -339,17 +472,64 @@
         "error": "No complete-parse error is expected.",
         "resourceLimit": "No resource-limit error is expected for this bounded fixture."
       },
-      "applicablePaths": ["complete-rfc822", "catalogue", "header"],
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
       "redaction": {
         "reviewer": "Dakia maintainers",
         "reviewedOn": "2026-07-30",
-        "permittedDomains": ["example.test"]
+        "permittedDomains": [
+          "example.test"
+        ]
       },
       "exercisedBy": [
         {
           "domain": "rust.mail.parse-paths",
           "source": "crates/dakia-core/src/mail.rs",
           "id": "every_mime_corpus_fixture_uses_all_publication_parse_paths"
+        }
+      ]
+    },
+    {
+      "id": "mime.international-reader-semantics",
+      "path": "crates/dakia-core/testdata/mime/international-reader-semantics.eml",
+      "sha256": "3fbdb8273819c0a20a585c36a45d15bd0bc89f7708a2293dfe0e74181c14629b",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Synthetic UTF-8 multipart/alternative with RFC 2047 headers, folded recipients, flowed text, emoji, bidirectional scripts, and a signature."
+      },
+      "issue": "MIME corpus: preserve international reading semantics and decode encoded, folded headers through the Reader handoff.",
+      "provider": {
+        "shape": "multipart/alternative with UTF-8 flowed text and a matching HTML alternative",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve the fictional Estonian flowed text, emoji, Arabic, Hebrew, and signature without inventing replacements.",
+        "html": "Retain the HTML alternative, including its explicit right-to-left Arabic paragraph.",
+        "snippet": "Use selected decoded text for normal preview semantics.",
+        "attachments": "No attachments are expected.",
+        "error": "No complete-parse error is expected.",
+        "resourceLimit": "No resource-limit error is expected for this bounded fixture."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-10-18",
+        "permittedDomains": [
+          "example.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "id": "governed_mime_corpus_survives_parse_reopen_and_declared_reader_semantics"
         }
       ]
     },
@@ -383,7 +563,9 @@
       "redaction": {
         "reviewer": "Dakia maintainers",
         "reviewedOn": "2026-07-30",
-        "permittedDomains": ["example.test"]
+        "permittedDomains": [
+          "example.test"
+        ]
       },
       "exercisedBy": [
         {
@@ -428,7 +610,9 @@
       "redaction": {
         "reviewer": "Dakia maintainers",
         "reviewedOn": "2026-07-30",
-        "permittedDomains": ["example.test"]
+        "permittedDomains": [
+          "example.test"
+        ]
       },
       "exercisedBy": [
         {
@@ -440,6 +624,365 @@
           "domain": "rust.mail.selective-bodystructure",
           "source": "crates/dakia-core/src/mail.rs",
           "id": "realistic_selective_bodystructure_fixtures_match_complete_parser_and_starred_storage"
+        }
+      ]
+    },
+    {
+      "id": "mime.standards-base64-final-quanta",
+      "path": "crates/dakia-core/testdata/mime/standards-base64-final-quanta.eml",
+      "sha256": "fe9d66d3859e262146f1b7998e8284dd970aeccc439b4a6235de7001379b6611",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Synthetic RFC 2045 Base64 fixture covering canonical one-byte, two-byte, and three-byte final quanta plus folded transport whitespace."
+      },
+      "issue": "MIME standards: decode every canonical Base64 final quantum and ignore transport whitespace consistently across complete and selective Reader paths.",
+      "provider": {
+        "shape": "multipart/mixed with four fictional text/plain Base64 leaves",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Publish A, AB, ABC, and White space in source order.",
+        "html": "No HTML body is expected.",
+        "snippet": "Use decoded content without Base64 transport syntax.",
+        "attachments": "No attachments are expected.",
+        "error": "No complete-parse or selective-fetch error is expected.",
+        "resourceLimit": "No resource-limit error is expected for this bounded fixture."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header",
+        "selective-bodystructure",
+        "storage-round-trip"
+      ],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "id": "rfc2045_base64_final_quanta_and_transport_whitespace_survive_selective_reopen"
+        },
+        {
+          "domain": "rust.mail.selective-bodystructure",
+          "source": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "id": "rfc2045_base64_final_quanta_and_transport_whitespace_survive_selective_reopen"
+        }
+      ]
+    },
+    {
+      "id": "mime.standards-malformed-quoted-printable",
+      "path": "crates/dakia-core/testdata/mime/standards-malformed-quoted-printable.eml",
+      "sha256": "509222e9f09d0daf5bf33b390f81e95dcc0c8619b35be841b077b55718b04c92",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Synthetic RFC 2045 malformed quoted-printable fixture containing a fictional =QZ escape."
+      },
+      "issue": "MIME recovery policy: reject a formally illegal quoted-printable escape without inventing decoded text or disturbing recoverable mailbox state.",
+      "provider": {
+        "shape": "standalone fictional text/plain quoted-printable body with one illegal escape",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Do not publish invented or partially decoded Reader content for the illegal =QZ sequence.",
+        "html": "No HTML body is expected.",
+        "snippet": "Do not publish a Reader snippet from the malformed body; catalogue callers may retain their separately supplied safe preview.",
+        "attachments": "No attachments are expected.",
+        "error": "Complete and selective Reader publication return mime_content_undecodable; header and catalogue metadata remain readable.",
+        "resourceLimit": "The small malformed body fails boundedly and does not disturb a neighboring valid message across profile reopen."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header",
+        "selective-bodystructure",
+        "storage-round-trip"
+      ],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "id": "malformed_quoted_printable_is_bounded_rejection_across_complete_selective_and_reopen"
+        },
+        {
+          "domain": "rust.mail.selective-bodystructure",
+          "source": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "id": "malformed_quoted_printable_is_bounded_rejection_across_complete_selective_and_reopen"
+        }
+      ]
+    },
+    {
+      "id": "mime.standards-multipart-boundary-lengths",
+      "path": "crates/dakia-core/testdata/mime/standards-multipart-boundary-lengths.eml",
+      "sha256": "d6bc2970d44c487280a0b7e345e68e1782b8080f971c008ed7d664a35f87017b",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Synthetic RFC 2046 multipart fixture using quoted legal punctuation, conforming 69- and 70-character boundaries, and one 71-character interoperability-tolerance boundary."
+      },
+      "issue": "MIME standards: preserve legal quoted boundary punctuation and exact length edges while documenting overlong-boundary acceptance as tolerance.",
+      "provider": {
+        "shape": "nested multipart/mixed with fictional 69-, 70-, and 71-character boundary values",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Publish all three child bodies in source order.",
+        "html": "No HTML body is expected.",
+        "snippet": "Use visible decoded child text.",
+        "attachments": "No attachments are expected.",
+        "error": "The 69- and 70-character boundaries conform; Dakia also accepts 71 characters as a documented tolerance, not as a conformance claim.",
+        "resourceLimit": "No resource-limit error is expected for this bounded fixture."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header",
+        "selective-bodystructure",
+        "storage-round-trip"
+      ],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "id": "rfc2046_quoted_boundary_punctuation_and_69_70_lengths_survive_selective_reopen"
+        },
+        {
+          "domain": "rust.mail.selective-bodystructure",
+          "source": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "id": "rfc2046_quoted_boundary_punctuation_and_69_70_lengths_survive_selective_reopen"
+        }
+      ]
+    },
+    {
+      "id": "mime.standards-bodystructure-omitted-attachment",
+      "path": "crates/dakia-core/testdata/mime/standards-bodystructure-omitted-attachment.eml",
+      "sha256": "6f4b2e0a4b807695a2f70d3a760a4ff2e8ded0214cfaa581de13dd095b84441d",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Synthetic multipart message where an IMAP BODYSTRUCTURE omits a text attachment disposition that remains present in the raw MIME section headers."
+      },
+      "issue": "Selective MIME: targeted saving must rehydrate raw MIME headers before resolving the immutable attachment ID published to Reader.",
+      "provider": {
+        "shape": "multipart/mixed with a visible plain body and a text/html attachment whose invalid extended filename falls back to safe.html",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Render only the visible safe plain body.",
+        "html": "Do not render the text/html attachment.",
+        "snippet": "Use the visible safe body.",
+        "attachments": "Reader publishes safe.html without fetching its payload; targeted saving resolves the same ID, preserves the unsafe warning, and returns the exact section bytes.",
+        "error": "No Reader or targeted-save error is expected despite the incomplete BODYSTRUCTURE metadata.",
+        "resourceLimit": "Only bounded MIME headers and the explicitly targeted attachment body are fetched."
+      },
+      "applicablePaths": [
+        "selective-bodystructure"
+      ],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-10-20",
+        "permittedDomains": [
+          "example.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.selective-bodystructure",
+          "source": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "id": "targeted_save_rehydrates_attachment_omitted_by_bodystructure_before_matching_reader_id"
+        }
+      ]
+    },
+    {
+      "id": "mime.standards-defaults-and-boundaries",
+      "path": "crates/dakia-core/testdata/mime/standards-defaults-and-boundaries.eml",
+      "sha256": "2502bdd30e7803357e7f089f5808970a582692f02064e0e8bc4c42e4694f330f",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Synthetic RFC 2045, RFC 2046, and RFC 2047 defaults, case-folding, encoded-word, quoted-printable, and Base64 boundary vector using fictional example.test identities."
+      },
+      "issue": "MIME standards: apply default text and transfer semantics, preserve unknown multipart child order, and decode canonical transfer boundaries.",
+      "provider": {
+        "shape": "unknown multipart subtype with absent content headers, mixed-case MIME tokens, adjacent encoded words, quoted-printable, and folded Base64",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Publish all three ordered text children using text/plain US-ASCII and 7bit defaults where headers are absent.",
+        "html": "No HTML body is expected.",
+        "snippet": "Use the decoded first visible text without transport syntax.",
+        "attachments": "No attachments are expected.",
+        "error": "No complete-parse error is expected.",
+        "resourceLimit": "No resource-limit error is expected for this bounded fixture."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-10-20",
+        "permittedDomains": [
+          "example.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "id": "rfc2045_defaults_case_and_transfer_boundaries_survive_all_reader_publication_paths"
+        }
+      ]
+    },
+    {
+      "id": "mime.standards-multipart-digest",
+      "path": "crates/dakia-core/testdata/mime/standards-multipart-digest.eml",
+      "sha256": "371eb92b4cf43bfff56abdbaf0ec02bbd4c4180cf35d6d84488f5f8cf1d3647d",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Synthetic RFC 2046 multipart/digest containing one implicit and one explicit message/rfc822 child."
+      },
+      "issue": "MIME standards: a multipart/digest child without Content-Type defaults to message/rfc822.",
+      "provider": {
+        "shape": "multipart/digest with implicit and explicit encapsulated fictional messages",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Keep both encapsulated message bodies outside the outer Reader body.",
+        "html": "No outer HTML body is expected.",
+        "snippet": "Do not promote encapsulated content into an outer preview.",
+        "attachments": "Expose both children with message/rfc822 semantics.",
+        "error": "No complete-parser error is expected.",
+        "resourceLimit": "No resource-limit error is expected for this bounded fixture."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-10-20",
+        "permittedDomains": [
+          "example.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "id": "rfc2046_digest_children_default_to_message_rfc822"
+        }
+      ]
+    },
+    {
+      "id": "mime.standards-rfc2231-pathologies",
+      "path": "crates/dakia-core/testdata/mime/standards-rfc2231-pathologies.eml",
+      "sha256": "bcdd799e328f7a85711b00128bb88fb7c912a904a3249577003e3bc0c38d2fc3",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Synthetic RFC 2231 language, unsupported charset, shuffled encoded continuation, valid unencoded and quoted-pair continuations, mixed encoded and ordinary segments, missing segment, and duplicate segment vectors."
+      },
+      "issue": "MIME standards: define safe deterministic filename recovery and complete/selective parity for RFC 2231 parameter edge cases.",
+      "provider": {
+        "shape": "multipart/mixed with nine fictional RFC 2231 attachment parameter variants",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Use only the visible ASCII explanatory body.",
+        "html": "No HTML body is expected.",
+        "snippet": "Use the visible explanatory body.",
+        "attachments": "Decode the language-tagged, shuffled-valid, contiguous unencoded, quoted-pair, and mixed encoded/ordinary names, then apply the same filename safety rules in complete and selective fetches; malformed or unsupported forms use their safe plain fallbacks.",
+        "error": "No complete-parse or selective-fetch error is expected.",
+        "resourceLimit": "No resource-limit error is expected for this bounded fixture."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header",
+        "selective-bodystructure"
+      ],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-10-20",
+        "permittedDomains": [
+          "example.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "id": "rfc2231_language_and_malformed_continuations_have_exact_complete_selective_parity"
+        },
+        {
+          "domain": "rust.mail.selective-bodystructure",
+          "source": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "id": "rfc2231_language_and_malformed_continuations_have_exact_complete_selective_parity"
+        }
+      ]
+    },
+    {
+      "id": "mime.standards-unknown-transfer-encoding",
+      "path": "crates/dakia-core/testdata/mime/standards-unknown-transfer-encoding.eml",
+      "sha256": "087ad977f7b58e4dd0a306814bc2f03ef36866ffe78c27ad11c60f82ba6386ab",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Synthetic RFC 2045 unknown Content-Transfer-Encoding vector with a valid visible sibling and fictional opaque payload."
+      },
+      "issue": "MIME standards: treat an unrecognized transfer encoding as opaque application/octet-stream instead of plausible decoded text or silent loss.",
+      "provider": {
+        "shape": "multipart/mixed with a valid text body plus named text/plain and unnamed text/html unknown-transfer leaves",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Publish only the valid visible sibling as message body text.",
+        "html": "The unnamed unknown-transfer HTML leaf remains opaque and never becomes Reader HTML.",
+        "snippet": "Use only the valid visible body.",
+        "attachments": "Decode the extended invoice.exe filename, preserve its unsafe warning, and expose both named and unnamed unknown-transfer leaves as opaque application/octet-stream downloads with transport bytes intact.",
+        "error": "No complete-message error is expected because the valid sibling remains readable.",
+        "resourceLimit": "No resource-limit error is expected for this bounded fixture."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header",
+        "selective-bodystructure"
+      ],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-10-20",
+        "permittedDomains": [
+          "example.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "id": "rfc2045_unknown_transfer_encoding_is_published_as_opaque_binary"
+        },
+        {
+          "domain": "rust.mail.selective-bodystructure",
+          "source": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "id": "rfc2045_unknown_transfer_encoding_is_published_as_opaque_binary"
         }
       ]
     },
@@ -473,7 +1016,9 @@
       "redaction": {
         "reviewer": "Dakia maintainers",
         "reviewedOn": "2026-07-30",
-        "permittedDomains": ["example.test"]
+        "permittedDomains": [
+          "example.test"
+        ]
       },
       "exercisedBy": [
         {
@@ -485,6 +1030,165 @@
           "domain": "rust.mail.partial-preview",
           "source": "crates/dakia-core/src/mail.rs",
           "id": "parses_the_checked_in_mime_regression_corpus"
+        }
+      ]
+    },
+    {
+      "id": "mime.fuzz-budget-graph-oom-minimized",
+      "path": "crates/dakia-core/testdata/mime/fuzz-budget-graph-oom-minimized.eml",
+      "sha256": "11caf9d40e6756b25ee4fa058bc87202b1384721b3d42fa7cc0ad63ec96bbac5",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "361-byte delta-minimized libFuzzer input derived from the adjacent original synthetic finding. It preserves Dakia's invalid MIME part-graph rejection."
+      },
+      "issue": "Dakia MIME budget fuzz regression: malformed parser output must not grow an unbounded traversal queue.",
+      "provider": {
+        "shape": "malformed multipart/mixed with corrupted nested message/rfc822 structure",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "No complete body is accepted.",
+        "html": "No HTML body is accepted.",
+        "snippet": "The production complete-parser boundary rejects the malformed graph before message metadata is published.",
+        "attachments": "No attachment is exposed from rejected complete parsing.",
+        "error": "Complete parsing returns mime_invalid_part_graph without unbounded allocation.",
+        "resourceLimit": "Traversal work remains bounded by Dakia's MIME part limit."
+      },
+      "applicablePaths": [
+        "complete-rfc822"
+      ],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-10-17",
+        "permittedDomains": [
+          "example.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail.rs",
+          "id": "malformed_part_graph_is_rejected_without_blocking_the_next_message"
+        }
+      ]
+    },
+    {
+      "id": "mime.fuzz-budget-graph-oom-original",
+      "path": "crates/dakia-core/testdata/mime/fuzz-budget-graph-oom-original.eml",
+      "sha256": "a6fa982cff51d2383a4d47620abeb4cc1791b05fde1ecdb30f970014133f19a2",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Original 2,324-byte libFuzzer out-of-memory input. It was mutated from the checked-in synthetic attached-message corpus and contains only fictional example.test addresses and synthetic body text."
+      },
+      "issue": "Dakia MIME budget fuzz regression: retain the original out-of-memory finding alongside its minimized seed.",
+      "provider": {
+        "shape": "mutated synthetic multipart/mixed with corrupted nested message/rfc822 structure",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "No complete body is accepted.",
+        "html": "No HTML body is accepted.",
+        "snippet": "The production complete-parser boundary rejects the malformed graph before message metadata is published.",
+        "attachments": "No attachment is exposed from rejected complete parsing.",
+        "error": "Complete parsing returns mime_invalid_part_graph without unbounded allocation.",
+        "resourceLimit": "The original remains a bounded permanent fuzz seed."
+      },
+      "applicablePaths": [
+        "complete-rfc822"
+      ],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-10-17",
+        "permittedDomains": [
+          "example.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail.rs",
+          "id": "malformed_part_graph_is_rejected_without_blocking_the_next_message"
+        }
+      ]
+    },
+    {
+      "id": "mime.fuzz-invalid-part-id-minimized",
+      "path": "crates/dakia-core/testdata/mime/fuzz-invalid-part-id-minimized.eml",
+      "sha256": "d6f8c108e2e17aaa5dd1fa38818be1a9f19a760913198a3aa490c43b52a8c076",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "114-byte libFuzzer-minimized nested message/rfc822 parser invariant input; derived from the adjacent synthetic original fixture."
+      },
+      "issue": "mail-parser upstream issue #160: malformed nested message/rfc822 must return a parse error without panicking.",
+      "provider": {
+        "shape": "malformed multipart with nested message/rfc822 recovery state",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "No complete body is accepted.",
+        "html": "No HTML body is accepted.",
+        "snippet": "The minimized seed has no valid Date, so catalogue metadata remains unavailable while raw header parsing stays safe.",
+        "attachments": "No attachment is exposed from rejected complete parsing.",
+        "error": "Complete parsing returns the ordinary parser error rather than panicking.",
+        "resourceLimit": "The bounded input must not enter a parser-internal invalid-part state."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-10-17",
+        "permittedDomains": [
+          "example.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail.rs",
+          "id": "malformed_nested_message_part_is_rejected_without_blocking_the_next_message"
+        }
+      ]
+    },
+    {
+      "id": "mime.fuzz-invalid-part-id-original",
+      "path": "crates/dakia-core/testdata/mime/fuzz-invalid-part-id-original.eml",
+      "sha256": "7e8550d2efc27d40a3a4dc0b8bf19bb7f2051e8983ed431b3ebedfce1b187896",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Original 1,611-byte libFuzzer crash input. It contains only fictional example.test addresses and synthetic body text."
+      },
+      "issue": "mail-parser upstream issue #160: retain the original crash input alongside its minimized regression seed.",
+      "provider": {
+        "shape": "mutated synthetic multipart/mixed with nested message/rfc822",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "No complete body is accepted.",
+        "html": "No HTML body is accepted.",
+        "snippet": "Catalogue and header-only metadata remain available because they do not parse the malformed body.",
+        "attachments": "No attachment is exposed from rejected complete parsing.",
+        "error": "Complete parsing returns the ordinary parser error rather than panicking.",
+        "resourceLimit": "The checked-in original is a bounded permanent fuzz seed."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-10-17",
+        "permittedDomains": [
+          "example.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail.rs",
+          "id": "malformed_nested_message_part_is_rejected_without_blocking_the_next_message"
         }
       ]
     },
@@ -520,7 +1224,9 @@
       "redaction": {
         "reviewer": "Dakia maintainers",
         "reviewedOn": "2026-07-30",
-        "permittedDomains": ["example.test"]
+        "permittedDomains": [
+          "example.test"
+        ]
       },
       "exercisedBy": [
         {
@@ -571,11 +1277,16 @@
         "error": "No rendering error is expected.",
         "resourceLimit": "No MIME resource-limit semantics apply to standalone HTML."
       },
-      "applicablePaths": ["html-document", "reader-disclosure"],
+      "applicablePaths": [
+        "html-document",
+        "reader-disclosure"
+      ],
       "redaction": {
         "reviewer": "Dakia maintainers",
         "reviewedOn": "2026-07-30",
-        "permittedDomains": ["example.test"]
+        "permittedDomains": [
+          "example.test"
+        ]
       },
       "exercisedBy": [
         {
@@ -606,11 +1317,16 @@
         "error": "No rendering error is expected.",
         "resourceLimit": "No MIME resource-limit semantics apply to standalone HTML."
       },
-      "applicablePaths": ["html-document", "reader-disclosure"],
+      "applicablePaths": [
+        "html-document",
+        "reader-disclosure"
+      ],
       "redaction": {
         "reviewer": "Dakia maintainers",
         "reviewedOn": "2026-07-30",
-        "permittedDomains": ["example.test"]
+        "permittedDomains": [
+          "example.test"
+        ]
       },
       "exercisedBy": [
         {
@@ -646,7 +1362,10 @@
         "error": "No rendering error is expected.",
         "resourceLimit": "No MIME resource-limit semantics apply to standalone HTML."
       },
-      "applicablePaths": ["html-document", "reader-disclosure"],
+      "applicablePaths": [
+        "html-document",
+        "reader-disclosure"
+      ],
       "redaction": {
         "reviewer": "Dakia maintainers",
         "reviewedOn": "2026-07-30",
@@ -685,11 +1404,15 @@
         "error": "No rendering error is expected.",
         "resourceLimit": "No MIME resource-limit semantics apply to standalone HTML."
       },
-      "applicablePaths": ["html-document"],
+      "applicablePaths": [
+        "html-document"
+      ],
       "redaction": {
         "reviewer": "Dakia maintainers",
         "reviewedOn": "2026-07-30",
-        "permittedDomains": ["example.test"]
+        "permittedDomains": [
+          "example.test"
+        ]
       },
       "exercisedBy": [
         {
@@ -745,6 +1468,2265 @@
           "domain": "frontend.html-message",
           "source": "apps/desktop/src/components/HtmlMessage.test.tsx",
           "id": "keeps the complete receipt mounted through dark-light-dark theme changes"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-01-comment-qtext",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-01-comment-qtext.eml",
+      "sha256": "f08c6d848618fc78b8843c9e02e40646e982abfcf0899233ffdc2f2a21dfc8b8",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.1 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Keep sender mailbox sender@example.test; no fabricated header or action; decide and document visible control normalization while retaining retrievable original bytes.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_01_comment_qtext"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-01-unstructured",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-01-unstructured.eml",
+      "sha256": "b822a2d5ce93298e977641ffa270e15be24a92f86e0293b696276b9ad76dbddc",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.1 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Accept bounded historical input without native/HTML execution; preserve printable alpha/omega order. Exact display normalization needs an explicit oracle, not an inferred standard rendering rule.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_01_unstructured"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-02-body-controls",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-02-body-controls.eml",
+      "sha256": "dfc2848efcb82296911b561cdaa59bec8804862c1eb988f89cffbeb1e942ceee",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.1 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Bounded body processing, printable tokens retained in order; exact chosen line-ending normalization documented; raw fetch/export must retain original octets.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_02_body_controls"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-02-mixed-header-separators",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-02-mixed-header-separators.eml",
+      "sha256": "eb9e1dc50f3c56fbf956ecd022bf7e58589b054b94110337060fd9da0eb0e255",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.1 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Resolve the historical bare-CR ambiguity explicitly; no silent body-as-header promotion or injected recipient. This case requires a policy oracle before claiming exact display semantics.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_02_mixed_header_separators"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-03-dotted-display",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-03-dotted-display.eml",
+      "sha256": "e92d22aa6d4c2b651ad3841fb96be1ad9ee1ccbc227db9db6855747d75a4ce95",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.1 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Sender address stays exact and display tokens do not become addr-spec segments.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_03_dotted_display"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-03-keyword-nulls",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-03-keyword-nulls.eml",
+      "sha256": "5165c84981d55f90291194ade35a39134f8b786bc5e9e57912b5618a4baf81f8",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.1 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Mail body remains readable and original header remains retrievable. No invented Keywords UI is required.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_03_keyword_nulls"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-04-whitespace-only-fold",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-04-whitespace-only-fold.eml",
+      "sha256": "3fa25cceebb39a396b609caabd5beaec795d7ecc9d3e36a45a9f0788344dca13",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.2 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Header does not end at the whitespace-only continuation; subject contains alpha then omega without exposing continuation as body.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_priority_obs_04_whitespace_only_fold"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-05-year-thresholds-00",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-05-year-thresholds-00.eml",
+      "sha256": "602fd5c1c0c3016d81bfac13f9c50c07e5e29c3f45c4729fd6df5bec844bcb2e",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.3 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Each Date yields its listed year at midnight UTC in all metadata/complete paths; a supplied conflicting IMAP INTERNALDATE must not hide incorrect Date interpretation.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_priority_obs_05_year_thresholds_00"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-05-year-thresholds-49",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-05-year-thresholds-49.eml",
+      "sha256": "4894f1e56134e8dab68aaa601694e34a49932dc3d4219dad0e7c75cfbfbd765d",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.3 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Each Date yields its listed year at midnight UTC in all metadata/complete paths; a supplied conflicting IMAP INTERNALDATE must not hide incorrect Date interpretation.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_priority_obs_05_year_thresholds_49"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-05-year-thresholds-50",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-05-year-thresholds-50.eml",
+      "sha256": "fae3cd2c77ee43d3ef30e4b5a7934433fce93a44361fb7777ae3440523d31aec",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.3 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Each Date yields its listed year at midnight UTC in all metadata/complete paths; a supplied conflicting IMAP INTERNALDATE must not hide incorrect Date interpretation.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_priority_obs_05_year_thresholds_50"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-05-year-thresholds-99",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-05-year-thresholds-99.eml",
+      "sha256": "6ba85dc8084ff845f3a1045c4b18f4d5add925df6d405b8e1f03d272ae5a7853",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.3 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Each Date yields its listed year at midnight UTC in all metadata/complete paths; a supplied conflicting IMAP INTERNALDATE must not hide incorrect Date interpretation.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_priority_obs_05_year_thresholds_99"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-05-year-thresholds-123",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-05-year-thresholds-123.eml",
+      "sha256": "532a1b3db5edc8107e9a244a0b7efd53fd73b020902a590c465309b5ca31e0f6",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.3 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Each Date yields its listed year at midnight UTC in all metadata/complete paths; a supplied conflicting IMAP INTERNALDATE must not hide incorrect Date interpretation.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_priority_obs_05_year_thresholds_123"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-05-date-token-comments",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-05-date-token-comments.eml",
+      "sha256": "b3c3b26eb1f4ef82e8e2b674127b0a7f21179ab07f639f142f2fd54269c10772",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.3 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Interpret the intended 2026-01-01T00:00:00Z rather than silently using receipt time.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_05_date_token_comments"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-06-zone-matrix-ut",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-06-zone-matrix-ut.eml",
+      "sha256": "162678996c8f0a2d3707679ada8f4cb744b2f242effe3ffe4ae34587bf26c82e",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.3 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_06_zone_matrix_ut"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-06-zone-matrix-gmt",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-06-zone-matrix-gmt.eml",
+      "sha256": "2d73cc67f9a7fd3d62dc04d9d21f863c66d03b426dea798339e40e2bd03c912c",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.3 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_06_zone_matrix_gmt"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-06-zone-matrix-est",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-06-zone-matrix-est.eml",
+      "sha256": "82ec4e1c545da12343ec66c9a84e35057e9a701a2722b02d31de6e9f5ee8274b",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.3 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_06_zone_matrix_est"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-06-zone-matrix-edt",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-06-zone-matrix-edt.eml",
+      "sha256": "e0ff33f5df2a5c41bc7322db97b4a799d35c2105059e72c0e67b185b4c18317a",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.3 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_06_zone_matrix_edt"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-06-zone-matrix-cst",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-06-zone-matrix-cst.eml",
+      "sha256": "a064bfece355b88708e2cae33b7b66bfa5a7c74ee2cbad5ed0953b59bdbb0c54",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.3 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_06_zone_matrix_cst"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-06-zone-matrix-cdt",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-06-zone-matrix-cdt.eml",
+      "sha256": "ef4b464c9862e54eeaa9ac6299e4c9629e21ef41d817ab18ebe84db1adbf58e2",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.3 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_06_zone_matrix_cdt"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-06-zone-matrix-mst",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-06-zone-matrix-mst.eml",
+      "sha256": "4734624f922baf2f9d101f5468df4ceb9d622bc528c7789ebd7dc2528725037c",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.3 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_06_zone_matrix_mst"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-06-zone-matrix-mdt",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-06-zone-matrix-mdt.eml",
+      "sha256": "bafde59460431a0167c5e29a1b99feab8c213d34eb5db01b986cc5012fef6ae2",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.3 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_06_zone_matrix_mdt"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-06-zone-matrix-pst",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-06-zone-matrix-pst.eml",
+      "sha256": "0bf174694d9300bb18d087313087bf6ee83526014a809b229d3e6536e0704265",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.3 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_06_zone_matrix_pst"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-06-zone-matrix-pdt",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-06-zone-matrix-pdt.eml",
+      "sha256": "96cfe9f909fcabfbc69d936a96ce96d0a61ad047e345c636bcc8012937499873",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.3 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_06_zone_matrix_pdt"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-06-zone-matrix-a",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-06-zone-matrix-a.eml",
+      "sha256": "9a324c3aec7c6f4e08de6d50b61f7d95872da818922b7c59bb344d30006caaf0",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.3 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_06_zone_matrix_a"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-07-direct-route",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-07-direct-route.eml",
+      "sha256": "edd9a785d8409b9150f794217bda2a8e72943ad2289490745f54b91e2b4534d6",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.4 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: The terminal sender/reader mailboxes remain exact; route domains are not recipients, identities or destinations. Reply preparation must not reintroduce route syntax.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_priority_obs_07_direct_route"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-08-cfws-dot",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-08-cfws-dot.eml",
+      "sha256": "9968f5d0c7641ad7561bcd0b5881152874b418688dd4ba3eeeb4008209e5b95f",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.4 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Interpret sender.part@example.test without changing meaningful local-part bytes; no encoded-word decoding inside identity.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_08_cfws_dot"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-08-quoted-word-dot",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-08-quoted-word-dot.eml",
+      "sha256": "0c5bb557ab51c3b1fa005afccbdaa3d6b323f648b4b49ddc8ef785fe788941c8",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.4 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Preserve the literal quoted local-part identity and produce a valid reply target; never collapse it into another mailbox. Exact serialization oracle must account for meaningful quoted whitespace.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_08_quoted_word_dot"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-09-null-recipients",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-09-null-recipients.eml",
+      "sha256": "9265297e431cdf9098f396e8d262cc42adead75d7e265519d198c23852c47420",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.4 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Keep exactly the two real To mailboxes and an empty group; no phantom recipient or parse failure. Reader Reply All retains the real recipients only.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_09_null_recipients"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-10-domain-escape",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-10-domain-escape.eml",
+      "sha256": "e349bf756670499d90f90526aa96a35e59a5a1085e6e204de35c41d540ba0174",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.4 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Keep the domain-literal address distinct and literal; do not reinterpret it as an application URL, local-file path or command.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_10_domain_escape"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-10-domain-control",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-10-domain-control.eml",
+      "sha256": "c5b6360a3357c1d75ec79ed101a0d1a7e8e46262fc6990eaeb495e6615f551de",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.4 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Bounded receive interpretation without retargeting; define safe reply behavior for the control-bearing domain rather than silently inventing a routable address.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_10_domain_control"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-11-reorder-and-wsp",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-11-reorder-and-wsp.eml",
+      "sha256": "490d5a677a64d8cec7348a6d0da4d44136245aaf87fa795a27f879fdda3757a5",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.5 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Same exposed metadata/body across full/header/catalogue and reopen despite order and whitespace. Singleton ambiguity uses the documented deterministic policy.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_11_reorder_and_wsp"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-12-date-wsp",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-12-date-wsp.eml",
+      "sha256": "8c505870e1c64e4d09fa54e208ce3611db98c4b0c26a1b39059433fe70a46cb8",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.5.1 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Use the valid historical message date, even with a conflicting provider INTERNALDATE; no invented now().",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_12_date_wsp"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-13-originator-fields",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-13-originator-fields.eml",
+      "sha256": "01fed8a1f326454f492850084f4b4a7bf568a4018f82e8d99c4ab35595a95f97",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.5.2 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Expose original sender and explicit Reply-To correctly. Sender/delegate must not replace From or silently retarget reply. Raw unknown fields remain retrievable.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_13_originator_fields"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-14-repeat-destinations",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-14-repeat-destinations.eml",
+      "sha256": "42dc0ed736bb701140b0342c5bf6050c47de31ed24f9861c608fa129c26caf24",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.5.3 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Preserve both To and both Cc mailboxes in order for Reader/Reply All; empty Bcc members add nobody. If deviating from the concatenation recommendation, document and test the deviation explicitly.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_priority_obs_14_repeat_destinations"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-15-thread-phrases",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-15-thread-phrases.eml",
+      "sha256": "33df6e98293cbcd3fef4ee4f340e96c99a7608aa800c71f2af7a27b23a6e1eef",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.5.4 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Only the two real identifiers contribute to threading; words are ignored, with account isolation and no cycles.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_priority_obs_15_thread_phrases"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-15-thread-cfws",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-15-thread-cfws.eml",
+      "sha256": "d65d799148bad1efe19fe6cd04cba65364a103e9b9146c02b9f3286fffc5f6f1",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.5.4 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Compare the semantic ID left.part@example.test without treating comments as identity bytes. Preserve original source, and never apply encoded-word decoding while normalizing CFWS.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_priority_obs_15_thread_cfws"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-16-info-wsp",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-16-info-wsp.eml",
+      "sha256": "11c39ca49d80d259e4f7ccb5f74e5296d8ee4b5c7119068c6ee4d89f1423ad50",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.5.5 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Reader displays the correct Subject/body; optional informational headers neither override identity nor trigger actions. Original fields remain available via raw fetch.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_16_info_wsp"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-17-resent-block",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-17-resent-block.eml",
+      "sha256": "75a3ccb352ceac408862f237fcfda8f3d2fb74354851903b31a55c736e7f4a81",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.5.6 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: A prepended resent block does not replace original From, Reply-To, Date or conversation identity; preserve original header source. No sending occurs merely because these fields exist.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_17_resent_block"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-18-trace-wsp",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-18-trace-wsp.eml",
+      "sha256": "28929028326edf69acd4a5684f7371ec45808a089c87abb1647b6b86023131b6",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.5.7 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Trace headers do not override Date/From or become reply destinations; body remains readable and raw trace bytes retrievable.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_18_trace_wsp"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-19-optional-wsp",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-19-optional-wsp.eml",
+      "sha256": "37128d8d4fd19349d91a1def731cdd8545fe7b6b8b8e797216f26e53358daf1f",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.5.8 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Unknown header does not reject the message, alter known identity or create a privileged action. Raw fetch/export retains the uninterpreted bytes.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_receive_obs_19_optional_wsp"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.quoted-local-encoded-looking-identity",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/quoted-local-encoded-looking-identity.eml",
+      "sha256": "1a3e0f12496e2728a7835aa7f5201f1b38e0347a5c6f9dce40b4a75ffe0209b9",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 3.4.1 receive grammar derivative; exact control/fold/address/date bytes retained."
+      },
+      "issue": "Obsolete receive: Equivalent quoting or preserved CFWS must not decode or alter literal local-part bytes.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_adjacent_quoted_local_identity_stays_literal"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-route-control-group",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-route-control-group.eml",
+      "sha256": "8b6d21d34384599f28f289ee4e0ceccfb82244bf684d1d0f300eeb7e1ecb4729",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.4 source-route boundary derivative; no private mail."
+      },
+      "issue": "Strip only a proven valid direct route span; preserve surrounding group/address syntax and ambiguous/invalid terminal identity exactly. This is a bounded Dakia compatibility policy, not universal obsolete grammar conformance.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_route_control_group"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-route-control-null-relays",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-route-control-null-relays.eml",
+      "sha256": "7d90cc72bcda02656cad8b224a45f6b6df38b769e334858468bc5d222d2e0191",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.4 source-route boundary derivative; no private mail."
+      },
+      "issue": "Strip only a proven valid direct route span; preserve surrounding group/address syntax and ambiguous/invalid terminal identity exactly. This is a bounded Dakia compatibility policy, not universal obsolete grammar conformance.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_route_control_null_relays"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-route-control-invalid-domain",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-route-control-invalid-domain.eml",
+      "sha256": "e997f6387565c6d41c7e06d508324d46860c89a3b97083c1703ca3653250713b",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.4 source-route boundary derivative; no private mail."
+      },
+      "issue": "Strip only a proven valid direct route span; preserve surrounding group/address syntax and ambiguous/invalid terminal identity exactly. This is a bounded Dakia compatibility policy, not universal obsolete grammar conformance.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_route_control_invalid_domain"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-route-control-colon-lookalike",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-route-control-colon-lookalike.eml",
+      "sha256": "2616edba2169165e6bee4110b04600deede9b7f8cd5e576ca7260c7b5ddeddc2",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.4 source-route boundary derivative; no private mail."
+      },
+      "issue": "Strip only a proven valid direct route span; preserve surrounding group/address syntax and ambiguous/invalid terminal identity exactly. This is a bounded Dakia compatibility policy, not universal obsolete grammar conformance.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_route_control_colon_lookalike"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-route-control-quoted-local",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-route-control-quoted-local.eml",
+      "sha256": "b3d58579444a4513e6540412a00e4a76b2a2e3209876ebbbda3321cdb256a875",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.4 source-route boundary derivative; no private mail."
+      },
+      "issue": "Strip only a proven valid direct route span; preserve surrounding group/address syntax and ambiguous/invalid terminal identity exactly. This is a bounded Dakia compatibility policy, not universal obsolete grammar conformance.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_route_control_quoted_local"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-route-control-comments",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-route-control-comments.eml",
+      "sha256": "06016e84f90ae76c8c0ff7ee1056a588e6984b9f177ed5ed527574351b177d15",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.4 source-route boundary derivative; no private mail."
+      },
+      "issue": "Strip only a proven valid direct route span; preserve surrounding group/address syntax and ambiguous/invalid terminal identity exactly. This is a bounded Dakia compatibility policy, not universal obsolete grammar conformance.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_route_control_comments"
+        }
+      ]
+    },
+    {
+      "id": "obsolete.obs-route-control-encoded-local",
+      "path": "crates/dakia-core/testdata/mime/obsolete-receive/obs-route-control-encoded-local.eml",
+      "sha256": "aed133c4528c308492512918e127bcd98e4b55fb74504d55a16b02366a261e86",
+      "provenance": {
+        "kind": "synthetic",
+        "detail": "Fictional RFC 5322 section 4.4 source-route boundary derivative; no private mail."
+      },
+      "issue": "Strip only a proven valid direct route span; preserve surrounding group/address syntax and ambiguous/invalid terminal identity exactly. This is a bounded Dakia compatibility policy, not universal obsolete grammar conformance.",
+      "provider": {
+        "shape": "single-part fictional RFC 5322 receive conformance fixture",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "Preserve fictional body semantics through complete parse and reopen; historical controls use the declared token oracle.",
+        "html": "No invented HTML alternative.",
+        "snippet": "No MIME transport artifacts; header/corpus semantics stay consistent.",
+        "attachments": "No attachment is expected.",
+        "error": "Valid historical receive syntax must remain readable; a failure is a real conformance gap, not a changed oracle.",
+        "resourceLimit": "Bounded tiny fictional input; no resource-limit failure expected."
+      },
+      "applicablePaths": [
+        "complete-rfc822",
+        "catalogue",
+        "header"
+      ],
+      "redaction": {
+        "reviewer": "Independent RFC corpus agent review",
+        "reviewedOn": "2026-10-21",
+        "permittedDomains": [
+          "example.test",
+          "relay-a.example",
+          "relay-b.example",
+          "relay.example",
+          "mailbox.example",
+          "evil.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.parse-paths",
+          "source": "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+          "id": "obsolete_route_control_encoded_local"
+        }
+      ]
+    },
+    {
+      "id": "mime.greenmail-2.1.14-mixed-alternative-leaf-mime-contradiction",
+      "path": "crates/dakia-core/testdata/mime/greenmail-2.1.14-mixed-alternative-leaf-mime-contradiction.eml",
+      "sha256": "948d62f3a3f1519475c6b0773cc37c2542a54625004d993b028c05b25b84f580",
+      "provenance": {
+        "kind": "faithfully-redacted",
+        "detail": "Captured from Dakia’s isolated fictional GreenMail 2.1.14 acceptance mailbox after one fictional send. Addresses, host labels, subject, and content are fictional."
+      },
+      "issue": "GreenMail 2.1.14 returned multipart/alternative MIME headers for text/plain and text/html BODYSTRUCTURE leaves. Reader must fall back to the bounded full raw source instead of publishing fake attachments and an empty body.",
+      "provider": {
+        "shape": "GreenMail 2.1.14 IMAP BODYSTRUCTURE multipart/mixed containing multipart/alternative with parent MIME header repeated for both leaves",
+        "liveProviderCompatible": false
+      },
+      "expected": {
+        "body": "One isolated fictional message for native send outcome acceptance. Do not resend.",
+        "html": "One isolated fictional message for native send outcome acceptance. Do not resend.",
+        "snippet": "Expose the fictional message text without synthetic attachments.",
+        "attachments": "Expose no attachments.",
+        "error": "Selective hydration must make one bounded read-neutral raw fallback after the topology contradiction.",
+        "resourceLimit": "The fallback retains existing IMAP literal and complete MIME parser limits."
+      },
+      "applicablePaths": [
+        "selective-bodystructure"
+      ],
+      "redaction": {
+        "reviewer": "Dakia maintainers",
+        "reviewedOn": "2026-10-22",
+        "permittedDomains": [
+          "example.test"
+        ]
+      },
+      "exercisedBy": [
+        {
+          "domain": "rust.mail.selective-bodystructure",
+          "source": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+          "id": "greenmail_mime_topology_contradiction_falls_back_to_bounded_raw_without_publishing_fake_attachments"
+        },
+        {
+          "domain": "rust.mail.selective-bodystructure",
+          "source": "crates/dakia-core/src/independent_server_tests.rs",
+          "id": "external_dovecot_selective_mime_roundtrip"
+        }
+      ],
+      "evidence": [
+        {
+          "kind": "selective-imap-transcript",
+          "path": "testdata/mime-reader-handoff/greenmail-2.1.14-mixed-alternative-leaf-mime-contradiction.json",
+          "sha256": "5aed47c1d302baf844fdbe43a55cdb8a8d09b9172af4d4dbb31b373ee64a72c0"
         }
       ]
     }

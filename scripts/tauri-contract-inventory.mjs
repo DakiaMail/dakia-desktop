@@ -463,8 +463,13 @@ export function extractRustCommandParameters(source) {
       cursor = skipBalanced(tokens, cursor + 1, "[", "]");
     }
     while (["pub", "async", "unsafe", "extern"].includes(tokens[cursor]?.value)) {
+      const modifier = tokens[cursor]?.value;
       cursor += 1;
-      if (tokens[cursor - 1]?.value === "extern" && tokens[cursor]?.type === "string")
+      // Rust visibility can be `pub(crate)` or `pub(super)`. These commands
+      // are still registered production handlers, not private test helpers.
+      if (modifier === "pub" && tokens[cursor]?.value === "(")
+        cursor = skipBalanced(tokens, cursor, "(", ")");
+      if (modifier === "extern" && tokens[cursor]?.type === "string")
         cursor += 1;
     }
     if (tokens[cursor]?.value !== "fn" || tokens[cursor + 1]?.type !== "identifier") {
@@ -514,7 +519,9 @@ export function extractRustNativeEmits(source) {
     if (!new Set(["emit", "emit_all", "emit_to"]).has(tokens[index].value))
       continue;
     if (tokens[index + 1]?.value !== "(") continue;
-    const event = tokens[index + 2];
+    // `emit_to(target, event, payload)` has a target before its event name;
+    // the remaining emit APIs place the event first.
+    const event = tokens[index + (tokens[index].value === "emit_to" ? 4 : 2)];
     if (event?.type === "string") {
       events.push(event.value);
     } else if (event?.type === "identifier" && constants.has(event.value)) {
@@ -677,7 +684,12 @@ export function validateInventory(inventory, contract) {
   if (duplicates(demoOnlyInvokes).length)
     errors.push("demoOnlyInvokes contains duplicates");
   for (const [event, origin] of Object.entries(eventOrigins)) {
-    if (!["native", "frontend", "demo-only"].includes(origin)) {
+    if (![
+      "native",
+      "frontend",
+      "bidirectional",
+      "demo-only",
+    ].includes(origin)) {
       errors.push(`event ${event} has invalid origin ${String(origin)}`);
     }
   }
@@ -727,10 +739,12 @@ export function validateInventory(inventory, contract) {
     knownEvents,
   );
   const nativeEvents = knownEvents.filter(
-    (event) => eventOrigins[event] === "native",
+    (event) =>
+      eventOrigins[event] === "native" || eventOrigins[event] === "bidirectional",
   );
   const frontendEvents = knownEvents.filter(
-    (event) => eventOrigins[event] === "frontend",
+    (event) =>
+      eventOrigins[event] === "frontend" || eventOrigins[event] === "bidirectional",
   );
   const demoEvents = knownEvents.filter(
     (event) => eventOrigins[event] === "demo-only",

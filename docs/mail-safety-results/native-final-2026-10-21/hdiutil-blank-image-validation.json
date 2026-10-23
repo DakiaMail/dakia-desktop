@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "operation": "blank-image-create-validation",
+  "root": "/private/tmp/dakia-hdiutil-create-validation.5OLTjJ",
+  "image": "/private/tmp/dakia-hdiutil-create-validation.5OLTjJ/attachment-enospc.dmg",
+  "command": [
+    "/usr/bin/hdiutil",
+    "create",
+    "-size",
+    "64m",
+    "-fs",
+    "Journaled HFS+",
+    "-volname",
+    "DakiaAttachmentENOSPC",
+    "-nospotlight",
+    "/private/tmp/dakia-hdiutil-create-validation.5OLTjJ/attachment-enospc.dmg"
+  ],
+  "createExit": 0,
+  "imageBytes": 67108864,
+  "imageSha256": "0d7c687fa740a3a4c1b0db430ee6bbfa87170fa0200f53e1a27b321a87354297",
+  "imageMode": "600",
+  "imageInfoFormat": "UDRW",
+  "imageInfoFormatDescription": "raw read/write",
+  "imageInfoTotalBytes": 67108864,
+  "hfsPartitionCount": 1,
+  "hfsPartitionHints": [
+    "Apple_HFS"
+  ],
+  "attachedImageMatches": 0,
+  "mounted": false,
+  "recordedAt": "2026-10-21T11:31:09.697Z"
+}

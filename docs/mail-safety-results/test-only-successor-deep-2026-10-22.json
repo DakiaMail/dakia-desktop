@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "status": "passed",
+  "failures": [],
+  "sourceBefore": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "0e1a6829efb3c3e8620d68b0e9d8864f39f12d7b844ed2f792c8abd0474fb953",
+    "fileCount": 961
+  },
+  "sourceAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "0e1a6829efb3c3e8620d68b0e9d8864f39f12d7b844ed2f792c8abd0474fb953",
+    "fileCount": 961
+  },
+  "liveSource": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "0e1a6829efb3c3e8620d68b0e9d8864f39f12d7b844ed2f792c8abd0474fb953",
+    "fileCount": 961
+  },
+  "attempts": 1,
+  "retries": 0,
+  "gmailEnvironment": "unset",
+  "stdin": "/dev/null",
+  "independentServers": {
+    "greenmail": "public-root TLS rejection and trusted IMAP/SMTP round trip passed",
+    "dovecot": {
+      "schemaVersion": 1,
+      "server": "dovecot/dovecot:2.4.5",
+      "imageDigest": "dovecot/dovecot@sha256:43c14def08a57f25107593cbcf64a0a6fbae84a7b9de7aa038513c9b21e91914",
+      "fixtureSha256": "948d62f3a3f1519475c6b0773cc37c2542a54625004d993b028c05b25b84f580",
+      "fixtureUid": 1,
+      "rawlogFileCount": 6,
+      "selectiveCommandCount": 8,
+      "productionMetadataFetchObserved": true,
+      "plainLeafFetchObserved": true,
+      "htmlLeafFetchObserved": true,
+      "fullRawFallbackObserved": false,
+      "mutatingStoreObserved": false,
+      "normalizedCommandSha256": "7b2f28a44267dc3e49cd1251aab27aaa8dc373d0a10c64795315f77b056f91b8"
+    },
+    "containersRemaining": []
+  },
+  "fuzz": {
+    "seedCount": 76,
+    "seedManifestSha256": "a8c95acf02f6994a8ea1b2b5bf0b2750144d59cfb979390323b01c9fad8bf8c3",
+    "mimeBudgetExecutions": 41263,
+    "attachmentMetadataExecutions": 116378,
+    "seconds": [
+      31,
+      31
+    ],
+    "limitations": [
+      "Two bounded 30-second campaigns, each completed in 31 seconds.",
+      "The completed process ASAN_OPTIONS value was not captured and is unavailable. The runner default is not claimed as the actual runtime setting.",
+      "No crash artifact was observed; this does not prove absence of vulnerabilities."
+    ]
+  },
+  "files": {
+    "deepJsonSha256": "c48533e95f426a80f7e5cd4765edabaab54a5690f8c53d039b84d3e3a61fd653",
+    "deepLogSha256": "cb218643cd46dddd3cb04195e602eba1bee7866cfbe6d6491b729beab100c4ae",
+    "dovecotEvidenceSha256": "ea28d14622c57dfa4505acb3566074642982a7a0a9400843c50f44e6aafd2be2"
+  },
+  "limitations": [
+    "This deep lane does not establish native, live-provider, packaged-release, performance, signing, notarization, or updater acceptance."
+  ],
+  "asanOptionsProvenance": {
+    "actualCallerValue": "unavailable",
+    "evidence": "The launch command did not capture inherited ASAN_OPTIONS. The post-run task shell is unset, but that is not accepted as proof of the completed process environment.",
+    "scriptBehavior": "A nonempty inherited value would override the script default; therefore the 64 MiB quarantine default is not claimed as actual runtime evidence."
+  },
+  "kind": "test-only-successor-independent-server-and-fuzz",
+  "verificationReceiptSha256": "cbdb3a2cbe39b727ac94d2425422e6a238f2939fc04a9663e82cf864a38e4543"
+}

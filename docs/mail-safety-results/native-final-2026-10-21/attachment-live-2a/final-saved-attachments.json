@@ -1,0 +1,41 @@
+[
+  {
+    "name": "account-two-notes.txt",
+    "bytes": 39,
+    "mode": "0o600",
+    "sha256": "8d75a6c97173c8be55b14daccce4f7cc4cfb2821ce13d3cb98fe2b2b28796541",
+    "quarantine": "0081;6ad8a2e3;Dakia;"
+  },
+  {
+    "name": "meeting-notes (1).txt",
+    "bytes": 32,
+    "mode": "0o600",
+    "sha256": "666dec5256feac267cd6c46b97107397c0a87fcde80a932321819f5a1cf2955e",
+    "quarantine": "0081;6ad8a54c;Dakia;"
+  },
+  {
+    "name": "meeting-notes.txt",
+    "bytes": 32,
+    "mode": "0o600",
+    "sha256": "666dec5256feac267cd6c46b97107397c0a87fcde80a932321819f5a1cf2955e",
+    "quarantine": "0081;6ad8a528;Dakia;"
+  },
+  {
+    "name": "quarterly-report.pdf (1).command",
+    "bytes": 28,
+    "mode": "0o600",
+    "sha256": "1679a56fbd964b0463ec644f56fa9a3189d1402343de932a66b210586d00c02f",
+    "quarantine": "0081;6ad8a1a9;Dakia;"
+  },
+  {
+    "name": "quarterly-report.pdf (2).command",
+    "bytes": 28,
+    "mode": "0o600",
+    "sha256": "1679a56fbd964b0463ec644f56fa9a3189d1402343de932a66b210586d00c02f",
+    "quarantine": "0081;6ad8a54c;Dakia;"
+  },
+  {
+    "name": "quarterly-report.pdf.command",
+    "symlink": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.dzkRZz/attachment-leaf-symlink-canary.txt"
+  }
+]

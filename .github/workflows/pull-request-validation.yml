@@ -42,6 +42,7 @@ jobs:
       mail_boundary: ${{ steps.classify.outputs.mail_boundary }}
       tauri_boundary: ${{ steps.classify.outputs.tauri_boundary }}
       release_only: ${{ steps.classify.outputs.release_only }}
+      dependency_audit: ${{ steps.classify.outputs.dependency_audit }}
       requires_lfs: ${{ steps.classify.outputs.requires_lfs }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -56,8 +57,8 @@ jobs:
       - name: Test classifier
         run: node --test scripts/change-classifier.node-test.mjs
 
-  validate:
-    name: Validate applicable scopes
+  validate_non_tauri:
+    name: Validate non-Tauri scopes
     needs: classify
     runs-on: ubuntu-24.04
     # The first run for a new lockfile/toolchain must be able to populate the
@@ -76,18 +77,18 @@ jobs:
         if: needs.classify.outputs.docs_only == 'true'
         run: git diff --check ${{ github.event.pull_request.base.sha }}...HEAD
       - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4
-        if: needs.classify.outputs.frontend == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.tauri_boundary == 'true' || needs.classify.outputs.release_only == 'true'
+        if: needs.classify.outputs.frontend == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.release_only == 'true' || needs.classify.outputs.dependency_audit == 'true'
         with:
           node-version: 20.19.0
       - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
-        if: needs.classify.outputs.frontend == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.release_only == 'true'
+        if: needs.classify.outputs.frontend == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.release_only == 'true' || needs.classify.outputs.dependency_audit == 'true'
         with:
           path: ~/.npm
           key: npm-${{ runner.os }}-${{ runner.arch }}-node-20.19.0-${{ hashFiles('package-lock.json') }}
           restore-keys: |
             npm-${{ runner.os }}-${{ runner.arch }}-node-20.19.0-
       - name: Install JavaScript dependencies without lifecycle preparation
-        if: needs.classify.outputs.frontend == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.release_only == 'true'
+        if: needs.classify.outputs.frontend == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.release_only == 'true' || needs.classify.outputs.dependency_audit == 'true'
         run: npm ci --ignore-scripts
       - id: frontend
         name: Validate frontend scope
@@ -99,19 +100,25 @@ jobs:
           node --test scripts/tauri-contract-inventory.node-test.mjs
           node scripts/tauri-contract-inventory.mjs
       - name: Install pinned Rust toolchain
-        if: needs.classify.outputs.rust_core == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.tauri_boundary == 'true'
+        if: needs.classify.outputs.rust_core == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.dependency_audit == 'true'
         run: |
           rustup toolchain install 1.89.0 --profile minimal --component rustfmt --component clippy
           echo 'RUSTUP_TOOLCHAIN=1.89.0' >> "$GITHUB_ENV"
       - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
-        if: needs.classify.outputs.rust_core == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.tauri_boundary == 'true'
+        if: needs.classify.outputs.rust_core == 'true' || needs.classify.outputs.mail_boundary == 'true' || needs.classify.outputs.dependency_audit == 'true'
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-deps-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-${{ hashFiles('Cargo.lock') }}
+          key: cargo-deps-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-${{ hashFiles('Cargo.lock', 'fuzz/Cargo.lock') }}
           restore-keys: |
             cargo-deps-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-
+      - id: dependency_audit_fetch
+        name: Fetch locked dependencies for offline provenance checks
+        if: needs.classify.outputs.dependency_audit == 'true'
+        run: |
+          cargo fetch --locked
+          cargo fetch --manifest-path fuzz/Cargo.toml --locked
       - id: rust_core
         name: Validate Rust core scope
         if: needs.classify.outputs.rust_core == 'true'
@@ -135,25 +142,34 @@ jobs:
         run: |
           node --test scripts/validate-realistic-fixtures.node-test.mjs
           node scripts/validate-realistic-fixtures.mjs
+          node --test scripts/mail-safety-catalogue.node-test.mjs
+          node scripts/validate-mail-safety-catalogue.mjs
+          node --test scripts/validate-mail-standards-requirements.node-test.mjs
+          node scripts/validate-mail-standards-requirements.mjs
+          node scripts/report-mail-safety-catalogue.mjs --lane pull-request
           if [ "${{ needs.classify.outputs.frontend }}" != "true" ]; then
             npx vitest run apps/desktop/src/apiMessageContent.test.ts apps/desktop/src/components/HtmlMessage.test.tsx apps/desktop/src/components/Reader.test.tsx --maxWorkers=1
           fi
-      - name: Install Linux dependencies for Tauri command tests
-        if: needs.classify.outputs.tauri_boundary == 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
-      - id: tauri_boundary
-        name: Validate Linux-compilable Tauri boundary
-        if: needs.classify.outputs.tauri_boundary == 'true'
-        run: |
-          npm run bundle:cli:dev
-          cargo clippy -p dakia-desktop --all-targets -- -D warnings
-          cargo test -p dakia-desktop
       - id: release_only
         name: Validate release scripts without packaging
         if: needs.classify.outputs.release_only == 'true'
         run: npm run test:release-scripts
+      - name: Cache pinned dependency audit executable
+        if: needs.classify.outputs.dependency_audit == 'true'
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-version-0.22.2
+      - id: dependency_audit
+        name: Audit changed dependency lockfiles
+        if: needs.classify.outputs.dependency_audit == 'true'
+        run: |
+          # Compile the audit tool with the repository's pinned MSRV rather
+          # than whatever Rust the hosted image happens to provide.
+          if ! cargo-audit --version 2>/dev/null | grep -Fxq 'cargo-audit 0.22.2'; then
+            cargo +1.89.0 install cargo-audit --version 0.22.2 --locked --force
+          fi
+          npm run audit:dependencies:npm
       - name: Report selected scopes
         if: always()
         run: |
@@ -163,6 +179,97 @@ jobs:
             echo '- frontend: ${{ steps.frontend.outcome }}'
             echo '- rust-core: ${{ steps.rust_core.outcome }}'
             echo '- mail-boundary: ${{ steps.mail_boundary.outcome }}'
-            echo '- tauri-boundary: ${{ steps.tauri_boundary.outcome }}'
+            echo '- tauri-boundary: separate job'
             echo '- release-only: ${{ steps.release_only.outcome }}'
+            echo '- dependency-audit: ${{ steps.dependency_audit.outcome }}'
           } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  tauri:
+    name: Validate Linux Tauri boundary
+    needs: classify
+    if: needs.classify.outputs.tauri_boundary == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 2
+          lfs: false
+      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4
+        with:
+          node-version: 20.19.0
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ runner.arch }}-node-20.19.0-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-${{ runner.arch }}-node-20.19.0-
+      - name: Install JavaScript dependencies without lifecycle preparation
+        run: npm ci --ignore-scripts
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.89.0 --profile minimal --component clippy
+          echo 'RUSTUP_TOOLCHAIN=1.89.0' >> "$GITHUB_ENV"
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-deps-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-${{ hashFiles('Cargo.lock', 'fuzz/Cargo.lock') }}
+          restore-keys: |
+            cargo-deps-${{ runner.os }}-${{ runner.arch }}-rust-1.89.0-
+      - name: Install bounded Linux dependencies for Tauri command tests
+        run: |
+          printf '%s\n' 'http://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          sudo timeout --signal=TERM --kill-after=15s 360s \
+            env DEBIAN_FRONTEND=noninteractive bash -ceu '
+              apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=30 update
+              apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=30 install \
+                --yes --no-install-recommends \
+                libgtk-3-dev \
+                libwebkit2gtk-4.1-dev \
+                libayatana-appindicator3-dev \
+                librsvg2-dev
+            '
+          pkg-config --exists \
+            gtk+-3.0 \
+            webkit2gtk-4.1 \
+            ayatana-appindicator3-0.1 \
+            librsvg-2.0
+      - id: tauri_boundary
+        name: Validate Linux-compilable Tauri boundary
+        run: |
+          npm run bundle:cli:dev
+          cargo clippy -p dakia-desktop --all-targets -- -D warnings
+          cargo test -p dakia-desktop
+          node scripts/test-realtime-delivery.mjs
+          node scripts/test-mime-reader-artifact.mjs
+          node scripts/test-attachment-command-artifact.mjs
+          node scripts/test-mail-command-tls.mjs
+          node scripts/test-unsubscribe-command-tls.mjs
+          cargo test --locked -p tauri-plugin-updater --lib
+
+  validate:
+    name: Validate applicable scopes
+    needs: [analytics, classify, validate_non_tauri, tauri]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - id: enforce_results
+        name: Enforce every selected validation result
+        env:
+          ANALYTICS_RESULT: ${{ needs.analytics.result }}
+          CLASSIFY_RESULT: ${{ needs.classify.result }}
+          NON_TAURI_RESULT: ${{ needs.validate_non_tauri.result }}
+          TAURI_SELECTED: ${{ needs.classify.outputs.tauri_boundary }}
+          TAURI_RESULT: ${{ needs.tauri.result }}
+        run: |
+          test "$ANALYTICS_RESULT" = success
+          test "$CLASSIFY_RESULT" = success
+          test "$NON_TAURI_RESULT" = success
+          if [ "$TAURI_SELECTED" = true ]; then
+            test "$TAURI_RESULT" = success
+          else
+            test "$TAURI_RESULT" = skipped
+          fi

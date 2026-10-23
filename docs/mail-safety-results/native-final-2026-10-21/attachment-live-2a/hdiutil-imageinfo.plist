@@ -1,0 +1,176 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Backing Store Information</key>
+	<dict>
+		<key>Class Name</key>
+		<string>CBSDBackingStore</string>
+		<key>Name</key>
+		<string>attachment-enospc.dmg</string>
+		<key>URL</key>
+		<string>file:///private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.dzkRZz/attachment-enospc.dmg</string>
+	</dict>
+	<key>Checksum Type</key>
+	<string>none</string>
+	<key>Checksum Value</key>
+	<string></string>
+	<key>Class Name</key>
+	<string>CRawDiskImage</string>
+	<key>Format</key>
+	<string>UDRW</string>
+	<key>Format Description</key>
+	<string>raw read/write</string>
+	<key>Properties</key>
+	<dict>
+		<key>Checksummed</key>
+		<false/>
+		<key>Compressed</key>
+		<string>no</string>
+		<key>Encrypted</key>
+		<false/>
+		<key>Kernel Compatible</key>
+		<true/>
+		<key>Partitioned</key>
+		<false/>
+		<key>Software License Agreement</key>
+		<false/>
+	</dict>
+	<key>Segments</key>
+	<array>
+		<string>/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.dzkRZz/attachment-enospc.dmg</string>
+	</array>
+	<key>Size Information</key>
+	<dict>
+		<key>Compressed Bytes</key>
+		<integer>67108864</integer>
+		<key>Compressed Ratio</key>
+		<real>1</real>
+		<key>Sector Count</key>
+		<integer>131072</integer>
+		<key>Total Bytes</key>
+		<integer>67108864</integer>
+		<key>Total Empty Bytes</key>
+		<integer>0</integer>
+		<key>Total Non-Empty Bytes</key>
+		<integer>67108864</integer>
+	</dict>
+	<key>partitions</key>
+	<dict>
+		<key>block-size</key>
+		<integer>512</integer>
+		<key>burnable</key>
+		<false/>
+		<key>partition-scheme</key>
+		<string>GUID</string>
+		<key>partitions</key>
+		<array>
+			<dict>
+				<key>partition-hint</key>
+				<string>MBR</string>
+				<key>partition-length</key>
+				<integer>1</integer>
+				<key>partition-name</key>
+				<string>Protective Master Boot Record</string>
+				<key>partition-start</key>
+				<integer>0</integer>
+				<key>partition-synthesized</key>
+				<true/>
+			</dict>
+			<dict>
+				<key>partition-hint</key>
+				<string>Primary GPT Header</string>
+				<key>partition-length</key>
+				<integer>1</integer>
+				<key>partition-name</key>
+				<string>GPT Header</string>
+				<key>partition-start</key>
+				<integer>1</integer>
+				<key>partition-synthesized</key>
+				<true/>
+			</dict>
+			<dict>
+				<key>partition-hint</key>
+				<string>Primary GPT Table</string>
+				<key>partition-length</key>
+				<integer>32</integer>
+				<key>partition-name</key>
+				<string>GPT Partition Data</string>
+				<key>partition-start</key>
+				<integer>2</integer>
+				<key>partition-synthesized</key>
+				<true/>
+			</dict>
+			<dict>
+				<key>partition-hint</key>
+				<string>Apple_Free</string>
+				<key>partition-length</key>
+				<integer>6</integer>
+				<key>partition-name</key>
+				<string></string>
+				<key>partition-start</key>
+				<integer>34</integer>
+				<key>partition-synthesized</key>
+				<true/>
+			</dict>
+			<dict>
+				<key>partition-UUID</key>
+				<string>14CD4B97-B415-423E-90F0-583C2718FBC2</string>
+				<key>partition-filesystems</key>
+				<dict>
+					<key>HFS+</key>
+					<string></string>
+				</dict>
+				<key>partition-hint</key>
+				<string>Apple_HFS</string>
+				<key>partition-hint-UUID</key>
+				<string>48465300-0000-11AA-AA11-00306543ECAC</string>
+				<key>partition-length</key>
+				<integer>130992</integer>
+				<key>partition-name</key>
+				<string>disk image</string>
+				<key>partition-number</key>
+				<integer>1</integer>
+				<key>partition-start</key>
+				<integer>40</integer>
+			</dict>
+			<dict>
+				<key>partition-hint</key>
+				<string>Apple_Free</string>
+				<key>partition-length</key>
+				<integer>7</integer>
+				<key>partition-name</key>
+				<string></string>
+				<key>partition-start</key>
+				<integer>131032</integer>
+				<key>partition-synthesized</key>
+				<true/>
+			</dict>
+			<dict>
+				<key>partition-hint</key>
+				<string>Backup GPT Table</string>
+				<key>partition-length</key>
+				<integer>32</integer>
+				<key>partition-name</key>
+				<string>GPT Partition Data</string>
+				<key>partition-start</key>
+				<integer>131039</integer>
+				<key>partition-synthesized</key>
+				<true/>
+			</dict>
+			<dict>
+				<key>partition-hint</key>
+				<string>Backup GPT Header</string>
+				<key>partition-length</key>
+				<integer>1</integer>
+				<key>partition-name</key>
+				<string>GPT Header</string>
+				<key>partition-start</key>
+				<integer>131071</integer>
+				<key>partition-synthesized</key>
+				<true/>
+			</dict>
+		</array>
+	</dict>
+</dict>
+</plist>

@@ -1,0 +1,225 @@
+{
+  "schemaVersion": 1,
+  "lane": "native-packaged-fictional-external-flag",
+  "recordedAt": "2026-10-21T20:09:29.012367Z",
+  "status": "passed-narrowly",
+  "scope": "One external IMAP Flagged change for the exact fictional primary account, INBOX, UID 4, through the production watcher, durable Store, main packaged WebKit mailbox list, and mounted Reader. No manual Sync was invoked.",
+  "source": {
+    "revision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+    "treeDigest": "c56d2d806d8623dd14c858c8a8362729655496036405ad8c24162fce02a9a85b",
+    "fileCount": 939,
+    "sourceBeforeBuild": {
+      "path": "source-before-build.json",
+      "sha256": "32d7a7768bcca89e24ce5c90dddab06d0b040d73440001fba32fb33ec809b3ff",
+      "bytes": 154
+    },
+    "sourceAfterBuild": {
+      "path": "source-after-build.json",
+      "sha256": "3e92f39ac97cbfc445d85b2e4db0f6419f74c785a1c30b68492c14d6d11b373e",
+      "bytes": 378
+    }
+  },
+  "runtimeIdentity": {
+    "runRoot": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.6CuxBW",
+    "applicationName": "Dakia Fictional Provider Reader",
+    "bundleIdentifier": "dev.dakia.fictional-provider-reader.run-OTAMH2",
+    "pidAtAcceptance": 90808,
+    "executable": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/Dakia Fictional Provider Reader.app/Contents/MacOS/dakia-desktop",
+    "executableSha256": "3034b987470efa198afe82d792e2613f82b03c051ce5dc85f9bf500024e39d4f",
+    "webviewUrl": "tauri://localhost/",
+    "architecture": "arm64",
+    "packagingBoundary": "Ad-hoc fixture-enabled debug app built for aarch64-apple-darwin. It is not Developer ID signed, notarized, stapled, updater-signed, installed, or published.",
+    "evidence": [
+      {
+        "path": "sleep-wake-fixture.json",
+        "sha256": "818b4d819e40681646b5225a84d027d1ba5765a36b2974a74d0f59a9c61bd9c1",
+        "bytes": 1128
+      },
+      {
+        "path": "native-runtime-files.json",
+        "sha256": "6af3abd866fc80cee9869abb1be932614e15b61d8b5d825c7214150a5d4f3ed9",
+        "bytes": 3572
+      },
+      {
+        "path": "native-build-mode.json",
+        "sha256": "c4b45328324eec07b096805f75fd8237e2c3c298a1927a69bea218ef5ad181a0",
+        "bytes": 768
+      }
+    ]
+  },
+  "target": {
+    "accountId": "62a9320c-04f5-47c2-b4fa-d4952f0b6121",
+    "address": "fictional-reader@localhost",
+    "mailbox": "INBOX",
+    "uid": 4,
+    "uidNextBeforeG013": 5,
+    "messageId": "<dakia-estonian-translation-arrival-20261021@localhost>",
+    "serverBeforeFlags": ["\\Seen"],
+    "serverAfterFlags": ["\\Flagged", "\\Seen"]
+  },
+  "guardedMutation": {
+    "helper": {
+      "path": "/private/tmp/dakia-native-external-flag-acceptance.py",
+      "sha256": "11eb3c66e7f93a3d4179913064f63e5e8fae790e286d38a3e8085174767bd13c"
+    },
+    "offlineTests": {
+      "path": "/private/tmp/test-dakia-native-external-flag-acceptance.py",
+      "sha256": "419f55906bbae4aedb4160cf0da5be54df09dcc2eb2407d9c46e36ca4fd84823",
+      "passed": 14,
+      "failed": 0
+    },
+    "preflight": {
+      "status": "passed",
+      "readOnly": true,
+      "separateStdoutArtifactRetained": false,
+      "claimLimit": "The preflight stdout was observed by the operator but was not saved as a separate file. The exclusive journal and before-state UI and Store evidence bind the same exact UID, Message-ID, UIDNEXT, and initial unflagged state."
+    },
+    "mutation": {
+      "status": "passed",
+      "storeCommands": 1,
+      "automaticRetry": false,
+      "journal": {
+        "path": ".dakia-external-flag-uid4-journal.json",
+        "sha256": "b4687110c6f2d1a32e7e9c91415ecc9735dadf8b2a4ddb75d79bfa5179fc7f95",
+        "bytes": 653
+      },
+      "serverVerifiedAt": "2026-10-21T20:05:39.096743Z"
+    }
+  },
+  "convergence": {
+    "manualSyncInvoked": false,
+    "notYetConverged": {
+      "capturedAt": "2026-10-21T20:06:09.980821Z",
+      "secondsAfterServerVerification": 30.884078,
+      "durableStoreIsFlagged": false,
+      "evidence": {
+        "path": "native-ui-evidence/021-uid4-store-external-star-observation.json",
+        "sha256": "5b969c1fe2bc7bd40221aa476fd369d34066b0a5f5b46ebe3f7da4035d1579e4",
+        "bytes": 236
+      }
+    },
+    "convergedBy": {
+      "capturedAt": "2026-10-21T20:07:06.776505Z",
+      "secondsAfterServerVerification": 87.679762,
+      "durableStoreIsFlagged": true,
+      "readerControl": "Remove star",
+      "starredSectionContainsUid4": true,
+      "evidence": [
+        {
+          "path": "native-ui-evidence/023-uid4-store-external-star-converged.json",
+          "sha256": "eb102a38b43c0880a3ffeafaaf27282ee07506834ef5e11d958e9f2d0d24baa4",
+          "bytes": 377
+        },
+        {
+          "path": "native-ui-evidence/024-uid4-external-star-converged.ax.txt",
+          "sha256": "f578614cc9927b74938f75e6256ada3d94f2b3844a209c2ac7abadc90f1beb34",
+          "bytes": 4016
+        }
+      ]
+    },
+    "boundedObservation": "The first convergence instant was not continuously sampled. Evidence proves the old state at 30.884078 seconds and the converged state by 87.679762 seconds. It does not establish a continuous latency measurement."
+  },
+  "watcherSemantics": {
+    "idleReconciliationWatchdogSeconds": 60,
+    "fallbackPollBaseSeconds": 300,
+    "primaryAccountJitterPercent": 4,
+    "primaryAccountFallbackPollSeconds": 312,
+    "observedModeClaim": "The result proves convergence without manual Sync. It does not distinguish an unsolicited IDLE response from the scheduled reconciliation by timing alone.",
+    "fixtureFinding": "GreenMail 2.1.14 advertises IDLE, but its IdleFolderListener flagsUpdated callback is empty. The fixture should not be used as evidence that cross-session flag changes produce unsolicited FETCH FLAGS.",
+    "fixtureSource": "https://github.com/greenmail-mail-test/greenmail/blob/release-2.1.14/greenmail-core/src/main/java/com/icegreen/greenmail/imap/commands/IdleCommand.java",
+    "dakiaSource": [
+      "crates/dakia-core/src/mail.rs:247",
+      "crates/dakia-core/src/mail.rs:835",
+      "crates/dakia-core/src/mail.rs:7961",
+      "crates/dakia-core/src/mail.rs:8899",
+      "apps/desktop/src-tauri/src/realtime.rs:480",
+      "apps/desktop/src/App.tsx:1401"
+    ]
+  },
+  "gates": [
+    {
+      "id": "initial-visible-state",
+      "status": "passed",
+      "result": "UID 4 showed Star conversation before the external mutation.",
+      "evidence": [
+        {
+          "path": "native-ui-evidence/019-uid4-before-external-star.ax.txt",
+          "sha256": "1f4d76651a8fcddeeed38df449cb7e2c5def62bf4a1b3040716163f02dde1c9d",
+          "bytes": 3546
+        }
+      ]
+    },
+    {
+      "id": "single-server-mutation",
+      "status": "passed",
+      "result": "The guarded helper issued one explicit UID STORE after its exclusive durable journal and verified server flags Seen and Flagged without retry.",
+      "evidence": [
+        {
+          "path": ".dakia-external-flag-uid4-journal.json",
+          "sha256": "b4687110c6f2d1a32e7e9c91415ecc9735dadf8b2a4ddb75d79bfa5179fc7f95",
+          "bytes": 653
+        }
+      ]
+    },
+    {
+      "id": "durable-store-convergence",
+      "status": "passed",
+      "result": "The exact primary account, INBOX, UID 4 row changed from is_flagged 0 to 1 without manual Sync.",
+      "evidence": [
+        {
+          "path": "native-ui-evidence/021-uid4-store-external-star-observation.json",
+          "sha256": "5b969c1fe2bc7bd40221aa476fd369d34066b0a5f5b46ebe3f7da4035d1579e4",
+          "bytes": 236
+        },
+        {
+          "path": "native-ui-evidence/023-uid4-store-external-star-converged.json",
+          "sha256": "eb102a38b43c0880a3ffeafaaf27282ee07506834ef5e11d958e9f2d0d24baa4",
+          "bytes": 377
+        }
+      ]
+    },
+    {
+      "id": "main-webkit-reader-convergence",
+      "status": "passed",
+      "result": "The packaged tauri://localhost UI changed the UID 4 list and Reader controls from Star conversation to Remove star and placed the conversation in Starred.",
+      "evidence": [
+        {
+          "path": "native-ui-evidence/019-uid4-before-external-star.ax.txt",
+          "sha256": "1f4d76651a8fcddeeed38df449cb7e2c5def62bf4a1b3040716163f02dde1c9d",
+          "bytes": 3546
+        },
+        {
+          "path": "native-ui-evidence/024-uid4-external-star-converged.ax.txt",
+          "sha256": "f578614cc9927b74938f75e6256ada3d94f2b3844a209c2ac7abadc90f1beb34",
+          "bytes": 4016
+        }
+      ]
+    },
+    {
+      "id": "continuous-latency",
+      "status": "skipped",
+      "result": "Sampling was bounded, not continuous. Only the non-converged and converged observation bounds are claimed."
+    },
+    {
+      "id": "no-idle-fallback",
+      "status": "skipped",
+      "result": "The 312-second primary-account polling fallback was derived from production constants and the fixed account UUID but was not exercised in this acceptance."
+    },
+    {
+      "id": "live-provider-flags",
+      "status": "skipped",
+      "result": "No live provider or non-fictional mailbox was contacted."
+    },
+    {
+      "id": "release-signing",
+      "status": "not-applicable",
+      "result": "Signing, notarization, stapling, updater signing, installation, and publication were outside this fictional debug acceptance."
+    }
+  ],
+  "limitations": [
+    "This proves one Flagged transition only. Unflagging, Seen changes, expunge, move, reconnect, no-IDLE polling, detached Reader windows, and live providers remain separate scenarios.",
+    "GreenMail 2.1.14 does not prove unsolicited flag notifications because its IDLE flag callback is empty.",
+    "The first convergence instant was not continuously sampled.",
+    "UID 5 G013 work began only after this UID 4 result and is not evidence for this gate."
+  ]
+}

@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "lane": "evidence-input-equivalence",
+  "status": "measured-inputs-match-final-source",
+  "finalSourceWitness": {
+    "report": "docs/mail-safety-results/native-corrections-three-run-source-2026-10-21.json",
+    "reportSha256": "58e7f6bc6c3c17411576b316be555ad98783c7ae9c8ff051a483a63a2fb8988f",
+    "sourceTreeDigest": "1a27848c0142d4b2f51439fc77caeae076acc9fd7a640b66569aa0b4d67376e6",
+    "fileCount": 761,
+    "beforeAndAfterDigestEqual": true,
+    "provenance": "The final-source report records this source-tree digest before and after its three consecutive passing 16-gate runs."
+  },
+  "coverageMeasuredInputEquivalence": {
+    "originalReport": "docs/mail-safety-results/publication-detail-storage-branch-coverage-2026-10-21.json",
+    "originalReportSha256": "433c541d4f275a0c71da553907665c68d6915b14bae043c34d1520f406f62a77",
+    "originalReportedSourceTreeDigest": "2a4e14731ba246806f3700b020ff7c1ec4afdbce0ceea6466fcfa46cb41d475f",
+    "verifiedAgainstFinalSource": {
+      "inputCount": 8,
+      "inputManifestSha256": "1a9d6b7ccb44944c45b0967761ec106ef6107e3b6cd4bff3c5933a7570c0c3f6",
+      "matches": true,
+      "privateVerificationArtifact": "/private/tmp/dakia-mail-safety-final-input-equivalence-2026-10-21-coverage-inputs.json",
+      "privateVerificationArtifactSha256": "6f94010b0d2c689b5d3f8b8343380a5d8ff5967dbcc59ffc704f18d11640b860",
+      "inputPaths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/dakia-core/Cargo.toml",
+        "crates/dakia-core/src/lib.rs",
+        "crates/dakia-core/src/storage.rs",
+        "crates/dakia-core/src/storage_fault_tests.rs",
+        "crates/dakia-core/src/storage_open_lock_tests.rs",
+        "crates/dakia-core/src/storage_realtime_publication_tests.rs"
+      ]
+    },
+    "conclusion": "All eight measured storage coverage inputs match the final source tree byte-for-byte."
+  },
+  "performanceMeasuredInputEquivalence": {
+    "originalReport": "docs/mail-safety-results/publication-detail-performance-comparison-2026-10-21.json",
+    "originalReportSha256": "310d9dd78c9a08f26800e2b2b3c9018e1cd2abf38d9bd29a96842330c050b78c",
+    "originalReportedSourceTreeDigest": "2a4e14731ba246806f3700b020ff7c1ec4afdbce0ceea6466fcfa46cb41d475f",
+    "verifiedAgainstFinalSource": {
+      "inputCount": 46,
+      "inputManifestSha256": "05430a40d6e1b1b4aaae140235c9bea502388e71ae18a42a85104a4bbbb44085",
+      "matches": true,
+      "inputDiscovery": {
+        "depfile": "/private/tmp/dakia-perf-ab.qDmU2B/target/debug/deps/dakia_core-416f5353cf6a53e7.d",
+        "depfileSha256": "5c817e75ad498cc6b6c9860818b64bb22e969ca8f5a66a3c4df1189bbb830188",
+        "description": "The Dakia Core test-binary dependency file identified 42 Rust compilation inputs. The private Exact-wrapper storage source was excluded and replaced by the retained DeletedOnly production storage capture. Root and core manifests plus the Tauri contract fixture complete the 46 checked paths."
+      },
+      "retainedProductionStorageInput": {
+        "privatePath": "/private/tmp/dakia-perf-ab.qDmU2B/storage-deleted-only.rs",
+        "currentPath": "crates/dakia-core/src/storage.rs",
+        "sha256": "6276106a9432cc6a927d92736e0e9ae66fec1451014f8cd669bb4f85834b23e2",
+        "matches": true
+      },
+      "privateVerificationArtifact": "/private/tmp/dakia-mail-safety-final-input-equivalence-2026-10-21-performance-inputs.json",
+      "privateVerificationArtifactSha256": "a2343e16c039f142fe60efdfba8f498c4870d85167148fc83b19da66bfcd821c"
+    },
+    "conclusion": "All 46 measured performance inputs, including the retained DeletedOnly production storage capture, match the final source tree byte-for-byte."
+  },
+  "preservedOriginalEvidence": {
+    "originalRunFingerprintsUnchanged": true,
+    "historicalCoverageReportWasNotEdited": true,
+    "historicalPerformanceReportWasNotEdited": true
+  },
+  "limits": [
+    "This is a read-only path-and-content equivalence check. It does not rerun coverage, performance, compilation, or instrumentation.",
+    "It does not restate the 2a4e source-tree coverage or performance runs as whole-workspace or whole-source 1a278 runs.",
+    "The performance result remains specific to its recorded hardware, build profile, private target state, source-variant controls, and timing conditions. Matching measured inputs does not prove identical code generation or incremental-cache state.",
+    "The coverage result remains three separate focused cohorts. Their branch observations are not aggregated into workspace or product coverage."
+  ]
+}

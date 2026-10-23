@@ -1,0 +1,130 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-10-22T10:04:33.220Z",
+  "status": "partial-test-only-successor-with-bounded-native-passes",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "0e1a6829efb3c3e8620d68b0e9d8864f39f12d7b844ed2f792c8abd0474fb953",
+    "fileCount": 961
+  },
+  "latestCompletedBaseline": "c2e8ba357d822b2ef086e497916e77f6555a422605e7a4b99acfb1e81e379888",
+  "productionChangesSinceBaseline": false,
+  "checks": [
+    {
+      "name": "storage fault regressions",
+      "passed": 24,
+      "failed": 0
+    },
+    {
+      "name": "attachment proxy actual loopback TLS",
+      "passed": 10,
+      "failed": 0
+    },
+    {
+      "name": "catalogue validator regressions",
+      "passed": 13,
+      "failed": 0
+    },
+    {
+      "name": "attachment harness and shared-profile helper before lsof correction",
+      "passed": 20,
+      "failed": 0,
+      "includesPythonCases": 11
+    },
+    {
+      "name": "complete script suite before lsof correction",
+      "passed": 275,
+      "failed": 0,
+      "sourceDigest": "995c9e75f238bb1ec4df1c2c0b52e33ab0374eb198eb1e05ee29af06e90c9bca",
+      "logSha256": "5e1207dd6001f22c9c71a011395a99762832f6d82524c20b7973019123aae70c"
+    },
+    {
+      "name": "corrected shared-profile helper",
+      "passed": 17,
+      "failed": 0
+    },
+    {
+      "name": "isolated GreenMail attachment prepare-only",
+      "status": "passed",
+      "exitCode": 0,
+      "sourceDigest": "995c9e75f238bb1ec4df1c2c0b52e33ab0374eb198eb1e05ee29af06e90c9bca",
+      "receiptSha256": "9197c23adea42d4de5e923a4d145460089fb480e61c94ec948347a3b944868cf"
+    },
+    {
+      "name": "Gmail Inbox/Sent/All Mail normal Message-ID sync and Store Reader deduplication",
+      "passed": 1,
+      "failed": 0,
+      "reopen": true,
+      "limitation": "No real provider action, no native Reader render, and no missing Message-ID provider-identity guarantee."
+    },
+    {
+      "name": "Corrected fault-injector account isolation actual loopback TLS",
+      "passed": 13,
+      "failed": 0,
+      "independentReview": "GO"
+    }
+  ],
+  "environmentFailures": [
+    {
+      "name": "sandboxed TLS proxy tests",
+      "passed": 4,
+      "failed": 6,
+      "error": "listen EPERM on loopback",
+      "resolution": "Actual local socket run passed 10/10; retained as environment failure, not silently retried or counted as flaky product behavior."
+    }
+  ],
+  "limitations": [
+    "The b14 native attachment evidence does not cover a user cancellation API because the product exposes no such API.",
+    "The b14 native evidence is fictional and ad-hoc signed. It does not establish Developer ID, notarization, stapling, updater, publication, release, or provider compatibility.",
+    "The current b14 Gmail proof does not exercise Dakia's production LIST parser, normal sync planner, missing or unusable RFC Message-ID/X-GM-MSGID durable identity, label convergence, native Reader, sending, or another provider.",
+    "C2 completed evidence remains separate and does not prove this successor.",
+    "No real Gmail send or mutation was performed."
+  ],
+  "developmentFailures": [
+    {
+      "name": "Gmail timeout wrapper compile failure",
+      "exitCode": 101,
+      "reason": "Missing semicolon in result handling, corrected before the passing focused run."
+    }
+  ],
+  "audit": "See successor-dependency-audit-2026-10-22.json: configured Rust audit pass with 10 allowed unmaintained warnings; npm zero vulnerabilities.",
+  "sourceThreeRuns": {
+    "status": "passed",
+    "sourceDigest": "0e1a6829efb3c3e8620d68b0e9d8864f39f12d7b844ed2f792c8abd0474fb953",
+    "manifestSha256": "f5674652e76918feaf220e49a0a5c6fad910f327dcd5d4fb2f66fce43227f10e",
+    "scope": "Historical 0e1 source evidence. The current b14 three-run source result is recorded separately."
+  },
+  "interruptedRuns": [
+    {
+      "exitCode": 130,
+      "reason": "Root stopped at manifest audit because generated Python bytecode was included. Cache files are now ignored, corrected source frozen and fresh three-run baseline started.",
+      "countedAsPass": false
+    }
+  ],
+  "b14Followup": {
+    "sourceTree": {
+      "digest": "b14fca648f7d0862f439fbb08890cef8085d025687e35d75322814d2f8dcca0e",
+      "fileCount": 961
+    },
+    "sourceLane": {
+      "status": "passed",
+      "report": "docs/mail-safety-results/test-only-successor-b14-three-run-source-2026-10-22.json",
+      "scope": "Three source cycles, 17 gates each, with no recorded retry, failure, or source-manifest change."
+    },
+    "attachmentAndSharedProfile": {
+      "status": "passed-bounded",
+      "report": "docs/mail-safety-results/native-b14-attachment-interruption-and-shared-profile-2026-10-22.json",
+      "scope": "Individual and Save All interruption failure/retry, account-isolated routing, controlled endpoint counter, and eight concurrent read-only CLI operations against the live desktop profile."
+    },
+    "packagedForwardUpgrade": {
+      "status": "passed-bounded",
+      "report": "docs/mail-safety-results/native-h016-faithful-packaged-gui-upgrade-b14-2026-10-22.json",
+      "scope": "One sealed fictional v0.4.4 profile forward-opened by the fixture-enabled packaged GUI, with unread/starred cached message visible and normal exit."
+    },
+    "gmailProvider": {
+      "status": "passed-for-exact-bounded-inbox-sent-path",
+      "report": "docs/mail-safety-results/gmail-bounded-inbox-sent-production-proof-b14-2026-10-22.json",
+      "scope": "One authorized read-only disposable Gmail account and one known existing message represented by two physical INBOX/Sent copies. Production TLS, bounded wrapper LIST resolution, full fetch, parsing, epoch-fenced Store/cache publication, reopen, one display representative, pre- and post-run flag invariance, and unchanged credentials file passed without SMTP or mailbox mutation."
+    }
+  }
+}

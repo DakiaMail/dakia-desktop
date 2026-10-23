@@ -19,6 +19,9 @@ import { EmptyState } from "./components/EmptyState";
 import { ActionStatus } from "./components/ActionStatus";
 import { MailboxNav } from "./components/MailboxNav";
 import { MailList } from "./components/MailList";
+import { SendRecoveryList } from "./components/SendRecoveryList";
+import { useSendRecoveries } from "./useSendRecoveries";
+import { outboxItemId } from "./outboxIdentity";
 import { Reader } from "./components/Reader";
 import {
   UpdateBanner,
@@ -56,9 +59,6 @@ import {
   onAccountConnected,
   onAccountRemoved,
   onAccountUpdated,
-  onMailArrived,
-  onMailChanged,
-  onMailHydrated,
   onMailIndexRebuilt,
   onMailRebuildFinished,
   onMailRebuildProgress,
@@ -71,6 +71,8 @@ import {
   openSettingsWindow,
   openSettingsWindowForAccount,
 } from "./nativeWindows";
+import { subscribeRealtimeEvents } from "./realtimeEvents";
+import { subscribeNativeGroup } from "./nativeSubscriptions";
 import type {
   Account,
   AiSettings,
@@ -126,6 +128,18 @@ type MailViewRequest = {
   mailbox: string;
   view: MailListView;
 };
+type PendingActionPageObservation = {
+  revision: number;
+  complete: boolean;
+  listThread?: MailThread;
+  smartThreads?: Partial<Record<SmartSectionId, MailThread>>;
+};
+
+function usesSmartInbox(view: MailViewRequest) {
+  return (
+    view.view === "smart" && view.mailbox === "INBOX" && !view.query.trim()
+  );
+}
 
 function sameMailView(left: MailViewRequest, right: MailViewRequest) {
   return (
@@ -139,6 +153,22 @@ function sameMailView(left: MailViewRequest, right: MailViewRequest) {
   );
 }
 
+function threadsWithinAccountScope(
+  threads: MailThread[],
+  accountIds: string[],
+) {
+  const allowed = new Set(accountIds);
+  return threads.flatMap((thread) => {
+    const messages = concreteThreadMessages(thread);
+    const scoped = messages.filter((message) =>
+      allowed.has(message.account_id),
+    );
+    if (!scoped.length) return [];
+    if (scoped.length === messages.length) return [thread];
+    return groupMessages(scoped);
+  });
+}
+
 function emptySmartSections(): Record<SmartSectionId, SmartSection> {
   return smartSectionIds.reduce<Record<SmartSectionId, SmartSection>>(
     (sections, id) => {
@@ -147,6 +177,25 @@ function emptySmartSections(): Record<SmartSectionId, SmartSection> {
     },
     {} as Record<SmartSectionId, SmartSection>,
   );
+}
+
+function discardRetainedSmartThreadsReplacedByAuthoritativeStarred(
+  retainedThreads: Map<
+    string,
+    { sectionId: SmartSectionId; thread: MailThread }
+  >,
+  sections: Array<Pick<SmartSection, "id" | "threads">>,
+) {
+  const starredThreadIds = new Set(
+    sections
+      .find((section) => section.id === "starred")
+      ?.threads.map((thread) => thread.id),
+  );
+  if (!starredThreadIds.size) return retainedThreads;
+
+  const next = new Map(retainedThreads);
+  for (const threadId of starredThreadIds) next.delete(threadId);
+  return next.size === retainedThreads.size ? retainedThreads : next;
 }
 
 type ActionStatusState = {
@@ -250,6 +299,8 @@ export default function App() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [remoteSearchUnavailable, setRemoteSearchUnavailable] = useState(false);
+  const [remoteSearchLimitReached, setRemoteSearchLimitReached] =
+    useState(false);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>();
   const [classifying, setClassifying] = useState(false);
   const [lastSyncAt, setLastSyncAt] = useState<string | undefined>(
@@ -284,14 +335,27 @@ export default function App() {
   const activeThreadRef = useRef<MailThread | undefined>(undefined);
   const mailboxActionsInFlightRef = useRef(0);
   const mailboxActionThreadIdsRef = useRef(new Set<string>());
+  const mailboxActionThreadCountsRef = useRef(new Map<string, number>());
+  const mailboxActionPageObservationsRef = useRef(
+    new Map<string, PendingActionPageObservation>(),
+  );
+  const mountedRef = useRef(true);
   const readMutationGenerationRef = useRef(0);
   const readMutationByMessageRef = useRef(new Map<string, number>());
+  const starMutationGenerationRef = useRef(0);
+  const starMutationByMessageRef = useRef(new Map<string, number>());
   const loadRequestIdRef = useRef(0);
   const smartLoadRequestIdRef = useRef(0);
+  const mailViewFirstPageGenerationRef = useRef(0);
+  const mailViewHasAppendedPagesRef = useRef(false);
   const starredCountRequestIdRef = useRef(0);
   const nextCursorRef = useRef<MailCursor | null>(null);
   const loadingMoreRef = useRef(false);
   const smartLoadingMoreRef = useRef(new Set<SmartSectionId>());
+  const mailFirstPageReadyRef = useRef(false);
+  const smartFirstPageReadyRef = useRef(false);
+  const loadedViewRef = useRef<MailViewRequest | undefined>(undefined);
+  const catalogueRevisionRef = useRef(0);
   const initialClassificationStartedRef = useRef(false);
   const classifyingRef = useRef(false);
   const classificationRequestedRef = useRef(false);
@@ -320,12 +384,53 @@ export default function App() {
   activeThreadSnapshotRef.current = activeThreadSnapshot;
   selectedRef.current = selected;
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    // React StrictMode replays effects in development, so each setup must
+    // reassert that this mounted instance may publish async completions.
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
       smartExitTimersRef.current.forEach((timer) => window.clearTimeout(timer));
-    },
-    [],
-  );
+    };
+  }, []);
+
+  const recordPendingActionListPage = (
+    pageThreads: MailThread[],
+    revision: number,
+    complete: boolean,
+  ) => {
+    const pendingIds = mailboxActionThreadIdsRef.current;
+    const byId = new Map(pageThreads.map((thread) => [thread.id, thread]));
+    for (const id of pendingIds) {
+      mailboxActionPageObservationsRef.current.set(id, {
+        revision,
+        complete,
+        listThread: byId.get(id),
+      });
+    }
+  };
+  const recordPendingActionSmartPage = (
+    sections: Array<{
+      id: SmartSectionId;
+      conversations: MailThread[];
+    }>,
+    revision: number,
+    complete: boolean,
+  ) => {
+    const pendingIds = mailboxActionThreadIdsRef.current;
+    for (const id of pendingIds) {
+      const smartThreads: Partial<Record<SmartSectionId, MailThread>> = {};
+      for (const section of sections) {
+        const thread = section.conversations.find((item) => item.id === id);
+        if (thread) smartThreads[section.id] = thread;
+      }
+      mailboxActionPageObservationsRef.current.set(id, {
+        revision,
+        complete,
+        smartThreads,
+      });
+    }
+  };
 
   const showStatus = useCallback(
     (
@@ -486,6 +591,28 @@ export default function App() {
         : accounts.map((account) => account.id),
     [accounts, selectedAccountId],
   );
+  const recoveries = useSendRecoveries(activeAccounts);
+  const refreshSendRecoveries = recoveries.refresh;
+  const refreshSendRecoveriesRef = useRef(refreshSendRecoveries);
+  refreshSendRecoveriesRef.current = refreshSendRecoveries;
+  const visibleOutbox = useMemo(
+    () =>
+      outbox.filter((message) => activeAccounts.includes(message.account_id)),
+    [activeAccounts, outbox],
+  );
+  const visibleRecoveries = useMemo(() => {
+    const sendingIds = new Set(visibleOutbox.map((message) => message.id));
+    return recoveries.items.filter(
+      (item) => !sendingIds.has(outboxItemId(item.account_id, item.attempt_id)),
+    );
+  }, [recoveries.items, visibleOutbox]);
+  const recoveryCount = Math.max(
+    0,
+    recoveries.total - (recoveries.items.length - visibleRecoveries.length),
+  );
+  useEffect(() => {
+    if (mailbox === "Outbox") void refreshSendRecoveries();
+  }, [mailbox, refreshSendRecoveries]);
   const currentViewRef = useRef<MailViewRequest>({
     accountIds: activeAccounts,
     query: debouncedQuery,
@@ -514,17 +641,37 @@ export default function App() {
   }, [activeAccounts, refreshStarredCount]);
 
   const loadMessages = useCallback(async (requestedAccountIds?: string[]) => {
+    mailViewFirstPageGenerationRef.current += 1;
+    mailViewHasAppendedPagesRef.current = false;
     const requestId = ++loadRequestIdRef.current;
     const smartRequestId = ++smartLoadRequestIdRef.current;
+    loadingMoreRef.current = false;
+    smartLoadingMoreRef.current.clear();
+    mailFirstPageReadyRef.current = false;
+    smartFirstPageReadyRef.current = false;
+    nextCursorRef.current = null;
+    setLoadingMore(false);
+    setHasMore(false);
     const currentView = {
       ...currentViewRef.current,
       accountIds: requestedAccountIds ?? currentViewRef.current.accountIds,
     };
+    if (
+      loadedViewRef.current &&
+      !sameMailView(loadedViewRef.current, currentView)
+    ) {
+      catalogueRevisionRef.current += 1;
+      smartExitTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+      smartExitTimersRef.current.clear();
+      retainedSmartThreadsRef.current = new Map();
+      setThreads([]);
+      setSmartSections(emptySmartSections());
+      setRetainedSmartThreads(new Map());
+      setExitingSmartThreadIds(new Set());
+    }
     const accountIds = currentView.accountIds;
-    const smartInbox =
-      currentView.view === "smart" &&
-      currentView.mailbox === "INBOX" &&
-      !currentView.query.trim();
+    const smartInbox = usesSmartInbox(currentView);
+    setRemoteSearchLimitReached(false);
     if (currentView.mailbox === "Outbox") {
       if (
         requestId === loadRequestIdRef.current &&
@@ -559,27 +706,47 @@ export default function App() {
           smartRequestId === smartLoadRequestIdRef.current &&
           sameMailView(currentView, currentViewRef.current)
         ) {
-          setSmartSections(() => {
-            const next = emptySmartSections();
-            for (const section of page.sections) {
-              const visible = excludeThreads(
-                section.conversations,
-                mailboxActionThreadIdsRef.current,
-              );
-              next[section.id] = {
-                id: section.id,
-                threads: senderCleanupTargetRef.current
-                  ? removeSenderCleanupMessages(
-                      visible,
-                      senderCleanupTargetRef.current,
-                    )
-                  : visible,
-                nextCursor: section.nextCursor,
-                loadingMore: false,
-              };
-            }
-            return next;
-          });
+          catalogueRevisionRef.current += 1;
+          const acceptedRevision = catalogueRevisionRef.current;
+          loadedViewRef.current = currentView;
+          smartFirstPageReadyRef.current = true;
+          const scopedSections = page.sections.map((section) => ({
+            ...section,
+            conversations: threadsWithinAccountScope(
+              section.conversations,
+              accountIds,
+            ),
+          }));
+          recordPendingActionSmartPage(
+            scopedSections,
+            acceptedRevision,
+            page.sections.every((section) => section.nextCursor === null),
+          );
+          const nextSmartSections = emptySmartSections();
+          for (const section of scopedSections) {
+            const visible = excludeThreads(
+              section.conversations,
+              mailboxActionThreadIdsRef.current,
+            );
+            nextSmartSections[section.id] = {
+              id: section.id,
+              threads: senderCleanupTargetRef.current
+                ? removeSenderCleanupMessages(
+                    visible,
+                    senderCleanupTargetRef.current,
+                  )
+                : visible,
+              nextCursor: section.nextCursor,
+              loadingMore: false,
+            };
+          }
+          setSmartSections(nextSmartSections);
+          setRetainedSmartThreads((current) =>
+            discardRetainedSmartThreadsReplacedByAuthoritativeStarred(
+              current,
+              smartSectionIds.map((id) => nextSmartSections[id]),
+            ),
+          );
           setHasMore(false);
         }
         return;
@@ -602,27 +769,37 @@ export default function App() {
         null,
       );
       if (
-        requestId === loadRequestIdRef.current &&
-        sameMailView(currentView, currentViewRef.current)
-      ) {
-        nextCursorRef.current = page.nextCursor;
-        const visible = excludeThreads(
-          page.conversations,
-          mailboxActionThreadIdsRef.current,
-        );
-        setThreads(
-          senderCleanupTargetRef.current
-            ? removeSenderCleanupMessages(
-                visible,
-                senderCleanupTargetRef.current,
-              )
-            : visible,
-        );
-        setHasMore(page.nextCursor !== null);
-      }
+        requestId !== loadRequestIdRef.current ||
+        !sameMailView(currentView, currentViewRef.current)
+      )
+        return;
+      catalogueRevisionRef.current += 1;
+      const acceptedRevision = catalogueRevisionRef.current;
+      loadedViewRef.current = currentView;
+      mailFirstPageReadyRef.current = true;
+      nextCursorRef.current = page.nextCursor;
+      const scopedThreads = threadsWithinAccountScope(
+        page.conversations,
+        accountIds,
+      );
+      recordPendingActionListPage(
+        scopedThreads,
+        acceptedRevision,
+        !currentView.query.trim() && page.nextCursor === null,
+      );
+      const visible = excludeThreads(
+        scopedThreads,
+        mailboxActionThreadIdsRef.current,
+      );
+      setThreads(
+        senderCleanupTargetRef.current
+          ? removeSenderCleanupMessages(visible, senderCleanupTargetRef.current)
+          : visible,
+      );
+      setHasMore(page.nextCursor !== null);
       if (currentView.query.trim()) {
         try {
-          const remote = await api.searchRemote(
+          const remoteResult = await api.searchRemote(
             currentView.query,
             accountIds,
             actualMailbox,
@@ -633,28 +810,50 @@ export default function App() {
             requestId === loadRequestIdRef.current &&
             sameMailView(currentView, currentViewRef.current)
           ) {
-            const merged = new Map(
-              page.conversations.map((thread) => [thread.id, thread]),
-            );
-            for (const thread of groupMessages(remote)) {
-              if (!merged.has(thread.id)) merged.set(thread.id, thread);
-            }
-            const visible = excludeThreads(
-              [...merged.values()].sort(
-                (left, right) =>
-                  new Date(right.latest.received_at).getTime() -
-                  new Date(left.latest.received_at).getTime(),
+            setRemoteSearchLimitReached(remoteResult.limitReached);
+            const remote = remoteResult.messages;
+            const remoteThreads = groupMessages(
+              remote.filter((message) =>
+                accountIds.includes(message.account_id),
               ),
-              mailboxActionThreadIdsRef.current,
             );
-            setThreads(
-              senderCleanupTargetRef.current
+            const observedThreads = new Map(
+              scopedThreads.map((thread) => [thread.id, thread]),
+            );
+            for (const thread of remoteThreads) {
+              if (!observedThreads.has(thread.id))
+                observedThreads.set(thread.id, thread);
+            }
+            recordPendingActionListPage(
+              [...observedThreads.values()],
+              acceptedRevision,
+              false,
+            );
+            setThreads((current) => {
+              const merged = new Map(
+                threadsWithinAccountScope(current, accountIds).map((thread) => [
+                  thread.id,
+                  thread,
+                ]),
+              );
+              for (const thread of remoteThreads) {
+                if (!merged.has(thread.id)) merged.set(thread.id, thread);
+              }
+              const visible = excludeThreads(
+                [...merged.values()].sort(
+                  (left, right) =>
+                    new Date(right.latest.received_at).getTime() -
+                    new Date(left.latest.received_at).getTime(),
+                ),
+                mailboxActionThreadIdsRef.current,
+              );
+              return senderCleanupTargetRef.current
                 ? removeSenderCleanupMessages(
                     visible,
                     senderCleanupTargetRef.current,
                   )
-                : visible,
-            );
+                : visible;
+            });
           }
         } catch {
           // Local catalogue results remain useful when remote search is
@@ -686,6 +885,168 @@ export default function App() {
         setLoading(false);
     }
   }, []);
+  const reconcileCurrentFirstPage = useCallback(
+    async (preservePagination: boolean) => {
+      const currentView = {
+        ...currentViewRef.current,
+        accountIds: [...currentViewRef.current.accountIds],
+      };
+      if (currentView.mailbox === "Outbox" || !currentView.accountIds.length) {
+        return;
+      }
+      const firstPageGeneration = mailViewFirstPageGenerationRef.current;
+      const requestId = ++loadRequestIdRef.current;
+      const smartRequestId = ++smartLoadRequestIdRef.current;
+      loadingMoreRef.current = false;
+      smartLoadingMoreRef.current.clear();
+      setLoadingMore(false);
+      setSmartSections(
+        (current) =>
+          Object.fromEntries(
+            smartSectionIds.map((id) => [
+              id,
+              { ...current[id], loadingMore: false },
+            ]),
+          ) as Record<SmartSectionId, SmartSection>,
+      );
+      const smartInbox = usesSmartInbox(currentView);
+      if (smartInbox) {
+        const page = await api.smartInbox(
+          currentView.accountIds,
+          smartPageSize,
+        );
+        if (
+          requestId !== loadRequestIdRef.current ||
+          smartRequestId !== smartLoadRequestIdRef.current ||
+          firstPageGeneration !== mailViewFirstPageGenerationRef.current ||
+          !sameMailView(currentView, currentViewRef.current)
+        ) {
+          return;
+        }
+        const scopedSections = page.sections.map((section) => ({
+          ...section,
+          conversations: threadsWithinAccountScope(
+            section.conversations,
+            currentView.accountIds,
+          ),
+        }));
+        const authoritativeSections = scopedSections.map((section) => {
+          const visible = excludeThreads(
+            section.conversations,
+            mailboxActionThreadIdsRef.current,
+          );
+          return {
+            id: section.id,
+            threads: senderCleanupTargetRef.current
+              ? removeSenderCleanupMessages(
+                  visible,
+                  senderCleanupTargetRef.current,
+                )
+              : visible,
+          };
+        });
+        const authoritativeSectionByThreadId = new Map<
+          string,
+          SmartSectionId
+        >();
+        for (const section of authoritativeSections) {
+          for (const thread of section.threads) {
+            authoritativeSectionByThreadId.set(thread.id, section.id);
+          }
+        }
+        setSmartSections((current) => {
+          const next = Object.fromEntries(
+            smartSectionIds.map((id) => [
+              id,
+              {
+                ...current[id],
+                threads: current[id].threads.filter((thread) => {
+                  const authoritativeSection =
+                    authoritativeSectionByThreadId.get(thread.id);
+                  return !authoritativeSection || authoritativeSection === id;
+                }),
+              },
+            ]),
+          ) as Record<SmartSectionId, SmartSection>;
+          for (const section of authoritativeSections) {
+            // The startup reconciliation intentionally retains appended older
+            // rows that are absent from a partial first page. It must still
+            // remove a row that the same authoritative response has moved to
+            // another Smart section, such as a read conversation externally
+            // starred by another device.
+            next[section.id] = {
+              ...next[section.id],
+              threads: mergeFirstPageThreads(
+                next[section.id].threads,
+                section.threads,
+                readMutationByMessageRef.current,
+                starMutationByMessageRef.current,
+              ),
+              nextCursor: preservePagination
+                ? current[section.id].nextCursor
+                : scopedSections.find((item) => item.id === section.id)!
+                    .nextCursor,
+            };
+          }
+          return next;
+        });
+        setRetainedSmartThreads((current) =>
+          discardRetainedSmartThreadsReplacedByAuthoritativeStarred(
+            current,
+            authoritativeSections,
+          ),
+        );
+        return;
+      }
+
+      const specialUnread = currentView.mailbox === "unread";
+      const specialFlagged = currentView.mailbox === "starred";
+      const actualMailbox =
+        ["unread", "starred"].includes(currentView.mailbox) ||
+        currentView.mailbox === ""
+          ? undefined
+          : currentView.mailbox;
+      const page = await api.search(
+        currentView.query,
+        currentView.accountIds,
+        actualMailbox,
+        specialUnread,
+        specialFlagged,
+        mailPageSize,
+        null,
+      );
+      if (
+        requestId !== loadRequestIdRef.current ||
+        firstPageGeneration !== mailViewFirstPageGenerationRef.current ||
+        !sameMailView(currentView, currentViewRef.current)
+      ) {
+        return;
+      }
+      const visible = excludeThreads(
+        threadsWithinAccountScope(page.conversations, currentView.accountIds),
+        mailboxActionThreadIdsRef.current,
+      );
+      const reconciled = senderCleanupTargetRef.current
+        ? removeSenderCleanupMessages(visible, senderCleanupTargetRef.current)
+        : visible;
+      // This first-page read closes a missed startup event. It only adds rows
+      // absent from the visible range so a partial page cannot overwrite a
+      // newer optimistic mutation or remove an appended older page.
+      setThreads((current) =>
+        mergeFirstPageThreads(
+          current,
+          reconciled,
+          readMutationByMessageRef.current,
+          starMutationByMessageRef.current,
+        ),
+      );
+      if (!preservePagination) {
+        nextCursorRef.current = page.nextCursor;
+        setHasMore(page.nextCursor !== null);
+      }
+    },
+    [],
+  );
   const removeAccountFromMain = useCallback(
     (accountId: string) => {
       removedAccountIdsRef.current.add(accountId);
@@ -778,7 +1139,8 @@ export default function App() {
     };
   }, [loadMessages]);
   const loadMoreMessages = useCallback(async () => {
-    if (loadingMoreRef.current || !hasMore) return;
+    if (loadingMoreRef.current || !hasMore || !mailFirstPageReadyRef.current)
+      return;
     const currentView = currentViewRef.current;
     if (currentView.mailbox === "Outbox" || !currentView.accountIds.length) {
       return;
@@ -809,8 +1171,14 @@ export default function App() {
       )
         return;
       nextCursorRef.current = page.nextCursor;
+      mailViewHasAppendedPagesRef.current = true;
       setHasMore(page.nextCursor !== null);
-      setThreads((current) => mergeThreads(current, page.conversations));
+      setThreads((current) =>
+        mergeThreads(
+          current,
+          threadsWithinAccountScope(page.conversations, currentView.accountIds),
+        ),
+      );
     } catch (error) {
       if (
         requestId === loadRequestIdRef.current &&
@@ -818,12 +1186,13 @@ export default function App() {
       )
         showError(error);
     } finally {
-      loadingMoreRef.current = false;
       if (
         requestId === loadRequestIdRef.current &&
         sameMailView(currentView, currentViewRef.current)
-      )
+      ) {
+        loadingMoreRef.current = false;
         setLoadingMore(false);
+      }
     }
   }, [hasMore]);
   const loadMoreSmartSection = useCallback(
@@ -832,6 +1201,7 @@ export default function App() {
       const section = smartSections[id];
       if (
         smartLoadingMoreRef.current.has(id) ||
+        !smartFirstPageReadyRef.current ||
         !section.nextCursor ||
         currentView.view !== "smart" ||
         currentView.mailbox !== "INBOX" ||
@@ -856,7 +1226,7 @@ export default function App() {
           smartMorePageSize,
           section.nextCursor,
           !["starred", "seen"].includes(id) ? id : undefined,
-          !["starred", "seen"].includes(id),
+          id !== "starred",
           id === "seen",
         );
         if (
@@ -864,15 +1234,25 @@ export default function App() {
           !sameMailView(currentView, currentViewRef.current)
         )
           return;
+        mailViewHasAppendedPagesRef.current = true;
+        const authoritativeThreads = threadsWithinAccountScope(
+          page.conversations,
+          currentView.accountIds,
+        );
         setSmartSections((current) => ({
           ...current,
           [id]: {
             ...current[id],
-            threads: mergeThreads(current[id].threads, page.conversations),
+            threads: mergeThreads(current[id].threads, authoritativeThreads),
             nextCursor: page.nextCursor,
             loadingMore: false,
           },
         }));
+        setRetainedSmartThreads((current) =>
+          discardRetainedSmartThreadsReplacedByAuthoritativeStarred(current, [
+            { id, threads: authoritativeThreads },
+          ]),
+        );
       } catch (error) {
         if (
           requestId === smartLoadRequestIdRef.current &&
@@ -1079,6 +1459,8 @@ export default function App() {
             ]
           : current.filter((message) => message.id !== event.id),
       );
+      if (event.phase === "finished")
+        void refreshSendRecoveriesRef.current(event.id);
     }).then((dispose) => {
       if (disposed) dispose();
       else unlisten = dispose;
@@ -1106,51 +1488,81 @@ export default function App() {
   useEffect(() => {
     let disposed = false;
     const unlisteners: Array<() => void> = [];
-    void Promise.all([
-      onMailArrived((arrival) => {
-        void (async () => {
-          markSynced();
-          await loadMessages();
-          await requestInitialNotificationAccess(notificationSettings);
-          if (!(await getCurrentWindow().isFocused())) {
-            const delivered = await sendNewMailNotification(
-              arrival.messages,
-              notificationSettings,
-              notificationCopy(t),
-            );
-            if (delivered) {
-              await api.recordNotificationDelivered(
-                arrival.accountId,
-                arrival.eventId,
-                arrival.detectedAt,
+    const subscriptionAbort = new AbortController();
+    void subscribeRealtimeEvents(
+      {
+        arrived: (arrival) => {
+          if (removedAccountIdsRef.current.has(arrival.accountId)) return;
+          void (async () => {
+            markSynced();
+            await loadMessages();
+            if (removedAccountIdsRef.current.has(arrival.accountId)) return;
+            await requestInitialNotificationAccess(notificationSettings);
+            if (removedAccountIdsRef.current.has(arrival.accountId)) return;
+            const focused = await getCurrentWindow().isFocused();
+            if (removedAccountIdsRef.current.has(arrival.accountId)) return;
+            if (!focused) {
+              const delivered = await sendNewMailNotification(
+                arrival.messages,
+                notificationSettings,
+                notificationCopy(t),
+                () => !removedAccountIdsRef.current.has(arrival.accountId),
               );
+              if (
+                delivered &&
+                !removedAccountIdsRef.current.has(arrival.accountId)
+              ) {
+                await api.recordNotificationDelivered(
+                  arrival.accountId,
+                  arrival.eventId,
+                  arrival.detectedAt,
+                );
+              }
             }
-          }
-        })().catch(showError);
-      }),
-      onMailHydrated(() => {
-        void classifyPending();
-      }),
-      onMailChanged(() => {
-        void loadMessages().catch(showError);
-      }),
-      onMailSyncState(() => undefined),
-    ])
-      .then(async (listeners) => {
+          })().catch(showError);
+        },
+        hydrated: () => {
+          void classifyPending();
+        },
+        changed: () => {
+          void loadMessages().catch(showError);
+        },
+        syncState: () => undefined,
+      },
+      subscriptionAbort.signal,
+    )
+      .then(async (unlisten) => {
         if (disposed) {
-          listeners.forEach((unlisten) => unlisten());
+          unlisten();
           return;
         }
-        unlisteners.push(...listeners);
+        unlisteners.push(unlisten);
+        const firstPageGeneration = mailViewFirstPageGenerationRef.current;
         await api.configureTray(t("tray.open"), t("tray.quit"));
         await api.startRealtimeSync();
+        if (
+          !disposed &&
+          firstPageGeneration === mailViewFirstPageGenerationRef.current
+        ) {
+          await reconcileCurrentFirstPage(mailViewHasAppendedPagesRef.current);
+        }
       })
-      .catch(showError);
+      .catch((error) => {
+        if (!disposed) showError(error);
+      });
     return () => {
       disposed = true;
+      subscriptionAbort.abort();
       unlisteners.forEach((unlisten) => unlisten());
     };
-  }, [classifyPending, loadMessages, markSynced, notificationSettings, t]);
+  }, [
+    classifyPending,
+    loadMessages,
+    markSynced,
+    notificationSettings,
+    reconcileCurrentFirstPage,
+    t,
+  ]);
 
   const smartInboxActive =
     mailListView === "smart" && mailbox === "INBOX" && !query.trim();
@@ -1160,7 +1572,7 @@ export default function App() {
   );
   const displayedThreads =
     mailbox === "Outbox"
-      ? groupMessages(outbox)
+      ? groupMessages(visibleOutbox)
       : smartInboxActive
         ? smartThreads
         : threads;
@@ -1199,7 +1611,12 @@ export default function App() {
 
   useEffect(() => {
     let disposed = false;
-    let dispose: () => void = () => undefined;
+    let registrationFailed = false;
+    const listeners = new Set<() => void>();
+    const cleanupListeners = () => {
+      for (const unlisten of listeners) unlisten();
+      listeners.clear();
+    };
     const openNotification = async (extra: Record<string, unknown>) => {
       const accountId =
         typeof extra.accountId === "string" ? extra.accountId : undefined;
@@ -1249,56 +1666,79 @@ export default function App() {
       setActive(undefined);
       setActiveThreadSnapshot(undefined);
     };
-    void Promise.all([
-      onNotificationAction(openNotification).then((listener) =>
-        typeof listener === "function" ? listener : () => listener.unregister(),
-      ),
-      onDesktopNotificationAction(openNotification),
-    ]).then((listeners) => {
-      const unlistenAll = () => listeners.forEach((unlisten) => unlisten());
-      if (disposed) unlistenAll();
-      else dispose = unlistenAll;
-    });
+    const register = (
+      setup:
+        | ReturnType<typeof onNotificationAction>
+        | ReturnType<typeof onDesktopNotificationAction>,
+    ) => {
+      void setup.then(
+        (listener) => {
+          const unlisten =
+            typeof listener === "function"
+              ? listener
+              : () => listener.unregister();
+          if (disposed || registrationFailed) unlisten();
+          else listeners.add(unlisten);
+        },
+        (error) => {
+          if (disposed || registrationFailed) return;
+          registrationFailed = true;
+          cleanupListeners();
+          showError(error);
+        },
+      );
+    };
+
+    register(onNotificationAction(openNotification));
+    register(onDesktopNotificationAction(openNotification));
     return () => {
       disposed = true;
-      dispose();
+      cleanupListeners();
     };
   }, [accounts]);
 
   useEffect(() => {
-    let dispose: () => void = () => undefined;
     let disposed = false;
-    void Promise.all([
-      onReaderWindowMutated(() => {
-        void loadMessages();
-        void refreshStarredCount(activeAccounts);
-      }),
-      onReaderWindowFailed(async ({ accountId }) => {
-        try {
-          const currentWindow = getCurrentWindow();
-          await currentWindow.show();
-          await currentWindow.setFocus();
-          setMailbox("INBOX");
-          setQuery("");
-          selectedAccountIdRef.current = accountId;
-          setSelectedAccountId(accountId);
-          setActive(undefined);
-          setActiveThreadSnapshot(undefined);
-          const inbox = await api.search("", [accountId], "INBOX");
-          setThreads(inbox.conversations);
-          nextCursorRef.current = inbox.nextCursor;
-          setHasMore(inbox.nextCursor !== null);
-        } catch (error) {
-          showError(error);
-        }
-      }),
-    ]).then((unlisteners) => {
-      const unlistenAll = () => unlisteners.forEach((unlisten) => unlisten());
-      if (disposed) unlistenAll();
-      else dispose = unlistenAll;
-    });
+    let dispose: () => void = () => undefined;
+    const subscriptionAbort = new AbortController();
+    void subscribeNativeGroup(
+      [
+        onReaderWindowMutated(() => {
+          void loadMessages();
+          void refreshStarredCount(activeAccounts);
+        }),
+        onReaderWindowFailed(async ({ accountId }) => {
+          try {
+            const currentWindow = getCurrentWindow();
+            await currentWindow.show();
+            await currentWindow.setFocus();
+            setMailbox("INBOX");
+            setQuery("");
+            selectedAccountIdRef.current = accountId;
+            setSelectedAccountId(accountId);
+            setActive(undefined);
+            setActiveThreadSnapshot(undefined);
+            const inbox = await api.search("", [accountId], "INBOX");
+            setThreads(inbox.conversations);
+            nextCursorRef.current = inbox.nextCursor;
+            setHasMore(inbox.nextCursor !== null);
+          } catch (error) {
+            showError(error);
+          }
+        }),
+      ],
+      subscriptionAbort.signal,
+    )
+      .then((unlisten) => {
+        if (disposed) unlisten();
+        else dispose = unlisten;
+      })
+      .catch((error) => {
+        if (!disposed) showError(error);
+      });
     return () => {
       disposed = true;
+      subscriptionAbort.abort();
       dispose();
     };
   }, [activeAccounts, loadMessages, refreshStarredCount]);
@@ -1383,11 +1823,16 @@ export default function App() {
       }))
       .filter((target) => target.messages.length > 0);
     if (!actionThreads.length) return;
+    const actionView: MailViewRequest = {
+      ...currentViewRef.current,
+      accountIds: [...currentViewRef.current.accountIds],
+    };
     mailboxActionsInFlightRef.current += 1;
     // An open/read transition may already be refreshing Smart sections with
     // the pre-action INBOX row. Make that result stale before moving the row.
     loadRequestIdRef.current += 1;
     smartLoadRequestIdRef.current += 1;
+    const actionCatalogueRevision = catalogueRevisionRef.current;
     const originalThreads = [...displayedThreads];
     const originalSmartSections = smartSections;
     const originalRetainedSmartThreads = retainedSmartThreads;
@@ -1396,7 +1841,11 @@ export default function App() {
     const targetThreadIds = new Set(
       actionThreads.map((target) => target.thread.id),
     );
-    for (const id of targetThreadIds) mailboxActionThreadIdsRef.current.add(id);
+    for (const id of targetThreadIds) {
+      const nextCount = (mailboxActionThreadCountsRef.current.get(id) ?? 0) + 1;
+      mailboxActionThreadCountsRef.current.set(id, nextCount);
+      mailboxActionThreadIdsRef.current.add(id);
+    }
     const reducedMotion = window.matchMedia(
       "(prefers-reduced-motion: reduce)",
     ).matches;
@@ -1464,12 +1913,15 @@ export default function App() {
               message.mailbox,
               message.uid,
               action,
+              message.id,
+              message.mailbox_uid_validity ?? null,
             ),
           ),
         ),
       ),
     );
     const results = await resultsPromise;
+    if (!mountedRef.current) return;
     const failedThreadIds = new Set(
       actionThreads
         .filter((_, index) => results[index].status === "rejected")
@@ -1494,34 +1946,102 @@ export default function App() {
         }
         return next;
       });
-      setSelected(new Set(failedThreadIds));
-      setThreads((current) =>
-        restoreThreads(current, originalThreads, failedThreadIds),
+      const currentRevision = catalogueRevisionRef.current;
+      const unchangedCatalogue = actionCatalogueRevision === currentRevision;
+      const observationFor = (threadId: string) => {
+        const observation =
+          mailboxActionPageObservationsRef.current.get(threadId);
+        return observation?.revision === currentRevision
+          ? observation
+          : undefined;
+      };
+      const restorableThreadIds = new Set(
+        [...failedThreadIds].filter((threadId) => {
+          if (unchangedCatalogue) return true;
+          const observation = observationFor(threadId);
+          if (!observation) return false;
+          const present = usesSmartInbox(actionView)
+            ? Boolean(
+                observation.smartThreads &&
+                Object.keys(observation.smartThreads).length,
+              )
+            : Boolean(observation.listThread);
+          return present || !observation.complete;
+        }),
       );
-      setSmartSections(
-        (current) =>
-          Object.fromEntries(
-            smartSectionIds.map((id) => [
-              id,
-              {
-                ...current[id],
-                threads: restoreThreads(
-                  current[id].threads,
-                  originalSmartSections[id].threads,
-                  failedThreadIds,
-                ),
-              },
-            ]),
-          ) as Record<SmartSectionId, SmartSection>,
-      );
-      setRetainedSmartThreads((current) => {
-        const next = new Map(current);
-        for (const id of failedThreadIds) {
-          const retained = originalRetainedSmartThreads.get(id);
-          if (retained) next.set(id, retained);
-        }
-        return next;
-      });
+      if (
+        restorableThreadIds.size > 0 &&
+        sameMailView(actionView, currentViewRef.current)
+      ) {
+        setSelected((current) => {
+          const next = new Set(current);
+          for (const id of restorableThreadIds) next.add(id);
+          return next;
+        });
+        const latestListThreads = originalThreads.map((thread) => {
+          if (!restorableThreadIds.has(thread.id)) return thread;
+          return observationFor(thread.id)?.listThread ?? thread;
+        });
+        setThreads((current) =>
+          restoreThreads(current, latestListThreads, restorableThreadIds),
+        );
+        setSmartSections(
+          (current) =>
+            Object.fromEntries(
+              smartSectionIds.map((id) => {
+                const restoreCandidates = originalSmartSections[
+                  id
+                ].threads.filter(
+                  (thread) => !restorableThreadIds.has(thread.id),
+                );
+                for (const threadId of restorableThreadIds) {
+                  const observation = observationFor(threadId);
+                  const observedMembership = observation?.smartThreads;
+                  const observedThread = observedMembership?.[id];
+                  if (observedThread) {
+                    restoreCandidates.push(observedThread);
+                    continue;
+                  }
+                  if (
+                    observedMembership &&
+                    Object.keys(observedMembership).length > 0
+                  )
+                    continue;
+                  const original = originalSmartSections[id].threads.find(
+                    (thread) => thread.id === threadId,
+                  );
+                  if (original) restoreCandidates.push(original);
+                }
+                return [
+                  id,
+                  {
+                    ...current[id],
+                    threads: restoreThreads(
+                      current[id].threads,
+                      restoreCandidates,
+                      restorableThreadIds,
+                    ),
+                  },
+                ];
+              }),
+            ) as Record<SmartSectionId, SmartSection>,
+        );
+        setRetainedSmartThreads((current) => {
+          const next = new Map(current);
+          for (const id of restorableThreadIds) {
+            next.delete(id);
+            const observed = observationFor(id)?.smartThreads;
+            const hasObservedMembership = Boolean(
+              observed && Object.keys(observed).length,
+            );
+            const retained = hasObservedMembership
+              ? undefined
+              : originalRetainedSmartThreads.get(id);
+            if (retained) next.set(id, retained);
+          }
+          return next;
+        });
+      }
       showStatus(
         actionOutcome(t, action, succeeded, failedThreadIds.size),
         "error",
@@ -1531,14 +2051,24 @@ export default function App() {
       showStatus(actionOutcome(t, action, succeeded, 0));
     }
 
+    if (!mountedRef.current) return;
+
     setPendingActions((current) => {
       const next = { ...current };
       for (const id of targetIds) delete next[id];
       return next;
     });
     mailboxActionsInFlightRef.current -= 1;
-    for (const id of targetThreadIds)
-      mailboxActionThreadIdsRef.current.delete(id);
+    for (const id of targetThreadIds) {
+      const nextCount = (mailboxActionThreadCountsRef.current.get(id) ?? 1) - 1;
+      if (nextCount > 0) {
+        mailboxActionThreadCountsRef.current.set(id, nextCount);
+      } else {
+        mailboxActionThreadCountsRef.current.delete(id);
+        mailboxActionThreadIdsRef.current.delete(id);
+        mailboxActionPageObservationsRef.current.delete(id);
+      }
+    }
     if (mailboxActionsInFlightRef.current === 0) await loadMessages();
   };
   const permanentlyDeleteMessage = async (message: MailSummary) => {
@@ -1573,6 +2103,8 @@ export default function App() {
         message.mailbox,
         message.uid,
         "delete",
+        message.id,
+        message.mailbox_uid_validity ?? null,
       );
       // Prevent an in-flight fetch that still contains this locator from
       // restoring the message after the server has deleted it. Do this only
@@ -1651,7 +2183,10 @@ export default function App() {
       setAiResult(
         await api.summarize(
           aiSettings,
-          targets.map((item) => item.id),
+          targets.map((item) => ({
+            messageId: item.id,
+            expectedUidValidity: item.mailbox_uid_validity ?? null,
+          })),
         ),
       );
     } catch (error) {
@@ -1689,7 +2224,10 @@ export default function App() {
     );
     if (!recipients) return;
     try {
-      const content = await api.content(replyMessage.id);
+      const content = await api.content(
+        replyMessage.id,
+        replyMessage.mailbox_uid_validity ?? null,
+      );
       const replyHistory = formatReplyHistory({
         message: replyMessage,
         bodyText: content.body_text,
@@ -1717,6 +2255,13 @@ export default function App() {
           ? contextMessages
           : [replyMessage]
         ).map((message) => message.id),
+        contextMessageTargets: (contextMessages.length
+          ? contextMessages
+          : [replyMessage]
+        ).map((message) => ({
+          messageId: message.id,
+          expectedUidValidity: message.mailbox_uid_validity ?? null,
+        })),
       });
     } catch (error) {
       await showNativeMessage(
@@ -1747,7 +2292,10 @@ export default function App() {
   const openForwardForMessage = async (message: MailSummary | undefined) => {
     if (!message) return;
     try {
-      const content = await api.content(message.id);
+      const content = await api.content(
+        message.id,
+        message.mailbox_uid_validity ?? null,
+      );
       const history = formatForwardHistory(message, content, {
         originalMessage: t("reader.originalMessage"),
         from: t("composer.from"),
@@ -1765,7 +2313,18 @@ export default function App() {
         )
           ? message.id
           : undefined,
+        forwardMessageUidValidity: content.attachments.some(
+          (attachment) => attachment.presentation !== "embedded",
+        )
+          ? (message.mailbox_uid_validity ?? null)
+          : undefined,
         contextMessageIds: [message.id],
+        contextMessageTargets: [
+          {
+            messageId: message.id,
+            expectedUidValidity: message.mailbox_uid_validity ?? null,
+          },
+        ],
       });
     } catch (error) {
       await showNativeMessage(
@@ -1780,7 +2339,10 @@ export default function App() {
   ) => openForwardForMessage(thread?.latest);
   const openSendAgainForMessage = async (message: MailSummary) => {
     try {
-      const content = await api.content(message.id);
+      const content = await api.content(
+        message.id,
+        message.mailbox_uid_validity ?? null,
+      );
       openComposeWindow({
         accountId: message.account_id,
         to: message.to_addresses,
@@ -1793,6 +2355,11 @@ export default function App() {
           (attachment) => attachment.presentation !== "embedded",
         )
           ? message.id
+          : undefined,
+        forwardMessageUidValidity: content.attachments.some(
+          (attachment) => attachment.presentation !== "embedded",
+        )
+          ? (message.mailbox_uid_validity ?? null)
           : undefined,
       });
     } catch (error) {
@@ -1812,6 +2379,9 @@ export default function App() {
       is_flagged: message.is_flagged,
     }));
     const ids = new Set(previous.map((message) => message.id));
+    const mutationGeneration = ++starMutationGenerationRef.current;
+    for (const id of ids)
+      starMutationByMessageRef.current.set(id, mutationGeneration);
     const updateFlag = (message: MailSummary, value: boolean) =>
       ids.has(message.id) ? { ...message, is_flagged: value } : message;
     setThreads((current) =>
@@ -1872,11 +2442,21 @@ export default function App() {
         : current,
     );
     const results = await Promise.allSettled(
-      sourceMessages.map((message) => api.setStarred(message.id, flagged)),
+      sourceMessages.map((message) =>
+        api.setStarred(
+          message.id,
+          flagged,
+          message.mailbox_uid_validity ?? null,
+        ),
+      ),
     );
     const failed = new Set(
       results.flatMap((result, index) =>
-        result.status === "rejected" ? [previous[index].id] : [],
+        result.status === "rejected" &&
+        starMutationByMessageRef.current.get(previous[index].id) ===
+          mutationGeneration
+          ? [previous[index].id]
+          : [],
       ),
     );
     if (failed.size) {
@@ -1911,6 +2491,10 @@ export default function App() {
       );
     }
     await refreshStarredCount(activeAccounts);
+    for (const id of ids) {
+      if (starMutationByMessageRef.current.get(id) === mutationGeneration)
+        starMutationByMessageRef.current.delete(id);
+    }
     actionBusyRef.current = false;
     await loadMessages();
   };
@@ -1923,6 +2507,11 @@ export default function App() {
       (message) => message.is_read !== read,
     );
     if (!targets.length) return;
+    const mutationView: MailViewRequest = {
+      ...currentViewRef.current,
+      accountIds: [...currentViewRef.current.accountIds],
+    };
+    const mutationCatalogueRevision = catalogueRevisionRef.current;
     const silent = Boolean(options?.silent);
     const previous = targets.map((message) => ({
       id: message.id,
@@ -1984,7 +2573,9 @@ export default function App() {
       current ? updateThreadReadState(current, ids, read) : current,
     );
     const results = await Promise.allSettled(
-      targets.map((message) => api.setRead(message.id, read)),
+      targets.map((message) =>
+        api.setRead(message.id, read, message.mailbox_uid_validity ?? null),
+      ),
     );
     const failed = new Set(
       results.flatMap((result, index) =>
@@ -2018,33 +2609,56 @@ export default function App() {
           .map((item) => item.id)
           .filter((id) => !mailboxActionThreadIdsRef.current.has(id)),
       );
-      setThreads((current) =>
-        restoreThreads(current, previousThreads, failedRegularThreadIds).map(
-          (item) => restoreThreadReadState(item, failed, prior),
-        ),
-      );
-      setActive((current) =>
-        current ? restoreMessageReadState(current, failed, prior) : current,
-      );
-      setActiveThreadSnapshot((current) =>
-        current ? restoreThreadReadState(current, failed, prior) : current,
-      );
-      setSmartSections(
-        (current) =>
-          Object.fromEntries(
-            smartSectionIds.map((id) => [
-              id,
-              {
-                ...current[id],
-                threads: restoreThreads(
-                  current[id].threads,
-                  previousSmartSections[id].threads,
-                  failedThreadIds,
-                ).map((item) => restoreThreadReadState(item, failed, prior)),
-              },
-            ]),
-          ) as Record<SmartSectionId, SmartSection>,
-      );
+      if (
+        mutationCatalogueRevision === catalogueRevisionRef.current &&
+        sameMailView(mutationView, currentViewRef.current)
+      ) {
+        setThreads((current) => {
+          const currentIds = new Set(current.map((item) => item.id));
+          const missingFailedThreadIds = new Set(
+            [...failedRegularThreadIds].filter((id) => !currentIds.has(id)),
+          );
+          return restoreThreads(
+            current,
+            previousThreads,
+            missingFailedThreadIds,
+          ).map((item) => restoreThreadReadState(item, failed, prior));
+        });
+        setActive((current) =>
+          current ? restoreMessageReadState(current, failed, prior) : current,
+        );
+        setActiveThreadSnapshot((current) =>
+          current ? restoreThreadReadState(current, failed, prior) : current,
+        );
+        setSmartSections(
+          (current) =>
+            Object.fromEntries(
+              smartSectionIds.map((id) => [
+                id,
+                {
+                  ...current[id],
+                  threads: (() => {
+                    const currentIds = new Set(
+                      current[id].threads.map((item) => item.id),
+                    );
+                    const missingFailedThreadIds = new Set(
+                      [...failedThreadIds].filter(
+                        (threadId) => !currentIds.has(threadId),
+                      ),
+                    );
+                    return restoreThreads(
+                      current[id].threads,
+                      previousSmartSections[id].threads,
+                      missingFailedThreadIds,
+                    ).map((item) =>
+                      restoreThreadReadState(item, failed, prior),
+                    );
+                  })(),
+                },
+              ]),
+            ) as Record<SmartSectionId, SmartSection>,
+        );
+      }
       if (!silent) {
         showStatus(
           t(read ? "feedback.readFailed" : "feedback.unreadFailed", {
@@ -2254,7 +2868,10 @@ export default function App() {
     if (unsubscribeLoading) return;
     setUnsubscribeLoading(true);
     try {
-      const result = await api.unsubscribe(message.id);
+      const result = await api.unsubscribe(
+        message.id,
+        message.mailbox_uid_validity ?? null,
+      );
       showStatus(
         t(
           result.kind === "opened_web"
@@ -2480,7 +3097,11 @@ export default function App() {
   );
   const toggleStar = async (message: MailSummary, starred: boolean) => {
     try {
-      const updated = await api.setStarred(message.id, starred);
+      const updated = await api.setStarred(
+        message.id,
+        starred,
+        message.mailbox_uid_validity ?? null,
+      );
       const update = (item: MailSummary) =>
         item.id === message.id
           ? { ...item, ...updated, is_flagged: starred }
@@ -2555,7 +3176,8 @@ export default function App() {
           onMailbox={selectMailbox}
           onFeedback={() => void openFeedback()}
           feedbackDisabled={loading}
-          outboxCount={outbox.length}
+          outboxSendingCount={visibleOutbox.length}
+          outboxRecoveryCount={recoveryCount}
           starredCount={starredCount}
         />
         <section className="mail-list-panel" />
@@ -2598,11 +3220,43 @@ export default function App() {
         onMailbox={selectMailbox}
         onFeedback={() => void openFeedback()}
         feedbackDisabled={loading}
-        outboxCount={outbox.length}
+        outboxSendingCount={visibleOutbox.length}
+        outboxRecoveryCount={recoveryCount}
         starredCount={starredCount}
       />
       <MailList
         threads={displayedThreads}
+        supplementaryContent={
+          mailbox === "Outbox" ? (
+            <SendRecoveryList
+              items={visibleRecoveries}
+              accountNames={Object.fromEntries(
+                accounts.map((account) => [
+                  account.id,
+                  account.account_name || account.email,
+                ]),
+              )}
+              loading={recoveries.loading}
+              failed={recoveries.failed}
+              hasMore={Boolean(recoveries.nextCursor)}
+              onOpen={(item) => {
+                void api
+                  .openSendRecoveryWindow(item.account_id, item.attempt_id)
+                  .catch(showError);
+              }}
+              onRetry={() => void refreshSendRecoveries()}
+              onLoadMore={recoveries.loadMore}
+            />
+          ) : undefined
+        }
+        suppressEmptyState={
+          mailbox === "Outbox" &&
+          (recoveries.items.length > 0 ||
+            recoveries.total > 0 ||
+            Boolean(recoveries.nextCursor) ||
+            recoveries.loading ||
+            recoveries.failed)
+        }
         activeThreadId={activeThread?.id}
         selected={selected}
         query={query}
@@ -2610,6 +3264,7 @@ export default function App() {
         loadingMore={loadingMore}
         hasMore={hasMore}
         remoteSearchUnavailable={remoteSearchUnavailable}
+        remoteSearchLimitReached={remoteSearchLimitReached}
         syncStatus={syncStatus}
         classifying={classifying}
         lastSyncAt={lastSyncAt}
@@ -2619,22 +3274,37 @@ export default function App() {
         smartInbox={smartInboxActive}
         smartSections={smartSectionIds.map((id) => {
           const section = smartSections[id];
-          const retained = [...retainedSmartThreads.values()]
+          const retainedEntries = [...retainedSmartThreads.values()];
+          const retained = retainedEntries
             .filter((item) => item.sectionId === id)
-            .map((item) => item.thread)
-            .filter(
-              (thread) =>
-                !section.threads.some((item) => item.id === thread.id),
-            );
-          return retained.length
-            ? { ...section, threads: mergeThreads(section.threads, retained) }
-            : section;
+            .map((item) => item.thread);
+          const retainedInOtherSections = new Set(
+            retainedEntries
+              .filter((item) => item.sectionId !== id)
+              .map((item) => item.thread.id),
+          );
+          const authoritativeThreads =
+            id === "starred"
+              ? section.threads
+              : section.threads.filter(
+                  (thread) => !retainedInOtherSections.has(thread.id),
+                );
+          return {
+            ...section,
+            threads: retained.length
+              ? mergeThreads(authoritativeThreads, retained)
+              : authoritativeThreads,
+          };
         })}
         exitingThreadIds={exitingSmartThreadIds}
         onViewChange={changeMailListView}
         onCategorize={(message, category) => {
           void api
-            .setCategory(message.id, category)
+            .setCategory(
+              message.id,
+              category,
+              message.mailbox_uid_validity ?? null,
+            )
             .then(() => {
               const updateCategory = (item: MailSummary) =>
                 item.id === message.id
@@ -2884,6 +3554,92 @@ function mergeThreads(current: MailThread[], incoming: MailThread[]) {
       new Date(right.latest.received_at).getTime() -
       new Date(left.latest.received_at).getTime(),
   );
+}
+
+function mergeFirstPageThreads(
+  current: MailThread[],
+  incoming: MailThread[],
+  pendingReadMutations: Map<string, number>,
+  pendingStarMutations: Map<string, number>,
+) {
+  const merged = new Map(current.map((thread) => [thread.id, thread]));
+  for (const incomingThread of incoming) {
+    const currentThread = merged.get(incomingThread.id);
+    if (!currentThread) {
+      merged.set(incomingThread.id, incomingThread);
+      continue;
+    }
+
+    const currentMessages = concreteThreadMessages(currentThread);
+    const currentById = new Map(
+      currentMessages.map((message) => [message.id, message]),
+    );
+    const messagesByLocator = new Map(
+      currentMessages.map((message) => [messageLocator(message), message]),
+    );
+    for (const incomingMessage of concreteThreadMessages(incomingThread)) {
+      const currentWithId = currentById.get(incomingMessage.id);
+      if (
+        currentWithId &&
+        messageLocator(currentWithId) !== messageLocator(incomingMessage)
+      ) {
+        // A local ID must never be rebound to a different remote action target.
+        continue;
+      }
+      const currentMessage =
+        currentWithId ?? messagesByLocator.get(messageLocator(incomingMessage));
+      if (!currentMessage) {
+        messagesByLocator.set(messageLocator(incomingMessage), incomingMessage);
+        continue;
+      }
+      messagesByLocator.set(messageLocator(currentMessage), {
+        ...currentMessage,
+        ...incomingMessage,
+        id: currentMessage.id,
+        account_id: currentMessage.account_id,
+        mailbox: currentMessage.mailbox,
+        uid: currentMessage.uid,
+        mailbox_uid_validity: currentMessage.mailbox_uid_validity,
+        is_read: pendingReadMutations.has(currentMessage.id)
+          ? currentMessage.is_read
+          : incomingMessage.is_read,
+        is_flagged: pendingStarMutations.has(currentMessage.id)
+          ? currentMessage.is_flagged
+          : incomingMessage.is_flagged,
+      });
+    }
+
+    const rebuilt = groupMessages([...messagesByLocator.values()]).find(
+      (thread) => thread.id === incomingThread.id,
+    );
+    if (!rebuilt) continue;
+    const knownCount = Math.max(
+      currentThread.messageCount ?? currentMessages.length,
+      incomingThread.messageCount ??
+        concreteThreadMessages(incomingThread).length,
+      concreteThreadMessages(rebuilt).length,
+    );
+    merged.set(incomingThread.id, {
+      ...currentThread,
+      ...incomingThread,
+      ...rebuilt,
+      messageCount: knownCount,
+    });
+  }
+  return [...merged.values()].sort(
+    (left, right) =>
+      new Date(right.latest.received_at).getTime() -
+      new Date(left.latest.received_at).getTime(),
+  );
+}
+
+function messageLocator(message: MailSummary) {
+  return JSON.stringify([
+    message.account_id,
+    message.mailbox,
+    message.mailbox_uid_validity ?? null,
+    message.uid,
+  ]);
 }
 
 function excludeThreads(threads: MailThread[], excludedIds: Set<string>) {

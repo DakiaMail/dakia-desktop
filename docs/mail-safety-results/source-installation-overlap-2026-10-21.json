@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "lane": "source-environment-failure-triage",
+  "recordedAt": "2026-10-21T07:57:32.505918+00:00",
+  "status": "installation-overlap-confirmed",
+  "failedReport": "docs/mail-safety-results/startup-lock-three-run-source-2026-10-21.json",
+  "failedReportSha256": "6b03d19dbf84d0a012996d9e611dc5fc137371c4ce0e341139a3d00494d20e1e",
+  "failedReportStatus": "failed",
+  "finding": "The source runner began before npm ci finished replacing node_modules. TypeScript reported TS7016 for package declarations absent during replacement. The settled installed Vite and locked Vite both resolve to 7.3.7; actual root typecheck then passed.",
+  "productSourceChangedToSuppressFailure": false,
+  "dependencyDeclarationShimsAdded": false,
+  "countsTowardThreeCleanRuns": false,
+  "replacementReport": "docs/mail-safety-results/startup-lock-three-run-source-installed-2026-10-21.json"
+}

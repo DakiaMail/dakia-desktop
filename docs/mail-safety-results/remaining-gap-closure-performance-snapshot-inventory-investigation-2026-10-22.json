@@ -1,0 +1,179 @@
+{
+  "schemaVersion": 1,
+  "lane": "manual-mailbox-performance-investigation",
+  "status": "performance-lane-regressed-root-cause-unproven",
+  "recordedAt": "2026-10-21T21:58:40Z",
+  "scope": "Docs-only reconciliation of the a86feeae performance regression with the retained c56d2d80 regression investigation. No benchmark, build, or source test was executed for this receipt.",
+  "currentRun": {
+    "report": {
+      "path": "docs/mail-safety-results/remaining-gap-closure-performance-snapshot-inventory-and-starred-retention-2026-10-22.json",
+      "sha256": "a4bcf2ff5728190c63e870b9eac8ebe021592b78728dbc573131fd975e77c9bc"
+    },
+    "rawLog": {
+      "path": "/private/tmp/dakia-performance-snapshot-inventory-and-starred-retention-20261022.log",
+      "sha256": "1d6db694cb94876a1c6bc6b6ee7e2d60465de4cc658c582737fbaa3680c9ab33"
+    },
+    "observer": {
+      "path": "/private/tmp/dakia-performance-snapshot-inventory-and-starred-retention-observations-20261022.json",
+      "sha256": "ccb4331661c5d265495335870346ae26a47658878d184d52758df0cc0a97dac5"
+    },
+    "exitCode": 1,
+    "sourceTree": {
+      "digest": "a86feeae88ffe172c8697a84f1d29afa123856661ee3765ca3307562c410193c",
+      "fileCount": 940,
+      "unchangedBeforeAfter": true
+    },
+    "snapshotTests": {
+      "completed": 12,
+      "failedBehaviorAssertions": 0,
+      "repeatCount": 3,
+      "scales": [2000, 30000, 100000, 200000]
+    },
+    "comparisons": [
+      {
+        "messageCount": 2000,
+        "measurementsMilliseconds": [716, 705, 609],
+        "medianMilliseconds": 705,
+        "historicalBaselineMedianMilliseconds": 560,
+        "changePercent": 25.892857142857146,
+        "thresholdPercent": 20,
+        "status": "regressed"
+      },
+      {
+        "messageCount": 30000,
+        "measurementsMilliseconds": [7932, 8467, 7612],
+        "medianMilliseconds": 7932,
+        "historicalBaselineMedianMilliseconds": 7660,
+        "changePercent": 3.5509138381201044,
+        "thresholdPercent": 20,
+        "status": "passed"
+      },
+      {
+        "messageCount": 100000,
+        "measurementsMilliseconds": [27767, 27650, 25595],
+        "medianMilliseconds": 27650,
+        "historicalBaselineMedianMilliseconds": 25662,
+        "changePercent": 7.746863066012002,
+        "thresholdPercent": 20,
+        "status": "passed"
+      },
+      {
+        "messageCount": 200000,
+        "measurementsMilliseconds": [56261, 54927, 51846],
+        "medianMilliseconds": 54927,
+        "historicalBaselineMedianMilliseconds": 52573,
+        "changePercent": 4.477583550491697,
+        "thresholdPercent": 20,
+        "status": "passed"
+      }
+    ],
+    "resourceSoak": {
+      "status": "passed",
+      "reconnectCycles": 200,
+      "storeOpenCycles": 100,
+      "elapsedMilliseconds": 1334,
+      "fileDescriptorsBefore": 10,
+      "fileDescriptorsAfter": 10,
+      "residentGrowthBytes": 1523712,
+      "residentGrowthLimitBytes": 67108864
+    },
+    "disposition": "The 2,000-message median exceeded the 20 percent threshold, so the a86 performance lane remains failed. The passing larger scales and resource soak do not override that result."
+  },
+  "retainedPriorEvidence": {
+    "historicalBaseline": {
+      "path": "docs/mail-safety-results/remaining-gap-closure-performance-2026-10-21.json",
+      "sha256": "6b5d4c28d6f95f3370c6fe6689a43aade155b5caf65b7796d61df837a7b85352",
+      "sourceDigest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+      "twoThousandMedianMilliseconds": 560,
+      "status": "retained-reference-baseline"
+    },
+    "c56FailedRun": {
+      "path": "docs/mail-safety-results/remaining-gap-closure-performance-window-handoff-recovery-2026-10-21.json",
+      "sha256": "8de443644dd4b5b38811c2e4776d0d2fc8dd101dad33ffe4a9fc5b7f9503cac2",
+      "sourceDigest": "c56d2d806d8623dd14c858c8a8362729655496036405ad8c24162fce02a9a85b",
+      "twoThousandMedianMilliseconds": 711,
+      "changePercent": 26.96428571428571,
+      "status": "regressed"
+    },
+    "c56Investigation": {
+      "path": "docs/mail-safety-results/remaining-gap-closure-performance-regression-investigation-2026-10-21.json",
+      "sha256": "a0f6e5b77812ac6350f3306f18ea38f29c0f91dd9cdb444c63ca4f85e63e1f2f",
+      "quietFollowUpMeasurementsMilliseconds": [591, 744, 1150, 601, 599, 618, 579, 599, 583],
+      "quietFollowUpMedianMilliseconds": 599,
+      "quietFollowUpChangePercent": 6.964285714285712,
+      "disposition": "The quiet c56 follow-up remains separate evidence under different observed conditions. It did not erase the c56 failed report or establish a replacement baseline."
+    }
+  },
+  "sourceDifferenceFromC56": {
+    "c56Archive": {
+      "path": "/private/tmp/dakia-frozen-source-20261021-window-handoff-recovery.zip",
+      "sha256": "2e279ec63fea66153f132d8e1b6c3276f95fb339a37954139a6d2cb237bca385"
+    },
+    "a86Archive": {
+      "path": "/private/tmp/dakia-frozen-source-20261021-snapshot-inventory-and-starred-retention.zip",
+      "sha256": "e6c4f94fa4821b73a0ab478c2efbe662ad634cbb5d8d3245578ce864337d52b9"
+    },
+    "a86Manifest": {
+      "path": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-snapshot-inventory-and-starred-retention.json",
+      "sha256": "3b20d3a6017d10e7bdb84e74672327e2f3439d3c062a2bd4b17770532501293a"
+    },
+    "verifiedUnchangedMeasuredInputs": [
+      "Cargo.toml",
+      "Cargo.lock",
+      "crates/dakia-core/Cargo.toml",
+      "crates/dakia-core/src/mail.rs",
+      "crates/dakia-core/src/mail/tests/resilience_performance_tests.rs",
+      "scripts/run-mail-resilience-performance.mjs"
+    ],
+    "changedMeasuredProductionFile": {
+      "path": "crates/dakia-core/src/storage.rs",
+      "c56Sha256": "6276106a9432cc6a927d92736e0e9ae66fec1451014f8cd669bb4f85834b23e2",
+      "a86Sha256": "42f72c84e1733e37074cac8ef3f6ae083bef3ce50b3573d51a75f4041e5ee790",
+      "exactChange": "finalize_mailbox_snapshot_inner now counts the staged mailbox_snapshot_items for the account, mailbox, and generation inside its transaction, then rolls back unless that count equals initial_exists.",
+      "pathRelevance": "The bounded snapshot benchmark reaches snapshot finalization, so this inventory fence is on its measured production path.",
+      "causalStatus": "unmeasured"
+    },
+    "interpretation": "The inventory fence is a verified on-path difference between c56 and a86. No exact paired c56 and a86 binary run isolates it, so this receipt does not attribute the 2,000-message regression to that query or to any other source change."
+  },
+  "observerFindings": {
+    "sampleCount": 29,
+    "thermalProbe": "The system probe returned no recorded thermal, performance, or CPU power warning. That output does not prove the absence of throttling during the complete run.",
+    "cargoAndCompiler": {
+      "samplesListingCargo": 27,
+      "maximumCargoCpuPercent": 13.7,
+      "samplesListingRustc": 0,
+      "rawLogBuildLockWaits": 0,
+      "interpretation": "The runner intentionally invokes Cargo once per test, so the observed Cargo processes are expected and are not evidence of unrelated compilation. No rustc process or Cargo build-lock wait was observed."
+    },
+    "intermittentExternalLoad": [
+      {
+        "process": "Tailscale network extension",
+        "maximumObservedCpuPercent": 109.1
+      },
+      {
+        "process": "Time Machine backupd",
+        "maximumObservedCpuPercent": 101.1
+      },
+      {
+        "process": "SystemUIServer",
+        "maximumObservedCpuPercent": 71.8
+      }
+    ],
+    "interpretation": "The observer proves that unrelated load was present at sampled moments. Its intermittent process snapshots cannot assign any portion of the measured regression to that load."
+  },
+  "reconciliation": {
+    "performanceAcceptance": "failed",
+    "baselinePolicy": "Keep the c47 560 millisecond median as the declared historical reference. Neither the c56 quiet follow-up nor the a86 regression creates a new baseline.",
+    "evidencePolicy": "Retain the c56 failed run, the c56 quiet follow-up, and the a86 failed run as distinct observations with their original source and environment bounds.",
+    "causalConclusion": "unproven",
+    "nextProofRequirement": "A causal source claim requires a controlled paired run from preserved, hash-bound source variants or binaries that differ only in the candidate change, executed in alternating order under the same observed conditions."
+  },
+  "limitations": [
+    "No benchmark, build, or test was executed during this docs-only investigation.",
+    "The a86 report compares with a historical c47 report, not an exact rebuilt and paired c47 artifact.",
+    "The c56 quiet follow-up used a direct preserved binary, while the a86 full run used the Cargo runner, so their absolute medians are not a controlled A/B comparison.",
+    "The benchmark uses the unoptimized Cargo test profile, and no exact c56 to a86 code-generation comparison was retained.",
+    "Observer snapshots are intermittent and unrelated user processes were not stopped.",
+    "The run does not measure provider latency, native WebKit responsiveness, or sustained process memory."
+  ]
+}

@@ -1,0 +1,16 @@
+X-Dakia-Corpus-Case: obs-17-resent-block
+X-Dakia-Corpus-Source: RFC 5322 section 4.5.6; fictional
+Resent-Date : 28 Jul 26 12:02:00 GMT
+Resent-From : forwarder@example.test
+Resent-To : reader@example.test
+Resent-Reply-To : rerouter@example.test
+Resent-Message-ID : <resent@example.test>
+Date: Tue, 28 Jul 2026 12:01:00 +0000
+From: Sender <sender@example.test>
+To: Reader <reader@example.test>
+Subject: Fictional obsolete syntax
+Message-ID: <obs-obs-17-resent-block@example.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+Fictional body obs-17-resent-block.

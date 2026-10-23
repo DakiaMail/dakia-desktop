@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "operation": "enospc-fill",
+  "root": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.dzkRZz",
+  "recordedAt": "2026-10-21T11:41:28.864Z",
+  "resumedAfterPartialBlock": "true",
+  "filler": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.dzkRZz/Downloads/.dakia-enospc-fill",
+  "fillerBytes": "64970752",
+  "fillerDevice": "16777244",
+  "fillerInode": "20",
+  "fillerOwner": "501",
+  "fillerMode": "600",
+  "ddLog": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.dzkRZz/native-attachment-fault-evidence/enospc-dd.log",
+  "ddLogSha256": "85ae1ed9cafc82c73446b2e2c2b8e9385b3dd28db030fdca387f8d1d684cd2ec",
+  "tailReport": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.dzkRZz/native-attachment-fault-evidence/enospc-tail-append.json",
+  "tailReportSha256": "aaafc25e714630024c6f0e9bceb332a901222da6e54f5d7a845b35da341e37fc",
+  "availableKiB": "0"
+}

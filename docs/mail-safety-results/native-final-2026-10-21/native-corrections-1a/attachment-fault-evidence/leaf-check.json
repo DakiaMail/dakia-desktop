@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "operation": "leaf-check",
+  "root": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2",
+  "recordedAt": "2026-10-21T12:23:13.933Z",
+  "canary": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/attachment-leaf-symlink-canary.txt",
+  "canarySha256": "af0fb29d777c7bfea075bfff6615c174e9c4236bd770ccc05d1f7943fdfe6faf",
+  "canaryMode": "600",
+  "link": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/Downloads/quarterly-report.pdf.command",
+  "linkTarget": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/attachment-leaf-symlink-canary.txt",
+  "savedFile": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/Downloads/quarterly-report.pdf (1).command",
+  "savedSha256": "1679a56fbd964b0463ec644f56fa9a3189d1402343de932a66b210586d00c02f",
+  "savedSize": "28",
+  "savedMode": "600",
+  "quarantine": "0081;6ad8aea6;Dakia;"
+}

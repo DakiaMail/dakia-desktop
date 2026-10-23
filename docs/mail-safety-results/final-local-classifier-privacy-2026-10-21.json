@@ -1,0 +1,39 @@
+{
+  "schema": 2,
+  "generatedAt": "2026-10-21T15:35:20.004Z",
+  "repository": "/Users/arsalan/code/codex-worktrees/36f9/dakia-desktop",
+  "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "boundary": "macOS sandbox-exec deny-default profile with local file access",
+  "positiveControl": {
+    "unsandboxedLoopbackConnection": true,
+    "serverConnectionsAfterControl": 1
+  },
+  "probe": {
+    "attemptedLoopbackConnection": true,
+    "denied": true,
+    "explicitErrno": 1,
+    "exitCode": 0,
+    "signal": null,
+    "timedOut": false,
+    "stderr": "",
+    "serverConnectionsAfterDeniedProbe": 1
+  },
+  "classifier": {
+    "productionModelIntegrationTest": "classification::model_integration_tests::local_model_privacy_canary_inference_succeeds_without_emitting_message_data",
+    "inferenceSucceeded": true,
+    "exactHarnessCounts": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "postInferenceMarkerObserved": true,
+    "canaryAbsentFromOutput": true,
+    "outputBytes": 281,
+    "stderr": ""
+  },
+  "limitations": [
+    "This proves successful inference under the enforced macOS sandbox; it does not observe blocked syscall attempts inside the classifier process.",
+    "It does not prove behavior outside this sandbox or replace packaged WebKit and release acceptance."
+  ],
+  "status": "passed"
+}

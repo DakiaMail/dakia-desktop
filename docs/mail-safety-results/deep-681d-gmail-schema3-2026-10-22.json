@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "kind": "independent-servers-and-bounded-fuzz",
+  "status": "passed",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "681dfc29e1cc782d363999cf572dc56be9498565d34f78ba5f0120187e0c70e9",
+    "fileCount": 996
+  },
+  "sourceTreeAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "681dfc29e1cc782d363999cf572dc56be9498565d34f78ba5f0120187e0c70e9",
+    "fileCount": 996
+  },
+  "runReport": {
+    "path": "/private/tmp/dakia-681d-gmail-schema3-deep-20261022.json",
+    "sha256": "0d436bd9209388e6f6d59f5edf207307a92d4d8378fa3c0cfc76b74ef886e652",
+    "status": "passed",
+    "commands": [
+      {
+        "command": "bash scripts/mail-safety-servers.sh all",
+        "exitCode": 0
+      },
+      {
+        "command": "bash scripts/run-mail-safety-fuzz.sh 30",
+        "exitCode": 0
+      }
+    ]
+  },
+  "rawLog": {
+    "path": "/private/tmp/dakia-681d-gmail-schema3-deep-20261022.log",
+    "sha256": "25540f088a9f298c3230a1d1a632546ddaff0d86de6475edfb946fb2cfce37f1"
+  },
+  "independentServers": {
+    "greenmail": {
+      "version": "2.1.14",
+      "publicRootTlsRejection": "passed",
+      "trustedImapSmtpRoundTrip": "passed"
+    },
+    "dovecot": {
+      "version": "2.4.5",
+      "imageDigest": "dovecot/dovecot@sha256:43c14def08a57f25107593cbcf64a0a6fbae84a7b9de7aa038513c9b21e91914",
+      "trustedProductionConnectorRoundTrip": "passed",
+      "selectiveMimeRoundTrip": "passed",
+      "fullRawFallbackObserved": false,
+      "mutatingStoreObserved": false
+    }
+  },
+  "fuzz": {
+    "tool": "cargo-fuzz 0.13.2",
+    "durationPerTargetSeconds": 30,
+    "fixtureSeedCount": 76,
+    "seedManifestSha256": "a8c95acf02f6994a8ea1b2b5bf0b2750144d59cfb979390323b01c9fad8bf8c3",
+    "targets": [
+      {
+        "name": "mime_budget",
+        "executions": 31068,
+        "elapsedSeconds": 31
+      },
+      {
+        "name": "attachment_metadata",
+        "executions": 104594,
+        "elapsedSeconds": 31
+      }
+    ],
+    "crashArtifact": "none observed"
+  },
+  "environment": {
+    "network": "fictional loopback containers and local bounded fuzzing only",
+    "credentials": "provider-related environment unset",
+    "stdin": "/dev/null"
+  },
+  "limitations": [
+    "This deep lane does not establish native WebKit, a live provider, packaged release, performance, signing, notarization, or updater acceptance.",
+    "The two 30-second fuzz campaigns cannot prove the absence of parser or memory-safety vulnerabilities.",
+    "The loopback server fixtures do not measure live-provider latency or provider-specific behavior beyond these controlled implementations."
+  ]
+}

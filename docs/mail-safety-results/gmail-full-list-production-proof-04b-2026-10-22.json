@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "status": "bounded-production-full-list-passed",
+  "provider": "gmail",
+  "authenticationMethod": "app_password",
+  "recordedAtUtc": "2026-10-22T00:58:18.966595Z",
+  "sourceDigest": "04b1368f7a758b2ad77d95442a2d5a0d3b7ce74f1f100bb59967aeef8b9ad471",
+  "sourceFileCount": 952,
+  "archiveSha256": "f88f277037ee337e27f7898e79d5b56e17e9826b78bebfd5f3cbdc1e895240d6",
+  "testBinarySha256": "0917fa35df48b879ccf194e41dd5eea46706720ef1805a1f3136d13fb8c3dca3",
+  "wrapperSha256": "c2db4ff1eb31ba66896f90ce300036f794619256e3120bd76cb9283cc4ea42ed",
+  "evidence": "/private/tmp/dakia-gmail-full-list-final-20261022/evidence/actual-readonly-full-list-output-corrected-20261022.json",
+  "evidenceSha256": "32432a6c730336123175b862573d36395697d97279b5cdc7accd8f7431785188",
+  "rootReceipt": "/private/tmp/dakia-gmail-full-list-final-20261022/evidence/actual-readonly-full-list-output-corrected-root-receipt-20261022.json",
+  "rootReceiptSha256": "5aa640525b7c9fae3f8b80981ed0c4cb0838fb184389227e12973e64cb1d5e2d",
+  "elapsedMs": 873,
+  "operations": [
+    "capability",
+    "authenticate",
+    "list_full",
+    "logout"
+  ],
+  "observation": {
+    "inbox_present": true,
+    "listed_count": 9,
+    "listing_shape_sha256": "c7a3bf7b3c94d9ca4c950de1e10c962ee97f4464175598f11b5dee10cad0f167",
+    "logout_outcome": "tagged_ok",
+    "noselect_count": 1,
+    "selectable_count": 8
+  },
+  "credentialsFileUnchanged": true,
+  "smtpRequested": false,
+  "remoteMailboxMutationRequested": false,
+  "retainedFirstFailure": "gmail-full-list-probe-first-failure-04b-2026-10-22.json",
+  "limits": [
+    "One read-only disposable Gmail account observation; no broad provider-reliability or other-provider claim.",
+    "No SELECT, FETCH, STORE, APPEND, COPY, MOVE or EXPUNGE was requested by this test.",
+    "Does not prove Gmail multi-label convergence, message hydration/Reader, mutation, sending or native package acceptance.",
+    "The earlier generic failed probe remains retained with unconfirmed cause.",
+    "The source snapshot is isolated staging and not yet applied to primary."
+  ]
+}

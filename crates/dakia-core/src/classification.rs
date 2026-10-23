@@ -1165,4 +1165,29 @@ mod model_integration_tests {
         assert_eq!(results[2].category, "notifications");
         assert_eq!(results[3].category, "newsletters");
     }
+
+    #[test]
+    #[ignore = "manual network-denied classifier privacy lane"]
+    fn local_model_privacy_canary_inference_succeeds_without_emitting_message_data() {
+        // This test is deliberately run by scripts/run-local-classifier-privacy.mjs
+        // inside a macOS network-denied sandbox. Keep the canaries in the real
+        // production input shape so a future remote classifier cannot silently
+        // replace this local inference boundary.
+        let canary = "classifier-privacy-canary-20261020";
+        let messages = [EmailClassificationInput::new(
+            Some("Fictional Sender"),
+            "sender@example.test",
+            &format!("Private subject {canary}"),
+            &format!("Private body {canary}"),
+            &format!("Private signal {canary}"),
+        )];
+
+        let results = classifier().classify(&messages).unwrap();
+        assert_eq!(results.len(), messages.len());
+        assert!(matches!(
+            results[0].category.as_str(),
+            "people" | "transactions" | "notifications" | "newsletters"
+        ));
+        println!("classifier-privacy-inference-complete");
+    }
 }

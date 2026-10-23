@@ -1,22 +1,62 @@
+mod account_locks;
 mod realtime;
+mod send_recovery_bridge;
+mod startup_error;
 mod translation;
 
 #[cfg(test)]
+mod ai_action_boundary_tests;
+#[cfg(all(test, feature = "native-mail-safety-fixture"))]
+mod attachment_command_artifact_tests;
+#[cfg(feature = "native-mail-safety-fixture")]
+mod attachment_partial_fault;
+#[cfg(test)]
+mod attachment_pipeline_tests;
+#[cfg(test)]
+mod bridge_security_tests;
+#[cfg(test)]
+mod l011_sync_interaction_tests;
+#[cfg(test)]
+mod local_search_command_tests;
+#[cfg(test)]
+mod mail_action_identity_tests;
+#[cfg(test)]
+mod mail_command_identity_tests;
+#[cfg(all(test, feature = "native-mail-safety-fixture"))]
+mod mail_command_tls_tests;
+#[cfg(test)]
+mod mail_safety_tests;
+#[cfg(all(test, feature = "native-mail-safety-fixture"))]
+mod message_content_uncached_tls_tests;
+#[cfg(test)]
+mod mime_reader_artifact_tests;
+#[cfg(feature = "native-mail-safety-fixture")]
+mod native_acl_acceptance;
+#[cfg(test)]
 mod tauri_contracts_tests;
+#[cfg(test)]
+mod test_support;
+#[cfg(all(test, feature = "native-mail-safety-fixture"))]
+mod unsubscribe_command_tls_tests;
+#[cfg(all(test, target_os = "macos"))]
+mod updater_acceptance_tests;
 
 use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
     Engine,
 };
 use dakia_core::storage::{ConversationTarget, MessageContentFetchAcquire};
+#[cfg(test)]
+use dakia_core::CachedMessageContent;
+#[cfg(all(test, feature = "native-mail-safety-fixture"))]
+use dakia_core::NativeMailSafetyOneClickTransport;
 use dakia_core::{
     ai::{AiConfig, AiProvider, AiService},
     mailbox_action_destination, normalize_sender_address, provider, Account, AccountAuth,
-    AccountDraft, Attachment, CachedMessageContent, ComposeMessage, EmailClassificationInput,
-    LocalEmailClassifier, MailConversation, MailConversationPage, MailRebuildJob, MailService,
-    MailSummary, MailboxAction, ModelClassificationUpdate, ProviderPreset, SearchQuery,
-    SenderTrashResult, SmartInboxPage, SmartInboxQuery, Store, SyncProgress, SyncResult,
-    UnsubscribeOutcome,
+    AccountDraft, Attachment, ComposeMessage, EmailClassificationInput, LocalEmailClassifier,
+    MailConversation, MailConversationPage, MailRebuildJob, MailService, MailSummary,
+    MailboxAction, ModelClassificationUpdate, ProviderPreset, SearchQuery, SenderTrashResult,
+    SmartInboxPage, SmartInboxQuery, Store, SyncProgress, SyncResult, UnsubscribeOutcome,
 };
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -38,32 +78,877 @@ use std::{
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 #[cfg(target_os = "macos")]
 use std::process::Command;
+#[cfg(unix)]
+use std::{
+    ffi::CString,
+    os::fd::{AsRawFd, FromRawFd},
+};
+#[cfg(target_os = "macos")]
+use std::{
+    ffi::{c_void, OsString},
+    os::unix::ffi::OsStringExt,
+    ptr,
+};
 use tauri::{
     image::Image,
     ipc::Channel,
     menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    DragDropEvent, Emitter, Manager, State, WindowEvent,
+    DragDropEvent, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_opener::OpenerExt;
-use tokio::sync::{watch, Mutex as AsyncMutex, Notify, OwnedMutexGuard, Semaphore};
+use tokio::sync::{watch, Notify, Semaphore};
 use url::Url;
 use uuid::Uuid;
 
+use account_locks::{AccountOperationGuard, AccountOperationLocks};
 use realtime::{RealtimeSyncManager, RealtimeSyncStatus};
+use send_recovery_bridge::{
+    acknowledge_send_recovery_seed, list_send_recoveries, open_send_recovery_window,
+    read_send_recovery_seed, SendRecoveryRuntime,
+};
+use startup_error::{
+    present_startup_storage_failure, startup_storage_failure_exit_code,
+    TauriStartupFailurePresenter,
+};
 use translation::{
     TranslationDownloadProgress, TranslationLanguageDetection, TranslationModelFiles,
     TranslationModelStatus,
 };
 
+fn app_context<R: tauri::Runtime>() -> tauri::Context<R> {
+    let context = tauri::generate_context!();
+    #[cfg(all(feature = "native-mail-safety-fixture", target_os = "macos"))]
+    {
+        let mut context = context;
+        apply_native_mail_safety_data_store_identifier(&mut context)
+            .expect("native mail-safety data-store configuration is invalid");
+        context
+    }
+    #[cfg(not(all(feature = "native-mail-safety-fixture", target_os = "macos")))]
+    {
+        context
+    }
+}
+
 const REMOTE_SEARCH_CONCURRENCY: usize = 4;
 const MESSAGE_HYDRATION_CONCURRENCY: usize = 4;
 const CLASSIFICATION_BATCH_SIZE: usize = 64;
+// AI UI is deliberately hidden while Dakia has no trusted native configuration
+// boundary for provider endpoints or local executables. Keep native commands
+// disabled as well: a forged IPC request must not read a stored key, send mail
+// content, or start a process.
+const AI_FEATURES_ENABLED: bool = false;
+const AI_FEATURES_DISABLED_ERROR: &str = "AI features are disabled in this Dakia build";
+const APP_MENU_QUIT_ID: &str = "app-quit";
+
+#[derive(Clone)]
+struct StartupFailureExitStatus {
+    exit_requested: Arc<AtomicBool>,
+    fatal_recovery_active: Arc<AtomicBool>,
+}
+
+impl Default for StartupFailureExitStatus {
+    fn default() -> Self {
+        Self {
+            exit_requested: Arc::new(AtomicBool::new(false)),
+            fatal_recovery_active: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+impl StartupFailureExitStatus {
+    fn activate_fatal_recovery(&self) {
+        self.fatal_recovery_active.store(true, Ordering::SeqCst);
+    }
+
+    fn may_exit_from_fatal_recovery_window(&self, label: &str) -> bool {
+        self.fatal_recovery_active.load(Ordering::SeqCst)
+            && label == startup_error::FATAL_RECOVERY_WINDOW_LABEL
+    }
+
+    fn mark_requested(&self) {
+        self.exit_requested.store(true, Ordering::SeqCst);
+    }
+
+    fn app_menu_quit_exit_code(&self, action: &str) -> Option<i32> {
+        (action == APP_MENU_QUIT_ID).then(|| {
+            if self.fatal_recovery_active.load(Ordering::SeqCst) {
+                self.mark_requested();
+                startup_storage_failure_exit_code()
+            } else {
+                0
+            }
+        })
+    }
+
+    fn resolve(&self, runtime_exit_code: i32) -> i32 {
+        if self.fatal_recovery_active.load(Ordering::SeqCst)
+            || self.exit_requested.load(Ordering::SeqCst)
+        {
+            startup_storage_failure_exit_code()
+        } else {
+            runtime_exit_code
+        }
+    }
+}
+
+#[cfg(test)]
+mod startup_failure_exit_status_tests {
+    use super::StartupFailureExitStatus;
+
+    #[test]
+    fn startup_failure_survives_a_runtime_zero_exit() {
+        let exit_status = StartupFailureExitStatus::default();
+
+        exit_status.mark_requested();
+
+        assert_eq!(exit_status.resolve(0), 1);
+    }
+
+    #[test]
+    fn fatal_recovery_survives_an_unrequested_runtime_zero_exit() {
+        let exit_status = StartupFailureExitStatus::default();
+
+        exit_status.activate_fatal_recovery();
+
+        // A stock menu or Cmd-Q exit reaches run_return without the recovery
+        // page callback. It must still preserve the fail-closed startup status.
+        assert_eq!(exit_status.resolve(0), 1);
+    }
+
+    #[test]
+    fn runtime_status_is_preserved_without_a_startup_failure() {
+        let exit_status = StartupFailureExitStatus::default();
+
+        assert_eq!(exit_status.resolve(73), 73);
+    }
+
+    #[test]
+    fn startup_failure_status_is_shared_with_the_fatal_window_callback() {
+        let exit_status = StartupFailureExitStatus::default();
+        let callback_status = exit_status.clone();
+
+        callback_status.mark_requested();
+
+        assert_eq!(exit_status.resolve(0), 1);
+    }
+
+    #[test]
+    fn fatal_recovery_exit_requires_both_active_startup_failure_and_exact_window_label() {
+        let exit_status = StartupFailureExitStatus::default();
+
+        assert!(!exit_status.may_exit_from_fatal_recovery_window("fatal-recovery"));
+        exit_status.activate_fatal_recovery();
+        assert!(exit_status.may_exit_from_fatal_recovery_window("fatal-recovery"));
+        assert!(!exit_status.may_exit_from_fatal_recovery_window("main"));
+        assert!(!exit_status.may_exit_from_fatal_recovery_window("fatal-recovery-copy"));
+    }
+
+    #[test]
+    fn explicit_app_quit_menu_routes_fatal_recovery_to_a_nonzero_runtime_exit() {
+        let normal = StartupFailureExitStatus::default();
+        assert_eq!(normal.app_menu_quit_exit_code("unrelated-action"), None);
+        assert_eq!(
+            normal.app_menu_quit_exit_code(super::APP_MENU_QUIT_ID),
+            Some(0)
+        );
+        assert_eq!(normal.resolve(0), 0);
+
+        let fatal = StartupFailureExitStatus::default();
+        fatal.activate_fatal_recovery();
+        assert_eq!(
+            fatal.app_menu_quit_exit_code(super::APP_MENU_QUIT_ID),
+            Some(1)
+        );
+        assert_eq!(fatal.resolve(0), 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_app_menu_quit_spec_uses_the_regular_cmd_q_event_item() {
+        assert_eq!(
+            super::macos_app_menu_quit_spec(),
+            super::MacosAppMenuQuitSpec {
+                id: super::APP_MENU_QUIT_ID,
+                text: "Quit Dakia",
+                accelerator: "CmdOrCtrl+Q",
+            }
+        );
+    }
+}
+
+fn require_ai_features_enabled() -> Result<(), String> {
+    AI_FEATURES_ENABLED
+        .then_some(())
+        .ok_or_else(|| AI_FEATURES_DISABLED_ERROR.to_owned())
+}
 const CLASSIFICATION_RETRY_DELAYS: [Duration; 2] =
     [Duration::from_millis(100), Duration::from_millis(500)];
 const MAX_EXPORT_FILENAME_BYTES: usize = 255;
 const MAX_DOWNLOAD_COLLISION_SUFFIX_BYTES: usize = " (9999)".len();
+#[cfg(feature = "native-mail-safety-fixture")]
+const NATIVE_MAIL_SAFETY_FIXTURE_MARKER: &str = "dakia-native-mail-safety-fixture-v1\n";
+#[cfg(feature = "native-mail-safety-fixture")]
+const NATIVE_MAIL_SAFETY_PRIMARY_ACCOUNT_ID: &str = "62a9320c-04f5-47c2-b4fa-d4952f0b6121";
+#[cfg(feature = "native-mail-safety-fixture")]
+const NATIVE_MAIL_SAFETY_PRIMARY_ACCOUNT_EMAIL: &str = "fictional-reader@localhost";
+#[cfg(feature = "native-mail-safety-fixture")]
+const NATIVE_MAIL_SAFETY_SECOND_ACCOUNT_ID: &str = "62a9320c-04f5-47c2-b4fa-d4952f0b6122";
+#[cfg(feature = "native-mail-safety-fixture")]
+const NATIVE_MAIL_SAFETY_SECOND_ACCOUNT_EMAIL: &str = "fictional-reader-two@localhost";
+
+#[cfg(feature = "native-mail-safety-fixture")]
+fn native_mail_safety_second_account_enabled(
+    value: Result<String, std::env::VarError>,
+) -> anyhow::Result<bool> {
+    match value {
+        Ok(value) if value == "1" => Ok(true),
+        Ok(_) => anyhow::bail!("native mail-safety second-account marker must equal 1"),
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(feature = "native-mail-safety-fixture")]
+fn native_mail_safety_profile_directory(
+    fixture_root: &Path,
+    data_dir: PathBuf,
+) -> anyhow::Result<PathBuf> {
+    if !data_dir.is_absolute() {
+        anyhow::bail!("native mail-safety fixture data directory must be absolute");
+    }
+    let data_dir = data_dir.canonicalize().map_err(|error| {
+        anyhow::anyhow!("canonicalize native mail-safety fixture data directory: {error}")
+    })?;
+    if data_dir == fixture_root || !data_dir.starts_with(fixture_root) {
+        anyhow::bail!("native mail-safety fixture data directory must be inside its fixture root");
+    }
+    if std::fs::read_to_string(data_dir.join(".dakia-native-mail-safety-profile"))
+        .ok()
+        .as_deref()
+        != Some(NATIVE_MAIL_SAFETY_FIXTURE_MARKER)
+    {
+        anyhow::bail!("native mail-safety fixture profile lacks its exact ownership sentinel");
+    }
+    Ok(data_dir)
+}
+
+#[cfg(feature = "native-mail-safety-fixture")]
+fn native_mail_safety_loopback_endpoint(value: &str) -> bool {
+    use std::net::IpAddr;
+
+    value.eq_ignore_ascii_case("localhost")
+        || value
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+#[cfg(feature = "native-mail-safety-fixture")]
+fn native_mail_safety_port(value: &str, protocol: &str) -> anyhow::Result<u16> {
+    value
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port != 0)
+        .ok_or_else(|| anyhow::anyhow!("native mail-safety {protocol} port is invalid"))
+}
+
+#[cfg(feature = "native-mail-safety-fixture")]
+#[derive(Clone, Copy)]
+struct NativeMailSafetyFixtureEndpoints<'a> {
+    imap_host: &'a str,
+    imap_port: u16,
+    smtp_host: &'a str,
+    smtp_port: u16,
+}
+
+#[cfg(feature = "native-mail-safety-fixture")]
+fn native_mail_safety_account(
+    id: &str,
+    email: &str,
+    account_name: &str,
+    display_name: &str,
+    endpoints: NativeMailSafetyFixtureEndpoints<'_>,
+    created_at: chrono::DateTime<chrono::Utc>,
+) -> Account {
+    Account {
+        id: Uuid::parse_str(id).expect("native fixture account UUID is valid"),
+        email: email.to_owned(),
+        account_name: account_name.into(),
+        display_name: display_name.into(),
+        provider_id: "custom".into(),
+        auth: AccountAuth::Password {
+            username: email.to_owned(),
+        },
+        imap_host: endpoints.imap_host.to_owned(),
+        imap_port: endpoints.imap_port,
+        imap_security: provider::Security::Tls,
+        smtp_host: endpoints.smtp_host.to_owned(),
+        smtp_port: endpoints.smtp_port,
+        smtp_security: provider::Security::Tls,
+        archive_mailbox: "Archive".into(),
+        spam_mailbox: "Spam".into(),
+        // Setup intentionally skips automatic watchers in this mode. The
+        // mounted production frontend starts them after its listeners exist.
+        enabled: true,
+        created_at,
+    }
+}
+
+#[cfg(feature = "native-mail-safety-fixture")]
+fn native_mail_safety_account_matches(actual: &Account, expected: &Account) -> bool {
+    actual.id == expected.id
+        && actual.email == expected.email
+        && actual.account_name == expected.account_name
+        && actual.display_name == expected.display_name
+        && actual.provider_id == expected.provider_id
+        && matches!(
+            (&actual.auth, &expected.auth),
+            (
+                AccountAuth::Password { username: actual },
+                AccountAuth::Password { username: expected }
+            ) if actual == expected
+        )
+        && actual.imap_host == expected.imap_host
+        && actual.imap_port == expected.imap_port
+        && actual.imap_security == provider::Security::Tls
+        && actual.smtp_host == expected.smtp_host
+        && actual.smtp_port == expected.smtp_port
+        && actual.smtp_security == provider::Security::Tls
+        && actual.archive_mailbox == expected.archive_mailbox
+        && actual.spam_mailbox == expected.spam_mailbox
+        && actual.enabled == expected.enabled
+}
+
+/// This profile exists solely for the opt-in native mail-safety acceptance
+/// build. It is deliberately absent from ordinary and release binaries. The
+/// runner supplies a fresh absolute directory, one or two fixed fictional
+/// localhost accounts, and the one-run CA which the core feature separately
+/// validates.
+#[cfg(feature = "native-mail-safety-fixture")]
+#[derive(Clone)]
+struct NativeMailSafetyFixture {
+    data_dir: PathBuf,
+    account: Account,
+    second_account: Option<Account>,
+    password: String,
+}
+
+#[cfg(all(test, feature = "native-mail-safety-fixture"))]
+fn native_mail_safety_unsubscribe_transport(
+) -> anyhow::Result<Option<NativeMailSafetyOneClickTransport>> {
+    use std::{
+        env, fs,
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+    };
+
+    const VARIABLES: [&str; 4] = [
+        "DAKIA_UNSUBSCRIBE_COMMAND_TLS_ROOT",
+        "DAKIA_UNSUBSCRIBE_COMMAND_TLS_NONCE",
+        "DAKIA_UNSUBSCRIBE_COMMAND_TLS_PORT",
+        "DAKIA_UNSUBSCRIBE_COMMAND_TLS_CA_DER_PATH",
+    ];
+    let values = VARIABLES.map(env::var);
+    if values
+        .iter()
+        .all(|value| matches!(value, Err(env::VarError::NotPresent)))
+    {
+        return Ok(None);
+    }
+    let required = |index: usize| -> anyhow::Result<&str> {
+        values[index].as_deref().map_err(|_| {
+            anyhow::anyhow!(
+                "native unsubscribe command TLS fixture requires {}",
+                VARIABLES[index]
+            )
+        })
+    };
+    let root = PathBuf::from(required(0)?);
+    if !root.is_absolute() {
+        anyhow::bail!("native unsubscribe command TLS fixture root must be absolute");
+    }
+    let root = root.canonicalize()?;
+    let fixture_root = PathBuf::from(env::var("DAKIA_NATIVE_MAIL_SAFETY_ROOT")?).canonicalize()?;
+    if root != fixture_root
+        || fs::read_to_string(root.join(".dakia-native-mail-safety-root"))
+            .ok()
+            .as_deref()
+            != Some(NATIVE_MAIL_SAFETY_FIXTURE_MARKER)
+    {
+        anyhow::bail!("native unsubscribe command TLS fixture root is not owned");
+    }
+    let nonce = Uuid::parse_str(required(1)?)?;
+    if nonce.to_string() != required(1)?
+        || fs::read_to_string(root.join(".dakia-unsubscribe-command-tls"))
+            .ok()
+            .as_deref()
+            != Some(&format!("{nonce}\n"))
+    {
+        anyhow::bail!("native unsubscribe command TLS fixture ownership marker is invalid");
+    }
+    let port = native_mail_safety_port(required(2)?, "unsubscribe")?;
+    let ca_path = PathBuf::from(required(3)?);
+    if !ca_path.is_absolute() || !ca_path.is_file() {
+        anyhow::bail!("native unsubscribe command TLS fixture CA must be an absolute file");
+    }
+    let ca_path = ca_path.canonicalize()?;
+    if !ca_path.starts_with(&root) {
+        anyhow::bail!("native unsubscribe command TLS fixture CA must be inside its fixture root");
+    }
+    let endpoint = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    NativeMailSafetyOneClickTransport::new(endpoint, &fs::read(ca_path)?).map(Some)
+}
+
+async fn unsubscribe_with_command_transport(
+    service: &MailService,
+    message: &MailSummary,
+) -> anyhow::Result<UnsubscribeOutcome> {
+    #[cfg(all(test, feature = "native-mail-safety-fixture"))]
+    if let Some(fixture) = native_mail_safety_unsubscribe_transport()? {
+        return service
+            .unsubscribe_with_native_mail_safety_fixture(message, &fixture)
+            .await;
+    }
+    service.unsubscribe(message).await
+}
+
+#[cfg(feature = "native-mail-safety-fixture")]
+impl NativeMailSafetyFixture {
+    fn from_environment() -> anyhow::Result<Option<Self>> {
+        use std::env;
+
+        match env::var("DAKIA_NATIVE_MAIL_SAFETY_FIXTURE") {
+            Ok(value) if value == "1" => {}
+            Ok(_) => anyhow::bail!("native mail-safety fixture marker must equal 1"),
+            Err(env::VarError::NotPresent) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
+        let second_account = native_mail_safety_second_account_enabled(env::var(
+            "DAKIA_NATIVE_MAIL_SAFETY_SECOND_ACCOUNT",
+        ))?;
+        let required = |name: &str| {
+            env::var(name)
+                .map_err(|_| anyhow::anyhow!("{name} is required for native mail-safety fixture"))
+        };
+        let fixture_root = PathBuf::from(required("DAKIA_NATIVE_MAIL_SAFETY_ROOT")?);
+        if !fixture_root.is_absolute() {
+            anyhow::bail!("native mail-safety fixture root must be absolute");
+        }
+        let fixture_root = fixture_root.canonicalize().map_err(|error| {
+            anyhow::anyhow!("canonicalize native mail-safety fixture root: {error}")
+        })?;
+        if std::fs::read_to_string(fixture_root.join(".dakia-native-mail-safety-root"))
+            .ok()
+            .as_deref()
+            != Some(NATIVE_MAIL_SAFETY_FIXTURE_MARKER)
+        {
+            anyhow::bail!("native mail-safety fixture root lacks its exact ownership sentinel");
+        }
+        let required = |name: &str| {
+            env::var(name)
+                .map_err(|_| anyhow::anyhow!("{name} is required for native mail-safety fixture"))
+        };
+        let data_dir = native_mail_safety_profile_directory(
+            &fixture_root,
+            PathBuf::from(required("DAKIA_NATIVE_MAIL_SAFETY_DATA_DIR")?),
+        )?;
+        // This happens before Store::open can create or migrate SQLite. A pre-existing
+        // database is acceptable only inside the explicitly marked fixture profile.
+        let database = data_dir.join("dakia.db");
+        if database.exists()
+            && std::fs::read_to_string(data_dir.join(".dakia-native-mail-safety-profile"))
+                .ok()
+                .as_deref()
+                != Some(NATIVE_MAIL_SAFETY_FIXTURE_MARKER)
+        {
+            anyhow::bail!("refusing to open an unowned native mail-safety fixture database");
+        }
+        let downloads_dir = PathBuf::from(required("DAKIA_NATIVE_MAIL_SAFETY_DOWNLOADS_DIR")?);
+        if !downloads_dir.is_absolute() || !downloads_dir.is_dir() {
+            anyhow::bail!(
+                "native mail-safety fixture Downloads directory must be an existing absolute directory"
+            );
+        }
+        let downloads_dir = downloads_dir.canonicalize().map_err(|error| {
+            anyhow::anyhow!("canonicalize native mail-safety fixture Downloads directory: {error}")
+        })?;
+        if !downloads_dir.starts_with(&fixture_root) {
+            anyhow::bail!(
+                "native mail-safety fixture Downloads directory must be inside its fixture root"
+            );
+        }
+        let imap_host = required("DAKIA_NATIVE_MAIL_SAFETY_IMAP_HOST")?;
+        let imap_port =
+            native_mail_safety_port(&required("DAKIA_NATIVE_MAIL_SAFETY_IMAP_PORT")?, "IMAP")?;
+        if !native_mail_safety_loopback_endpoint(&imap_host) {
+            anyhow::bail!("native mail-safety fixture IMAP host must be loopback");
+        }
+        let smtp_host = required("DAKIA_NATIVE_MAIL_SAFETY_SMTP_HOST")?;
+        let smtp_port =
+            native_mail_safety_port(&required("DAKIA_NATIVE_MAIL_SAFETY_SMTP_PORT")?, "SMTP")?;
+        let smtp_server_name = required("DAKIA_NATIVE_MAIL_SAFETY_SMTP_SERVER_NAME")?;
+        if !native_mail_safety_loopback_endpoint(&smtp_host)
+            || !native_mail_safety_loopback_endpoint(&smtp_server_name)
+        {
+            anyhow::bail!("native mail-safety fixture SMTP endpoint must be loopback");
+        }
+        let ca_path = PathBuf::from(required("DAKIA_NATIVE_MAIL_SAFETY_CA_DER_PATH")?);
+        if !ca_path.is_absolute() || !ca_path.is_file() {
+            anyhow::bail!("native mail-safety fixture CA must be an existing absolute file");
+        }
+        let ca_path = ca_path.canonicalize().map_err(|error| {
+            anyhow::anyhow!("canonicalize native mail-safety fixture CA: {error}")
+        })?;
+        if !ca_path.starts_with(&fixture_root) {
+            anyhow::bail!("native mail-safety fixture CA must be inside its fixture root");
+        }
+        let password = required("DAKIA_NATIVE_MAIL_SAFETY_PASSWORD")?;
+        if password != "synthetic-only-password" {
+            anyhow::bail!("native mail-safety fixture accepts its synthetic password only");
+        }
+        let created_at = chrono::Utc::now();
+        let endpoints = NativeMailSafetyFixtureEndpoints {
+            imap_host: &imap_host,
+            imap_port,
+            smtp_host: &smtp_host,
+            smtp_port,
+        };
+        let account = native_mail_safety_account(
+            NATIVE_MAIL_SAFETY_PRIMARY_ACCOUNT_ID,
+            NATIVE_MAIL_SAFETY_PRIMARY_ACCOUNT_EMAIL,
+            "Fictional native mail safety",
+            "Fictional Reader",
+            endpoints,
+            created_at,
+        );
+        let second_account = second_account.then(|| {
+            native_mail_safety_account(
+                NATIVE_MAIL_SAFETY_SECOND_ACCOUNT_ID,
+                NATIVE_MAIL_SAFETY_SECOND_ACCOUNT_EMAIL,
+                "Fictional native mail safety two",
+                "Fictional Reader Two",
+                endpoints,
+                created_at,
+            )
+        });
+        Ok(Some(Self {
+            data_dir,
+            account,
+            second_account,
+            password,
+        }))
+    }
+
+    fn accounts(&self) -> impl Iterator<Item = &Account> {
+        std::iter::once(&self.account).chain(self.second_account.iter())
+    }
+
+    async fn seed_accounts(&self, store: &Store) -> anyhow::Result<()> {
+        let existing_accounts = store.accounts().await?;
+        let expected_count = usize::from(self.second_account.is_some()) + 1;
+        if existing_accounts.len() > expected_count
+            || existing_accounts.iter().any(|existing| {
+                !self.accounts().any(|expected| {
+                    existing.id == expected.id
+                        && native_mail_safety_account_matches(existing, expected)
+                })
+            })
+        {
+            anyhow::bail!(
+                "native mail-safety fixture data directory contains a non-fixture account"
+            );
+        }
+        for expected in self.accounts() {
+            if !existing_accounts
+                .iter()
+                .any(|existing| existing.id == expected.id)
+            {
+                store.save_account(expected).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn seed(&self, store: &Store) -> anyhow::Result<()> {
+        self.seed_accounts(store).await?;
+        let mail_service = MailService::new(store.clone());
+        let credentials = mail_service.credentials();
+        for account in self.accounts() {
+            credentials.set_password(account, &self.password).await?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "native-mail-safety-fixture"))]
+mod native_mail_safety_fixture_tests {
+    use super::*;
+    use std::{env::VarError, fs};
+    use tempfile::tempdir;
+
+    fn fixture_accounts(second_account: bool) -> (Account, Option<Account>) {
+        let created_at = chrono::Utc::now();
+        let endpoints = NativeMailSafetyFixtureEndpoints {
+            imap_host: "127.0.0.1",
+            imap_port: 3993,
+            smtp_host: "127.0.0.1",
+            smtp_port: 3465,
+        };
+        let account = native_mail_safety_account(
+            NATIVE_MAIL_SAFETY_PRIMARY_ACCOUNT_ID,
+            NATIVE_MAIL_SAFETY_PRIMARY_ACCOUNT_EMAIL,
+            "Fictional native mail safety",
+            "Fictional Reader",
+            endpoints,
+            created_at,
+        );
+        let second_account = second_account.then(|| {
+            native_mail_safety_account(
+                NATIVE_MAIL_SAFETY_SECOND_ACCOUNT_ID,
+                NATIVE_MAIL_SAFETY_SECOND_ACCOUNT_EMAIL,
+                "Fictional native mail safety two",
+                "Fictional Reader Two",
+                endpoints,
+                created_at,
+            )
+        });
+        (account, second_account)
+    }
+
+    #[test]
+    fn second_account_requires_the_exact_opt_in_marker() {
+        assert!(!native_mail_safety_second_account_enabled(Err(VarError::NotPresent)).unwrap());
+        assert!(native_mail_safety_second_account_enabled(Ok("1".into())).unwrap());
+        for value in ["", "0", "true", "01", "2"] {
+            assert!(native_mail_safety_second_account_enabled(Ok(value.into())).is_err());
+        }
+    }
+
+    #[test]
+    fn fixture_endpoints_accept_loopback_only_and_seed_exact_smtp_tls_targets() {
+        for endpoint in ["localhost", "LOCALHOST", "127.0.0.1", "::1"] {
+            assert!(native_mail_safety_loopback_endpoint(endpoint));
+        }
+        for endpoint in ["", "example.test", "192.0.2.1", "8.8.8.8"] {
+            assert!(!native_mail_safety_loopback_endpoint(endpoint));
+        }
+        for protocol in ["IMAP", "SMTP"] {
+            assert_eq!(native_mail_safety_port("1", protocol).unwrap(), 1);
+            assert_eq!(native_mail_safety_port("65535", protocol).unwrap(), 65535);
+            for invalid in ["", "0", "65536", "not-a-port"] {
+                assert!(native_mail_safety_port(invalid, protocol).is_err());
+            }
+        }
+
+        let (primary, second) = fixture_accounts(true);
+        for account in [primary, second.unwrap()] {
+            assert_eq!(account.imap_host, "127.0.0.1");
+            assert_eq!(account.imap_port, 3993);
+            assert_eq!(account.imap_security, provider::Security::Tls);
+            assert_eq!(account.smtp_host, "127.0.0.1");
+            assert_eq!(account.smtp_port, 3465);
+            assert_eq!(account.smtp_security, provider::Security::Tls);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn data_store_identifier_requires_the_exact_fixture_and_random_uuid() {
+        let identifier = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x46, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ];
+        assert!(
+            validate_native_mail_safety_data_store_identifier(None, false, Some(identifier))
+                .is_err()
+        );
+        assert_eq!(
+            validate_native_mail_safety_data_store_identifier(Some("1"), true, None).unwrap(),
+            None
+        );
+        assert_eq!(
+            validate_native_mail_safety_data_store_identifier(Some("1"), false, None).unwrap(),
+            None
+        );
+        assert_eq!(
+            validate_native_mail_safety_data_store_identifier(Some("1"), true, Some(identifier))
+                .unwrap(),
+            Some(identifier)
+        );
+        assert!(validate_native_mail_safety_data_store_identifier(
+            Some("true"),
+            true,
+            Some(identifier)
+        )
+        .is_err());
+        assert!(validate_native_mail_safety_data_store_identifier(
+            Some("1"),
+            false,
+            Some(identifier)
+        )
+        .is_err());
+        assert!(
+            validate_native_mail_safety_data_store_identifier(Some("1"), true, Some([0; 16]))
+                .is_err()
+        );
+        assert_eq!(
+            parse_native_mail_safety_data_store_identifier("00112233-4455-4677-8899-aabbccddeeff")
+                .unwrap(),
+            identifier
+        );
+        for invalid in [
+            "00112233-4455-4677-8899-AABBCCDDEEFF",
+            "00112233445546778899aabbccddeeff",
+            "not-a-uuid",
+        ] {
+            assert!(parse_native_mail_safety_data_store_identifier(invalid).is_err());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn data_store_identifier_is_injected_into_exactly_one_main_window() {
+        let identifier = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x46, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ];
+        let mut windows = vec![tauri::utils::config::WindowConfig {
+            label: "main".into(),
+            ..Default::default()
+        }];
+        set_native_mail_safety_main_data_store_identifier(&mut windows, Some(identifier)).unwrap();
+        assert_eq!(windows[0].data_store_identifier, Some(identifier));
+        assert!(
+            set_native_mail_safety_main_data_store_identifier(&mut windows, Some(identifier))
+                .is_err()
+        );
+
+        let mut static_identifier = vec![tauri::utils::config::WindowConfig {
+            label: "main".into(),
+            data_store_identifier: Some(identifier),
+            ..Default::default()
+        }];
+        assert!(
+            set_native_mail_safety_main_data_store_identifier(&mut static_identifier, None)
+                .is_err()
+        );
+
+        let mut unconfigured = vec![tauri::utils::config::WindowConfig {
+            label: "main".into(),
+            ..Default::default()
+        }];
+        set_native_mail_safety_main_data_store_identifier(&mut unconfigured, None).unwrap();
+        assert_eq!(unconfigured[0].data_store_identifier, None);
+
+        let mut missing = vec![tauri::utils::config::WindowConfig {
+            label: "reader".into(),
+            ..Default::default()
+        }];
+        assert!(
+            set_native_mail_safety_main_data_store_identifier(&mut missing, Some(identifier))
+                .is_err()
+        );
+
+        let mut duplicate = vec![
+            tauri::utils::config::WindowConfig {
+                label: "main".into(),
+                ..Default::default()
+            },
+            tauri::utils::config::WindowConfig {
+                label: "main".into(),
+                ..Default::default()
+            },
+        ];
+        assert!(set_native_mail_safety_main_data_store_identifier(
+            &mut duplicate,
+            Some(identifier)
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn profile_directory_requires_an_exact_owned_child_sentinel() {
+        let directory = tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let profile = root.join("profile");
+        fs::create_dir(&profile).unwrap();
+
+        let missing = native_mail_safety_profile_directory(&root, profile.clone()).unwrap_err();
+        assert!(missing.to_string().contains("ownership sentinel"));
+
+        fs::write(
+            profile.join(".dakia-native-mail-safety-profile"),
+            NATIVE_MAIL_SAFETY_FIXTURE_MARKER,
+        )
+        .unwrap();
+        assert_eq!(
+            native_mail_safety_profile_directory(&root, profile.clone()).unwrap(),
+            profile.canonicalize().unwrap()
+        );
+
+        fs::write(
+            profile.join(".dakia-native-mail-safety-profile"),
+            "similar-but-unowned\n",
+        )
+        .unwrap();
+        assert!(native_mail_safety_profile_directory(&root, profile).is_err());
+        assert!(native_mail_safety_profile_directory(&root, root.clone()).is_err());
+    }
+
+    #[tokio::test]
+    async fn seed_adds_only_the_two_fixed_accounts_and_rejects_profile_contamination() {
+        let directory = tempdir().unwrap();
+        let store = Store::open(directory.path().join("dakia.db"))
+            .await
+            .unwrap();
+        let (account, second_account) = fixture_accounts(true);
+        let fixture = NativeMailSafetyFixture {
+            data_dir: directory.path().to_owned(),
+            account,
+            second_account,
+            password: "synthetic-only-password".into(),
+        };
+
+        fixture.seed_accounts(&store).await.unwrap();
+        let accounts = store.accounts().await.unwrap();
+        assert_eq!(accounts.len(), 2);
+        assert!(accounts.iter().any(|account| {
+            account.id == Uuid::parse_str(NATIVE_MAIL_SAFETY_PRIMARY_ACCOUNT_ID).unwrap()
+                && account.email == NATIVE_MAIL_SAFETY_PRIMARY_ACCOUNT_EMAIL
+        }));
+        assert!(accounts.iter().any(|account| {
+            account.id == Uuid::parse_str(NATIVE_MAIL_SAFETY_SECOND_ACCOUNT_ID).unwrap()
+                && account.email == NATIVE_MAIL_SAFETY_SECOND_ACCOUNT_EMAIL
+        }));
+
+        let (account, second_account) = fixture_accounts(false);
+        let single_account_fixture = NativeMailSafetyFixture {
+            data_dir: directory.path().to_owned(),
+            account,
+            second_account,
+            password: "synthetic-only-password".into(),
+        };
+        assert!(single_account_fixture.seed_accounts(&store).await.is_err());
+
+        let mut contaminated = fixture.second_account.clone().unwrap();
+        contaminated.email = "other@localhost".into();
+        store.save_account(&contaminated).await.unwrap();
+        assert!(fixture.seed_accounts(&store).await.is_err());
+
+        let mut contaminated = fixture.second_account.clone().unwrap();
+        contaminated.provider_id = "gmail".into();
+        store.save_account(&contaminated).await.unwrap();
+        assert!(fixture.seed_accounts(&store).await.is_err());
+
+        let mut contaminated = fixture.second_account.clone().unwrap();
+        contaminated.auth = AccountAuth::Password {
+            username: NATIVE_MAIL_SAFETY_PRIMARY_ACCOUNT_EMAIL.into(),
+        };
+        store.save_account(&contaminated).await.unwrap();
+        assert!(fixture.seed_accounts(&store).await.is_err());
+    }
+}
 
 struct AppState {
     store: Store,
@@ -108,24 +993,6 @@ impl EmailClassifier for LocalEmailClassifier {
 /// unnecessarily blocking other accounts.  A deletion holds this lock from
 /// stopping realtime through the storage transaction, so an in-flight manual
 /// sync or resumed rebuild cannot finish by repopulating the removed account.
-#[derive(Default)]
-struct AccountOperationLocks {
-    locks: Mutex<HashMap<Uuid, Arc<AsyncMutex<()>>>>,
-}
-
-impl AccountOperationLocks {
-    async fn acquire(&self, account_id: Uuid) -> OwnedMutexGuard<()> {
-        let operation = self
-            .locks
-            .lock()
-            .expect("account operation lock poisoned")
-            .entry(account_id)
-            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
-            .clone();
-        operation.lock_owned().await
-    }
-}
-
 /// Coordinates a rebuild cancellation across the brief interval before a
 /// queued rebuild obtains the per-account operation lock.
 #[derive(Default)]
@@ -480,7 +1347,7 @@ mod legacy_oauth_conversion_tests {
 }
 
 async fn enabled_account_for_operation(
-    state: &Arc<AppState>,
+    state: &AppState,
     account_id: Uuid,
 ) -> Result<Account, String> {
     let account = state
@@ -492,6 +1359,12 @@ async fn enabled_account_for_operation(
     if !account.enabled {
         return Err("Account is disabled".to_owned());
     }
+    // Every caller holds the account operation lock, but account replacement
+    // commits its durable reset intent before old catalogue rows are cleared.
+    // Do not send a flag, mailbox, unsubscribe, compose, or sender action to
+    // the replacement provider while those retained rows still name the prior
+    // namespace.
+    ensure_account_namespace_is_not_pending(&state.store, account_id).await?;
     Ok(account)
 }
 
@@ -1477,7 +2350,7 @@ async fn remove_terminal_command(app: tauri::AppHandle) -> Result<(), String> {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct MessageContent {
     body_text: String,
     body_html: Option<String>,
@@ -1502,6 +2375,32 @@ enum MessageContentErrorKind {
 #[derive(Debug, Serialize, PartialEq, Eq)]
 struct MessageContentCommandError {
     kind: MessageContentErrorKind,
+}
+
+/// A bulk attachment save can have durable successes before a later file or
+/// mailbox-identity check fails. Keep the outcome structured so the Reader
+/// never tells someone that nothing was saved when a file is already present.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct AttachmentSaveCommandError {
+    kind: AttachmentSaveErrorKind,
+    saved_count: usize,
+    total_count: usize,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum AttachmentSaveErrorKind {
+    Partial,
+}
+
+fn partial_attachment_save_error(saved_count: usize, total_count: usize) -> String {
+    serde_json::to_string(&AttachmentSaveCommandError {
+        kind: AttachmentSaveErrorKind::Partial,
+        saved_count,
+        total_count,
+    })
+    .expect("attachment save error is serializable")
 }
 
 impl MessageContentCommandError {
@@ -1534,7 +2433,9 @@ impl MessageContentCommandError {
         .any(|marker| failure.contains(marker));
         let kind = if resource_limit {
             MessageContentErrorKind::ResourceLimit
-        } else if failure.contains("mime_content_undecodable") {
+        } else if failure.contains("mime_content_undecodable")
+            || failure.contains("mime_invalid_part_graph")
+        {
             MessageContentErrorKind::Undecodable
         } else if failure.contains("unsupported transfer encoding") {
             MessageContentErrorKind::Unsupported
@@ -1561,6 +2462,254 @@ struct DesktopNotification {
 }
 
 #[cfg(any(target_os = "macos", test))]
+const NATIVE_NOTIFICATION_UNAVAILABLE_ERROR: &str =
+    "Desktop notifications are unavailable because Dakia could not verify its application identity";
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Default)]
+struct NativeNotificationAvailability(Arc<AtomicBool>);
+
+#[cfg(any(target_os = "macos", test))]
+impl NativeNotificationAvailability {
+    fn mark_available(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    fn require_available(&self) -> Result<(), String> {
+        self.0
+            .load(Ordering::SeqCst)
+            .then_some(())
+            .ok_or_else(|| NATIVE_NOTIFICATION_UNAVAILABLE_ERROR.to_owned())
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn initialize_native_notification_application(
+    availability: &NativeNotificationAvailability,
+    application: &str,
+    preflight: impl FnOnce(&str) -> Result<(), String>,
+    initialize: impl FnOnce(&str) -> Result<(), String>,
+    report_failure: impl FnOnce(&str),
+) {
+    let result = preflight(application).and_then(|()| initialize(application));
+    match result {
+        Ok(()) => availability.mark_available(),
+        Err(error) => report_failure(&error),
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn preflight_native_notification_application(
+    application: &str,
+    expected_app: Option<&Path>,
+    resolve: impl FnOnce(&str) -> Result<Vec<PathBuf>, String>,
+) -> Result<(), String> {
+    let resolved_apps = resolve(application)?;
+    if resolved_apps.is_empty() {
+        return Err(format!(
+            "LaunchServices did not resolve application {application}"
+        ));
+    }
+    if resolved_apps
+        .iter()
+        .any(|path| path.as_os_str().is_empty() || !path.is_absolute())
+    {
+        return Err(format!(
+            "LaunchServices returned a non-absolute path for application {application}"
+        ));
+    }
+    let Some(expected_app) = expected_app else {
+        return Ok(());
+    };
+    let expected_app = expected_app.canonicalize().map_err(|error| {
+        format!(
+            "canonicalize current application bundle {}: {error}",
+            expected_app.display()
+        )
+    })?;
+    let resolved_current_app = resolved_apps.into_iter().any(|resolved_app| {
+        resolved_app
+            .canonicalize()
+            .is_ok_and(|resolved_app| resolved_app == expected_app)
+    });
+    if !resolved_current_app {
+        return Err(format!(
+            "LaunchServices did not resolve application {application} to the current bundle {}",
+            expected_app.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn current_macos_application_bundle() -> Result<PathBuf, String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("resolve current executable: {error}"))?
+        .canonicalize()
+        .map_err(|error| format!("canonicalize current executable: {error}"))?;
+    let macos = executable
+        .parent()
+        .filter(|path| path.file_name().is_some_and(|name| name == "MacOS"))
+        .ok_or_else(|| {
+            format!(
+                "current executable is not inside an application MacOS directory: {}",
+                executable.display()
+            )
+        })?;
+    let contents = macos
+        .parent()
+        .filter(|path| path.file_name().is_some_and(|name| name == "Contents"))
+        .ok_or_else(|| {
+            format!(
+                "current executable is not inside an application Contents directory: {}",
+                executable.display()
+            )
+        })?;
+    let app = contents
+        .parent()
+        .filter(|path| path.extension().is_some_and(|extension| extension == "app"))
+        .ok_or_else(|| {
+            format!(
+                "current executable is not inside an application bundle: {}",
+                executable.display()
+            )
+        })?;
+    app.canonicalize()
+        .map_err(|error| format!("canonicalize current application bundle: {error}"))
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_launch_services_application_urls(application: &str) -> Result<Vec<PathBuf>, String> {
+    const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+    const MAX_APPLICATION_URLS: isize = 4_096;
+    const INITIAL_PATH_CAPACITY: usize = 4_096;
+    const MAX_PATH_CAPACITY: usize = 65_536;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFArrayGetCount(array: *const c_void) -> isize;
+        fn CFArrayGetValueAtIndex(array: *const c_void, index: isize) -> *const c_void;
+        fn CFGetTypeID(value: *const c_void) -> usize;
+        fn CFRelease(value: *const c_void);
+        fn CFStringCreateWithBytes(
+            allocator: *const c_void,
+            bytes: *const u8,
+            length: isize,
+            encoding: u32,
+            is_external_representation: u8,
+        ) -> *const c_void;
+        fn CFURLGetFileSystemRepresentation(
+            url: *const c_void,
+            resolve_against_base: u8,
+            buffer: *mut u8,
+            max_buffer_length: isize,
+        ) -> u8;
+        fn CFURLGetTypeID() -> usize;
+    }
+    #[link(name = "CoreServices", kind = "framework")]
+    extern "C" {
+        fn LSCopyApplicationURLsForBundleIdentifier(
+            bundle_identifier: *const c_void,
+            out_error: *mut *const c_void,
+        ) -> *const c_void;
+    }
+
+    struct OwnedCoreFoundation(*const c_void);
+    impl Drop for OwnedCoreFoundation {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // SAFETY: This wrapper owns a create/copy-rule Core Foundation value.
+                unsafe { CFRelease(self.0) };
+            }
+        }
+    }
+
+    let length = isize::try_from(application.len())
+        .map_err(|_| "application identifier is too long".to_owned())?;
+    // SAFETY: The UTF-8 byte slice remains alive for the duration of the call, and
+    // the returned create-rule object is released by OwnedCoreFoundation.
+    let identifier = unsafe {
+        CFStringCreateWithBytes(
+            ptr::null(),
+            application.as_ptr(),
+            length,
+            K_CF_STRING_ENCODING_UTF8,
+            0,
+        )
+    };
+    if identifier.is_null() {
+        return Err("Core Foundation could not represent the application identifier".to_owned());
+    }
+    let identifier = OwnedCoreFoundation(identifier);
+    // SAFETY: identifier is a live CFStringRef. A null error pointer is permitted,
+    // and the returned copy-rule array is released below.
+    let applications =
+        unsafe { LSCopyApplicationURLsForBundleIdentifier(identifier.0, ptr::null_mut()) };
+    if applications.is_null() {
+        return Ok(Vec::new());
+    }
+    let applications = OwnedCoreFoundation(applications);
+    // SAFETY: applications is the CFArrayRef returned by LaunchServices.
+    let count = unsafe { CFArrayGetCount(applications.0) };
+    if !(0..=MAX_APPLICATION_URLS).contains(&count) {
+        return Err(format!(
+            "LaunchServices returned an invalid application URL count: {count}"
+        ));
+    }
+
+    let mut paths = Vec::with_capacity(count as usize);
+    for index in 0..count {
+        // SAFETY: index is bounded by the count read from the same live CFArrayRef.
+        let url = unsafe { CFArrayGetValueAtIndex(applications.0, index) };
+        if url.is_null() {
+            return Err(format!(
+                "LaunchServices returned a null application URL at index {index}"
+            ));
+        }
+        // SAFETY: url is a non-null Core Foundation value borrowed from applications.
+        if unsafe { CFGetTypeID(url) } != unsafe { CFURLGetTypeID() } {
+            return Err(format!(
+                "LaunchServices returned a non-URL application value at index {index}"
+            ));
+        }
+
+        let mut capacity = INITIAL_PATH_CAPACITY;
+        let path = loop {
+            let mut buffer = vec![0_u8; capacity];
+            let max_buffer_length = isize::try_from(buffer.len())
+                .map_err(|_| "LaunchServices application path buffer is too large".to_owned())?;
+            // SAFETY: url is a live CFURLRef and buffer is writable for its full length.
+            let success = unsafe {
+                CFURLGetFileSystemRepresentation(url, 1, buffer.as_mut_ptr(), max_buffer_length)
+            };
+            if success != 0 {
+                let end = buffer.iter().position(|byte| *byte == 0).ok_or_else(|| {
+                    "LaunchServices application path was not null-terminated".to_owned()
+                })?;
+                break PathBuf::from(OsString::from_vec(buffer[..end].to_vec()));
+            }
+            if capacity == MAX_PATH_CAPACITY {
+                return Err(format!(
+                    "LaunchServices application path at index {index} exceeds {MAX_PATH_CAPACITY} bytes"
+                ));
+            }
+            capacity = (capacity * 2).min(MAX_PATH_CAPACITY);
+        };
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn with_native_notification_identity<T>(
+    availability: &NativeNotificationAvailability,
+    show: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    availability.require_available()?;
+    show()
+}
+
+#[cfg(any(target_os = "macos", test))]
 fn notification_has_reader_target(notification: &DesktopNotification) -> bool {
     notification.count == 1
         && notification
@@ -1580,6 +2729,7 @@ fn notification_has_reader_target(notification: &DesktopNotification) -> bool {
 #[cfg(test)]
 mod desktop_notification_tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
 
     #[test]
     fn single_message_notifications_preserve_reader_locators_without_focusing_main() {
@@ -1609,6 +2759,113 @@ mod desktop_notification_tests {
             sound: None,
         };
         assert!(!notification_has_reader_target(&grouped));
+    }
+
+    #[test]
+    fn notification_identity_failure_is_nonfatal_and_blocks_the_show_boundary() {
+        let availability = NativeNotificationAvailability::default();
+        let initialize_calls = AtomicUsize::new(0);
+
+        let reported_error = Mutex::new(None);
+        initialize_native_notification_application(
+            &availability,
+            "dev.dakia.fictional-provider-reader",
+            |_| Err("LaunchServices did not resolve the application".to_owned()),
+            |application| {
+                initialize_calls.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(application, "dev.dakia.fictional-provider-reader");
+                Ok(())
+            },
+            |error| *reported_error.lock().expect("reported error lock") = Some(error.to_owned()),
+        );
+        let error = reported_error
+            .lock()
+            .expect("reported error lock")
+            .clone()
+            .expect("identity initialization must report its failure without propagating it");
+        assert!(error.contains("LaunchServices"));
+        assert_eq!(initialize_calls.load(Ordering::SeqCst), 0);
+
+        let show_calls = AtomicUsize::new(0);
+        let error = with_native_notification_identity(&availability, || {
+            show_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .expect_err("an unavailable identity must reject delivery");
+        assert_eq!(error, NATIVE_NOTIFICATION_UNAVAILABLE_ERROR);
+        assert_eq!(show_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn verified_notification_identity_allows_exactly_one_show_boundary_call() {
+        let availability = NativeNotificationAvailability::default();
+        initialize_native_notification_application(
+            &availability,
+            "dev.dakia.mail",
+            |_| Ok(()),
+            |application| {
+                assert_eq!(application, "dev.dakia.mail");
+                Ok(())
+            },
+            |_| panic!("a successful identity initialization must not report failure"),
+        );
+
+        let show_calls = AtomicUsize::new(0);
+        with_native_notification_identity(&availability, || {
+            show_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .expect("verified identity permits delivery");
+        assert_eq!(show_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn notification_identity_preflight_rejects_a_different_registered_bundle() {
+        let root = tempfile::tempdir().unwrap();
+        let current_app = root.path().join("Dakia.app");
+        let other_app = root.path().join("Other Dakia.app");
+        std::fs::create_dir(&current_app).unwrap();
+        std::fs::create_dir(&other_app).unwrap();
+
+        let error =
+            preflight_native_notification_application("dev.dakia.mail", Some(&current_app), |_| {
+                Ok(vec![other_app])
+            })
+            .expect_err("a matching bundle identifier at another path is insufficient");
+        assert!(error.contains("current bundle"));
+        assert!(error.contains(&current_app.display().to_string()));
+    }
+
+    #[test]
+    fn notification_identity_preflight_runs_before_process_global_initialization() {
+        let availability = NativeNotificationAvailability::default();
+        let order = Mutex::new(Vec::new());
+        initialize_native_notification_application(
+            &availability,
+            "dev.dakia.mail",
+            |_| {
+                order.lock().unwrap().push("preflight");
+                Ok(())
+            },
+            |_| {
+                order.lock().unwrap().push("initialize");
+                Ok(())
+            },
+            |_| panic!("successful initialization must not report failure"),
+        );
+        assert_eq!(*order.lock().unwrap(), ["preflight", "initialize"]);
+        availability.require_available().unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn launch_services_preflight_rejects_an_absent_identifier_without_mutation() {
+        let absent = resolve_launch_services_application_urls(&format!(
+            "dev.dakia.notification-preflight.absent.{}",
+            Uuid::new_v4()
+        ))
+        .unwrap();
+        assert!(absent.is_empty());
     }
 }
 
@@ -1653,7 +2910,16 @@ struct AiInput {
     executable: Option<PathBuf>,
     model_path: Option<PathBuf>,
     message_ids: Vec<String>,
+    #[serde(default)]
+    message_targets: Vec<AiMessageTarget>,
     instruction: Option<String>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AiMessageTarget {
+    message_id: String,
+    expected_uid_validity: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -1679,6 +2945,32 @@ struct SenderCleanupTarget {
 
 fn error(error: impl std::fmt::Display) -> String {
     error.to_string()
+}
+
+/// Server replies are untrusted and can echo credentials or message content.
+/// Preserve the delivery outcome while keeping provider text out of IPC.
+fn send_command_error(failure: anyhow::Error) -> String {
+    use dakia_core::SendFailureKind;
+    let kind = failure
+        .downcast_ref::<dakia_core::SendFailure>()
+        .map(|failure| failure.kind)
+        .unwrap_or(SendFailureKind::DeliveryUncertain);
+    let message = match kind {
+        SendFailureKind::NotSubmitted => {
+            "The message was not sent. Check your account and try again."
+        }
+        SendFailureKind::DeliveryUncertain => {
+            "The server did not confirm delivery. Check your Sent folder before sending again."
+        }
+        SendFailureKind::SentCopyFailed => {
+            "The message was sent, but a copy could not be saved in Sent. Do not send it again."
+        }
+    };
+    serde_json::to_string(&dakia_core::SendFailure {
+        kind,
+        message: message.into(),
+    })
+    .expect("send failure contains only serializable strings")
 }
 
 fn sender_cleanup_target(message: &MailSummary, account_id: Uuid) -> Option<SenderCleanupTarget> {
@@ -1823,39 +3115,131 @@ mod unsubscribe_email_tests {
 async fn message_attachments(
     state: State<'_, Arc<AppState>>,
     message_id: String,
+    expected_uid_validity: Option<i64>,
 ) -> Result<Vec<Attachment>, String> {
-    Ok(load_message_content(state.inner(), &message_id)
-        .await?
-        .attachments)
+    Ok(
+        load_message_content(state.inner(), &message_id, expected_uid_validity)
+            .await?
+            .attachments,
+    )
 }
 
 #[tauri::command]
 async fn message_content(
     state: State<'_, Arc<AppState>>,
     message_id: String,
+    expected_uid_validity: Option<i64>,
 ) -> Result<MessageContent, MessageContentCommandError> {
-    load_message_content(state.inner(), &message_id)
+    load_message_content(state.inner(), &message_id, expected_uid_validity)
         .await
         .map_err(|failure| MessageContentCommandError::from_failure(&failure))
 }
 
-async fn cached_message_content(
+fn message_identity_changed_error() -> String {
+    "This message changed. Refresh the mailbox before trying again.".to_owned()
+}
+
+fn account_namespace_reset_pending_error() -> String {
+    "This account is updating. Refresh the mailbox after the update finishes.".to_owned()
+}
+
+async fn account_namespace_reset_is_pending(
+    store: &Store,
+    account_id: Uuid,
+) -> Result<bool, String> {
+    Ok(store
+        .mail_rebuild_jobs()
+        .await
+        .map_err(error)?
+        .into_iter()
+        .any(|job| job.account_id == account_id && job.reset_before_sync))
+}
+
+async fn ensure_account_namespace_is_not_pending(
+    store: &Store,
+    account_id: Uuid,
+) -> Result<(), String> {
+    if account_namespace_reset_is_pending(store, account_id).await? {
+        return Err(account_namespace_reset_pending_error());
+    }
+    Ok(())
+}
+
+fn same_message_epoch_identity(target: &MailSummary, current: &MailSummary) -> bool {
+    target.id == current.id
+        && target.account_id == current.account_id
+        && target.mailbox == current.mailbox
+        && target.uid == current.uid
+        && target.mailbox_uid_validity.is_some()
+        && target.mailbox_uid_validity == current.mailbox_uid_validity
+}
+
+#[cfg(test)]
+fn same_export_identity(before: &MailSummary, after: &MailSummary) -> bool {
+    before.account_id == after.account_id
+        && before.mailbox == after.mailbox
+        && before.uid == after.uid
+        && before.message_id == after.message_id
+        && before.received_at == after.received_at
+        && before.mailbox_uid_validity == after.mailbox_uid_validity
+}
+
+async fn current_message_at_epoch(
     store: &Store,
     message_id: &str,
+    expected_uid_validity: Option<i64>,
+) -> Result<MailSummary, String> {
+    let message = store
+        .message(message_id)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Message not found".to_owned())?;
+    let expected = expected_uid_validity
+        .filter(|value| *value > 0)
+        .ok_or_else(message_identity_changed_error)?;
+    if message.mailbox_uid_validity != Some(expected) {
+        return Err(message_identity_changed_error());
+    }
+    Ok(message)
+}
+
+async fn confirm_message_epoch(store: &Store, target: &MailSummary) -> Result<MailSummary, String> {
+    let current = store
+        .message(&target.id)
+        .await
+        .map_err(error)?
+        .ok_or_else(message_identity_changed_error)?;
+    if !same_message_epoch_identity(target, &current) {
+        return Err(message_identity_changed_error());
+    }
+    Ok(current)
+}
+
+async fn cached_message_content(
+    store: &Store,
+    target: &MailSummary,
 ) -> Result<Option<MessageContent>, String> {
+    let message_id = &target.id;
     if let Some((body_text, body_html)) = store.starred_body(message_id).await.map_err(error)? {
+        confirm_message_epoch(store, target).await?;
+        let message = store
+            .message(message_id)
+            .await
+            .map_err(error)?
+            .ok_or_else(message_identity_changed_error)?;
+        if !same_message_epoch_identity(target, &message) {
+            return Err(message_identity_changed_error());
+        }
+        let attachments = store
+            .starred_attachment_metadata(message_id)
+            .await
+            .map_err(error)?;
+        confirm_message_epoch(store, target).await?;
         return Ok(Some(MessageContent {
             body_text,
             body_html,
-            unsubscribe_kind: store
-                .message(message_id)
-                .await
-                .map_err(error)?
-                .and_then(|message| message.unsubscribe_kind),
-            attachments: store
-                .starred_attachment_metadata(message_id)
-                .await
-                .map_err(error)?
+            unsubscribe_kind: message.unsubscribe_kind,
+            attachments: attachments
                 .into_iter()
                 .filter(is_downloadable_attachment)
                 .collect(),
@@ -1866,6 +3250,7 @@ async fn cached_message_content(
         .await
         .map_err(error)?
     {
+        confirm_message_epoch(store, target).await?;
         return Ok(Some(MessageContent {
             body_text: cached.body_text,
             body_html: cached.body_html,
@@ -1877,24 +3262,56 @@ async fn cached_message_content(
                 .collect(),
         }));
     }
+    confirm_message_epoch(store, target).await?;
     Ok(None)
+}
+
+fn content_from_message(message: MailSummary) -> MessageContent {
+    MessageContent {
+        body_text: message.body_text,
+        body_html: message.body_html,
+        unsubscribe_kind: message.unsubscribe_kind,
+        attachments: message
+            .attachments
+            .into_iter()
+            .map(|item| item.attachment)
+            .filter(is_downloadable_attachment)
+            .collect(),
+    }
 }
 
 async fn load_message_content(
     state: &Arc<AppState>,
     message_id: &str,
+    expected_uid_validity: Option<i64>,
 ) -> Result<MessageContent, String> {
-    if let Some(cached) = cached_message_content(&state.store, message_id).await? {
+    let initial = current_message_at_epoch(&state.store, message_id, expected_uid_validity).await?;
+    let account_id = Uuid::parse_str(&initial.account_id).map_err(error)?;
+    // An account update can retain the same account ID, mailbox, UID, and
+    // UIDVALIDITY while a durable reset replaces its provider namespace. Hold
+    // the account boundary from the authoritative reread through cache lookup,
+    // fetch, and publication so old catalogue rows cannot be hydrated from the
+    // replacement provider.
+    let _operation = state.account_operations.acquire(account_id).await;
+    let target = current_message_at_epoch(&state.store, message_id, expected_uid_validity).await?;
+    if !same_message_epoch_identity(&initial, &target) {
+        return Err(message_identity_changed_error());
+    }
+    if account_namespace_reset_is_pending(&state.store, account_id).await? {
+        return Err(account_namespace_reset_pending_error());
+    }
+    if let Some(cached) = cached_message_content(&state.store, &target).await? {
         if !looks_like_misclassified_text_body(&cached) {
+            if account_namespace_reset_is_pending(&state.store, account_id).await? {
+                return Err(account_namespace_reset_pending_error());
+            }
             return Ok(cached);
         }
     }
 
-    // Background warming and a foreground open share this durable claim. A
-    // foreground request waits for the warmer's cache commit, but takes over
-    // immediately if the warmer failed and released the claim.
     let mut waited = Duration::ZERO;
     let claim = loop {
+        confirm_message_epoch(&state.store, &target).await?;
         match state
             .store
             .acquire_message_content_fetch_outcome(message_id)
@@ -1905,8 +3322,11 @@ async fn load_message_content(
             MessageContentFetchAcquire::Missing => return Err("Message not found".to_owned()),
             MessageContentFetchAcquire::Busy => {}
         }
-        if let Some(cached) = cached_message_content(&state.store, message_id).await? {
+        if let Some(cached) = cached_message_content(&state.store, &target).await? {
             if !looks_like_misclassified_text_body(&cached) {
+                if account_namespace_reset_is_pending(&state.store, account_id).await? {
+                    return Err(account_namespace_reset_pending_error());
+                }
                 return Ok(cached);
             }
         }
@@ -1919,62 +3339,56 @@ async fn load_message_content(
     };
 
     let result = async {
-        // The winner must re-check after claiming: another fetch can commit
-        // content immediately before releasing its claim.
-        let cached_before_fetch = cached_message_content(&state.store, message_id).await?;
+        confirm_message_epoch(&state.store, &target).await?;
+        if account_namespace_reset_is_pending(&state.store, account_id).await? {
+            return Err(account_namespace_reset_pending_error());
+        }
+        let cached_before_fetch = cached_message_content(&state.store, &target).await?;
         if let Some(cached) = &cached_before_fetch {
             if !looks_like_misclassified_text_body(cached) {
-                return Ok(MessageContent {
-                    body_text: cached.body_text.clone(),
-                    body_html: cached.body_html.clone(),
-                    unsubscribe_kind: cached.unsubscribe_kind.clone(),
-                    attachments: cached.attachments.clone(),
-                });
+                if account_namespace_reset_is_pending(&state.store, account_id).await? {
+                    return Err(account_namespace_reset_pending_error());
+                }
+                return Ok(cached.clone());
             }
         }
-        let message = if cached_before_fetch
-            .as_ref()
-            .is_some_and(looks_like_misclassified_text_body)
-        {
-            // PR #42 repairs legacy rows under the account-operation lock so
-            // a concurrent move or action cannot redirect the refetch.
-            refetch_and_persist_message(state, message_id).await?
-        } else {
-            fetch_remote_message(state, message_id).await?
-        };
-        let cached = CachedMessageContent {
-            body_text: message.body_text.clone(),
-            body_html: message.body_html.clone(),
-            unsubscribe_kind: message.unsubscribe_kind.clone(),
-            attachments: message
-                .attachments
-                .iter()
-                .filter(|item| is_downloadable_attachment(&item.attachment))
-                .map(|item| item.attachment.clone())
-                .collect(),
-        };
-        let still_starred =
-            persist_foreground_message_content(&state.store, &message, &cached).await?;
-        if !still_starred {
-            if let Err(cache_error) = state
-                .store
-                .cache_message_content(message_id, false, cached.clone())
-                .await
-            {
-                tracing::warn!(%cache_error, %message_id, "could not persist foreground message cache");
-            }
-        }
-        state
+        let account = state
             .store
-            .set_message_content_state(message_id, "complete")
+            .account(account_id)
+            .await
+            .map_err(error)?
+            .ok_or_else(|| "Account not found".to_owned())?;
+        confirm_message_epoch(&state.store, &target).await?;
+        let fetched = MailService::new(state.store.clone())
+            .fetch_message(&account, &target.mailbox, target.uid as u32)
             .await
             .map_err(error)?;
-        Ok(MessageContent {
-            body_text: cached.body_text,
-            body_html: cached.body_html,
-            unsubscribe_kind: cached.unsubscribe_kind,
-            attachments: cached.attachments,
-        })
+        if !same_message_epoch_identity(&target, &fetched) {
+            return Err(message_identity_changed_error());
+        }
+        // A separate process does not share this process-local lock. Check the
+        // durable replacement intent again before publishing or returning
+        // content fetched against an account configuration that may have been
+        // superseded while the provider request was in flight.
+        if account_namespace_reset_is_pending(&state.store, account_id).await? {
+            return Err(account_namespace_reset_pending_error());
+        }
+        if !state
+            .store
+            .publish_message_content_at_epoch(&target, &fetched)
+            .await
+            .map_err(error)?
+        {
+            return Err(message_identity_changed_error());
+        }
+        // The durable catalogue projection deliberately stores only metadata.
+        // Return the complete, provider-parsed snapshot after the second epoch
+        // check instead of rebuilding Reader content from that projection.
+        // `fetched` was already matched to `target` before publication, and
+        // the confirmation fences a replacement or deletion that happened
+        // while the result was being committed.
+        confirm_message_epoch(&state.store, &target).await?;
+        Ok(content_from_message(fetched))
     }
     .await;
     if let Err(release_error) = claim.release().await {
@@ -2036,6 +3450,7 @@ mod message_content_repair_tests {
             filename: filename.into(),
             mime_type: mime_type.into(),
             size_bytes: 42,
+            size_kind: dakia_core::AttachmentSizeKind::Decoded,
             is_inline,
             presentation: AttachmentPresentation::Downloadable,
             is_potentially_unsafe: false,
@@ -2079,7 +3494,7 @@ mod message_content_repair_tests {
 
         let result = tokio::time::timeout(
             Duration::from_millis(250),
-            load_message_content(&state, "deleted-message"),
+            load_message_content(&state, "deleted-message", Some(1)),
         )
         .await
         .expect("a deleted message must not wait for the claim timeout");
@@ -2092,6 +3507,7 @@ mod message_content_repair_tests {
         let cases = [
             ("mime_raw_message_too_large", "resource_limit"),
             ("mime_content_undecodable", "undecodable"),
+            ("mime_invalid_part_graph", "undecodable"),
             (
                 "MIME part uses an unsupported transfer encoding",
                 "unsupported",
@@ -2123,102 +3539,152 @@ mod message_content_repair_tests {
 }
 
 #[tauri::command]
-async fn save_attachment(
-    app: tauri::AppHandle,
+async fn save_attachment<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: State<'_, Arc<AppState>>,
     message_id: String,
     attachment_id: String,
+    expected_uid_validity: Option<i64>,
 ) -> Result<String, String> {
-    let (summary, account) = remote_message_locator(state.inner(), &message_id).await?;
+    let operation =
+        remote_message_at_epoch(state.inner(), &message_id, expected_uid_validity).await?;
+    let target = &operation.target;
     let attachment = MailService::new(state.store.clone())
-        .fetch_attachment(
-            &account,
-            &summary.mailbox,
-            summary.uid as u32,
+        .fetch_attachment_at_epoch(
+            &operation.account,
+            &target.mailbox,
+            target.uid as u32,
             &attachment_id,
+            operation.epoch,
         )
         .await
         .map_err(error)?;
+    ensure_account_namespace_is_not_pending(&state.store, operation.account.id).await?;
+    confirm_message_epoch(&state.store, target).await?;
     save_to_downloads(&app, &attachment.attachment, &attachment.bytes).map_err(error)
 }
 
 #[tauri::command]
-async fn export_message(
-    app: tauri::AppHandle,
+async fn export_message<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: State<'_, Arc<AppState>>,
     message_id: String,
+    expected_uid_validity: Option<i64>,
 ) -> Result<String, String> {
-    let initial_message = state
-        .store
-        .message(&message_id)
-        .await
-        .map_err(error)?
-        .ok_or_else(|| "Message not found".to_owned())?;
-    let account_id = Uuid::parse_str(&initial_message.account_id).map_err(error)?;
-    let _operation = state.account_operations.acquire(account_id).await;
-    let message = state
-        .store
-        .message(&message_id)
-        .await
-        .map_err(error)?
-        .ok_or_else(|| "Message changed while it was being exported".to_owned())?;
-    if !same_export_identity(&initial_message, &message) {
-        return Err("Message changed while it was being exported".to_owned());
-    }
-    let account = state
-        .store
-        .account(account_id)
-        .await
-        .map_err(error)?
-        .ok_or_else(|| "Account not found".to_owned())?;
-    let uid = u32::try_from(message.uid).map_err(|_| "Message UID is invalid".to_owned())?;
+    let operation =
+        remote_message_at_epoch(state.inner(), &message_id, expected_uid_validity).await?;
+    let target = &operation.target;
+    confirm_message_epoch(&state.store, target).await?;
     let bytes = MailService::new(state.store.clone())
-        .fetch_raw_message(&account, &message.mailbox, uid)
+        .fetch_raw_message_at_epoch(
+            &operation.account,
+            &target.mailbox,
+            target.uid as u32,
+            operation.epoch,
+        )
         .await
         .map_err(error)?;
-    save_eml_to_downloads(&app, &message.subject, &bytes).map_err(error)
-}
-
-fn same_export_identity(before: &MailSummary, after: &MailSummary) -> bool {
-    before.account_id == after.account_id
-        && before.mailbox == after.mailbox
-        && before.uid == after.uid
-        && before.message_id == after.message_id
-        && before.received_at == after.received_at
+    ensure_account_namespace_is_not_pending(&state.store, operation.account.id).await?;
+    confirm_message_epoch(&state.store, target).await?;
+    save_eml_to_downloads(&app, &target.subject, &bytes).map_err(error)
 }
 
 #[tauri::command]
-async fn save_all_attachments(
-    app: tauri::AppHandle,
+async fn save_all_attachments<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: State<'_, Arc<AppState>>,
     message_id: String,
+    expected_uid_validity: Option<i64>,
 ) -> Result<Vec<String>, String> {
-    let attachments = fetch_full_remote_message(state.inner(), &message_id)
+    let operation =
+        remote_message_at_epoch(state.inner(), &message_id, expected_uid_validity).await?;
+    let target = &operation.target;
+    let attachments = fetch_full_remote_message_at_epoch(state.inner(), &operation)
         .await?
         .attachments
         .into_iter()
         .filter(|item| is_downloadable_attachment(&item.attachment))
         .collect::<Vec<_>>();
+    confirm_message_epoch(&state.store, target).await?;
+    let total_count = attachments.len();
     let mut saved = Vec::with_capacity(attachments.len());
+    #[cfg(feature = "native-mail-safety-fixture")]
+    let mut fixture_partial_after_first_save = false;
     for attachment in attachments {
-        saved.push(
-            save_to_downloads(&app, &attachment.attachment, &attachment.bytes).map_err(error)?,
-        );
+        ensure_account_namespace_is_not_pending(&state.store, operation.account.id).await?;
+        #[cfg(feature = "native-mail-safety-fixture")]
+        let confirmation = if fixture_partial_after_first_save {
+            Err("fixture-only partial-save fault after one successful file".into())
+        } else {
+            confirm_message_epoch(&state.store, target)
+                .await
+                .map(|_| ())
+        };
+        #[cfg(not(feature = "native-mail-safety-fixture"))]
+        let confirmation = confirm_message_epoch(&state.store, target)
+            .await
+            .map(|_| ());
+        save_attachment_batch_step(&mut saved, total_count, confirmation, || {
+            save_to_downloads(&app, &attachment.attachment, &attachment.bytes).map_err(error)
+        })?;
+        #[cfg(all(test, feature = "native-mail-safety-fixture"))]
+        attachment_command_artifact_tests::after_successful_bulk_save_for_test(
+            &state.store,
+            target,
+            saved.len(),
+        )
+        .await;
+        // This hook is compiled only into the fictional native fixture build.
+        // It consumes an owned one-shot marker after the first real publish;
+        // the next iteration takes the normal partial-error branch before it
+        // can write another file.
+        #[cfg(feature = "native-mail-safety-fixture")]
+        {
+            fixture_partial_after_first_save =
+                attachment_partial_fault::inject_partial_after_successful_bulk_save(saved.len())
+                    .map_err(|_| partial_attachment_save_error(saved.len(), total_count))?;
+        }
     }
     Ok(saved)
+}
+
+fn save_attachment_batch_step<F>(
+    saved: &mut Vec<String>,
+    total_count: usize,
+    confirmation: Result<(), String>,
+    save: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> Result<String, String>,
+{
+    if confirmation.is_err() {
+        return Err(partial_attachment_save_error(saved.len(), total_count));
+    }
+    match save() {
+        Ok(path) => {
+            saved.push(path);
+            Ok(())
+        }
+        Err(_) => Err(partial_attachment_save_error(saved.len(), total_count)),
+    }
 }
 
 #[tauri::command]
 async fn forward_attachments(
     state: State<'_, Arc<AppState>>,
     message_id: String,
+    expected_uid_validity: Option<i64>,
 ) -> Result<Vec<DroppedAttachment>, String> {
-    let attachments = fetch_full_remote_message(state.inner(), &message_id)
+    let operation =
+        remote_message_at_epoch(state.inner(), &message_id, expected_uid_validity).await?;
+    let target = &operation.target;
+    let attachments = fetch_full_remote_message_at_epoch(state.inner(), &operation)
         .await?
         .attachments
         .into_iter()
         .filter(|item| is_downloadable_attachment(&item.attachment))
         .collect::<Vec<_>>();
+    confirm_message_epoch(&state.store, target).await?;
     if attachments.len() > MAX_DROPPED_ATTACHMENTS {
         return Err(format!(
             "This message has more than {MAX_DROPPED_ATTACHMENTS} attachments"
@@ -2235,6 +3701,7 @@ async fn forward_attachments(
     {
         return Err("The original attachments exceed the forwarding limit".into());
     }
+    ensure_account_namespace_is_not_pending(&state.store, operation.account.id).await?;
     Ok(attachments
         .into_iter()
         .map(|attachment| DroppedAttachment {
@@ -2253,6 +3720,7 @@ fn is_downloadable_attachment(attachment: &Attachment) -> bool {
 /// Authoritative foreground parsing corrects paperclip state for every
 /// message. Starred content is written only when the current local row remains
 /// starred; a fetched provider snapshot must never undo a concurrent unstar.
+#[cfg(test)]
 async fn persist_foreground_message_content(
     store: &Store,
     message: &MailSummary,
@@ -2278,7 +3746,7 @@ async fn persist_foreground_message_content(
 mod attachment_presentation_command_tests {
     use super::*;
     use chrono::Utc;
-    use dakia_core::{storage::AttachmentData, AttachmentPresentation};
+    use dakia_core::{storage::AttachmentData, AttachmentPresentation, AttachmentSizeKind};
     use tempfile::tempdir;
 
     fn attachment(id: &str, presentation: AttachmentPresentation) -> Attachment {
@@ -2288,6 +3756,7 @@ mod attachment_presentation_command_tests {
             filename: format!("{id}.bin"),
             mime_type: "application/octet-stream".into(),
             size_bytes: 3,
+            size_kind: AttachmentSizeKind::Decoded,
             is_inline: matches!(presentation, AttachmentPresentation::Embedded),
             presentation,
             is_potentially_unsafe: false,
@@ -2296,11 +3765,13 @@ mod attachment_presentation_command_tests {
 
     fn complete_message(account_id: String, is_flagged: bool) -> MailSummary {
         MailSummary {
+            mailbox_uid_validity: None,
             id: "message-attachment-presentation".into(),
             account_id,
             mailbox: "INBOX".into(),
             uid: 1,
             message_id: Some("<attachment-presentation@example.test>".into()),
+            gmail_message_id: None,
             in_reply_to: None,
             reference_ids: None,
             thread_id: "message-attachment-presentation".into(),
@@ -2528,97 +3999,60 @@ mod attachment_presentation_command_tests {
     }
 }
 
-async fn fetch_remote_message(
+async fn fetch_full_remote_message_at_epoch(
     state: &Arc<AppState>,
-    message_id: &str,
+    operation: &RemoteMessageOperation,
 ) -> Result<MailSummary, String> {
-    let (summary, account) = remote_message_locator(state, message_id).await?;
-    MailService::new(state.store.clone())
-        .fetch_message(&account, &summary.mailbox, summary.uid as u32)
-        .await
-        .map_err(error)
-}
-
-async fn fetch_full_remote_message(
-    state: &Arc<AppState>,
-    message_id: &str,
-) -> Result<MailSummary, String> {
-    let (summary, account) = remote_message_locator(state, message_id).await?;
-    MailService::new(state.store.clone())
-        .fetch_full_message(&account, &summary.mailbox, summary.uid as u32)
-        .await
-        .map_err(error)
-}
-
-async fn remote_message_locator(
-    state: &Arc<AppState>,
-    message_id: &str,
-) -> Result<(MailSummary, Account), String> {
-    let summary = state
-        .store
-        .messages_by_ids(&[message_id.to_owned()])
-        .await
-        .map_err(error)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| "Message not found".to_owned())?;
-    let account_id = Uuid::parse_str(&summary.account_id).map_err(error)?;
-    let account = state
-        .store
-        .account(account_id)
-        .await
-        .map_err(error)?
-        .ok_or_else(|| "Account not found".to_owned())?;
-    Ok((summary, account))
-}
-
-async fn refetch_and_persist_message(
-    state: &Arc<AppState>,
-    message_id: &str,
-) -> Result<MailSummary, String> {
-    let initial_summary = state
-        .store
-        .messages_by_ids(&[message_id.to_owned()])
-        .await
-        .map_err(error)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| "Message not found".to_owned())?;
-    let account_id = Uuid::parse_str(&initial_summary.account_id).map_err(error)?;
-    let _operation = state.account_operations.acquire(account_id).await;
-    let summary = state
-        .store
-        .messages_by_ids(&[message_id.to_owned()])
-        .await
-        .map_err(error)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| "Message changed while it was being repaired".to_owned())?;
-    if summary.account_id != initial_summary.account_id {
-        return Err("Message changed while it was being repaired".to_owned());
-    }
-    let account = state
-        .store
-        .account(account_id)
-        .await
-        .map_err(error)?
-        .ok_or_else(|| "Account not found".to_owned())?;
-    let message = MailService::new(state.store.clone())
-        .fetch_message(&account, &summary.mailbox, summary.uid as u32)
+    let target = &operation.target;
+    confirm_message_epoch(&state.store, target).await?;
+    let fetched = MailService::new(state.store.clone())
+        .fetch_full_message(&operation.account, &target.mailbox, target.uid as u32)
         .await
         .map_err(error)?;
-    let content = CachedMessageContent {
-        body_text: message.body_text.clone(),
-        body_html: message.body_html.clone(),
-        unsubscribe_kind: message.unsubscribe_kind.clone(),
-        attachments: message
-            .attachments
-            .iter()
-            .map(|item| item.attachment.clone())
-            .collect(),
-    };
-    persist_foreground_message_content(&state.store, &message, &content).await?;
-    Ok(message)
+    if !same_message_epoch_identity(target, &fetched) {
+        return Err(message_identity_changed_error());
+    }
+    ensure_account_namespace_is_not_pending(&state.store, operation.account.id).await?;
+    confirm_message_epoch(&state.store, target).await?;
+    Ok(fetched)
+}
+
+struct RemoteMessageOperation {
+    target: MailSummary,
+    account: Account,
+    epoch: i64,
+    _account_operation: AccountOperationGuard,
+}
+
+async fn remote_message_at_epoch(
+    state: &Arc<AppState>,
+    message_id: &str,
+    expected_uid_validity: Option<i64>,
+) -> Result<RemoteMessageOperation, String> {
+    let initial = current_message_at_epoch(&state.store, message_id, expected_uid_validity).await?;
+    let account_id = Uuid::parse_str(&initial.account_id).map_err(error)?;
+    let account_operation = state.account_operations.acquire(account_id).await;
+    let target = current_message_at_epoch(&state.store, message_id, expected_uid_validity).await?;
+    if !same_message_epoch_identity(&initial, &target) {
+        return Err(message_identity_changed_error());
+    }
+    ensure_account_namespace_is_not_pending(&state.store, account_id).await?;
+    let epoch = target
+        .mailbox_uid_validity
+        .ok_or_else(message_identity_changed_error)?;
+    let account = state
+        .store
+        .account(account_id)
+        .await
+        .map_err(error)?
+        .ok_or_else(|| "Account not found".to_owned())?;
+    confirm_message_epoch(&state.store, &target).await?;
+    Ok(RemoteMessageOperation {
+        target,
+        account,
+        epoch,
+        _account_operation: account_operation,
+    })
 }
 
 struct OpenDroppedFile {
@@ -3000,24 +4434,82 @@ mod dropped_file_receipt_tests {
     }
 }
 
-fn save_to_downloads(
-    app: &tauri::AppHandle,
+fn save_to_downloads<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     attachment: &Attachment,
     bytes: &[u8],
 ) -> anyhow::Result<String> {
-    let downloads = app.path().download_dir()?;
+    let downloads = attachment_download_directory(app)?;
     let filename = dakia_core::mail::safe_attachment_filename(&attachment.filename, 0);
     Ok(save_private_download(&downloads, &filename, bytes)?
         .to_string_lossy()
         .into_owned())
 }
 
-fn save_eml_to_downloads(
-    app: &tauri::AppHandle,
+fn attachment_download_directory<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> anyhow::Result<PathBuf> {
+    #[cfg(feature = "native-mail-safety-fixture")]
+    if let Some(downloads) = native_mail_safety_download_directory()? {
+        return Ok(downloads);
+    }
+    Ok(app.path().download_dir()?)
+}
+
+/// Recheck the owned fixture directory on every save. The runner validates it
+/// before startup too, but a later symlink replacement must not turn an email
+/// download into a write outside the fictional acceptance run.
+#[cfg(feature = "native-mail-safety-fixture")]
+fn native_mail_safety_download_directory() -> anyhow::Result<Option<PathBuf>> {
+    match std::env::var("DAKIA_NATIVE_MAIL_SAFETY_FIXTURE") {
+        Ok(value) if value == "1" => {}
+        Ok(_) => anyhow::bail!("native mail-safety fixture marker must equal 1"),
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+    let root = PathBuf::from(
+        std::env::var("DAKIA_NATIVE_MAIL_SAFETY_ROOT")
+            .map_err(|_| anyhow::anyhow!("native mail-safety fixture root is required"))?,
+    );
+    let downloads = PathBuf::from(
+        std::env::var("DAKIA_NATIVE_MAIL_SAFETY_DOWNLOADS_DIR").map_err(|_| {
+            anyhow::anyhow!("native mail-safety fixture Downloads directory is required")
+        })?,
+    );
+    Ok(Some(verified_native_mail_safety_download_directory(
+        &root, &downloads,
+    )?))
+}
+
+#[cfg(feature = "native-mail-safety-fixture")]
+fn verified_native_mail_safety_download_directory(
+    root: &Path,
+    downloads: &Path,
+) -> anyhow::Result<PathBuf> {
+    if !root.is_absolute() || !downloads.is_absolute() {
+        anyhow::bail!("native mail-safety fixture paths must be absolute");
+    }
+    let root = root.canonicalize()?;
+    if std::fs::read_to_string(root.join(".dakia-native-mail-safety-root"))
+        .ok()
+        .as_deref()
+        != Some(NATIVE_MAIL_SAFETY_FIXTURE_MARKER)
+    {
+        anyhow::bail!("native mail-safety fixture root lacks its exact ownership sentinel");
+    }
+    let downloads = downloads.canonicalize()?;
+    if !downloads.is_dir() || !downloads.starts_with(&root) {
+        anyhow::bail!("native mail-safety fixture Downloads directory must be inside its root");
+    }
+    Ok(downloads)
+}
+
+fn save_eml_to_downloads<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     subject: &str,
     bytes: &[u8],
 ) -> anyhow::Result<String> {
-    let downloads = app.path().download_dir()?;
+    let downloads = attachment_download_directory(app)?;
     Ok(
         save_private_download(&downloads, &eml_export_filename(subject), bytes)?
             .to_string_lossy()
@@ -3063,25 +4555,518 @@ fn save_private_download(
     filename: &str,
     bytes: &[u8],
 ) -> anyhow::Result<PathBuf> {
+    save_private_download_with_writer(downloads, filename, bytes, |file, contents| {
+        file.write_all(contents).and_then(|_| file.sync_all())
+    })
+}
+
+/// The writer seam keeps fault tests at the exact create/write/fsync/cleanup
+/// boundary. The production caller above always uses the real filesystem.
+#[cfg(unix)]
+fn save_private_download_with_writer<F>(
+    downloads: &Path,
+    filename: &str,
+    bytes: &[u8],
+    write_and_sync: F,
+) -> anyhow::Result<PathBuf>
+where
+    F: FnMut(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+{
+    save_private_download_with_directory_descriptor(
+        downloads,
+        filename,
+        bytes,
+        write_and_sync,
+        quarantine_download,
+        |_| Ok(()),
+        || Ok(()),
+        || Ok(()),
+    )
+}
+
+#[cfg(not(unix))]
+fn save_private_download_with_writer<F>(
+    downloads: &Path,
+    filename: &str,
+    bytes: &[u8],
+    write_and_sync: F,
+) -> anyhow::Result<PathBuf>
+where
+    F: FnMut(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+{
+    save_private_download_with_operations(
+        downloads,
+        filename,
+        bytes,
+        |path| std::fs::create_dir_all(path),
+        open_private_download_file,
+        write_and_sync,
+        quarantine_download,
+    )
+}
+
+/// On Unix, pin the configured Downloads directory by descriptor before
+/// creating an attachment. A configured directory symlink remains valid, but
+/// later path swaps cannot redirect `openat` or cleanup to a different parent.
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn save_private_download_with_directory_descriptor<W, Q, D, F, P>(
+    downloads: &Path,
+    filename: &str,
+    bytes: &[u8],
+    mut write_and_sync: W,
+    mut quarantine: Q,
+    mut after_directory_open: D,
+    mut after_file_open: F,
+    mut before_publish: P,
+) -> anyhow::Result<PathBuf>
+where
+    W: FnMut(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+    Q: FnMut(&std::fs::File) -> anyhow::Result<()>,
+    D: FnMut(&std::fs::File) -> anyhow::Result<()>,
+    F: FnMut() -> anyhow::Result<()>,
+    P: FnMut() -> anyhow::Result<()>,
+{
+    let mut after_publish = || Ok(());
+    save_private_download_with_directory_descriptor_and_cleanup(
+        downloads,
+        filename,
+        bytes,
+        &mut write_and_sync,
+        &mut quarantine,
+        &mut after_directory_open,
+        &mut after_file_open,
+        &mut before_publish,
+        &mut after_publish,
+        private_download_candidate_exists_at,
+        unlink_private_download_at,
+        sync_private_download_directory,
+    )
+}
+
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn save_private_download_with_directory_descriptor_and_cleanup<W, Q, D, F, P, A, C, U, S>(
+    downloads: &Path,
+    filename: &str,
+    bytes: &[u8],
+    write_and_sync: &mut W,
+    quarantine: &mut Q,
+    after_directory_open: &mut D,
+    after_file_open: &mut F,
+    before_publish: &mut P,
+    after_publish: &mut A,
+    mut candidate_exists: C,
+    mut unlink_temporary: U,
+    mut sync_directory: S,
+) -> anyhow::Result<PathBuf>
+where
+    W: FnMut(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+    Q: FnMut(&std::fs::File) -> anyhow::Result<()>,
+    D: FnMut(&std::fs::File) -> anyhow::Result<()>,
+    F: FnMut() -> anyhow::Result<()>,
+    P: FnMut() -> anyhow::Result<()>,
+    A: FnMut() -> anyhow::Result<()>,
+    C: FnMut(&std::fs::File, &std::ffi::CStr) -> std::io::Result<bool>,
+    U: FnMut(&std::fs::File, &std::ffi::CStr) -> std::io::Result<()>,
+    S: FnMut(&std::fs::File) -> std::io::Result<()>,
+{
+    if !is_safe_download_filename(filename) {
+        anyhow::bail!("attachment filename is not a safe basename");
+    }
     std::fs::create_dir_all(downloads)?;
+    let directory = std::fs::File::open(downloads)?;
+    if !directory.metadata()?.is_dir() {
+        anyhow::bail!("Downloads path is not a directory");
+    }
+    after_directory_open(&directory)?;
+
+    for counter in 0..10_000 {
+        let final_name = CString::new(download_name(filename, counter))?;
+        match candidate_exists(&directory, &final_name) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => return Err(error.into()),
+        }
+        let (temporary_name, mut file) = open_private_download_temporary_at(&directory)?;
+        if let Err(hook_error) = after_file_open() {
+            return Err(cleanup_temporary_download_error(
+                hook_error,
+                &directory,
+                &temporary_name,
+                &mut unlink_temporary,
+                &mut sync_directory,
+            ));
+        }
+        if let Err(write_error) = write_and_sync(&mut file, bytes) {
+            return Err(cleanup_temporary_download_error(
+                write_error.into(),
+                &directory,
+                &temporary_name,
+                &mut unlink_temporary,
+                &mut sync_directory,
+            ));
+        }
+        if let Err(permission_error) = file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        {
+            return Err(cleanup_temporary_download_error(
+                permission_error.into(),
+                &directory,
+                &temporary_name,
+                &mut unlink_temporary,
+                &mut sync_directory,
+            ));
+        }
+        if let Err(quarantine_error) = quarantine(&file) {
+            return Err(cleanup_temporary_download_error(
+                quarantine_error,
+                &directory,
+                &temporary_name,
+                &mut unlink_temporary,
+                &mut sync_directory,
+            ));
+        }
+        if let Err(barrier_error) = before_publish() {
+            return Err(cleanup_temporary_download_error(
+                barrier_error,
+                &directory,
+                &temporary_name,
+                &mut unlink_temporary,
+                &mut sync_directory,
+            ));
+        }
+        if !downloads_directory_matches(&directory, downloads)? {
+            return Err(cleanup_temporary_download_error(
+                anyhow::anyhow!(
+                    "Downloads directory changed while saving. Retry the attachment save."
+                ),
+                &directory,
+                &temporary_name,
+                &mut unlink_temporary,
+                &mut sync_directory,
+            ));
+        }
+
+        match publish_private_download_at(&directory, &temporary_name, &final_name) {
+            Ok(PublishPrivateDownload::PublishedAndTemporaryRemoved) => {}
+            #[cfg(not(target_os = "macos"))]
+            Ok(PublishPrivateDownload::PublishedWithTemporary) => {
+                if let Err(cleanup_error) = cleanup_temporary_download(
+                    &directory,
+                    &temporary_name,
+                    &mut unlink_temporary,
+                    &mut sync_directory,
+                ) {
+                    return Err(anyhow::anyhow!(
+                        "Attachment was saved, but hidden temporary cleanup failed: {cleanup_error}"
+                    ));
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                if let Err(cleanup_error) = cleanup_temporary_download(
+                    &directory,
+                    &temporary_name,
+                    &mut unlink_temporary,
+                    &mut sync_directory,
+                ) {
+                    return Err(anyhow::anyhow!(
+                        "could not choose a safe filename in Downloads; hidden temporary cleanup failed: {cleanup_error}"
+                    ));
+                }
+                continue;
+            }
+            Err(error) => {
+                return Err(cleanup_temporary_download_error(
+                    error.into(),
+                    &directory,
+                    &temporary_name,
+                    &mut unlink_temporary,
+                    &mut sync_directory,
+                ));
+            }
+        }
+
+        if let Err(hook_error) = after_publish() {
+            return Err(cleanup_published_download_error(
+                hook_error,
+                &directory,
+                &final_name,
+                &mut unlink_temporary,
+                &mut sync_directory,
+            ));
+        }
+        if let Err(_sync_error) = sync_directory(&directory) {
+            tracing::warn!("attachment download directory sync failed after publication");
+        }
+        if !downloads_directory_matches(&directory, downloads)? {
+            return Err(cleanup_published_download_error(
+                anyhow::anyhow!(
+                    "Downloads directory changed while publishing. Retry the attachment save."
+                ),
+                &directory,
+                &final_name,
+                &mut unlink_temporary,
+                &mut sync_directory,
+            ));
+        }
+        return Ok(downloads.join(final_name.to_string_lossy().as_ref()));
+    }
+    Err(anyhow::anyhow!(
+        "could not choose a safe filename in Downloads"
+    ))
+}
+
+/// Probe the candidate through the pinned Downloads descriptor before doing
+/// the durable temporary-file work. This is advisory only: the later
+/// descriptor-relative exclusive publish remains the authority for races.
+/// Existing symlinks count as occupied without being followed.
+#[cfg(unix)]
+fn private_download_candidate_exists_at(
+    directory: &std::fs::File,
+    name: &std::ffi::CStr,
+) -> std::io::Result<bool> {
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let result = unsafe {
+        libc::fstatat(
+            std::os::fd::AsRawFd::as_raw_fd(directory),
+            name.as_ptr(),
+            metadata.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result == 0 {
+        return Ok(true);
+    }
+
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ENOENT) {
+        Ok(false)
+    } else {
+        Err(error)
+    }
+}
+
+#[cfg(unix)]
+fn open_private_download_temporary_at(
+    directory: &std::fs::File,
+) -> anyhow::Result<(CString, std::fs::File)> {
+    for _ in 0..10_000 {
+        let temporary_name = CString::new(format!(".dakia-{}.partial", Uuid::new_v4()))?;
+        match open_private_download_at(directory, &temporary_name) {
+            Ok(file) => return Ok((temporary_name, file)),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(anyhow::anyhow!(
+        "could not allocate a private temporary attachment file"
+    ))
+}
+
+#[cfg(unix)]
+fn cleanup_temporary_download<U, S>(
+    directory: &std::fs::File,
+    temporary_name: &std::ffi::CStr,
+    unlink_temporary: &mut U,
+    sync_directory: &mut S,
+) -> std::io::Result<()>
+where
+    U: FnMut(&std::fs::File, &std::ffi::CStr) -> std::io::Result<()>,
+    S: FnMut(&std::fs::File) -> std::io::Result<()>,
+{
+    unlink_temporary(directory, temporary_name)?;
+    sync_directory(directory)
+}
+
+#[cfg(unix)]
+fn cleanup_temporary_download_error<U, S>(
+    original: anyhow::Error,
+    directory: &std::fs::File,
+    temporary_name: &std::ffi::CStr,
+    unlink_temporary: &mut U,
+    sync_directory: &mut S,
+) -> anyhow::Error
+where
+    U: FnMut(&std::fs::File, &std::ffi::CStr) -> std::io::Result<()>,
+    S: FnMut(&std::fs::File) -> std::io::Result<()>,
+{
+    match cleanup_temporary_download(directory, temporary_name, unlink_temporary, sync_directory) {
+        Ok(()) => original,
+        Err(cleanup_error) => {
+            anyhow::anyhow!("{original}; a hidden temporary attachment may remain: {cleanup_error}")
+        }
+    }
+}
+
+#[cfg(unix)]
+fn cleanup_published_download_error<U, S>(
+    original: anyhow::Error,
+    directory: &std::fs::File,
+    final_name: &std::ffi::CStr,
+    unlink_temporary: &mut U,
+    sync_directory: &mut S,
+) -> anyhow::Error
+where
+    U: FnMut(&std::fs::File, &std::ffi::CStr) -> std::io::Result<()>,
+    S: FnMut(&std::fs::File) -> std::io::Result<()>,
+{
+    match cleanup_temporary_download(directory, final_name, unlink_temporary, sync_directory) {
+        Ok(()) => original,
+        Err(cleanup_error) => {
+            anyhow::anyhow!("{original}; saved attachment may remain: {cleanup_error}")
+        }
+    }
+}
+
+#[cfg(unix)]
+fn downloads_directory_matches(
+    directory: &std::fs::File,
+    downloads: &Path,
+) -> anyhow::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+
+    let pinned = directory.metadata()?;
+    let Ok(current) = std::fs::metadata(downloads) else {
+        return Ok(false);
+    };
+    Ok(pinned.dev() == current.dev() && pinned.ino() == current.ino())
+}
+
+#[cfg(unix)]
+fn sync_private_download_directory(directory: &std::fs::File) -> std::io::Result<()> {
+    directory.sync_all()
+}
+
+#[cfg(unix)]
+enum PublishPrivateDownload {
+    PublishedAndTemporaryRemoved,
+    #[cfg(not(target_os = "macos"))]
+    PublishedWithTemporary,
+}
+
+#[cfg(target_os = "macos")]
+fn publish_private_download_at(
+    directory: &std::fs::File,
+    temporary_name: &std::ffi::CStr,
+    final_name: &std::ffi::CStr,
+) -> std::io::Result<PublishPrivateDownload> {
+    let result = unsafe {
+        libc::renameatx_np(
+            directory.as_raw_fd(),
+            temporary_name.as_ptr(),
+            directory.as_raw_fd(),
+            final_name.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(PublishPrivateDownload::PublishedAndTemporaryRemoved)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn publish_private_download_at(
+    directory: &std::fs::File,
+    temporary_name: &std::ffi::CStr,
+    final_name: &std::ffi::CStr,
+) -> std::io::Result<PublishPrivateDownload> {
+    let result = unsafe {
+        libc::linkat(
+            directory.as_raw_fd(),
+            temporary_name.as_ptr(),
+            directory.as_raw_fd(),
+            final_name.as_ptr(),
+            0,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(PublishPrivateDownload::PublishedWithTemporary)
+}
+
+#[cfg(unix)]
+fn open_private_download_at(
+    directory: &std::fs::File,
+    name: &std::ffi::CStr,
+) -> std::io::Result<std::fs::File> {
+    let descriptor = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { std::fs::File::from_raw_fd(descriptor) })
+}
+
+#[cfg(unix)]
+fn unlink_private_download_at(
+    directory: &std::fs::File,
+    name: &std::ffi::CStr,
+) -> std::io::Result<()> {
+    let result = unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn open_private_download_file(candidate: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options.open(candidate)
+}
+
+/// Test-only operation seams for create/open fault injection. Unix production
+/// saves use the descriptor-relative helper above, so path swaps cannot affect
+/// attachment creation or cleanup.
+#[cfg_attr(unix, allow(dead_code))]
+fn save_private_download_with_operations<D, O, W, Q>(
+    downloads: &Path,
+    filename: &str,
+    bytes: &[u8],
+    mut create_downloads: D,
+    mut open_new: O,
+    mut write_and_sync: W,
+    mut quarantine: Q,
+) -> anyhow::Result<PathBuf>
+where
+    D: FnMut(&Path) -> std::io::Result<()>,
+    O: FnMut(&Path) -> std::io::Result<std::fs::File>,
+    W: FnMut(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+    Q: FnMut(&std::fs::File) -> anyhow::Result<()>,
+{
+    if !is_safe_download_filename(filename) {
+        anyhow::bail!("attachment filename is not a safe basename");
+    }
+    create_downloads(downloads)?;
     for counter in 0..10_000 {
         let candidate = downloads.join(download_name(filename, counter));
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        match options.open(&candidate) {
+        match open_new(&candidate) {
             Ok(mut file) => {
-                if let Err(write_error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
+                if let Err(write_error) = write_and_sync(&mut file, bytes) {
                     let _ = std::fs::remove_file(&candidate);
                     return Err(write_error.into());
                 }
                 #[cfg(unix)]
                 if let Err(permission_error) =
-                    std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o600))
+                    file.set_permissions(std::fs::Permissions::from_mode(0o600))
                 {
                     let _ = std::fs::remove_file(&candidate);
                     return Err(permission_error.into());
+                }
+                if let Err(quarantine_error) = quarantine(&file) {
+                    let _ = std::fs::remove_file(&candidate);
+                    return Err(quarantine_error);
                 }
                 return Ok(candidate);
             }
@@ -3092,6 +5077,45 @@ fn save_private_download(
     Err(anyhow::anyhow!(
         "could not choose a safe filename in Downloads"
     ))
+}
+
+fn is_safe_download_filename(filename: &str) -> bool {
+    let mut components = Path::new(filename).components();
+    matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none()
+}
+
+/// Mark the opened inode rather than following a path that could have been
+/// replaced since create_new. Email downloads must keep Gatekeeper provenance.
+#[cfg(target_os = "macos")]
+fn quarantine_download(file: &std::fs::File) -> anyhow::Result<()> {
+    use std::os::fd::AsRawFd;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let value = format!("0081;{timestamp:x};Dakia;");
+    // The name is a static NUL-terminated string and the value is valid for
+    // its explicit length. The descriptor remains owned by file throughout.
+    let result = unsafe {
+        libc::fsetxattr(
+            file.as_raw_fd(),
+            c"com.apple.quarantine".as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            0,
+            0,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    file.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn quarantine_download(_file: &std::fs::File) -> anyhow::Result<()> {
+    Ok(())
 }
 
 fn download_name(filename: &str, counter: usize) -> String {
@@ -3174,11 +5198,13 @@ mod download_tests {
     #[test]
     fn export_identity_rejects_uid_reuse_after_a_mailbox_epoch_change() {
         let before = MailSummary {
+            mailbox_uid_validity: None,
             id: "message".into(),
             account_id: Uuid::nil().to_string(),
             mailbox: "INBOX".into(),
             uid: 42,
             message_id: Some("<old@example.test>".into()),
+            gmail_message_id: None,
             in_reply_to: None,
             reference_ids: None,
             thread_id: "thread".into(),
@@ -3214,6 +5240,33 @@ mod download_tests {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[derive(Debug, Eq, PartialEq)]
+struct MacosAppMenuQuitSpec {
+    id: &'static str,
+    text: &'static str,
+    accelerator: &'static str,
+}
+
+#[cfg(target_os = "macos")]
+fn macos_app_menu_quit_spec() -> MacosAppMenuQuitSpec {
+    MacosAppMenuQuitSpec {
+        id: APP_MENU_QUIT_ID,
+        text: "Quit Dakia",
+        accelerator: "CmdOrCtrl+Q",
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn build_macos_app_quit_item<R: tauri::Runtime>(
+    app: &tauri::App<R>,
+) -> tauri::Result<tauri::menu::MenuItem<R>> {
+    let spec = macos_app_menu_quit_spec();
+    MenuItemBuilder::with_id(spec.id, spec.text)
+        .accelerator(spec.accelerator)
+        .build(app)
+}
+
 fn install_app_menu(app: &tauri::App) -> tauri::Result<()> {
     let settings = MenuItemBuilder::with_id("settings", "Settings…")
         .accelerator("CmdOrCtrl+,")
@@ -3245,6 +5298,8 @@ fn install_app_menu(app: &tauri::App) -> tauri::Result<()> {
     let keyboard_shortcuts =
         MenuItemBuilder::with_id("keyboard-shortcuts", "Keyboard Shortcuts").build(app)?;
     #[cfg(target_os = "macos")]
+    let app_quit = build_macos_app_quit_item(app)?;
+    #[cfg(target_os = "macos")]
     let terminal_command = {
         let label = app
             .path()
@@ -3270,6 +5325,18 @@ fn install_app_menu(app: &tauri::App) -> tauri::Result<()> {
         .item(&check_for_updates);
     #[cfg(target_os = "macos")]
     let app_menu_builder = app_menu_builder.separator().item(&terminal_command);
+    #[cfg(target_os = "macos")]
+    let app_menu = app_menu_builder
+        .separator()
+        .services()
+        .separator()
+        .hide()
+        .hide_others()
+        .show_all()
+        .separator()
+        .item(&app_quit)
+        .build()?;
+    #[cfg(not(target_os = "macos"))]
     let app_menu = app_menu_builder
         .separator()
         .services()
@@ -3435,6 +5502,25 @@ async fn update_account(
         MailRebuildCancellationDisposition::Retain,
     );
     let _operation = state.account_operations.acquire(input.id).await;
+    // Coordinate this supported account-configuration mutation with a CLI
+    // provider operation in another process. This is intentionally distinct
+    // from the per-account in-process lock and is held through credential
+    // writes, account publication, and watcher reconciliation.
+    let _profile_operation = match state.store.acquire_profile_operation_guard().await {
+        Ok(guard) => guard,
+        Err(profile_error) => {
+            // Cancellation was requested before this lock. Re-arm a retained
+            // rebuild before reporting a busy or unavailable profile lock so
+            // a CLI operation cannot leave it cancelled indefinitely. This
+            // read is cleanup only; the authoritative configuration reread is
+            // below, after the profile operation guard is held.
+            if let Ok(Some(current_account)) = state.store.account(input.id).await {
+                resume_scheduled_mail_rebuild(app.clone(), state.inner().clone(), current_account)
+                    .await;
+            }
+            return Err(error(profile_error));
+        }
+    };
     let mut account = state
         .store
         .account(input.id)
@@ -3746,7 +5832,7 @@ async fn remove_account(
         MailRebuildCancellationDisposition::Remove,
     );
     let _operation = state.account_operations.acquire(account_id).await;
-    let account = state
+    state
         .store
         .account(account_id)
         .await
@@ -3755,14 +5841,9 @@ async fn remove_account(
     // `stop_account` waits for the watcher task to leave IMAP and complete
     // its current storage call before destructive storage work begins.
     state.realtime.stop_account(account_id).await;
-    MailService::new(state.store.clone())
-        .credentials()
-        .delete(&account)
-        .await
-        .map_err(error)?;
     state
         .store
-        .delete_account(account_id)
+        .delete_account_with_credential(account_id)
         .await
         .map_err(error)?;
     if let Err(error) = app.emit(
@@ -3778,12 +5859,340 @@ async fn remove_account(
 }
 
 #[tauri::command]
-fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
-    let parsed = Url::parse(&url).map_err(error)?;
+fn open_external_url<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    url: String,
+) -> Result<(), String> {
+    validate_external_url(&url)?;
+    app.opener().open_url(url, None::<&str>).map_err(error)
+}
+
+fn validate_external_url(url: &str) -> Result<(), String> {
+    if url.trim() != url || url.chars().any(char::is_control) {
+        return Err("This link contains invalid characters".into());
+    }
+    let parsed = Url::parse(url).map_err(|_| "This link is not valid".to_owned())?;
     if !matches!(parsed.scheme(), "http" | "https" | "mailto") {
         return Err("Only web and email links can be opened".into());
     }
-    app.opener().open_url(url, None::<&str>).map_err(error)
+    if matches!(parsed.scheme(), "http" | "https")
+        && (parsed.host_str().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some())
+    {
+        return Err("Web links must have a host and cannot contain login details".into());
+    }
+    Ok(())
+}
+
+struct MailWindowSpec {
+    label: String,
+    path: String,
+    title: &'static str,
+    size: (f64, f64),
+    minimum_size: (f64, f64),
+}
+
+#[cfg(all(feature = "native-mail-safety-fixture", target_os = "macos"))]
+fn validate_native_mail_safety_data_store_identifier(
+    fixture_marker: Option<&str>,
+    root_is_marked: bool,
+    configured_identifier: Option<[u8; 16]>,
+) -> anyhow::Result<Option<[u8; 16]>> {
+    let Some(identifier) = configured_identifier else {
+        return Ok(None);
+    };
+    let Some(fixture_marker) = fixture_marker else {
+        anyhow::bail!("native mail-safety data store requires the exact fixture marker");
+    };
+    if fixture_marker != "1" {
+        anyhow::bail!("native mail-safety fixture marker must equal 1");
+    }
+    if !root_is_marked {
+        anyhow::bail!("native mail-safety data store requires its exact owned fixture root");
+    }
+    let uuid = Uuid::from_bytes(identifier);
+    if uuid.get_version_num() != 4 || uuid.get_variant() != uuid::Variant::RFC4122 {
+        anyhow::bail!("native mail-safety data store must use a random UUID");
+    }
+    Ok(Some(identifier))
+}
+
+#[cfg(all(feature = "native-mail-safety-fixture", target_os = "macos"))]
+fn parse_native_mail_safety_data_store_identifier(value: &str) -> anyhow::Result<[u8; 16]> {
+    let identifier = Uuid::parse_str(value)
+        .map_err(|_| anyhow::anyhow!("native mail-safety data store UUID is invalid"))?;
+    if identifier.to_string() != value {
+        anyhow::bail!("native mail-safety data store UUID must be canonical");
+    }
+    Ok(*identifier.as_bytes())
+}
+
+#[cfg(all(feature = "native-mail-safety-fixture", target_os = "macos"))]
+fn native_mail_safety_data_store_identifier_from_environment() -> anyhow::Result<Option<[u8; 16]>> {
+    let configured_identifier =
+        match std::env::var("DAKIA_NATIVE_MAIL_SAFETY_DATA_STORE_IDENTIFIER") {
+            Ok(value) => Some(parse_native_mail_safety_data_store_identifier(&value)?),
+            Err(std::env::VarError::NotPresent) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+    let fixture_marker = match std::env::var("DAKIA_NATIVE_MAIL_SAFETY_FIXTURE") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => return Err(error.into()),
+    };
+    let fixture_is_marked = if fixture_marker.as_deref() == Some("1") {
+        let root = std::env::var("DAKIA_NATIVE_MAIL_SAFETY_ROOT")
+            .map(PathBuf::from)
+            .map_err(|_| anyhow::anyhow!("DAKIA_NATIVE_MAIL_SAFETY_ROOT is required"))?;
+        if !root.is_absolute() {
+            anyhow::bail!("native mail-safety fixture root must be absolute");
+        }
+        let root = root.canonicalize()?;
+        if std::fs::read_to_string(root.join(".dakia-native-mail-safety-root"))
+            .ok()
+            .as_deref()
+            != Some(NATIVE_MAIL_SAFETY_FIXTURE_MARKER)
+        {
+            anyhow::bail!("native mail-safety fixture root lacks its exact ownership sentinel");
+        }
+        let profile = std::env::var("DAKIA_NATIVE_MAIL_SAFETY_DATA_DIR")
+            .map(PathBuf::from)
+            .map_err(|_| anyhow::anyhow!("DAKIA_NATIVE_MAIL_SAFETY_DATA_DIR is required"))?;
+        native_mail_safety_profile_directory(&root, profile)?;
+        true
+    } else {
+        false
+    };
+    validate_native_mail_safety_data_store_identifier(
+        fixture_marker.as_deref(),
+        fixture_is_marked,
+        configured_identifier,
+    )
+}
+
+#[cfg(all(feature = "native-mail-safety-fixture", target_os = "macos"))]
+fn set_native_mail_safety_main_data_store_identifier(
+    windows: &mut [tauri::utils::config::WindowConfig],
+    identifier: Option<[u8; 16]>,
+) -> anyhow::Result<()> {
+    let mut main_windows = windows.iter_mut().filter(|window| window.label == "main");
+    let main = main_windows
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("native mail-safety fixture config has no main window"))?;
+    if main_windows.next().is_some() {
+        anyhow::bail!("native mail-safety fixture config contains duplicate main windows");
+    }
+    if main.data_store_identifier.is_some() {
+        anyhow::bail!("native mail-safety fixture config must omit a static data-store identifier");
+    }
+    main.data_store_identifier = identifier;
+    Ok(())
+}
+
+#[cfg(all(feature = "native-mail-safety-fixture", target_os = "macos"))]
+fn apply_native_mail_safety_data_store_identifier<R: tauri::Runtime>(
+    context: &mut tauri::Context<R>,
+) -> anyhow::Result<()> {
+    let identifier = native_mail_safety_data_store_identifier_from_environment()?;
+    set_native_mail_safety_main_data_store_identifier(
+        &mut context.config_mut().app.windows,
+        identifier,
+    )
+}
+
+#[cfg(all(feature = "native-mail-safety-fixture", target_os = "macos"))]
+fn native_mail_safety_data_store_identifier<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> anyhow::Result<Option<[u8; 16]>> {
+    let expected = native_mail_safety_data_store_identifier_from_environment()?;
+    let mut main_windows = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .filter(|window| window.label == "main");
+    let configured = main_windows
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("native mail-safety fixture config has no main window"))?
+        .data_store_identifier;
+    if main_windows.next().is_some() {
+        anyhow::bail!("native mail-safety fixture config contains duplicate main windows");
+    }
+    if configured != expected {
+        anyhow::bail!("native mail-safety data-store configuration changed after startup");
+    }
+    Ok(expected)
+}
+
+fn open_mail_window<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    spec: MailWindowSpec,
+) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(&spec.label) {
+        window
+            .show()
+            .and_then(|_| window.set_focus())
+            .map_err(error)?;
+        return Ok(());
+    }
+    let builder = WebviewWindowBuilder::new(app, spec.label, WebviewUrl::App(spec.path.into()));
+    #[cfg(all(feature = "native-mail-safety-fixture", target_os = "macos"))]
+    let builder = match native_mail_safety_data_store_identifier(app).map_err(error)? {
+        Some(identifier) => builder.data_store_identifier(identifier),
+        None => builder,
+    };
+    let builder = builder
+        .title(spec.title)
+        .inner_size(spec.size.0, spec.size.1)
+        .min_inner_size(spec.minimum_size.0, spec.minimum_size.1)
+        .center()
+        .focused(true)
+        .resizable(true)
+        .decorations(true)
+        .shadow(true);
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true);
+    builder.build().map(|_| ()).map_err(error)
+}
+
+fn window_seed_key(seed_key: &str) -> Result<(), String> {
+    if seed_key.len() != 36 || Uuid::parse_str(seed_key).is_err() {
+        return Err("Window seed key is invalid".into());
+    }
+    Ok(())
+}
+
+fn is_reader_window_label(label: &str) -> bool {
+    label.len() == "reader-".len() + 32
+        && label.strip_prefix("reader-").is_some_and(|digest| {
+            digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        })
+}
+
+fn compose_opener_label<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+) -> Result<String, String> {
+    let label = window.label();
+    if label == "main" || is_reader_window_label(label) {
+        Ok(label.to_string())
+    } else {
+        Err("Compose windows may only be opened by the main or Reader window".into())
+    }
+}
+
+#[tauri::command]
+fn open_compose_window<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    window: tauri::WebviewWindow<R>,
+    seed_key: Option<String>,
+    seed_db_key: Option<String>,
+) -> Result<String, String> {
+    let opener = compose_opener_label(&window)?;
+    let seed = match (seed_key, seed_db_key) {
+        (Some(seed_key), None) => {
+            window_seed_key(&seed_key)?;
+            ("seedKey", seed_key)
+        }
+        (None, Some(seed_db_key)) => {
+            window_seed_key(&seed_db_key)?;
+            ("seedDbKey", seed_db_key)
+        }
+        _ => return Err("Compose windows require exactly one draft seed key".into()),
+    };
+    let label = format!("compose-{}", Uuid::new_v4());
+    // The caller label is derived from the authenticated WebviewWindow, not
+    // from IPC input. Both permitted labels have a restricted ASCII form.
+    let path = format!("/?view=compose&{}={}&opener={opener}", seed.0, seed.1);
+    open_mail_window(
+        &app,
+        MailWindowSpec {
+            label: label.clone(),
+            path,
+            title: "New message",
+            size: (880.0, 700.0),
+            minimum_size: (620.0, 480.0),
+        },
+    )?;
+    Ok(label)
+}
+
+#[tauri::command]
+fn open_reader_window<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    label: String,
+    seed_key: Option<String>,
+    seed_db_key: Option<String>,
+) -> Result<(), String> {
+    if !is_reader_window_label(&label) {
+        return Err("Reader window label is invalid".into());
+    }
+    let path = reader_window_path(seed_key, seed_db_key)?;
+    open_mail_window(
+        &app,
+        MailWindowSpec {
+            label,
+            path,
+            title: "Dakia",
+            size: (980.0, 760.0),
+            minimum_size: (600.0, 480.0),
+        },
+    )
+}
+
+fn reader_window_path(
+    seed_key: Option<String>,
+    seed_db_key: Option<String>,
+) -> Result<String, String> {
+    match (seed_key, seed_db_key) {
+        (Some(seed_key), None) => {
+            window_seed_key(&seed_key)?;
+            Ok(format!("/?view=reader&seedKey={seed_key}"))
+        }
+        (None, Some(seed_db_key)) => {
+            window_seed_key(&seed_db_key)?;
+            Ok(format!("/?view=reader&seedDbKey={seed_db_key}"))
+        }
+        _ => Err("Reader windows require exactly one target seed key".into()),
+    }
+}
+
+#[tauri::command]
+fn open_settings_window<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    account_id: Option<Uuid>,
+) -> Result<(), String> {
+    let suffix = account_id
+        .map(|account_id| format!("&accountId={account_id}"))
+        .unwrap_or_default();
+    open_mail_window(
+        &app,
+        MailWindowSpec {
+            label: "settings".into(),
+            path: format!("/?view=settings{suffix}"),
+            title: "Settings",
+            size: (760.0, 560.0),
+            minimum_size: (640.0, 460.0),
+        },
+    )
+}
+
+#[tauri::command]
+fn open_account_window<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+    open_mail_window(
+        &app,
+        MailWindowSpec {
+            label: "account".into(),
+            path: "/?view=account".into(),
+            title: "Add Account",
+            size: (620.0, 720.0),
+            minimum_size: (520.0, 560.0),
+        },
+    )
 }
 
 #[tauri::command]
@@ -3888,12 +6297,11 @@ async fn conversation_for_target(
 async fn search_remote(
     state: State<'_, Arc<AppState>>,
     query: SearchQuery,
-) -> Result<Vec<MailSummary>, String> {
+) -> Result<RemoteSearchResult, String> {
     if query.text.trim().is_empty() {
-        return Ok(Vec::new());
+        return Ok(RemoteSearchResult::default());
     }
     let limit = query.limit.unwrap_or(100).min(500) as usize;
-    let mut results = Vec::new();
     let search_state = state.inner().clone();
     let search_text = query.text.clone();
     let search_mailbox = query.mailbox.clone();
@@ -3922,8 +6330,27 @@ async fn search_remote(
     .await;
     // Reassemble completion results in requested account order. This makes the
     // first returned failure deterministic and preserves stable tie ordering.
-    for hits in searches {
-        let hits = hits?;
+    let raw_results = searches.into_iter().collect::<Result<Vec<_>, _>>()?;
+    Ok(shape_remote_search_results(&query, limit, raw_results))
+}
+
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteSearchResult {
+    messages: Vec<MailSummary>,
+    limit_reached: bool,
+}
+
+fn shape_remote_search_results(
+    query: &SearchQuery,
+    limit: usize,
+    raw_results: Vec<Vec<MailSummary>>,
+) -> RemoteSearchResult {
+    // A capped provider response means there may be more remote matches even
+    // if local filtering later hides every returned row.
+    let mut limit_reached = limit > 0 && raw_results.iter().any(|hits| hits.len() >= limit);
+    let mut messages = Vec::new();
+    for hits in raw_results {
         for message in hits {
             if query.mailbox.is_none()
                 && matches!(message.mailbox.split("::").next(), Some("Spam" | "Trash"))
@@ -3934,13 +6361,111 @@ async fn search_remote(
                 && (!query.flagged_only || message.is_flagged)
                 && (!query.unflagged_only || !message.is_flagged)
             {
-                results.push(message);
+                messages.push(message);
             }
         }
     }
-    results.sort_by_key(|result| std::cmp::Reverse(result.received_at));
-    results.truncate(limit);
-    Ok(results)
+    limit_reached |= messages.len() > limit;
+    messages.sort_by_key(|result| std::cmp::Reverse(result.received_at));
+    messages.truncate(limit);
+    RemoteSearchResult {
+        messages,
+        limit_reached,
+    }
+}
+
+#[cfg(test)]
+mod remote_search_limit_tests {
+    use super::*;
+    use chrono::{Duration as ChronoDuration, Utc};
+
+    fn query() -> SearchQuery {
+        SearchQuery {
+            text: "fixture".into(),
+            account_ids: vec![],
+            mailbox: None,
+            from: None,
+            unread_only: false,
+            read_only: false,
+            flagged_only: false,
+            unflagged_only: false,
+            category: None,
+            limit: Some(500),
+            cursor: None,
+        }
+    }
+
+    fn messages(account_id: &str, mailbox: &str, count: usize) -> Vec<MailSummary> {
+        (0..count)
+            .map(|index| MailSummary {
+                id: format!("{account_id}:{mailbox}:{index}"),
+                account_id: account_id.into(),
+                mailbox: mailbox.into(),
+                uid: index as i64 + 1,
+                mailbox_uid_validity: Some(77),
+                message_id: Some(format!("<{account_id}-{index}@example.test>")),
+                gmail_message_id: None,
+                in_reply_to: None,
+                reference_ids: None,
+                thread_id: format!("{account_id}:{index}"),
+                subject: "Fixture remote match".into(),
+                from_name: None,
+                from_address: "sender@example.test".into(),
+                to_addresses: "reader@example.test".into(),
+                cc_addresses: String::new(),
+                bcc_addresses: String::new(),
+                reply_to_addresses: String::new(),
+                received_at: Utc::now() - ChronoDuration::seconds(index as i64),
+                snippet: String::new(),
+                body_text: String::new(),
+                body_html: None,
+                content_state: "headers_only".into(),
+                unsubscribe_kind: None,
+                unsubscribe_url: None,
+                is_read: false,
+                is_flagged: false,
+                has_attachments: false,
+                category: None,
+                classification_confidence: None,
+                classification_source: None,
+                classification_signals: String::new(),
+                attachments: vec![],
+            })
+            .collect()
+    }
+
+    #[test]
+    fn remote_search_reports_no_limit_for_499_raw_eligible_messages() {
+        let result =
+            shape_remote_search_results(&query(), 500, vec![messages("one", "INBOX", 499)]);
+
+        assert_eq!(result.messages.len(), 499);
+        assert!(!result.limit_reached);
+        assert_eq!(serde_json::to_value(result).unwrap()["limitReached"], false);
+    }
+
+    #[test]
+    fn remote_search_reports_a_raw_provider_cap_before_spam_filtering() {
+        let mut capped = messages("one", "Spam", 480);
+        capped.extend(messages("one", "INBOX", 20));
+
+        let result = shape_remote_search_results(&query(), 500, vec![capped]);
+
+        assert_eq!(result.messages.len(), 20);
+        assert!(result.limit_reached);
+    }
+
+    #[test]
+    fn remote_search_reports_a_global_merge_that_exceeds_the_cap() {
+        let result = shape_remote_search_results(
+            &query(),
+            500,
+            vec![messages("one", "INBOX", 251), messages("two", "INBOX", 250)],
+        );
+
+        assert_eq!(result.messages.len(), 500);
+        assert!(result.limit_reached);
+    }
 }
 
 #[tauri::command]
@@ -3948,12 +6473,26 @@ async fn set_message_category(
     state: State<'_, Arc<AppState>>,
     message_id: String,
     category: String,
+    expected_uid_validity: Option<i64>,
 ) -> Result<(), String> {
-    state
+    let initial =
+        current_message_at_epoch(&state.store, &message_id, expected_uid_validity).await?;
+    let account_id = Uuid::parse_str(&initial.account_id).map_err(error)?;
+    let _operation = state.account_operations.acquire(account_id).await;
+    let message =
+        current_message_at_epoch(&state.store, &message_id, expected_uid_validity).await?;
+    if !same_message_epoch_identity(&initial, &message) {
+        return Err(message_identity_changed_error());
+    }
+    if !state
         .store
-        .set_message_category(&message_id, &category)
+        .set_message_category_at_epoch(&message, &category)
         .await
-        .map_err(error)
+        .map_err(error)?
+    {
+        return Err(message_identity_changed_error());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -3961,46 +6500,52 @@ async fn set_message_starred(
     state: State<'_, Arc<AppState>>,
     message_id: String,
     starred: bool,
+    expected_uid_validity: Option<i64>,
 ) -> Result<dakia_core::MailSummary, String> {
-    let message = state
-        .store
-        .message(&message_id)
-        .await
-        .map_err(error)?
-        .ok_or_else(|| "Message not found".to_owned())?;
+    let message =
+        current_message_at_epoch(&state.store, &message_id, expected_uid_validity).await?;
     let account_id = Uuid::parse_str(&message.account_id).map_err(error)?;
-    let _operation = state.account_operations.acquire(account_id).await;
-    let account = enabled_account_for_operation(state.inner(), account_id).await?;
-    MailService::new(state.store.clone())
-        .set_flagged(&account, &message.mailbox, message.uid as u32, starred)
-        .await
-        .map_err(error)?;
-    state
-        .store
-        .set_message_flagged(&message_id, starred)
-        .await
-        .map_err(error)?;
-    if starred {
-        match MailService::new(state.store.clone())
-            .hydrate_message(&account, &message.mailbox, message.uid as u32)
+    let message = {
+        let _operation = state.account_operations.acquire(account_id).await;
+        let message = require_current_message_target(
+            &state.store,
+            account_id,
+            &message.mailbox,
+            message.uid as u32,
+            Some(&message_id),
+            expected_uid_validity,
+        )
+        .await?;
+        let account = enabled_account_for_operation(state.inner(), account_id).await?;
+        MailService::new(state.store.clone())
+            .set_flagged_at_epoch(
+                &account,
+                &message.mailbox,
+                message.uid as u32,
+                starred,
+                expected_uid_validity.expect("target validated"),
+            )
             .await
-        {
-            Ok(hydrated) => Ok(hydrated),
-            Err(_) => state
-                .store
-                .message(&message_id)
-                .await
-                .map_err(error)?
-                .ok_or_else(|| "Message not found".to_owned()),
-        }
-    } else {
-        state
+            .map_err(error)?;
+        if !state
             .store
-            .message(&message_id)
+            .set_message_flagged_at_epoch(&message, starred)
             .await
             .map_err(error)?
-            .ok_or_else(|| "Message not found".to_owned())
+        {
+            return Err(message_identity_changed_error());
+        }
+        confirm_message_epoch(&state.store, &message).await?
+    };
+    if starred {
+        // The loader carries the captured epoch through its cache publication.
+        // Run it after releasing the account operation lock: Reader hydration
+        // uses that same boundary to fence a replacement provider namespace.
+        // Ignore a fetch failure, but never fall back to a replacement row.
+        let _ =
+            load_message_content(state.inner(), &message.id, message.mailbox_uid_validity).await;
     }
+    confirm_message_epoch(&state.store, &message).await
 }
 
 #[tauri::command]
@@ -4008,25 +6553,41 @@ async fn set_message_read(
     state: State<'_, Arc<AppState>>,
     message_id: String,
     read: bool,
+    expected_uid_validity: Option<i64>,
 ) -> Result<(), String> {
-    let message = state
-        .store
-        .message(&message_id)
-        .await
-        .map_err(error)?
-        .ok_or_else(|| "Message not found".to_owned())?;
+    let message =
+        current_message_at_epoch(&state.store, &message_id, expected_uid_validity).await?;
     let account_id = Uuid::parse_str(&message.account_id).map_err(error)?;
     let _operation = state.account_operations.acquire(account_id).await;
+    let message = require_current_message_target(
+        &state.store,
+        account_id,
+        &message.mailbox,
+        message.uid as u32,
+        Some(&message_id),
+        expected_uid_validity,
+    )
+    .await?;
     let account = enabled_account_for_operation(state.inner(), account_id).await?;
     MailService::new(state.store.clone())
-        .set_read(&account, &message.mailbox, message.uid as u32, read)
+        .set_read_at_epoch(
+            &account,
+            &message.mailbox,
+            message.uid as u32,
+            read,
+            expected_uid_validity.expect("target validated"),
+        )
         .await
         .map_err(error)?;
-    state
+    if !state
         .store
-        .set_message_read(&message_id, read)
+        .set_message_read_at_epoch(&message, read)
         .await
-        .map_err(error)
+        .map_err(error)?
+    {
+        return Err(message_identity_changed_error());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -4230,8 +6791,9 @@ async fn hydrate_message(
     app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     message_id: String,
+    expected_uid_validity: Option<i64>,
 ) -> Result<dakia_core::MailSummary, String> {
-    let message = hydrated_message(state.inner(), &message_id).await?;
+    let message = hydrated_message(state.inner(), &message_id, expected_uid_validity).await?;
     let account_id = Uuid::parse_str(&message.account_id).map_err(error)?;
     kick_classification(state.inner().clone());
     let _ = app.emit(
@@ -4244,14 +6806,14 @@ async fn hydrate_message(
     Ok(message)
 }
 
-async fn hydrated_message(state: &Arc<AppState>, message_id: &str) -> Result<MailSummary, String> {
-    let content = load_message_content(state, message_id).await?;
-    let mut message = state
-        .store
-        .message(message_id)
-        .await
-        .map_err(error)?
-        .ok_or_else(|| "Message not found".to_owned())?;
+async fn hydrated_message(
+    state: &Arc<AppState>,
+    message_id: &str,
+    expected_uid_validity: Option<i64>,
+) -> Result<MailSummary, String> {
+    let content = load_message_content(state, message_id, expected_uid_validity).await?;
+    let mut message =
+        current_message_at_epoch(&state.store, message_id, expected_uid_validity).await?;
     message.body_text = content.body_text;
     message.body_html = content.body_html;
     message.unsubscribe_kind = content.unsubscribe_kind;
@@ -4769,26 +7331,16 @@ async fn sync_account(
         }
         (result, account)
     } else {
-        let _operation = state.account_operations.acquire(account_id).await;
-        let account = state
-            .store
-            .account(account_id)
-            .await
-            .map_err(error)?
-            .ok_or_else(|| "Account not found".to_owned())?;
-        state.realtime.stop_account(account_id).await;
-        let service = MailService::new(state.store.clone());
-        let result = service
-            .refresh_inbox_with_progress(&account, limit.unwrap_or(50), |progress| {
-                let _ = on_progress.send(progress);
-            })
-            .await;
-        let result = complete_manual_sync_attempt(
-            result,
-            restart_realtime_if_current(app.clone(), state.inner(), account_id).await,
+        run_incremental_sync_account(
+            state.inner(),
             account_id,
-        );
-        (result, account)
+            limit.unwrap_or(50),
+            |progress| {
+                let _ = on_progress.send(progress);
+            },
+            || restart_realtime_if_current(app.clone(), state.inner(), account_id),
+        )
+        .await?
     };
     let (result, _) = result;
     let synced = result.map_err(error)?;
@@ -4796,17 +7348,279 @@ async fn sync_account(
     Ok(synced)
 }
 
-#[tauri::command]
-async fn send_message(
-    state: State<'_, Arc<AppState>>,
-    draft: ComposeMessage,
-) -> Result<String, String> {
-    let _operation = state.account_operations.acquire(draft.account_id).await;
-    let account = enabled_account_for_operation(state.inner(), draft.account_id).await?;
-    MailService::new(state.store.clone())
-        .send(&account, &draft)
+async fn run_incremental_sync_account<Progress, Restart, RestartFuture>(
+    state: &Arc<AppState>,
+    account_id: Uuid,
+    limit: u32,
+    on_progress: Progress,
+    restart: Restart,
+) -> Result<(anyhow::Result<SyncResult>, Account), String>
+where
+    Progress: FnMut(SyncProgress),
+    Restart: FnOnce() -> RestartFuture,
+    RestartFuture: Future<Output = anyhow::Result<()>>,
+{
+    let _operation = state.account_operations.acquire(account_id).await;
+    let account = state
+        .store
+        .account(account_id)
         .await
-        .map_err(error)
+        .map_err(error)?
+        .ok_or_else(|| "Account not found".to_owned())?;
+    state.realtime.stop_account(account_id).await;
+    let service = MailService::new(state.store.clone());
+    let result = service
+        .refresh_inbox_with_progress(&account, limit, on_progress)
+        .await;
+    let result = complete_manual_sync_attempt(result, restart().await, account_id);
+    Ok((result, account))
+}
+
+#[derive(Deserialize)]
+struct SendCommandDraft {
+    #[serde(flatten)]
+    message: ComposeMessage,
+    #[serde(default)]
+    send_attempt_id: Option<Uuid>,
+}
+
+// Retained as an isolated journal regression harness for existing tests. The
+// production command below uses the recovery payload transaction instead.
+#[cfg(test)]
+async fn submit_send_attempt(
+    store: &Store,
+    draft: &ComposeMessage,
+    attempt_id: Option<Uuid>,
+    submit: impl Future<Output = anyhow::Result<String>>,
+) -> Result<String, String> {
+    use dakia_core::storage::{SendAttemptClaim, SendAttemptStatus};
+    use dakia_core::SendFailureKind;
+    use sha2::{Digest, Sha256};
+    let Some(attempt_id) = attempt_id else {
+        return submit.await.map_err(send_command_error);
+    };
+    let payload_hash = format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(draft).map_err(|error| send_command_error(error.into()))?
+        )
+    );
+    let failure_for = |kind| {
+        send_command_error(anyhow::Error::new(dakia_core::SendFailure {
+            kind,
+            message: String::new(),
+        }))
+    };
+    match store
+        .claim_send_attempt(draft.account_id, attempt_id, &payload_hash)
+        .await
+        .map_err(send_command_error)?
+    {
+        SendAttemptClaim::Claimed => {}
+        SendAttemptClaim::Existing(SendAttemptStatus::Submitted) => {
+            return Ok("Message already submitted".into())
+        }
+        SendAttemptClaim::Existing(SendAttemptStatus::SentCopyFailed) => {
+            return Err(failure_for(SendFailureKind::SentCopyFailed))
+        }
+        SendAttemptClaim::Existing(_) | SendAttemptClaim::Mismatch => {
+            return Err(failure_for(SendFailureKind::DeliveryUncertain))
+        }
+    }
+    match submit.await {
+        Ok(response) => {
+            store
+                .complete_send_attempt(
+                    draft.account_id,
+                    attempt_id,
+                    &payload_hash,
+                    SendAttemptStatus::Submitted,
+                )
+                .await
+                .map_err(send_command_error)?;
+            Ok(response)
+        }
+        Err(failure) => {
+            let kind = failure
+                .downcast_ref::<dakia_core::SendFailure>()
+                .map(|failure| failure.kind)
+                .unwrap_or(SendFailureKind::DeliveryUncertain);
+            match kind {
+                SendFailureKind::NotSubmitted => store
+                    .release_send_attempt(draft.account_id, attempt_id, &payload_hash)
+                    .await
+                    .map_err(send_command_error)?,
+                SendFailureKind::DeliveryUncertain | SendFailureKind::SentCopyFailed => {
+                    let status = if kind == SendFailureKind::SentCopyFailed {
+                        SendAttemptStatus::SentCopyFailed
+                    } else {
+                        SendAttemptStatus::DeliveryUncertain
+                    };
+                    store
+                        .complete_send_attempt(draft.account_id, attempt_id, &payload_hash, status)
+                        .await
+                        .map_err(send_command_error)?;
+                }
+            }
+            Err(send_command_error(failure))
+        }
+    }
+}
+
+/// Sends a draft after its canonical payload and outcome journal have been
+/// made durable. The claim is intentionally created before the account lock:
+/// a process loss while a send waits in that queue remains visible as Pending
+/// instead of silently disappearing.
+async fn submit_recoverable_send_attempt<R: tauri::Runtime>(
+    state: &AppState,
+    runtime: Arc<SendRecoveryRuntime>,
+    app: tauri::AppHandle<R>,
+    draft: &ComposeMessage,
+    attempt_id: Uuid,
+) -> Result<String, String> {
+    use dakia_core::storage::{SendAttemptStatus, SendRecoveryClaim, SendRecoveryStatus};
+    use dakia_core::SendFailureKind;
+    let failure_for = |kind| {
+        send_command_error(anyhow::Error::new(dakia_core::SendFailure {
+            kind,
+            message: String::new(),
+        }))
+    };
+    // Persist after structural/MIME validation but before enabled-account and
+    // account-lock checks. A disabled account is a definite no-SMTP outcome,
+    // yet its draft must still survive a closed Compose window as NotSubmitted.
+    let account = state
+        .store
+        .account(draft.account_id)
+        .await
+        .map_err(|_| failure_for(SendFailureKind::NotSubmitted))?
+        .ok_or_else(|| failure_for(SendFailureKind::NotSubmitted))?;
+    dakia_core::mail::validate_compose_message_for_account(&account, draft)
+        .map_err(send_command_error)?;
+    let existing_recovery = state
+        .store
+        .load_send_recovery(draft.account_id, attempt_id)
+        .await
+        .map_err(send_command_error)?
+        .is_some();
+    let active = runtime.reserve(draft.account_id, attempt_id, app, existing_recovery)?;
+    match state
+        .store
+        .prepare_send_recovery(draft.account_id, attempt_id, draft)
+        .await
+        .map_err(send_command_error)?
+    {
+        SendRecoveryClaim::Claimed => active.mark_persisted()?,
+        SendRecoveryClaim::AlreadySubmitted => {
+            return Ok("Message already submitted".into());
+        }
+        SendRecoveryClaim::Existing(SendRecoveryStatus::SentCopyFailed) => {
+            return Err(failure_for(SendFailureKind::SentCopyFailed));
+        }
+        SendRecoveryClaim::Existing(_) | SendRecoveryClaim::Mismatch => {
+            return Err(failure_for(SendFailureKind::DeliveryUncertain));
+        }
+    }
+    let _operation = state.account_operations.acquire(draft.account_id).await;
+    let account = match enabled_account_for_operation(state, draft.account_id).await {
+        Ok(account) => account,
+        Err(_) => {
+            state
+                .store
+                .release_send_recovery(draft.account_id, attempt_id)
+                .await
+                .map_err(|_| failure_for(SendFailureKind::DeliveryUncertain))?;
+            return Err(failure_for(SendFailureKind::NotSubmitted));
+        }
+    };
+    if dakia_core::mail::validate_compose_message_for_account(&account, draft).is_err() {
+        state
+            .store
+            .release_send_recovery(draft.account_id, attempt_id)
+            .await
+            .map_err(|_| failure_for(SendFailureKind::DeliveryUncertain))?;
+        return Err(failure_for(SendFailureKind::NotSubmitted));
+    }
+    let service = MailService::new(state.store.clone());
+    let result = match service.send(&account, draft).await {
+        Ok(response) => {
+            state
+                .store
+                .finish_send_recovery(draft.account_id, attempt_id, SendAttemptStatus::Submitted)
+                .await
+                .map_err(|_| failure_for(SendFailureKind::DeliveryUncertain))?;
+            Ok(response)
+        }
+        Err(failure) => {
+            let kind = failure
+                .downcast_ref::<dakia_core::SendFailure>()
+                .map(|failure| failure.kind)
+                .unwrap_or(SendFailureKind::DeliveryUncertain);
+            match kind {
+                SendFailureKind::NotSubmitted => {
+                    state
+                        .store
+                        .release_send_recovery(draft.account_id, attempt_id)
+                        .await
+                        .map_err(|_| failure_for(SendFailureKind::DeliveryUncertain))?;
+                }
+                SendFailureKind::DeliveryUncertain | SendFailureKind::SentCopyFailed => {
+                    let status = if kind == SendFailureKind::SentCopyFailed {
+                        SendAttemptStatus::SentCopyFailed
+                    } else {
+                        SendAttemptStatus::DeliveryUncertain
+                    };
+                    state
+                        .store
+                        .finish_send_recovery(draft.account_id, attempt_id, status)
+                        .await
+                        .map_err(|_| failure_for(SendFailureKind::DeliveryUncertain))?;
+                }
+            }
+            Err(send_command_error(failure))
+        }
+    };
+    // Dropping the guard removes the active-row filter before notifying the
+    // main window, so recovery listing observes the terminal durable state.
+    drop(active);
+    result
+}
+
+#[tauri::command]
+async fn send_message<R: tauri::Runtime>(
+    state: State<'_, Arc<AppState>>,
+    runtime: State<'_, Arc<SendRecoveryRuntime>>,
+    app: tauri::AppHandle<R>,
+    draft: SendCommandDraft,
+) -> Result<String, String> {
+    if let Some(attempt_id) = draft.send_attempt_id {
+        return submit_recoverable_send_attempt(
+            state.inner(),
+            Arc::clone(runtime.inner()),
+            app,
+            &draft.message,
+            attempt_id,
+        )
+        .await;
+    }
+    // Compatibility for an already-issued older Compose window. New Compose
+    // always provides an ID and therefore always has durable recovery.
+    let _operation = state
+        .account_operations
+        .acquire(draft.message.account_id)
+        .await;
+    let account = enabled_account_for_operation(state.inner(), draft.message.account_id)
+        .await
+        .map_err(|_| {
+            send_command_error(anyhow::Error::new(dakia_core::SendFailure {
+                kind: dakia_core::SendFailureKind::NotSubmitted,
+                message: "Account is unavailable".into(),
+            }))
+        })?;
+    MailService::new(state.store.clone())
+        .send(&account, &draft.message)
+        .await
+        .map_err(send_command_error)
 }
 
 #[tauri::command]
@@ -4816,27 +7630,109 @@ async fn apply_mailbox_action(
     mailbox: String,
     uid: u32,
     action: MailboxAction,
+    message_id: Option<String>,
+    expected_uid_validity: Option<i64>,
 ) -> Result<(), String> {
-    let _operation = state.account_operations.acquire(account_id).await;
-    let account = enabled_account_for_operation(state.inner(), account_id).await?;
-    require_permanent_delete_locator(&state.store, account_id, &mailbox, uid, action).await?;
-    let destination_uid = MailService::new(state.store.clone())
-        .apply_action(&account, &mailbox, uid, action)
-        .await
-        .map_err(error)?;
-    state
-        .store
-        .move_message(
-            account.id,
-            &mailbox,
-            uid,
-            mailbox_action_destination(action).unwrap_or_default(),
-            destination_uid,
-        )
-        .await
-        .map_err(error)
+    apply_mailbox_action_inner(
+        state.inner(),
+        account_id,
+        mailbox,
+        uid,
+        action,
+        message_id,
+        expected_uid_validity,
+    )
+    .await
 }
 
+async fn apply_mailbox_action_inner(
+    state: &Arc<AppState>,
+    account_id: Uuid,
+    mailbox: String,
+    uid: u32,
+    action: MailboxAction,
+    message_id: Option<String>,
+    expected_uid_validity: Option<i64>,
+) -> Result<(), String> {
+    let _operation = state.account_operations.acquire(account_id).await;
+    let account = enabled_account_for_operation(state, account_id).await?;
+    let target = require_current_message_target(
+        &state.store,
+        account_id,
+        &mailbox,
+        uid,
+        message_id.as_deref(),
+        expected_uid_validity,
+    )
+    .await?;
+    let receipt = MailService::new(state.store.clone())
+        .apply_action_at_epoch_with_receipt(
+            &account,
+            &mailbox,
+            uid,
+            action,
+            expected_uid_validity.expect("target validated"),
+        )
+        .await
+        .map_err(error)?;
+    let publication = state
+        .store
+        .move_message_at_epoch(
+            &target,
+            mailbox_action_destination(action).unwrap_or_default(),
+            &receipt,
+        )
+        .await
+        .map_err(error)?;
+    if !publication.source_published {
+        return Err(message_identity_changed_error());
+    }
+    if mailbox_action_destination(action).is_some() && !publication.destination_mapped {
+        // Without a verified COPYUID destination receipt, the source is still
+        // safely tombstoned but the destination must be projected by sync.
+        let store = state.store.clone();
+        let account = account.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(sync_error) = MailService::new(store).sync_all(&account, 500).await {
+                tracing::warn!(account_id = %account.id, error = %sync_error, "could not reconcile mailbox action destination");
+            }
+        });
+    }
+    Ok(())
+}
+
+async fn require_current_message_target(
+    store: &Store,
+    account_id: Uuid,
+    mailbox: &str,
+    uid: u32,
+    message_id: Option<&str>,
+    expected_uid_validity: Option<i64>,
+) -> Result<MailSummary, String> {
+    let unavailable =
+        || "This message changed. Refresh the mailbox before trying again.".to_owned();
+    let id = message_id
+        .filter(|value| !value.is_empty())
+        .ok_or_else(unavailable)?;
+    let expected = expected_uid_validity
+        .filter(|value| *value > 0)
+        .ok_or_else(unavailable)?;
+    let message = store
+        .message(id)
+        .await
+        .map_err(error)?
+        .ok_or_else(unavailable)?;
+    if message.account_id != account_id.to_string()
+        || message.mailbox != mailbox
+        || message.uid != i64::from(uid)
+        || message.mailbox_uid_validity != Some(expected)
+    {
+        return Err(unavailable());
+    }
+    Ok(message)
+}
+
+#[cfg(test)]
 async fn require_permanent_delete_locator(
     store: &Store,
     account_id: Uuid,
@@ -4862,11 +7758,13 @@ mod permanent_delete_command_tests {
 
     fn message(account_id: Uuid, mailbox: &str, uid: u32) -> MailSummary {
         MailSummary {
+            mailbox_uid_validity: None,
             id: format!("{account_id}:{mailbox}:{uid}"),
             account_id: account_id.to_string(),
             mailbox: mailbox.into(),
             uid: i64::from(uid),
             message_id: Some(format!("<{uid}@example.test>")),
+            gmail_message_id: None,
             in_reply_to: None,
             reference_ids: None,
             thread_id: format!("thread-{uid}"),
@@ -4939,46 +7837,66 @@ mod permanent_delete_command_tests {
 }
 
 #[tauri::command]
-async fn unsubscribe_message(
-    app: tauri::AppHandle,
+async fn unsubscribe_message<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: State<'_, Arc<AppState>>,
     message_id: String,
+    expected_uid_validity: Option<i64>,
 ) -> Result<UnsubscribeResult, String> {
-    // Unsubscribe metadata is parsed, verified, and persisted when the message
-    // is synced. Do not make an unrelated IMAP round trip before acting on it:
-    // that made otherwise valid unsubscribe actions fail whenever the mailbox
-    // could not be fetched again.
-    let message = state
-        .store
-        .message(&message_id)
-        .await
-        .map_err(error)?
-        .ok_or_else(|| "Message not found".to_owned())?;
-    let account_id = Uuid::parse_str(&message.account_id).map_err(error)?;
-    let mut cleanup_target = sender_cleanup_target(&message, account_id);
+    // The unsubscribe URL is untrusted message data. Bind it to the selected
+    // IMAP namespace before it can open a browser, send a mailto message, or
+    // issue a one-click POST.
+    let initial =
+        current_message_at_epoch(&state.store, &message_id, expected_uid_validity).await?;
+    let account_id = Uuid::parse_str(&initial.account_id).map_err(error)?;
     let _operation = state.account_operations.acquire(account_id).await;
+    let message =
+        current_message_at_epoch(&state.store, &message_id, expected_uid_validity).await?;
+    if !same_message_epoch_identity(&initial, &message) {
+        return Err(message_identity_changed_error());
+    }
+    let mut cleanup_target = sender_cleanup_target(&message, account_id);
     let account = enabled_account_for_operation(state.inner(), account_id).await?;
     let service = MailService::new(state.store.clone());
-    let outcome = match service.unsubscribe(&message).await {
+    let outcome = match unsubscribe_with_command_transport(&service, &message).await {
         Ok(outcome) => outcome,
         // Older catalogue rows may contain an action selected by a previous
         // parser version. Refresh only malformed, side-effect-free web/mailto
         // metadata so a later valid fallback in the header can be selected.
         // Never retry a one-click POST: its failure may be ambiguous.
         Err(_) if message.unsubscribe_kind.as_deref() != Some("one_click") => {
-            let refreshed = fetch_remote_message(state.inner(), &message_id).await?;
+            let fetched = service
+                .fetch_message(&account, &message.mailbox, message.uid as u32)
+                .await
+                .map_err(error)?;
+            if !same_message_epoch_identity(&message, &fetched) {
+                return Err(message_identity_changed_error());
+            }
+            if !state
+                .store
+                .publish_message_content_at_epoch(&message, &fetched)
+                .await
+                .map_err(error)?
+            {
+                return Err(message_identity_changed_error());
+            }
+            let refreshed = confirm_message_epoch(&state.store, &message).await?;
             cleanup_target = sender_cleanup_target(&refreshed, account_id);
-            service.unsubscribe(&refreshed).await.map_err(error)?
+            unsubscribe_with_command_transport(&service, &refreshed)
+                .await
+                .map_err(error)?
         }
         Err(failure) => return Err(error(failure)),
     };
     match outcome {
         UnsubscribeOutcome::Completed => Ok(UnsubscribeResult::Completed { cleanup_target }),
         UnsubscribeOutcome::Web(url) => {
+            confirm_message_epoch(&state.store, &message).await?;
             open_external_url(app, url)?;
             Ok(UnsubscribeResult::OpenedWeb { cleanup_target })
         }
         UnsubscribeOutcome::Mailto { to, subject, body } => {
+            confirm_message_epoch(&state.store, &message).await?;
             let draft = unsubscribe_email(account_id, to, subject, body)?;
             MailService::new(state.store.clone())
                 .send(&account, &draft)
@@ -5005,37 +7923,81 @@ async fn trash_messages_from_sender(
 
 #[tauri::command]
 async fn ai_summarize(state: State<'_, Arc<AppState>>, input: AiInput) -> Result<String, String> {
-    let messages = hydrate_messages(state.inner(), &input.message_ids).await?;
-    ai_service(&state.store, input)
-        .await?
-        .summarize(&messages)
-        .await
-        .map_err(error)
+    require_ai_features_enabled()?;
+    let targets = required_ai_message_targets(&input)?;
+    let messages = hydrate_messages(state.inner(), &targets).await?;
+    confirm_ai_message_targets(&state.store, &targets).await?;
+    let service = ai_service(&state.store, input).await?;
+    confirm_ai_message_targets(&state.store, &targets).await?;
+    service.summarize(&messages).await.map_err(error)
 }
 
 #[tauri::command]
 async fn ai_draft(state: State<'_, Arc<AppState>>, input: AiInput) -> Result<String, String> {
-    let messages = hydrate_messages(state.inner(), &input.message_ids).await?;
+    require_ai_features_enabled()?;
+    ai_draft_inner(state.inner(), input).await
+}
+
+async fn ai_draft_inner(state: &Arc<AppState>, input: AiInput) -> Result<String, String> {
+    require_ai_features_enabled()?;
+    let targets = required_ai_message_targets(&input)?;
+    let messages = hydrate_messages(state, &targets).await?;
+    confirm_ai_message_targets(&state.store, &targets).await?;
     let instruction = input.instruction.clone().unwrap_or_default();
-    ai_service(&state.store, input)
-        .await?
-        .draft(&instruction, &messages)
-        .await
-        .map_err(error)
+    let service = ai_service(&state.store, input).await?;
+    confirm_ai_message_targets(&state.store, &targets).await?;
+    service.draft(&instruction, &messages).await.map_err(error)
+}
+
+fn required_ai_message_targets(input: &AiInput) -> Result<Vec<AiMessageTarget>, String> {
+    if input.message_ids.is_empty()
+        || input.message_ids.len() != input.message_targets.len()
+        || input
+            .message_ids
+            .iter()
+            .zip(&input.message_targets)
+            .any(|(id, target)| {
+                id.is_empty() || id != &target.message_id || target.expected_uid_validity.is_none()
+            })
+    {
+        return Err(message_identity_changed_error());
+    }
+    let mut ids = HashSet::new();
+    if input
+        .message_targets
+        .iter()
+        .any(|target| !ids.insert(target.message_id.as_str()))
+    {
+        return Err(message_identity_changed_error());
+    }
+    Ok(input.message_targets.clone())
+}
+
+async fn confirm_ai_message_targets(
+    store: &Store,
+    targets: &[AiMessageTarget],
+) -> Result<(), String> {
+    for target in targets {
+        current_message_at_epoch(store, &target.message_id, target.expected_uid_validity).await?;
+    }
+    Ok(())
 }
 
 async fn hydrate_messages(
     state: &Arc<AppState>,
-    message_ids: &[String],
+    targets: &[AiMessageTarget],
 ) -> Result<Vec<MailSummary>, String> {
+    confirm_ai_message_targets(&state.store, targets).await?;
     let hydration_state = state.clone();
     run_bounded_ordered(
-        message_ids.to_vec(),
+        targets.to_vec(),
         MESSAGE_HYDRATION_CONCURRENCY,
         state.remote_operation_slots.clone(),
-        move |message_id| {
+        move |target| {
             let state = hydration_state.clone();
-            async move { hydrated_message(&state, &message_id).await }
+            async move {
+                hydrated_message(&state, &target.message_id, target.expected_uid_validity).await
+            }
         },
     )
     .await
@@ -5045,41 +8007,47 @@ async fn hydrate_messages(
 
 #[tauri::command]
 async fn ai_available(state: State<'_, Arc<AppState>>, input: AiInput) -> Result<bool, String> {
+    require_ai_features_enabled()?;
     Ok(ai_service(&state.store, input).await?.is_available().await)
 }
 
 #[tauri::command]
-async fn send_desktop_notification(
-    app: tauri::AppHandle,
+async fn send_desktop_notification<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     notification: DesktopNotification,
 ) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        let mut builder = notify_rust::Notification::new();
-        builder
-            .summary(&notification.title)
-            .body(&notification.body)
-            .auto_icon();
-        if let Some(sound) = &notification.sound {
-            builder.sound_name(sound);
-        }
-        let handle = builder.show().map_err(error)?;
-        let action_app = app.clone();
-        tauri::async_runtime::spawn_blocking(move || {
-            handle.wait_for_action(move |action| {
-                if action == "__closed" {
-                    return;
-                }
-                if !notification_has_reader_target(&notification) {
-                    if let Some(window) = action_app.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
+        let availability = app
+            .try_state::<NativeNotificationAvailability>()
+            .ok_or_else(|| NATIVE_NOTIFICATION_UNAVAILABLE_ERROR.to_owned())?;
+        with_native_notification_identity(&availability, || {
+            let mut builder = notify_rust::Notification::new();
+            builder
+                .summary(&notification.title)
+                .body(&notification.body)
+                .auto_icon();
+            if let Some(sound) = &notification.sound {
+                builder.sound_name(sound);
+            }
+            let handle = builder.show().map_err(error)?;
+            let action_app = app.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                handle.wait_for_action(move |action| {
+                    if action == "__closed" {
+                        return;
                     }
-                }
-                let _ = action_app.emit("notification-action", notification);
+                    if !notification_has_reader_target(&notification) {
+                        if let Some(window) = action_app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    let _ = action_app.emit("notification-action", notification);
+                });
             });
-        });
-        Ok(())
+            Ok(())
+        })
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -5136,6 +8104,7 @@ async fn ai_service(store: &Store, input: AiInput) -> Result<AiService, String> 
 
 #[tauri::command]
 async fn set_ai_api_key(state: State<'_, Arc<AppState>>, api_key: String) -> Result<(), String> {
+    require_ai_features_enabled()?;
     if api_key.is_empty() {
         state
             .store
@@ -5217,6 +8186,21 @@ async fn translation_remove_model(
     translation::remove(&state.data_dir, &source).await
 }
 
+#[tauri::command]
+fn quit_startup_recovery<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    window: tauri::WebviewWindow<R>,
+    exit_status: State<'_, StartupFailureExitStatus>,
+) -> Result<(), String> {
+    if !exit_status.may_exit_from_fatal_recovery_window(window.label()) {
+        return Err("Fatal recovery exit is unavailable".into());
+    }
+
+    exit_status.mark_requested();
+    app.exit(startup_storage_failure_exit_code());
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let _ = tracing_subscriber::fmt()
@@ -5228,8 +8212,22 @@ pub fn run() {
     let dropped_file_receipts = Arc::new(DroppedFileReceiptStore::default());
     let event_receipts = dropped_file_receipts.clone();
     let window_receipts = dropped_file_receipts.clone();
-    tauri::Builder::default()
+    let send_recovery_runtime = Arc::new(SendRecoveryRuntime::default());
+    let window_send_recoveries = send_recovery_runtime.clone();
+    let startup_failure_exit_status = StartupFailureExitStatus::default();
+    let setup_startup_failure_exit_status = startup_failure_exit_status.clone();
+    let menu_startup_failure_exit_status = startup_failure_exit_status.clone();
+    #[cfg(target_os = "macos")]
+    let native_notification_availability = NativeNotificationAvailability::default();
+    #[cfg(target_os = "macos")]
+    let setup_native_notification_availability = native_notification_availability.clone();
+    let builder = tauri::Builder::default()
+        .manage(startup_failure_exit_status.clone())
         .manage(dropped_file_receipts)
+        .manage(send_recovery_runtime);
+    #[cfg(target_os = "macos")]
+    let builder = builder.manage(native_notification_availability);
+    let app = builder
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--background"]),
@@ -5241,8 +8239,12 @@ pub fn run() {
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .on_menu_event(|app, event| {
+        .on_menu_event(move |app, event| {
             let action = event.id().as_ref();
+            if let Some(exit_code) = menu_startup_failure_exit_status.app_menu_quit_exit_code(action) {
+                app.exit(exit_code);
+                return;
+            }
             if let Some(encoded_address) = action.strip_prefix("copy-email-address:") {
                 match decode_context_menu_email_address(encoded_address)
                     .and_then(|address| app.clipboard().write_text(address).map_err(error))
@@ -5304,6 +8306,7 @@ pub fn run() {
             }
             WindowEvent::Destroyed => {
                 window_receipts.revoke_window(window.label());
+                window_send_recoveries.revoke_window(window.label());
             }
             WindowEvent::CloseRequested { api, .. } if window.label() == "main" => {
                 api.prevent_close();
@@ -5311,21 +8314,52 @@ pub fn run() {
             }
             _ => {}
         })
-        .setup(|app| {
+        .setup(move |app| {
             #[cfg(target_os = "macos")]
             {
                 // notify-rust uses process-global state for the application identity. It
                 // rejects subsequent calls, so initialize it once before either the
                 // frontend notification plugin or realtime mail notifications run.
-                let application = if tauri::is_dev() {
+                let is_dev = tauri::is_dev();
+                let application = if is_dev {
                     "com.apple.Terminal"
                 } else {
                     app.config().identifier.as_str()
                 };
-                notify_rust::set_application(application)
-                    .map_err(|error| anyhow::anyhow!("notification application: {error}"))?;
+                initialize_native_notification_application(
+                    &setup_native_notification_availability,
+                    application,
+                    move |application| {
+                        let expected_app = if is_dev {
+                            None
+                        } else {
+                            Some(current_macos_application_bundle()?)
+                        };
+                        preflight_native_notification_application(
+                            application,
+                            expected_app.as_deref(),
+                            resolve_launch_services_application_urls,
+                        )
+                    },
+                    |application| notify_rust::set_application(application).map_err(error),
+                    |notification_error| {
+                        tracing::warn!(
+                            application,
+                            error = %notification_error,
+                            "desktop notifications are unavailable because the application identity could not be verified"
+                        );
+                    },
+                );
             }
             install_app_menu(app).map_err(|error| anyhow::anyhow!("app menu: {error}"))?;
+            #[cfg(feature = "native-mail-safety-fixture")]
+            let native_mail_safety_fixture = NativeMailSafetyFixture::from_environment()?;
+            #[cfg(feature = "native-mail-safety-fixture")]
+            let native_fixture_data_dir = native_mail_safety_fixture
+                .as_ref()
+                .map(|fixture| fixture.data_dir.clone());
+            #[cfg(not(feature = "native-mail-safety-fixture"))]
+            let native_fixture_data_dir: Option<PathBuf> = None;
             let release_smoke_test = std::env::var_os("DAKIA_RELEASE_SMOKE_TEST").as_deref()
                 == Some(std::ffi::OsStr::new("1"));
             let data_dir = if release_smoke_test {
@@ -5336,6 +8370,8 @@ pub fn run() {
                             "DAKIA_RELEASE_SMOKE_DATA_DIR is required for release smoke tests"
                         )
                     })?
+            } else if let Some(data_dir) = native_fixture_data_dir {
+                data_dir
             } else {
                 app.path()
                     .app_local_data_dir()
@@ -5349,8 +8385,26 @@ pub fn run() {
                     .to_path_buf(),
             };
             let classifier_dir = resource_dir.join("resources/email-classifier-v2");
+            let store = match tauri::async_runtime::block_on(Store::open(data_dir.join("dakia.db")))
+            {
+                Ok(store) => store,
+                Err(error) => {
+                    setup_startup_failure_exit_status.activate_fatal_recovery();
+                    let exit_handle = app.handle().clone();
+                    let callback_exit_status = setup_startup_failure_exit_status.clone();
+                    let mut presenter = TauriStartupFailurePresenter::new(app);
+                    present_startup_storage_failure(&mut presenter, &error, move || {
+                        callback_exit_status.mark_requested();
+                        exit_handle.exit(startup_storage_failure_exit_code());
+                    });
+                    return Ok(());
+                }
+            };
             let state = tauri::async_runtime::block_on(async {
-                let store = Store::open(data_dir.join("dakia.db")).await?;
+                #[cfg(feature = "native-mail-safety-fixture")]
+                if let Some(fixture) = &native_mail_safety_fixture {
+                    fixture.seed(&store).await?;
+                }
                 let classifier = LocalEmailClassifier::from_dir(&classifier_dir)?;
                 let mail_rebuilds = store
                     .mail_rebuild_jobs()
@@ -5374,6 +8428,8 @@ pub fn run() {
                 }))
             })?;
             app.manage(state.clone());
+            #[cfg(feature = "native-mail-safety-fixture")]
+            native_acl_acceptance::install(app, state.clone())?;
             let classification_state = Arc::downgrade(&state);
             state
                 .realtime
@@ -5387,57 +8443,64 @@ pub fn run() {
                 app.handle().exit(0);
                 return Ok(());
             }
+            #[cfg(feature = "native-mail-safety-fixture")]
+            let native_fixture_starts_after_frontend_subscription =
+                native_mail_safety_fixture.is_some();
+            #[cfg(not(feature = "native-mail-safety-fixture"))]
+            let native_fixture_starts_after_frontend_subscription = false;
             // Real-time mail is a native application responsibility. Starting
             // it here keeps delivery alive even when the webview is slow to
             // mount, hidden by --background, or temporarily unavailable.
             let realtime_app = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                kick_classification(state.clone());
-                let rebuilding: HashMap<_, _> = state
-                    .mail_rebuilds
-                    .lock()
-                    .expect("mail rebuild lock poisoned")
-                    .iter()
-                    .map(|(account_id, job)| (*account_id, job.reset_before_sync))
-                    .collect();
-                match state.store.accounts().await {
-                    Ok(accounts) => {
-                        for account in accounts {
-                            if let Some(reset_before_sync) = rebuilding.get(&account.id) {
-                                let rebuild_app = realtime_app.clone();
-                                let rebuild_state = state.clone();
-                                let reset_before_sync = *reset_before_sync;
-                                if !reserve_mail_rebuild(&rebuild_state, account.id) {
-                                    continue;
-                                }
-                                tauri::async_runtime::spawn(async move {
-                                    if let Err(error) = run_mail_rebuild(
-                                        rebuild_app,
-                                        rebuild_state,
-                                        account,
-                                        reset_before_sync,
-                                    )
-                                    .await
-                                    {
-                                        tracing::error!(
-                                            error = %error,
-                                            "could not resume interrupted mail rebuild"
-                                        );
+            if !native_fixture_starts_after_frontend_subscription {
+                tauri::async_runtime::spawn(async move {
+                    kick_classification(state.clone());
+                    let rebuilding: HashMap<_, _> = state
+                        .mail_rebuilds
+                        .lock()
+                        .expect("mail rebuild lock poisoned")
+                        .iter()
+                        .map(|(account_id, job)| (*account_id, job.reset_before_sync))
+                        .collect();
+                    match state.store.accounts().await {
+                        Ok(accounts) => {
+                            for account in accounts {
+                                if let Some(reset_before_sync) = rebuilding.get(&account.id) {
+                                    let rebuild_app = realtime_app.clone();
+                                    let rebuild_state = state.clone();
+                                    let reset_before_sync = *reset_before_sync;
+                                    if !reserve_mail_rebuild(&rebuild_state, account.id) {
+                                        continue;
                                     }
-                                });
-                            } else if account.enabled {
-                                state
-                                    .realtime
-                                    .start_account(realtime_app.clone(), account)
-                                    .await;
+                                    tauri::async_runtime::spawn(async move {
+                                        if let Err(error) = run_mail_rebuild(
+                                            rebuild_app,
+                                            rebuild_state,
+                                            account,
+                                            reset_before_sync,
+                                        )
+                                        .await
+                                        {
+                                            tracing::error!(
+                                                error = %error,
+                                                "could not resume interrupted mail rebuild"
+                                            );
+                                        }
+                                    });
+                                } else if account.enabled {
+                                    state
+                                        .realtime
+                                        .start_account(realtime_app.clone(), account)
+                                        .await;
+                                }
                             }
                         }
+                        Err(error) => {
+                            tracing::error!(error = %error, "could not start native mail tasks");
+                        }
                     }
-                    Err(error) => {
-                        tracing::error!(error = %error, "could not start native mail tasks");
-                    }
-                }
-            });
+                });
+            }
             if std::env::args().any(|argument| argument == "--background") {
                 if let Some(window) = app.get_webview_window("main") {
                     window.hide()?;
@@ -5464,6 +8527,15 @@ pub fn run() {
             show_email_address_context_menu,
             remove_account,
             open_external_url,
+            open_compose_window,
+            list_send_recoveries,
+            open_send_recovery_window,
+            read_send_recovery_seed,
+            acknowledge_send_recovery_seed,
+            quit_startup_recovery,
+            open_reader_window,
+            open_settings_window,
+            open_account_window,
             add_account,
             search,
             search_smart_inbox,
@@ -5497,6 +8569,12 @@ pub fn run() {
             translation_cancel_install,
             translation_remove_model
         ])
-        .run(tauri::generate_context!())
+        .build(app_context())
         .expect("Dakia desktop runtime failed");
+
+    // The pinned macOS runtime currently turns RequestExit(1) into Tao's
+    // zero-valued ControlFlow::Exit. Retain only Dakia's startup-failure status,
+    // let run_return perform normal Tauri cleanup, then exit from the main thread.
+    let runtime_exit_code = app.run_return(|_handle, _event| {});
+    std::process::exit(startup_failure_exit_status.resolve(runtime_exit_code));
 }

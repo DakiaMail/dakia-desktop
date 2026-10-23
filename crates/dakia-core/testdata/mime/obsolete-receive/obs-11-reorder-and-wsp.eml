@@ -1,0 +1,11 @@
+X-Dakia-Corpus-Case: obs-11-reorder-and-wsp
+X-Dakia-Corpus-Source: RFC 5322 section 4.5; fictional
+Message-ID: <obs-obs-11-reorder-and-wsp@example.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Subject 	: reordered
+To : reader@example.test
+From	: sender@example.test
+Date : 28 Jul 2026 12:01:00 +0000
+
+Fictional body obs-11-reorder-and-wsp.

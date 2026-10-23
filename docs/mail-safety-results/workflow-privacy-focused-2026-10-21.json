@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T13:36:01.342676+00:00",
+  "status": "passed-focused-source-slices",
+  "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "scope": "Focused workflow and privacy results while the wider working tree is changing. Not a full-source, native, provider, or release pass.",
+  "slices": [
+    {
+      "scenario": "MS-I-013",
+      "checks": [
+        {
+          "command": "npx vitest run apps/desktop/src/mailRecipientIntent.integration.test.tsx",
+          "result": "3 passed"
+        },
+        {
+          "command": "related recipient and identity suites",
+          "result": "21 passed; earlier scoped run, not added to the focused count"
+        },
+        {
+          "command": "TypeScript, Prettier, scoped diff check",
+          "result": "passed"
+        }
+      ],
+      "behavior": [
+        "Reply-To precedence and From fallback",
+        "case-insensitive selected self removal",
+        "To/Cc duplicate suppression and sender already present",
+        "Bcc absent from compose seed, UI, and send payload",
+        "full frontend account/message/thread/UIDVALIDITY continuity through opaque seed"
+      ],
+      "review": "Independent review and final rereview approved; full-field target comparison replaces property-order-sensitive comparison.",
+      "limits": [
+        "Aliases are not modeled by the current interface.",
+        "Frontend mocks do not establish Tauri or Store collision resolution."
+      ]
+    },
+    {
+      "scenario": "MS-I-014",
+      "checks": [
+        {
+          "command": "npm test -- apps/desktop/src/notifications.test.ts",
+          "result": "12 passed"
+        },
+        {
+          "command": "TypeScript, Prettier, scoped diff check",
+          "result": "passed"
+        }
+      ],
+      "behavior": [
+        "Both actual notification adapters exclude sender, recipient, subject, snippet, body, Cc, Bcc and Reply-To canaries with previews off.",
+        "Preview-on plugin permits sender name and subject while excluding recipient and body data.",
+        "Existing keyboard tests map search focus, archive, and permanent delete to immutable locators."
+      ],
+      "review": "Independent bounded privacy review approved. Exact payload equality and canary assertions are sensitive to added private fields.",
+      "limits": [
+        "Routing identifiers remain intentionally present for notification actions.",
+        "Native focus restoration, lock-screen rendering and OS delivery are not established by jsdom."
+      ]
+    },
+    {
+      "scenario": "MS-J-004",
+      "checks": [
+        {
+          "command": "cargo test -p dakia-core --test ai_privacy",
+          "result": "2 passed"
+        },
+        {
+          "command": "npx vitest run apps/desktop/src/ComposeApp.ai-privacy.test.tsx",
+          "result": "1 passed"
+        }
+      ],
+      "behavior": [
+        "Ollama wire request excludes configured key and has exact intended payload.",
+        "Local executable validates exact argument count, owned model path, intended prompt and empty stdin.",
+        "Hostile output remains inert escaped draft text without send or native actions."
+      ],
+      "review": "Root inspected the bounded tests; final model-path assertion corrected after review.",
+      "limits": [
+        "Shipped desktop AI remains disabled.",
+        "Optional service tests do not audit arbitrary executable behavior, provider retention or all OS network egress."
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "apps/desktop/src/mailRecipientIntent.integration.test.tsx",
+      "sha256": "0bb316a5e21d22847f97390f273c551b3c33cfb948c760398ed1512750f4ad13"
+    },
+    {
+      "path": "apps/desktop/src/notifications.test.ts",
+      "sha256": "59a61962b43a257612962e652d588cacdb64af89a16a2e615fe28ebea71940d8"
+    },
+    {
+      "path": "crates/dakia-core/tests/ai_privacy.rs",
+      "sha256": "8f01a74bc1df0149bab2523ceecf1cc2e91b96b55b1630499b734e3acad897f0"
+    },
+    {
+      "path": "apps/desktop/src/ComposeApp.ai-privacy.test.tsx",
+      "sha256": "e8dbe1d5e77994cd4fafdb49cf68f3db7c17623308d45c6abdca4a3d0360fa3a"
+    }
+  ],
+  "rootIndependentRerun": {
+    "recordedAt": "2026-10-21T13:37:05.885971+00:00",
+    "command": "npx vitest run apps/desktop/src/mailRecipientIntent.integration.test.tsx apps/desktop/src/notifications.test.ts apps/desktop/src/ComposeApp.ai-privacy.test.tsx --maxWorkers=1 --reporter=dot",
+    "result": "3 files passed; 16 tests passed; no failures or skips; exit 0",
+    "durationSeconds": 3.65
+  }
+}

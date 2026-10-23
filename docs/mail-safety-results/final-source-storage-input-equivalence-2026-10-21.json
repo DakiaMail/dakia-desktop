@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-21T15:19:01Z",
+  "lane": "final-source-storage-input-equivalence",
+  "status": "passed",
+  "coverageEvidence": {
+    "reportPath": "docs/mail-safety-results/remaining-gap-closure-final-storage-branch-coverage-2026-10-21.json",
+    "reportSha256": "0fb107639b55242dae6a360e43a408ec7bf145628bab7fa16f5fc88055705ea1",
+    "measuredSourceDigest": "14081b6cb59e0ea43082ef5b2edd1dccba85736dfd17ce4674cf36042c7de308",
+    "measuredSourceFileCount": 933,
+    "coverageInputManifest": "/private/tmp/dakia-mail-safety-remaining-gap-final-storage-branch-coverage-2026-10-21/input-before.sha256",
+    "coverageInputAfter": "/private/tmp/dakia-mail-safety-remaining-gap-final-storage-branch-coverage-2026-10-21/input-after.sha256",
+    "coverageInputManifestSha256": "28fdc43ae6ca1266cf7624f8b41a4b748e53265e23331c8ba681d7c10063141d",
+    "coverageInputAfterSha256": "28fdc43ae6ca1266cf7624f8b41a4b748e53265e23331c8ba681d7c10063141d",
+    "coverageInputFileCount": 538,
+    "coverageInputBeforeAfterIdentical": true
+  },
+  "finalSource": {
+    "digest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+    "fileCount": 933,
+    "manifestPath": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-c47c2de0.json",
+    "manifestSha256": "43060add67b37337eec6820d93c0d8dfe00db7fc0123fa188b58b452778bc3d2",
+    "liveFilesVerified": 933,
+    "liveMismatches": 0
+  },
+  "comparison": {
+    "priorManifestPath": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021.json",
+    "priorManifestSha256": "6a29637a36d1aa961857726022ed9741f4964299f80057d8c6d2eee94cf7c835",
+    "pathSetUnchanged": true,
+    "changedSourceFileCount": 2,
+    "changedSourceFiles": [
+      {
+        "path": "crates/dakia-cli/src/bin/provider-smoke.rs",
+        "before": {
+          "path": "crates/dakia-cli/src/bin/provider-smoke.rs",
+          "sha256": "43d4f78f10a590572c0e241591dfbc8195df7ca6142dcf1ec8f77d806309eab6",
+          "bytes": 63097
+        },
+        "after": {
+          "path": "crates/dakia-cli/src/bin/provider-smoke.rs",
+          "sha256": "fc67c93e35e6507d3ae84f98c38239994ad9eeda18199444d0df3f55de4287db",
+          "bytes": 65031
+        }
+      },
+      {
+        "path": "scripts/validate-realistic-fixtures.node-test.mjs",
+        "before": {
+          "path": "scripts/validate-realistic-fixtures.node-test.mjs",
+          "sha256": "09af98495a6a35cbb4029b751c09d639848686d186f2af74b6001f2ff027aefd",
+          "bytes": 7360
+        },
+        "after": {
+          "path": "scripts/validate-realistic-fixtures.node-test.mjs",
+          "sha256": "cc7f087a1094d8b55f710073edc6e2a83ff0e30c58950d91f820f1fd214c172e",
+          "bytes": 7360
+        }
+      }
+    ],
+    "changedCoverageInputCount": 0,
+    "currentCoverageInputMismatches": 0,
+    "exactCoverageInputsEquivalent": true
+  },
+  "conclusion": "The final source snapshot retains every byte measured by the three separate storage branch coverage cohorts. The two later source changes are outside the 538-file Cargo, dakia-core, mail-parser, and lettre coverage input set, so the recorded storage.rs observations remain applicable to the final core and vendor inputs.",
+  "limitations": [
+    "This is byte-equivalence evidence, not a new coverage execution.",
+    "It carries forward only the focused storage.rs branch observations and their original non-aggregation limits.",
+    "It provides no coverage claim for the changed provider-smoke CLI or fixture validator test file.",
+    "It does not extend the coverage evidence to the native app, providers, packaged artifacts, performance, or release behavior."
+  ]
+}

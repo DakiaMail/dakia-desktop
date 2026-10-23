@@ -17,9 +17,13 @@ const copiedDirectories = [
   "crates/dakia-core/testdata/mime",
   "crates/dakia-core/tests/fixtures",
   "apps/desktop/src/test/fixtures",
+  "testdata/mime-reader-handoff",
 ];
 const copiedSources = [
   "crates/dakia-core/src/mail.rs",
+  "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+  "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs",
+  "crates/dakia-core/src/independent_server_tests.rs",
   "apps/desktop/src-tauri/src/tauri_contracts_tests.rs",
   "apps/desktop/src/components/HtmlMessage.test.tsx",
   "apps/desktop/src/components/Reader.test.tsx",
@@ -57,8 +61,8 @@ function manifestAt(root) {
 
 test("validates the checked-in realistic mail fixture corpus", () => {
   const result = validateFixtureCorpus(repositoryRoot);
-  assert.equal(result.fixtureCount, 18);
-  assert.equal(result.files.filter((path) => path.endsWith(".eml")).length, 13);
+  assert.equal(result.fixtureCount, 82);
+  assert.equal(result.files.filter((path) => path.endsWith(".eml")).length, 77);
   assert.equal(result.files.filter((path) => path.endsWith(".html")).length, 5);
 });
 
@@ -160,7 +164,7 @@ test("rejects live domains, credential-like values, and non-exercising tests", (
       (entry) => entry.id === "mime.charset-matrix",
     );
     const fixturePath = join(root, fixture.path);
-    const changed = `${readFileSync(fixturePath, "utf8")}\nAuthorization: Bearer abcdefghijklmnop\nFrom: person@gmail.com\n`;
+    const changed = `${readFileSync(fixturePath, "utf8")}\nAuthorization: Bearer abcdefghijklmnop\nFrom: person@gmail.com\nReceived: from 192.168.215.1 (HELO mbpro.local) [::1] [fc00::1] [fe80::1]\n`;
     writeFileSync(fixturePath, changed);
     fixture.sha256 = createHash("sha256").update(changed).digest("hex");
     fixture.exercisedBy[0].id = "missing fixture test";
@@ -173,6 +177,11 @@ test("rejects live domains, credential-like values, and non-exercising tests", (
         return (
           /prohibited live domain: gmail\.com/.test(message) &&
           /credential-like/.test(message) &&
+          /private network address: 192\.168\.215\.1/.test(message) &&
+          /local hostname: mbpro\.local/.test(message) &&
+          /local IPv6 address: \[::1\]/.test(message) &&
+          /local IPv6 address: \[fc00::1\]/.test(message) &&
+          /local IPv6 address: \[fe80::1\]/.test(message) &&
           /not exercised/.test(message)
         );
       },
@@ -206,6 +215,22 @@ test("scans header URLs and bounded decoded MIME bodies and requires a real test
         );
       },
     );
+  }));
+
+test("rejects selective IMAP transcript evidence drift", () =>
+  withCorpus((root) => {
+    const [manifestPath, manifest] = manifestAt(root);
+    const fixture = manifest.fixtures.find(
+      (entry) =>
+        entry.id ===
+        "mime.greenmail-2.1.14-mixed-alternative-leaf-mime-contradiction",
+    );
+    const evidencePath = join(root, fixture.evidence[0].path);
+    writeFileSync(evidencePath, `${readFileSync(evidencePath, "utf8")}\n`);
+    assert.throws(() => validateFixtureCorpus(root), /evidence checksum drift/);
+    // Keep the local manifest write explicit so a broken implementation that
+    // ignores evidence entirely cannot satisfy this test through stale data.
+    writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   }));
 
 test("rejects an applicable publication path without a path-specific exercise", () =>

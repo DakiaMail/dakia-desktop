@@ -1,0 +1,11 @@
+X-Dakia-Corpus-Case: obs-10-domain-control
+X-Dakia-Corpus-Source: RFC 5322 section 4.4; fictional
+Date: Tue, 28 Jul 2026 12:01:00 +0000
+To: Reader <reader@example.test>
+Subject: Fictional obsolete syntax
+Message-ID: <obs-obs-10-domain-control@example.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+From: sender@[192.0.2.10]
+
+Fictional body obs-10-domain-control.

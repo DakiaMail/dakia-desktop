@@ -1,0 +1,210 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-21T11:21:00Z",
+  "lane": "focused-rust-storage-branch-coverage",
+  "status": "accepted-clean-refresh",
+  "sourceRunContext": {
+    "parentReportedFrozenInputDigestPrefix": "423a76",
+    "parentReportedFileCount": 758,
+    "headRevisionAtRecording": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+    "note": "The frozen source digest was supplied in abbreviated form by the coordinating run. The before-and-after input manifest below is the authoritative coverage-input evidence."
+  },
+  "scope": {
+    "description": "Two named dakia-core storage test modules measured branches in the current production storage source independently.",
+    "notProductWide": true,
+    "cohortsAreNotAggregated": true,
+    "priorTlsCoverageRecord": "docs/mail-safety-results/scoped-rust-branch-coverage-2026-10-21.json",
+    "priorTlsCoverageRecordChanged": false,
+    "tlsRefresh": "not run because the production TLS path was unchanged",
+    "branchObservationsAreNotAggregated": true
+  },
+  "toolEnvironment": {
+    "cargoLlvmCov": "cargo-llvm-cov 0.9.1",
+    "cargoNightly": "cargo 1.101.0-nightly (3960fa69b 2026-10-12)",
+    "rustcNightly": "rustc 1.101.0-nightly (5d8fec066 2026-10-16)",
+    "branchMode": "cargo llvm-cov --branch"
+  },
+  "sharedCompiledTarget": {
+    "path": "/private/tmp/dakia-mail-safety-branch-coverage-2026-10-21/target",
+    "reuse": "Dependency compilation cache was retained. Each cohort used cargo-llvm-cov default cleanup behavior, without --no-clean."
+  },
+  "inputManifest": {
+    "beforePath": "/private/tmp/dakia-mail-safety-storage-coverage-clean-2026-10-21/input-before.sha256",
+    "afterPath": "/private/tmp/dakia-mail-safety-storage-coverage-clean-2026-10-21/input-after-fault-recovery.sha256",
+    "sha256": "72608801b0ec2a6b6bf7f1b72a6c4d8979d685e19f480ac6f2e1215165b52dfa",
+    "unchanged": true,
+    "files": [
+      {
+        "path": "Cargo.toml",
+        "sha256": "47bbb06da69694b95d75f64ebbebdf1bc7e6b829a150b00cc9637821fc6d65b3"
+      },
+      {
+        "path": "Cargo.lock",
+        "sha256": "c75c4da551e415e6b883c061b19b0ed24a3d8ba5e4b36809db3f947ab4c31a4d"
+      },
+      {
+        "path": "crates/dakia-core/Cargo.toml",
+        "sha256": "f69475dc8dd0741daa758a623a886d37431b7969ae6e87cc23e268ab136f0d13"
+      },
+      {
+        "path": "crates/dakia-core/src/lib.rs",
+        "sha256": "9d3b5ef30bbfcc373f11e03a9c3a3191100ac44aca04eaf6e3223943bec9807d"
+      },
+      {
+        "path": "crates/dakia-core/src/storage.rs",
+        "sha256": "8ddb45545ffd8dbe3489dbcd6f3111b5a44834277eec90acfed547afff2227eb"
+      },
+      {
+        "path": "crates/dakia-core/src/storage_fault_tests.rs",
+        "sha256": "72b485b60c1924e5cf8334e742ac7518c2da885f33e17146cc9beb4feead9885"
+      },
+      {
+        "path": "crates/dakia-core/src/storage_open_lock_tests.rs",
+        "sha256": "faa222dcba187e78d3fb2987e51e8ef72c3974300797377991d02de3ae175e97"
+      }
+    ]
+  },
+  "combinedTestExecution": {
+    "passed": 31,
+    "failed": 0,
+    "note": "This is a count across two independent executions. Branch observations remain separate and must not be aggregated as workspace or product coverage."
+  },
+  "cohorts": [
+    {
+      "id": "storage_open_lock",
+      "command": "PATH=/private/tmp/dakia-mail-safety-tools/bin:$PATH CARGO_TARGET_DIR=/private/tmp/dakia-mail-safety-branch-coverage-2026-10-21/target cargo +nightly llvm-cov --branch --locked --package dakia-core --lib --json --output-path /private/tmp/dakia-mail-safety-storage-coverage-clean-2026-10-21/storage-open-lock.json -- storage::storage_open_lock_tests",
+      "exitCode": 0,
+      "testResult": {
+        "passed": 9,
+        "failed": 0,
+        "ignored": 0,
+        "filteredOut": 652,
+        "durationSeconds": 0.24
+      },
+      "rawLog": {
+        "path": "/private/tmp/dakia-mail-safety-storage-coverage-clean-2026-10-21/storage-open-lock.raw.log",
+        "sha256": "ccb0d66dacb8cbbe97744195c0be49eb68dedb97f48bede7867db6575319b172",
+        "kind": "raw cargo test and coverage stdout"
+      },
+      "coverageJson": {
+        "path": "/private/tmp/dakia-mail-safety-storage-coverage-clean-2026-10-21/storage-open-lock.json",
+        "sha256": "2b75162d7792b79c495a017ecfa2d4e328913251d663ce7b66d69d4bce56d0ad",
+        "bytes": 5501568
+      },
+      "objectSelectionEvidence": {
+        "buildDirectoryListPath": "/private/tmp/dakia-mail-safety-storage-coverage-clean-2026-10-21/storage-open-lock-build-directories.txt",
+        "buildDirectoryListSha256": "8f0f67b7cbf290dc4bbff225268c0bcc600cc9119e3d9419fc053fdcec83bbad",
+        "buildDirectoryCount": 1,
+        "onlyBuildDirectory": "09bc6243720f71af",
+        "objectListPath": "/private/tmp/dakia-mail-safety-storage-coverage-clean-2026-10-21/storage-open-lock-object-list.txt",
+        "objectListSha256": "92551fbb9285588ce7c2be1f755ce57938cbe0dea6105a2d505ae47099643e8d",
+        "objectPathCount": 258,
+        "reportMapPath": "/private/tmp/dakia-mail-safety-storage-coverage-clean-2026-10-21/storage-open-lock-report-map.json",
+        "reportMapSha256": "887f85e309fa75e2093a4393307f9e501d649354f69552e007e913361a0cc80a",
+        "matchingStorageFileCount": 1
+      },
+      "productionSourceBranchObservation": {
+        "path": "crates/dakia-core/src/storage.rs",
+        "found": 724,
+        "covered": 89,
+        "notCovered": 635,
+        "percent": 12.292817679558013
+      }
+    },
+    {
+      "id": "storage_fault_recovery",
+      "command": "PATH=/private/tmp/dakia-mail-safety-tools/bin:$PATH CARGO_TARGET_DIR=/private/tmp/dakia-mail-safety-branch-coverage-2026-10-21/target cargo +nightly llvm-cov --branch --locked --package dakia-core --lib --json --output-path /private/tmp/dakia-mail-safety-storage-coverage-clean-2026-10-21/storage-fault-recovery.json -- storage::storage_fault_tests",
+      "exitCode": 0,
+      "testResult": {
+        "passed": 22,
+        "failed": 0,
+        "ignored": 0,
+        "filteredOut": 639,
+        "durationSeconds": 0.57
+      },
+      "rawLog": {
+        "path": "/private/tmp/dakia-mail-safety-storage-coverage-clean-2026-10-21/storage-fault-recovery.raw.log",
+        "sha256": "c5c3421d119180cacd3715235cf6295bc5153f7dc3a7e19fbf4ca74fa784a4f0",
+        "kind": "raw cargo test and coverage stdout"
+      },
+      "coverageJson": {
+        "path": "/private/tmp/dakia-mail-safety-storage-coverage-clean-2026-10-21/storage-fault-recovery.json",
+        "sha256": "9bd6db0a08cb4200b91e3ad2f1c0630b78b7840ca6c8d1bcb7d804179ee88b5a",
+        "bytes": 5503482
+      },
+      "objectSelectionEvidence": {
+        "buildDirectoryListPath": "/private/tmp/dakia-mail-safety-storage-coverage-clean-2026-10-21/storage-fault-recovery-build-directories.txt",
+        "buildDirectoryListSha256": "8f0f67b7cbf290dc4bbff225268c0bcc600cc9119e3d9419fc053fdcec83bbad",
+        "buildDirectoryCount": 1,
+        "onlyBuildDirectory": "09bc6243720f71af",
+        "objectListPath": "/private/tmp/dakia-mail-safety-storage-coverage-clean-2026-10-21/storage-fault-recovery-object-list.txt",
+        "objectListSha256": "62733d9a0bd52b57420049a523775d0174a28d0f72738f236513529c4545359f",
+        "objectPathCount": 258,
+        "reportMapPath": "/private/tmp/dakia-mail-safety-storage-coverage-clean-2026-10-21/storage-fault-recovery-report-map.json",
+        "reportMapSha256": "1e1e1ba5156193fbdf1effd52033491edcbf7dc65456ece6e3539060157869a1",
+        "matchingStorageFileCount": 1
+      },
+      "productionSourceBranchObservation": {
+        "path": "crates/dakia-core/src/storage.rs",
+        "found": 724,
+        "covered": 124,
+        "notCovered": 600,
+        "percent": 17.12707182320442
+      }
+    }
+  ],
+  "limitations": [
+    "These are focused module observations, not whole-workspace or whole-product coverage.",
+    "The two coverage JSON reports use separate normal-clean executions and are intentionally not combined.",
+    "The full JSON reports, object lists, and raw logs are private temporary artifacts. This durable record retains their paths, sizes, and SHA-256 values for later verification.",
+    "The branch mode is an unstable cargo-llvm-cov capability; the record reports observed branches rather than asserting a coverage gate.",
+    "The retained stale-object audit copy is historical evidence only. Its 1406-branch observations are rejected and must not be used."
+  ],
+  "acceptance": {
+    "testExecution": "accepted: raw test outputs show 31 passing focused tests and zero failures",
+    "branchObservations": "accepted for the two named cohorts after normal cargo-llvm-cov cleanup",
+    "replacementRequired": "no"
+  },
+  "staleInstrumentedObjectCorrection": {
+    "initialReportCopy": "docs/mail-safety-results/scoped-storage-startup-branch-coverage-2026-10-21-stale-objects.json",
+    "initialReportSha256": "32b0ffa0f4b13970375c4c262b25b0155135d818b80034c81a3a82bbe44e806e",
+    "initialReportRetainedByteExact": true,
+    "confirmedEvidence": {
+      "oldStorageFaultReport": {
+        "branches": 682,
+        "functions": 930,
+        "lines": 13063
+      },
+      "rejectedRefreshReport": {
+        "branches": 1406,
+        "functions": 1877,
+        "lines": 26292
+      },
+      "interpretation": "The near doubling is explained by the exporter selecting two dakia-core instrumented test objects, rather than by the fresh profile data alone.",
+      "objectDirectories": [
+        "/private/tmp/dakia-mail-safety-branch-coverage-2026-10-21/target/llvm-cov-target/debug/build/dakia-core/17bee37d630df7ee/out",
+        "/private/tmp/dakia-mail-safety-branch-coverage-2026-10-21/target/llvm-cov-target/debug/build/dakia-core/09bc6243720f71af/out"
+      ],
+      "objectBuildTimesLocal": {
+        "17bee37d630df7ee": "2026-10-21T10:01:23+03:00",
+        "09bc6243720f71af": "2026-10-21T11:10:18+03:00"
+      }
+    },
+    "invalidatedFields": [
+      "cohorts[].productionSourceBranchObservation",
+      "any branch percentage derived from those observations"
+    ],
+    "validRetainedFields": [
+      "inputManifest",
+      "toolEnvironment",
+      "cohorts[].testResult",
+      "cohorts[].rawLog",
+      "combinedTestExecution"
+    ],
+    "status": "rejected-historical-attempt"
+  },
+  "cleanRefreshMethod": {
+    "description": "Each cohort ran cargo-llvm-cov normally, so its default cleanup ran before the test build. Neither command used --no-clean.",
+    "postRunObjectEvidence": "After each report, the instrumented dakia-core build-directory list contained exactly one directory and its executable/object list contained 258 paths."
+  }
+}

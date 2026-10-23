@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-22",
+  "lane": "primary-fictional-loopback-unsubscribe-command-tls",
+  "status": "passed-focused-primary",
+  "scope": {
+    "productionEntryPoint": "registered Tauri unsubscribe_message command dispatched from a Reader-labelled MockRuntime window",
+    "fixture": "synthetic DKIM-signed message, synthetic local DNS authority, and owned loopback TLS listeners",
+    "remoteServices": "none",
+    "physicalWebKitClick": "not exercised"
+  },
+  "application": {
+    "journal": "/private/tmp/dakia-unsubscribe-primary-application-20261022/application-journal.json",
+    "journalSha256": "be9a94a4968e222ad94944eee66a9da48db8a6bbf8cbad5a59cf6877febc380e",
+    "patchSha256": "b72130007d7c473468b36008da11b490eb9d71e7e43470b528c23d6e43f8ede7",
+    "privateReview": "GO"
+  },
+  "focusedRun": {
+    "log": "/private/tmp/dakia-unsubscribe-primary-application-20261022/focused-run.log",
+    "logSha256": "64b2babf4eab18577cec312fa58bb1779eb6dbc986415f4ecea7294f1a2e6bf2",
+    "tests": [
+      "production_tauri_unsubscribe_posts_once_and_stale_or_wrong_account_never_reach_tls",
+      "production_tauri_unsubscribe_rejects_untrusted_tls_without_http_post",
+      "production_tauri_unsubscribe_rejects_wrong_tls_hostname_without_http_post"
+    ],
+    "result": "3 passed; each test invoked the registered command through the production dispatcher"
+  },
+  "wireEvidence": {
+    "fixtureRoot": "/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-unsubscribe-command-tls-P91nIv",
+    "commandReceiptSha256": "f387f620812784ff317ba0fab5986f569b1a790dc38655957e12493c03f9d34d",
+    "httpReceiptSha256": "b0e82543a43cc435bdcdd8dbed6b1e7f287885e7e985873c47b626fdcdd068f3",
+    "successfulPosts": 1,
+    "successfulRequest": {
+      "method": "POST",
+      "path": "/one-click",
+      "contentType": "application/x-www-form-urlencoded",
+      "body": "List-Unsubscribe=One-Click",
+      "authorization": null,
+      "cookie": null,
+      "origin": null,
+      "referer": null
+    },
+    "rejectedBeforeHttp": [
+      "stale UIDVALIDITY target",
+      "foreign or absent account-scoped target",
+      "untrusted TLS certificate",
+      "wrong TLS hostname"
+    ]
+  },
+  "sensitivity": {
+    "privateCandidateOnly": true,
+    "certificateVerificationDisabled": "The untrusted-certificate command test failed by receiving a completed result after a temporary danger_accept_invalid_certs mutation. The candidate source was restored byte-for-byte.",
+    "historicalCandidateFailuresRetained": [
+      "Malformed copied DKIM key literal before literal correction",
+      "Overly specific wrong-account error expectation before it was aligned with immutable-target rejection"
+    ]
+  },
+  "selectedFileSha256": {
+    "crates/dakia-core/src/lib.rs": "6feaacdfd4c99f1c76340e01777ef3b8bff456438059c98a5cfeb7147560f236",
+    "crates/dakia-core/src/mail.rs": "139cf441706da8ba3eb75b2cf7c8d62a06374e70c70b36fe759f9d3c8b6fd609",
+    "crates/dakia-core/src/native_mail_safety_unsubscribe_fixture.rs": "a29546f5b9ad92395dd7e2594e78bbdf15829eac41e6e4a9a99e97a3c79c1b43",
+    "apps/desktop/src-tauri/src/lib.rs": "97fa8fd75a10952e91127e3535189a1ae927491141e580725e4dc5162efd751a",
+    "apps/desktop/src-tauri/src/unsubscribe_command_tls_tests.rs": "62686fb2abf3ccd0ca4bb5f1937266e3b533f71bc7222cd49badded5b1d6d765"
+  },
+  "limitations": [
+    "This is command-boundary evidence. It does not prove that a physical WebKit Reader click reaches the command.",
+    "The focused runner does not establish a whole-current-source pass.",
+    "The fixture runner terminates the spawned child PID on timeout, not a whole descendant process group."
+  ]
+}

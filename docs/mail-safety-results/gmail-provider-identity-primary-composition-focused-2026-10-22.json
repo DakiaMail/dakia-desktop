@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 1,
+  "lane": "focused-primary-composition",
+  "status": "passed-for-gmail-provider-identity-composition-only",
+  "recordedAt": "2026-10-22",
+  "sourceBinding": {
+    "frozenPrimarySourceDigest": "78cdb7b60e2cb68a1d04ede3172c0c4a1b1a8ddc6b0db3535c6c0a1e79d30c22",
+    "frozenPrimaryFileCount": 996,
+    "frozenPrimaryManifest": "/private/tmp/dakia-final-gmail-schema3-full-source-20261022/source-manifest.json",
+    "frozenPrimaryManifestSha256": "13704ff6823d9576b6d3afdfd2a6f5d16a81009d92f30fae975a52463bbc2962",
+    "candidateMailSha256": "e2ad0184019acd536da0acdb2c94b17918906831979c63b4a544e86ced100d54",
+    "candidateStorageSha256": "13591af2d9af9e5058fc9cf253c52d66a5a807169428bc9a019b5464d883484b"
+  },
+  "composition": {
+    "journal": "/private/tmp/dakia-gmail-primary-integration-20261022",
+    "canonicalB14Patch": {
+      "path": "patches/gmail-provider-identity-b14.patch",
+      "sha256": "aeb445aef982eb0b2664683fc4146e6fc829f0826c866fff7118cb0a15132e06"
+    },
+    "primaryCompositionPatch": {
+      "path": "patches/primary-gmail-integration.patch",
+      "sha256": "bcafe53d5e07629ec547261b51bea1b5b2d4dd28fe549c6a5dba25d925f01305"
+    },
+    "pathHashRecord": {
+      "path": "primary-integration-hashes.json",
+      "sha256": "b58ed6e8c48f4ac134057519dd1397fb0a65613d9f6981220607d27c873b4c06",
+      "pathCount": 29
+    },
+    "mailMerge": {
+      "primaryBeforeSha256": "139cf441706da8ba3eb75b2cf7c8d62a06374e70c70b36fe759f9d3c8b6fd609",
+      "b14BaseSha256": "47ffc21b8e0b1840c2ce42161a9764e677adfad5030fdc955271cf3aedc954eb",
+      "resultSha256": "1d37009da2afd8298600c3eb3861cc11c852d138e64ceed3af2e79ba19f6188c",
+      "conflicts": 0,
+      "preservedConcurrentWork": [
+        "reviewed unsubscribe changes",
+        "reviewed MIME changes",
+        "accepted configured AI egress test"
+      ]
+    },
+    "independentReview": {
+      "status": "go",
+      "scope": "all 29 recorded paths, including the late feature-only initializer",
+      "finding": "No material composition issue; the reconstructed three-way mail merge matches the applied primary bytes."
+    }
+  },
+  "focusedValidation": {
+    "validationRecord": {
+      "path": "/private/tmp/dakia-gmail-primary-integration-20261022/validation-results.json",
+      "sha256": "94a98b378a14dd7a7b07a33642e79299ffc88a538af8b9c9b980e79fccd3a1a6"
+    },
+    "focusedGmailRegressions": {
+      "passed": 13,
+      "failed": 0,
+      "covers": [
+        "mixed RFC identity copies and reopen",
+        "bounded backfill and terminal observation liveness",
+        "provider-change fencing",
+        "full sync and realtime fallback without exact X-GM-EXT-1",
+        "Reader, recent-refresh, and remote-search fallback",
+        "exact case-insensitive capability token recognition",
+        "sender-cleanup fail-closed behavior"
+      ],
+      "sandboxCompatibleLogSha256": "ffc9212649018f5e93c4db33d7de8f6c39d0acda096206202e6bd7eb61e9d220",
+      "isolatedLoopbackLogSha256": "ee552d7369f6f59b70e3b7e07063c08057db92ddfaf6e81cc34270f9a9cfec8a"
+    },
+    "compilation": {
+      "coreCheck": "passed",
+      "coreTestTargets": "passed",
+      "cliTestTargets": "passed",
+      "desktopLibTestTargets": "passed",
+      "featureEnabledDesktopLibTestTargets": "passed",
+      "formatCheck": "passed",
+      "featureEnabledSuccessLogSha256": "9af8aa6a1aba9e7b4884879c0ec1c20e11803844dc9a1b0a6b0e9b333b4d9c3d"
+    },
+    "privateCandidateValidation": {
+      "record": "/private/tmp/dakia-gmail-provider-identity-candidate-XS8Osj/validation-20261022/validation-manifest.json",
+      "recordSha256": "117cafbb3a5d71a6cbac38c0fb3822803a327a01117d0a3f338d54f0e6f93977",
+      "coreLibrary": {
+        "passed": 772,
+        "ignored": 13,
+        "total": 785
+      },
+      "coreIntegration": {
+        "passed": 21,
+        "ignored": 0,
+        "total": 21
+      },
+      "combined": {
+        "passed": 793,
+        "ignored": 13,
+        "total": 806,
+        "failed": 0
+      }
+    }
+  },
+  "retainedIssues": [
+    {
+      "kind": "test-harness-selector",
+      "status": "corrected and not counted as a pass",
+      "detail": "The first focused runner used Cargo --exact with unqualified names and ran zero tests. The retained log is 1a0915a36d055c7e6c5c493240f4079dda7ff64ea1edeebef71c9c41d41c9b5c. The replacement runner requires one executed test and one passing result per filter."
+    },
+    {
+      "kind": "sandbox-loopback-restriction",
+      "status": "environment restriction, isolated rerun passed",
+      "detail": "One remote-search fixture first failed with EPERM while binding a synthetic loopback server. The isolated elevated rerun passed and used no provider credentials or external service."
+    },
+    {
+      "kind": "feature-gated-constructor",
+      "status": "corrected",
+      "detail": "The native-mail-safety-fixture desktop compile exposed one missing MailSummary initializer. The retained predecessor E0063 log is a8b5dea11b06562338ed79fd996c4aa5474072a7162d5f111d6884030cf94816. The only correction was gmail_message_id: None, and the exact feature-enabled compile then passed."
+    },
+    {
+      "kind": "hash-transcription",
+      "status": "corrected in evidence",
+      "detail": "Earlier prose incorrectly ended the candidate mail hash with c2c1a889. The actual validated candidate hash is e2ad0184019acd536da0acdb2c94b17918906831979c63b4a544e86ced100d54; this was a transcription error, not another source variant."
+    }
+  ],
+  "limitations": [
+    "This is focused source and compilation evidence for the Gmail provider-identity composition. It is not the fresh full-source validation lane.",
+    "No live Gmail, other provider, SMTP, mailbox mutation, credential, native app, WebKit, packaged-app, upgrade, signing, or release operation was performed for this report.",
+    "The private candidate full-core result is not a substitute for the full primary source lane after composition.",
+    "The 13 ignored core tests remain ignored evidence, not passes.",
+    "Schema version 3 requires separate upgrade and fatal-profile native acceptance binding."
+  ]
+}

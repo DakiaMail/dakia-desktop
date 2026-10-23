@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "status": "failed-infrastructure",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "7126a3b01086f50ffb453b8ddc7ba68909c25258f31058b256c2393d6c521162",
+    "fileCount": 743
+  },
+  "sourceAfterRun": {
+    "status": "passed",
+    "baseline": {
+      "algorithm": "sha256-path-and-content-manifest",
+      "digest": "7126a3b01086f50ffb453b8ddc7ba68909c25258f31058b256c2393d6c521162",
+      "fileCount": 743
+    },
+    "current": {
+      "algorithm": "sha256-path-and-content-manifest",
+      "digest": "7126a3b01086f50ffb453b8ddc7ba68909c25258f31058b256c2393d6c521162",
+      "fileCount": 743
+    }
+  },
+  "runtime": {
+    "executable": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.sW6Nyh/Dakia Fictional Provider Reader.app/Contents/MacOS/dakia-desktop",
+    "executableSha256": "0b7c0bbc181e984084974a19746f368fdcdbcd98822597cd5793222fae65b955",
+    "pid": 4421,
+    "bundleIdentifier": "dev.dakia.fictional-provider-reader.run-sW6Nyh",
+    "webviewUrl": "http://127.0.0.1:1420/",
+    "exitCode": 0
+  },
+  "failure": "The computer-use attachment call took 23087.9619 seconds. During this prolonged wait the owned GreenMail server exhausted its Java heap. Subsequent strict-TLS read-only flag inspection failed with SSLEOFError. Native provider flow and attachment acceptance were not executed on this degraded fixture.",
+  "observations": [
+    "Live ACL acceptance completed before the failure.",
+    "The app SQLite store contained three messages per fictional account; switching Smart to List showed six messages without manual Sync. This observation occurred after the prolonged wait and is not prompt-startup latency evidence.",
+    "Owned GreenMail logs contained Java heap space OutOfMemoryError; Docker process remained up with 20 PIDs and about236.6MiB/512MiB memory."
+  ],
+  "evidenceRoot": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.sW6Nyh",
+  "serverErrorLog": "/private/tmp/dakia-native-greenmail-last150-20261021.log",
+  "proxyState": {
+    "disabled": false,
+    "accepted": 7006,
+    "blocked": 0,
+    "activeSockets": 0,
+    "lastCommandId": null,
+    "capturedAt": "2026-10-21T04:41:08.056Z"
+  },
+  "cleanup": "Normal Cmd+Q exited the app with code0; runner removed only owned processes/container and retained artifacts.",
+  "limitations": [
+    "This is not a native acceptance pass.",
+    "The prolonged wait and server heap exhaustion do not establish a product flake or a successful long-running native soak.",
+    "Physical Mac sleep/wake was not requested or performed by the test."
+  ]
+}

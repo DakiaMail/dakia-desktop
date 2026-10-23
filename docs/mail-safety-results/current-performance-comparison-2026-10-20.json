@@ -1,0 +1,176 @@
+{
+  "schemaVersion": 1,
+  "lane": "manual-mailbox-performance",
+  "status": "passed",
+  "startedAt": "2026-10-20T20:55:59.546Z",
+  "finishedAt": "2026-10-20T21:00:41.096Z",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "67018628cfa5601b987996ccee872283365cb888eb575a8d87bc501c9234f03b",
+    "fileCount": 736
+  },
+  "sourceTreeAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "67018628cfa5601b987996ccee872283365cb888eb575a8d87bc501c9234f03b",
+    "fileCount": 736
+  },
+  "hardware": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "osRelease": "25.6.0",
+    "cpuModel": "Apple M1 Max",
+    "logicalCpuCount": 10,
+    "totalMemoryBytes": 68719476736,
+    "node": "v22.23.2"
+  },
+  "build": {
+    "rustProfile": "cargo-test-unoptimized-debuginfo",
+    "rustc": "rustc 1.89.0 (29483883e 2025-08-04)\nbinary: rustc\ncommit-hash: 29483883eed69d5fb4db01964cdf2af4d86e9cb2\ncommit-date: 2025-08-04\nhost: aarch64-apple-darwin\nrelease: 1.89.0\nLLVM version: 20.1.7",
+    "cargo": "cargo 1.89.0 (c24e10642 2025-06-23)"
+  },
+  "repeat": 3,
+  "measurements": [
+    {
+      "iteration": 1,
+      "testName": "manual_two_thousand_message_snapshot_baseline",
+      "messageCount": 2000,
+      "pageSize": 500,
+      "pageCount": 4,
+      "elapsedMilliseconds": 654
+    },
+    {
+      "iteration": 1,
+      "testName": "manual_thirty_thousand_message_snapshot_baseline",
+      "messageCount": 30000,
+      "pageSize": 500,
+      "pageCount": 60,
+      "elapsedMilliseconds": 8437
+    },
+    {
+      "iteration": 1,
+      "testName": "manual_one_hundred_thousand_message_snapshot_baseline",
+      "messageCount": 100000,
+      "pageSize": 500,
+      "pageCount": 200,
+      "elapsedMilliseconds": 27633
+    },
+    {
+      "iteration": 1,
+      "testName": "manual_two_hundred_thousand_message_snapshot_baseline",
+      "messageCount": 200000,
+      "pageSize": 500,
+      "pageCount": 400,
+      "elapsedMilliseconds": 55689
+    },
+    {
+      "iteration": 2,
+      "testName": "manual_two_thousand_message_snapshot_baseline",
+      "messageCount": 2000,
+      "pageSize": 500,
+      "pageCount": 4,
+      "elapsedMilliseconds": 662
+    },
+    {
+      "iteration": 2,
+      "testName": "manual_thirty_thousand_message_snapshot_baseline",
+      "messageCount": 30000,
+      "pageSize": 500,
+      "pageCount": 60,
+      "elapsedMilliseconds": 8020
+    },
+    {
+      "iteration": 2,
+      "testName": "manual_one_hundred_thousand_message_snapshot_baseline",
+      "messageCount": 100000,
+      "pageSize": 500,
+      "pageCount": 200,
+      "elapsedMilliseconds": 27888
+    },
+    {
+      "iteration": 2,
+      "testName": "manual_two_hundred_thousand_message_snapshot_baseline",
+      "messageCount": 200000,
+      "pageSize": 500,
+      "pageCount": 400,
+      "elapsedMilliseconds": 55853
+    },
+    {
+      "iteration": 3,
+      "testName": "manual_two_thousand_message_snapshot_baseline",
+      "messageCount": 2000,
+      "pageSize": 500,
+      "pageCount": 4,
+      "elapsedMilliseconds": 644
+    },
+    {
+      "iteration": 3,
+      "testName": "manual_thirty_thousand_message_snapshot_baseline",
+      "messageCount": 30000,
+      "pageSize": 500,
+      "pageCount": 60,
+      "elapsedMilliseconds": 8041
+    },
+    {
+      "iteration": 3,
+      "testName": "manual_one_hundred_thousand_message_snapshot_baseline",
+      "messageCount": 100000,
+      "pageSize": 500,
+      "pageCount": 200,
+      "elapsedMilliseconds": 27533
+    },
+    {
+      "iteration": 3,
+      "testName": "manual_two_hundred_thousand_message_snapshot_baseline",
+      "messageCount": 200000,
+      "pageSize": 500,
+      "pageCount": 400,
+      "elapsedMilliseconds": 55644
+    }
+  ],
+  "resourceSoak": {
+    "reconnectCycles": 200,
+    "storeOpenCycles": 100,
+    "elapsedMilliseconds": 1117,
+    "fileDescriptorsBefore": 10,
+    "fileDescriptorsAfter": 10,
+    "residentBytesBefore": 26443776,
+    "residentBytesAfter": 27705344,
+    "residentGrowthBytes": 1261568,
+    "residentGrowthLimitBytes": 67108864
+  },
+  "comparisons": [
+    {
+      "messageCount": 2000,
+      "currentMedianMilliseconds": 654,
+      "baselineMedianMilliseconds": 912,
+      "changePercent": -28.289473684210524,
+      "status": "passed"
+    },
+    {
+      "messageCount": 30000,
+      "currentMedianMilliseconds": 8041,
+      "baselineMedianMilliseconds": 7833,
+      "changePercent": 2.655432146048768,
+      "status": "passed"
+    },
+    {
+      "messageCount": 100000,
+      "currentMedianMilliseconds": 27633,
+      "baselineMedianMilliseconds": 25256,
+      "changePercent": 9.41162496040545,
+      "status": "passed"
+    },
+    {
+      "messageCount": 200000,
+      "currentMedianMilliseconds": 55689,
+      "baselineMedianMilliseconds": 51152,
+      "changePercent": 8.869643415702221,
+      "status": "passed"
+    }
+  ],
+  "limitations": [
+    "Loopback scripted IMAP measures Dakia's production protocol and SQLite paths, not provider latency.",
+    "Elapsed time is comparable only on the same idle hardware and build profile.",
+    "This runner does not establish native WebKit responsiveness or sustained process memory."
+  ]
+}

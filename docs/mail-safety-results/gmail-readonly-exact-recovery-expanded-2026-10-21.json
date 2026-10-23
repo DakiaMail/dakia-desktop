@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T14:32:02.526369+00:00",
+  "lane": "credentialed-gmail-read-only-exact-message-recovery",
+  "status": "passed",
+  "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "evidence": {
+    "binarySha256": "7817c4d83cff9bb5212be4ee4973da1589b46d0b42eaa5845115592a7e6ff2bb",
+    "childReaped": true,
+    "cleanupIncomplete": false,
+    "elapsedMs": 9182,
+    "fixedRecoveryId": "redacted-fixed-id",
+    "forcedKillRequested": false,
+    "implementation": {
+      "focusedProviderSmokeTests": "19 passed",
+      "independentReview": "approved"
+    },
+    "innerTimeoutSeconds": 45,
+    "kind": "private-provider-smoke-ci-read-only-recovery",
+    "mailSubmissionRequested": false,
+    "operations": [
+      "read-only exact recovery"
+    ],
+    "outerTimeout": false,
+    "outerTimeoutSeconds": 70,
+    "ownedChildTempDirRemoved": true,
+    "processExitCode": 0,
+    "providerSourceSha256": "43d4f78f10a590572c0e241591dfbc8195df7ca6142dcf1ec8f77d806309eab6",
+    "rawEvidence": {
+      "bytes": 1135,
+      "schemaValid": true,
+      "sha256": "4405134dcd297620d7776e6a359f1bb4c38761dcc1b3ba6e88a7530011cd0bba"
+    },
+    "recoveryEvidence": {
+      "outcome": "passed",
+      "stage": "inbox_observation",
+      "stageHistory": [
+        "prepared",
+        "recovery_store_open",
+        "recovery_account_persist",
+        "recovery_credential_persist",
+        "recovery_smoke",
+        "recovery_header_sync",
+        "recovery_exact_search",
+        "recovery_body_fetch",
+        "recovery_cache_verify",
+        "inbox_observation"
+      ]
+    },
+    "recoveryEvidenceRemoved": true,
+    "remoteMutationRequested": false,
+    "roundtripRequested": false,
+    "schemaVersion": 1,
+    "sourceBindingSha256": "7346af77e66ac88bac48f5b06b012f676ba2d4dd93c7e3879f3aca74bf11a7d4",
+    "terminationRequested": false,
+    "workspaceSourceSha256": "2742cade8090db0a5e1d861b8139bdbde045ed11ba40d5606f1d86a1f9a77bd0"
+  },
+  "sanitizedReportSha256": "e26fb79c3c1e44959b0718ec17165b279eec1b8c40344ef1b3bb0eada564fe94",
+  "scope": [
+    "Existing disposable self-message exact remote search, body fetch, and cache verification through production provider-smoke recovery.",
+    "Read-neutral IMAP and SMTP authentication; no sending, remote flag or label mutation, or message deletion requested.",
+    "Owned temporary encrypted credentials and adjacent key were removed with the reaped child; no credentials, addresses or message content are retained in this report."
+  ],
+  "sourceIdentityNote": "Recorded digest2742cade identifies the invocation tree. A later standards-inventory script-only correction invalidated the parallel full-source baseline; it did not change this built provider executable or its provider source. This provider result is separate from the restarted full-source suite.",
+  "limitations": [
+    "One Gmail app-password account and one existing message only.",
+    "Does not establish arbitrary provider behavior, Gmail multi-label convergence, all Gmail operations, native Reader behavior, or a new SMTP round trip.",
+    "Earlier recovery timeouts remain historical failures; this one invocation completed in9182ms without retry, timeout, termination or forced kill."
+  ]
+}

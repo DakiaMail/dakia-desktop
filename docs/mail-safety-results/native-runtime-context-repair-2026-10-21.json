@@ -1,0 +1,311 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T15:54:04.957409+00:00",
+  "lane": "native-fixture-runtime-context-repair",
+  "status": "passed-focused-and-compile-only",
+  "sourceTree": {
+    "digest": "f6c8094e26fc9982144aebf7e368d149926001835fa848b94c4445bc87bcfd27",
+    "fileCount": 933
+  },
+  "change": "Omit the static dataStoreIdentifier field from generated Tauri JSON. Validate the owned fictional root/profile and canonical per-run UUID, then set the typed 16-byte identifier through Context::config_mut before main window construction. Detached windows and ACL probes validate and reuse that same configuration. Production builds are unchanged.",
+  "independentReview": "approved",
+  "focusedTests": {
+    "fixtureFeatureRustPassed": 206,
+    "focusedRustPassed": 2,
+    "harnessNodePassed": 1,
+    "cargoCheck": "passed"
+  },
+  "compileOnlyEvidence": {
+    "schemaVersion": 1,
+    "status": "passed-compile-only",
+    "generatedAt": "2026-10-21T15:50:14.888Z",
+    "sourceSnapshot": {
+      "digest": "f6c8094e26fc9982144aebf7e368d149926001835fa848b94c4445bc87bcfd27",
+      "fileCount": 933,
+      "manifest": {
+        "path": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-f6c8094e.json",
+        "bytes": 170388,
+        "sha256": "493df9b39cfc8283ecf9875701b26102be7538d58cc311f7ae979c74ecd06a64"
+      }
+    },
+    "command": [
+      "npx",
+      "tauri",
+      "build",
+      "--debug",
+      "--target",
+      "aarch64-apple-darwin",
+      "--bundles",
+      "app",
+      "--no-sign",
+      "--ci",
+      "--features",
+      "native-mail-safety-fixture",
+      "--runner",
+      "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.a3kXDF/cargo-build-only",
+      "--config",
+      "apps/desktop/src-tauri/tauri.conf.json",
+      "--config",
+      "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.a3kXDF/tauri.runtime-context.json"
+    ],
+    "inputs": {
+      "repairedConfig": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.a3kXDF/tauri.runtime-context.json",
+        "bytes": 1168,
+        "sha256": "525291eac74a535f6229e3662ed2aa299d47c2f60f31778419abbaacd6d9e8fc"
+      },
+      "runtimeContextInput": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.a3kXDF/native-data-store-identifier.compile-only.json",
+        "bytes": 273,
+        "sha256": "ec201bd29ce7bb2ec2bd2beed68d8b935cde5b36238d543f7089db61d2131d69",
+        "value": {
+          "schemaVersion": 1,
+          "injection": "runtime-context",
+          "identifier": "a32f54ce-ab83-46d2-a87b-97f1e382dd8d",
+          "bytes": [
+            163,
+            47,
+            84,
+            206,
+            171,
+            131,
+            70,
+            210,
+            168,
+            123,
+            151,
+            241,
+            227,
+            130,
+            221,
+            141
+          ]
+        }
+      },
+      "preservedFailureConfig": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.a3kXDF/tauri.failed-static-datastore.json",
+        "bytes": 1448,
+        "sha256": "3d87719c0979ed146cf9fa972806b92842a2490ea7594a620eef3b06873ef114"
+      },
+      "preservedFailureLog": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.a3kXDF/tauri-build.failed-static-datastore.log",
+        "bytes": 11849,
+        "sha256": "33fa305133c9fd723301b7ecf2c3877dd0dc1d6b00b95c8bb6fd718a20cfd990"
+      }
+    },
+    "artifact": {
+      "path": "/private/tmp/dakia-native-mail-safety-final-20261017/target/aarch64-apple-darwin/debug/bundle/macos/Dakia Fictional Provider Reader.app",
+      "bundleIdentifier": "dev.dakia.fictional-provider-reader.run-OTAMH2",
+      "desktop": {
+        "path": "/private/tmp/dakia-native-mail-safety-final-20261017/target/aarch64-apple-darwin/debug/bundle/macos/Dakia Fictional Provider Reader.app/Contents/MacOS/dakia-desktop",
+        "bytes": 107681904,
+        "sha256": "f43fe6e1d12115cb0cbd538c7ebd8b1ea24cd2e03d6e8ecd9e04ea8a0598adde",
+        "architecture": "arm64"
+      },
+      "cli": {
+        "path": "/private/tmp/dakia-native-mail-safety-final-20261017/target/aarch64-apple-darwin/debug/bundle/macos/Dakia Fictional Provider Reader.app/Contents/MacOS/dakia",
+        "bytes": 77677704,
+        "sha256": "b6b236fb1e7571841044450c3cdc73453d3d5ae11ed81fae7f4ddbc78baa7fed",
+        "architecture": "arm64"
+      },
+      "inventory": [
+        {
+          "path": "Contents/Frameworks/libonnxruntime.1.23.2.dylib",
+          "bytes": 74902752,
+          "sha256": "6fee21a0dbcaa98fe082cb4f7ed07ec5def439df36198f47b61dc205e7d2a1fa"
+        },
+        {
+          "path": "Contents/Info.plist",
+          "bytes": 1220,
+          "sha256": "483e24a061da9136352f6c0e167e86a19fdaaf0841411506fefe846f3fcb35de"
+        },
+        {
+          "path": "Contents/MacOS/dakia",
+          "bytes": 77677704,
+          "sha256": "b6b236fb1e7571841044450c3cdc73453d3d5ae11ed81fae7f4ddbc78baa7fed"
+        },
+        {
+          "path": "Contents/MacOS/dakia-desktop",
+          "bytes": 107681904,
+          "sha256": "f43fe6e1d12115cb0cbd538c7ebd8b1ea24cd2e03d6e8ecd9e04ea8a0598adde"
+        },
+        {
+          "path": "Contents/Resources/THIRD_PARTY_NOTICES.md",
+          "bytes": 3578,
+          "sha256": "a2c9fce64490e7ab801121510021f7237dc0a6c94fa7232445fd899111ec245a"
+        },
+        {
+          "path": "Contents/Resources/icon.icns",
+          "bytes": 1361462,
+          "sha256": "03a5a7e610ad3f7debeca73df4c3fd0dd341c0dad2a941f26aa266b02a29ba1d"
+        },
+        {
+          "path": "Contents/Resources/licenses/Apache-2.0.txt",
+          "bytes": 11358,
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "path": "Contents/Resources/licenses/DAKIA-MPL-2.0-SOURCE-NOTICE.md",
+          "bytes": 400,
+          "sha256": "eef5d343ef610b25bee312f39d2e8657cc667b510e8811b8e958f444eb9faee8"
+        },
+        {
+          "path": "Contents/Resources/licenses/MPL-2.0.txt",
+          "bytes": 16726,
+          "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04"
+        },
+        {
+          "path": "Contents/Resources/licenses/ONNX-Runtime-1.23.2-LICENSE.txt",
+          "bytes": 1073,
+          "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c"
+        },
+        {
+          "path": "Contents/Resources/licenses/ONNX-Runtime-1.23.2-ThirdPartyNotices.txt",
+          "bytes": 326866,
+          "sha256": "e9e90971a8e75a9a8ac0c6412e29c1202d079998389915aa485f46c816c3b4cc"
+        },
+        {
+          "path": "Contents/Resources/licenses/mmBERT-small-MIT-NOTICE.txt",
+          "bytes": 1910,
+          "sha256": "37bd7f5f301ccab826b60d0f225137e228505d3d3e0fb68bd33a8cdb33883e62"
+        },
+        {
+          "path": "Contents/Resources/resources/email-classifier-v2/MANIFEST.json",
+          "bytes": 838,
+          "sha256": "1647390c9d90c7c09983f69ef239cd80da7d10368766ee5193b340ae3970bbf9"
+        },
+        {
+          "path": "Contents/Resources/resources/email-classifier-v2/export_metadata.json",
+          "bytes": 1422,
+          "sha256": "7be647b1e81f868f3a88ff023b2a676d52bb0b4f85ccb41133c345b1615183e1"
+        },
+        {
+          "path": "Contents/Resources/resources/email-classifier-v2/model.onnx",
+          "bytes": 141843160,
+          "sha256": "48c7ea833f547661a2462e580015373ad3bebeaaca88b53cdb9eb1740fb8e7f5"
+        },
+        {
+          "path": "Contents/Resources/resources/email-classifier-v2/special_tokens_map.json",
+          "bytes": 1051,
+          "sha256": "6e3204c5a4004719c185007a745d1940471a6fb02521cfa0a00306dbb6bc5903"
+        },
+        {
+          "path": "Contents/Resources/resources/email-classifier-v2/tokenizer.json",
+          "bytes": 34363188,
+          "sha256": "609d8f4c067cd3950f88594c5a802616cea245823836ef5848ee4fc40aab5b6f"
+        },
+        {
+          "path": "Contents/Resources/resources/email-classifier-v2/tokenizer_config.json",
+          "bytes": 46469,
+          "sha256": "3b66ca84514d9aacf4b90c65a61e561127c6c21d81bbf4e8ba9d46a4c15ac82d"
+        }
+      ]
+    },
+    "gates": [
+      {
+        "gate": "original static JSON sensitivity",
+        "status": "passed",
+        "evidence": "Retained E0308 expected [u8;16], found Vec<u8> failure."
+      },
+      {
+        "gate": "typed runtime-context compile",
+        "status": "passed",
+        "evidence": "Tauri debug arm64 app bundle created with static dataStoreIdentifier absent."
+      },
+      {
+        "gate": "feature library tests",
+        "status": "passed",
+        "evidence": "206 passed, 0 failed after authorized loopback rerun."
+      },
+      {
+        "gate": "provider harness contract",
+        "status": "passed",
+        "evidence": "1 passed, 0 failed."
+      },
+      {
+        "gate": "native process launch",
+        "status": "skipped",
+        "evidence": "Compile-only task; exact executable was confirmed absent from process table after build."
+      },
+      {
+        "gate": "live packaged WebKit data-store identity",
+        "status": "skipped",
+        "evidence": "Requires later CUA-driven native acceptance after source gates."
+      },
+      {
+        "gate": "Developer ID signing, notarization, stapling, updater signing, installation, publishing",
+        "status": "skipped",
+        "evidence": "Not authorized and not part of this debug no-sign compile gate."
+      },
+      {
+        "gate": "Intel architecture",
+        "status": "waived",
+        "evidence": "This fixture acceptance is Apple Silicon arm64 only."
+      },
+      {
+        "gate": "app bundle code-signature verification",
+        "status": "failed",
+        "evidence": "Expected for this explicitly no-sign debug compile artifact: codesign reported that the bundle has no sealed resources."
+      },
+      {
+        "gate": "Gatekeeper assessment",
+        "status": "failed",
+        "evidence": "Expected for this explicitly no-sign debug compile artifact; it is not release eligible."
+      }
+    ],
+    "limitations": [
+      "The runtime-context receipt proves the guarded input, not that WebKit consumed it.",
+      "The generated bundle is a debug no-sign test artifact with linker ad-hoc signatures, not a release artifact.",
+      "No native UI, provider, profile, installer, update, signing, notarization, or publication action occurred.",
+      "The app bundle fails strict code-signature and Gatekeeper verification as expected for --no-sign. It must never be treated as a distributable release artifact."
+    ],
+    "nativeLaunched": false,
+    "providerConnected": false,
+    "profileAccessed": false,
+    "published": false,
+    "signatureAssessment": {
+      "releaseEligible": false,
+      "codesignVerify": {
+        "status": "failed-expected-for-no-sign-debug-artifact",
+        "exitCode": 1,
+        "stdout": {
+          "path": "/private/tmp/dakia-native-runtime-context-codesign-verify.stdout",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stderr": {
+          "path": "/private/tmp/dakia-native-runtime-context-codesign-verify.stderr",
+          "bytes": 204,
+          "sha256": "0d80f5b98bd7a996892b9d1cb9b83d0eebd77be774b8ebd5b7d01e4cd55f1c4b"
+        }
+      },
+      "gatekeeper": {
+        "status": "failed-expected-for-no-sign-debug-artifact",
+        "exitCode": 1,
+        "stdout": {
+          "path": "/private/tmp/dakia-native-runtime-context-spctl.stdout",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stderr": {
+          "path": "/private/tmp/dakia-native-runtime-context-spctl.stderr",
+          "bytes": 178,
+          "sha256": "02f105eec9faa39c6c5165f103dd1fb35eca1880afc6720a1a12b09aa48f1cd0"
+        }
+      },
+      "preservedEarlierReport": {
+        "path": "/private/tmp/dakia-native-runtime-context-compile-only-f6c8094e.before-signature-assessment.json",
+        "bytes": 8930,
+        "sha256": "5b19a7ab0f475b252693e14fec62837b4e871dc093840cfc9cc529e84833611d"
+      }
+    }
+  },
+  "compileOnlyReportSha256": "34173794fbb88fd6bbaab34a05b21793b992889e4b7da57dba9cabfe698fc059",
+  "failureRetained": "packaged-native-build-configuration-failure-2026-10-21.json",
+  "limitations": [
+    "The first full fixture suite caught an absent-opt-in regression; the repaired suite then passed206 tests.",
+    "The new three-run source baseline is separate and in progress.",
+    "No app launched and no WebKit/provider/profile/upgrade result is established.",
+    "The no-sign debug compile artifact is not release eligible; expected signing/Gatekeeper rejection is recorded. The native harness must perform its own isolated ad-hoc signing before UI acceptance."
+  ]
+}

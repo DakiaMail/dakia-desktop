@@ -1,0 +1,147 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-21T22:25:31.442Z",
+  "lane": "native-WebKit-packaged-fixture-checkpoint",
+  "status": "partial-failed",
+  "scope": "A mid-run checkpoint for the a86 fictional packaged fixture. Later H016 and startup-alert work was intentionally not included.",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "a86feeae88ffe172c8697a84f1d29afa123856661ee3765ca3307562c410193c",
+    "fileCount": 940,
+    "manifestPath": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-snapshot-inventory-and-starred-retention.json",
+    "manifestSha256": "3b20d3a6017d10e7bdb84e74672327e2f3439d3c062a2bd4b17770532501293a"
+  },
+  "sourceTreeAfterBuild": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "a86feeae88ffe172c8697a84f1d29afa123856661ee3765ca3307562c410193c",
+    "fileCount": 940,
+    "matchesSourceTree": true
+  },
+  "runtime": {
+    "appPid": 40938,
+    "desktopSha256": "1f3a21dff8d83bad428602b1950b79280af5b88d08809517a1a5dc4176135510",
+    "bundledCliSha256": "1e5b9aee65b422b06af5812830d0f6fbd994fb4aa1bcd337137049f593a6ca25",
+    "architecture": "arm64",
+    "webviewUrl": "tauri://localhost/",
+    "packageBoundary": "ad-hoc fictional debug fixture; not Developer ID signed, notarized, stapled, updater-signed, installed, or published",
+    "finalCleanupOrOriginalRestoreRecorded": false
+  },
+  "evidenceArtifacts": {
+    "runRoot": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8VRoLm",
+    "log": {
+      "path": "/private/tmp/dakia-native-final-a86-20261022.log",
+      "sha256": "c434f759be5b8158b396d4029be86692d5a85a61af49bbeec70002f67777f239",
+      "bytes": 9667
+    },
+    "identity": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8VRoLm/approved-identity-begin.json",
+      "sha256": "265df53581c7bee72b7cebb143d28f206f8c425ef702f5682df5242c30af8bbf",
+      "bytes": 219
+    },
+    "runtimeInventory": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8VRoLm/native-runtime-files.json",
+      "sha256": "4b0fab28ab9f2531e35409b973415e900008ec96f62288f8063e76564fcfc4ee",
+      "bytes": 3572
+    },
+    "acl": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8VRoLm/native-acl-acceptance.json",
+      "sha256": "18d83413964c8db8fc58e49829bf6700576349d35005cce11d483e9a36abdba8",
+      "bytes": 30297
+    },
+    "mailto": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8VRoLm/native-mailto-regressions.json",
+      "sha256": "7d6177e12bddadd5dda8f16ad18889606bee91022cc7a8243be1233fb3aebe11",
+      "bytes": 6364
+    },
+    "sharedProfile": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8VRoLm/native-shared-profile-acceptance.json",
+      "sha256": "d1b93056d78c7549ff236c338d81c38935e579c00cf1252385b79f4f201ea505",
+      "bytes": 8214
+    },
+    "safeFirstArtifact": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8VRoLm/g013-safe-first-mailservice-artifact.json",
+      "sha256": "6321c9bd12bcaff655f27edb849318cedba35f7100ba2a31479f786711210404",
+      "bytes": 3707
+    },
+    "uid4ExternalFlagJournal": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8VRoLm/.dakia-external-flag-uid4-journal.json",
+      "sha256": "f8ae3f930050078fcafb3f33c2bdbd5f0634a17e0928a1df726fee06ec992675",
+      "bytes": 653
+    },
+    "uid4ExternalUnstarJournal": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8VRoLm/.dakia-external-unstar-uid4-journal.json",
+      "sha256": "34c3e7785aaa224de9828da9c17d31c24e07a4b0328d4f7b56ae10c1ef652f1c",
+      "bytes": 1177
+    },
+    "uid6SendJournal": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8VRoLm/.dakia-native-uid6-send-journal.json",
+      "sha256": "f7d8934e51704258b0fe2d01550eca0941511ca93561f120977abec452b6f549",
+      "bytes": 274
+    },
+    "uiEvidence": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8VRoLm/native-ui-evidence",
+      "fileCount": 186,
+      "sha256PathContent": "861cd675d01c7ebedc3b6f58cc020a2063d38145f7b2655f7e851436f4fe1822"
+    },
+    "g013AttachmentEvidence": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8VRoLm/native-attachment-g013-evidence",
+      "fileCount": 11,
+      "sha256PathContent": "6ee1df0bab1a66e033a331ebfd75bef10882a0dd81ddb105b8a30245cded44e4"
+    },
+    "attachmentFaultEvidence": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8VRoLm/native-attachment-fault-evidence",
+      "fileCount": 29,
+      "sha256PathContent": "aa5d03e3cdfedf8777b721600e62851fe392c5de59e6181d199f336181a9d420"
+    },
+    "resourceSummary": {
+      "path": "/private/tmp/dakia-l013-native-resource-run-Jb0Tlk/evidence/resource-summary.json",
+      "sha256": "b65825504ef721a115c0155b93a87ccd3d9bea5cfb21af162d5bb2bec3d0b548",
+      "sampleCount": 6,
+      "peakMetrics": {
+        "mainRssBytes": 903806976,
+        "mainOpenFileDescriptors": 17,
+        "mappedWebKitAggregateRssBytes": 0,
+        "mappedWebKitAggregateOpenFileDescriptors": 0,
+        "mappedWebKitChildren": 0
+      },
+      "regressionStatus": "baseline_established_no_regression_claim"
+    }
+  },
+  "passedBoundedChecks": [
+    "Six packaged ACL checks denied the untrusted probe before side effects.",
+    "Ten Reader open and close cycles, ten account A/B round trips, and all eleven physical mailto cases completed unsent.",
+    "Detached account-B Reply and Forward preserved the account-specific opener, body, and 39-byte attachment.",
+    "The mounted UID 4 arrival rendered account A, local translation made zero controlled contacts, and the external UNSTAR watchdog converged to one Seen row with Reader Star available.",
+    "The UID 5 watcher path avoided bulk Sync, fetched and published raw/full content at its captured epoch, reopened the cache, and rendered both the 32-byte safe and 28-byte unsafe attachment metadata in Reader.",
+    "Initial UID 5 prefetch remained unread; opening UID 5 alone added Seen.",
+    "EACCES and actual ENOSPC attachment saves surfaced failure without partial output, then restored and retried with exact bytes, quarantine and non-executable mode. Positive Save all, symlink safety, warnings, and partial collision saving were also observed.",
+    "Remote content made zero contacts before consent, then exactly five HTTP and four expected TLS contacts from the allowlist. The count remained stable through five history states, and permission reset plus reply preparation added no contacts.",
+    "The offline proxy disconnect preserved cached account-A and account-B views; reconnect resumed with four sockets.",
+    "One UID 6 native submit under a 35-second acknowledgement hold displayed one Outbox attempt, a terminal Sent-copy-failure sheet and disabled Send. Keyboard repeats created no extra submission, UID or UIDNEXT advance.",
+    "A separate 35-second held-sync read kept cached body and attachments available before deadline without a send."
+  ],
+  "failures": [
+    {
+      "id": "external-starred-membership",
+      "result": "External STAR produced a duplicate between Starred and Seen, both exposing Remove Star.",
+      "scope": "The backend Smart Seen representation was missing the unflagged state; this is not local retention evidence."
+    },
+    {
+      "id": "terminal-compose-recovery",
+      "result": "Closing the terminal Compose sheet exposed no accessible draft-recovery UI and remote Drafts was empty.",
+      "scope": "The UID 6 Message-ID diagnostic remains pending, so the planned leap-second UID 7 scenario did not run."
+    }
+  ],
+  "incompleteOrNotRun": [
+    "H016 upgrade acceptance and the remaining two fatal-startup alerts were not included in this checkpoint.",
+    "The native resource receipt is a baseline only. It has no compatible historical comparison, no regression pass and no complete WebKit process attribution.",
+    "Notification delivery was unavailable and remained fail-closed; delivery was not accepted.",
+    "No final original-restoration or fixture-service cleanup record exists for this mid-run checkpoint.",
+    "The computer-use timeout while closing a window is retained as a control-infrastructure failure, not a product flake."
+  ],
+  "limitations": [
+    "This partial result cannot close composite native, packaged GUI, release, upgrade, notification, Starred-state, Compose-recovery or resource-leak requirements.",
+    "The fixture uses fictional loopback mail and a one-run CA. It does not establish live-provider compatibility or Developer ID release behavior.",
+    "The main app remained alive for later native work when this receipt was recorded; this receipt is intentionally not a final native outcome."
+  ]
+}

@@ -142,11 +142,11 @@ jobs:
       - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4
         with:
           node-version: 20.19.0
-      - name: Install pinned Rust coverage tooling
+      - name: Install branch-capable Rust coverage tooling
         run: |
-          rustup toolchain install 1.89.0 --profile minimal --component llvm-tools-preview
-          echo 'RUSTUP_TOOLCHAIN=1.89.0' >> "$GITHUB_ENV"
-          cargo install cargo-llvm-cov --version 0.6.13 --locked
+          rustup toolchain install nightly-2026-10-17 --profile minimal --component llvm-tools-preview
+          echo 'RUSTUP_TOOLCHAIN=nightly-2026-10-17' >> "$GITHUB_ENV"
+          cargo +nightly-2026-10-17 install cargo-llvm-cov --version 0.9.1 --locked
       - name: Install Linux dependencies for workspace coverage
         run: |
           sudo apt-get update
@@ -156,12 +156,98 @@ jobs:
         run: git lfs pull --include='apps/desktop/src-tauri/resources/email-classifier-v2/model.onnx,apps/desktop/src-tauri/resources/email-classifier-v2/tokenizer.json'
       - name: Prepare the required Tauri CLI sidecar
         run: npm run bundle:cli:dev
-      - name: Install the pinned Vitest coverage provider for this manual lane
-        run: npm install --no-save --ignore-scripts @vitest/coverage-v8@4.1.10
-      - name: Generate Rust and frontend LCOV reports
+      - name: Install the isolated lock-reproducible Vitest coverage provider
+        run: |
+          locked_vitest_version="$(node -p "require('./package-lock.json').packages['node_modules/vitest'].version")"
+          test -n "$locked_vitest_version"
+          declared_provider_version="$(node -p "require('./scripts/coverage-provider/package.json').dependencies['@vitest/coverage-v8']")"
+          locked_provider_version="$(node -p "require('./scripts/coverage-provider/package-lock.json').packages['node_modules/@vitest/coverage-v8'].version")"
+          locked_provider_vitest_version="$(node -p "require('./scripts/coverage-provider/package-lock.json').packages['node_modules/vitest'].version")"
+          test "$declared_provider_version" = "$locked_vitest_version"
+          test "$locked_provider_version" = "$locked_vitest_version"
+          test "$locked_provider_vitest_version" = "$locked_vitest_version"
+          root_tree_before="$RUNNER_TEMP/dakia-root-node-modules-before-coverage.json"
+          root_tree_after="$RUNNER_TEMP/dakia-root-node-modules-after-coverage.json"
+          npm ls --all --json > "$root_tree_before"
+          coverage_provider_root="$RUNNER_TEMP/dakia-vitest-coverage-provider"
+          mkdir -p "$coverage_provider_root"
+          cp scripts/coverage-provider/package.json scripts/coverage-provider/package-lock.json \
+            "$coverage_provider_root/"
+          (
+            cd "$coverage_provider_root"
+            npm ci --ignore-scripts --no-audit
+          )
+          mkdir -p "$GITHUB_WORKSPACE/coverage"
+          cp scripts/coverage-provider/package-lock.json \
+            "$GITHUB_WORKSPACE/coverage/vitest-coverage-provider.package-lock.json"
+          sha256sum "$GITHUB_WORKSPACE/coverage/vitest-coverage-provider.package-lock.json" > \
+            "$GITHUB_WORKSPACE/coverage/vitest-coverage-provider.package-lock.sha256"
+          npm ls --all --json > "$root_tree_after"
+          cmp "$root_tree_before" "$root_tree_after"
+          coverage_provider_link="$PWD/node_modules/@vitest/coverage-v8"
+          test ! -e "$coverage_provider_link"
+          test ! -L "$coverage_provider_link"
+          ln -s "$coverage_provider_root/node_modules/@vitest/coverage-v8" "$coverage_provider_link"
+          installed_vitest_version="$(node -p "require('./node_modules/vitest/package.json').version")"
+          installed_provider_version="$(node -p "require('./node_modules/@vitest/coverage-v8/package.json').version")"
+          installed_provider_vitest_version="$(node -p "require('$coverage_provider_root/node_modules/vitest/package.json').version")"
+          test "$installed_vitest_version" = "$locked_vitest_version"
+          test "$installed_provider_version" = "$locked_vitest_version"
+          test "$installed_provider_vitest_version" = "$locked_vitest_version"
+      - name: Generate Rust coverage reports without the LLVM full-LCOV crash path
         run: |
           mkdir -p coverage
-          cargo llvm-cov --workspace --lcov --output-path coverage/rust.lcov
+          chmod +x scripts/coverage-llvm-cov-proxy.mjs
+          target_libdir="$(rustc +nightly-2026-10-17 --print target-libdir)"
+          llvm_tools_dir="$(dirname "$target_libdir")/bin"
+          export RUST_COVERAGE_REAL_LLVM_COV="$llvm_tools_dir/llvm-cov"
+          export LLVM_PROFDATA="$llvm_tools_dir/llvm-profdata"
+          test -x "$RUST_COVERAGE_REAL_LLVM_COV"
+          test -x "$LLVM_PROFDATA"
+          "$RUST_COVERAGE_REAL_LLVM_COV" --version
+          "$LLVM_PROFDATA" --version
+          export RUST_COVERAGE_EXPORT_LOG="$PWD/coverage/rust-export-invocations.jsonl"
+          export LLVM_COV="$PWD/scripts/coverage-llvm-cov-proxy.mjs"
+          node scripts/create-rust-coverage-provenance.mjs --prepare-source \
+            --source-root . \
+            --source-manifest coverage/rust-source-manifest.json \
+            --source-digest-output coverage/rust-source-digest.txt
+          cargo +nightly-2026-10-17 llvm-cov clean --workspace
+          cargo +nightly-2026-10-17 llvm-cov --workspace --branch --locked --no-report
+          cargo +nightly-2026-10-17 llvm-cov report --workspace --branch --locked --lcov --skip-functions --output-path coverage/rust.lcov
+          cargo +nightly-2026-10-17 llvm-cov report --workspace --branch --locked --json --output-path coverage/rust-functions.json
+          node scripts/create-rust-coverage-provenance.mjs \
+            --source-root . \
+            --source-manifest coverage/rust-source-manifest.json \
+            --source-digest-output coverage/rust-source-digest.txt \
+            --export-log coverage/rust-export-invocations.jsonl \
+            --line-branch-lcov coverage/rust.lcov \
+            --functions-json coverage/rust-functions.json \
+            --line-branch-receipt coverage/rust-line-branch.receipt.json \
+            --functions-receipt coverage/rust-functions.receipt.json \
+            --toolchain "nightly-2026-10-17 cargo-llvm-cov-0.9.1"
+          profile_path="$(node -p "require('./coverage/rust-line-branch.receipt.json').profilePath")"
+          profile_sha256="$(node -p "require('./coverage/rust-line-branch.receipt.json').profileSha256")"
+          node scripts/normalize-rust-coverage-lcov.mjs \
+            --line-branch-lcov coverage/rust.lcov \
+            --functions-json coverage/rust-functions.json \
+            --profile "$profile_path" \
+            --expected-profile-sha256 "$profile_sha256" \
+            --source-digest "$(cat coverage/rust-source-digest.txt)" \
+            --source-manifest coverage/rust-source-manifest.json \
+            --line-branch-receipt coverage/rust-line-branch.receipt.json \
+            --functions-receipt coverage/rust-functions.receipt.json \
+            --output coverage/rust-normalized.lcov \
+            --summary coverage/rust-normalization-summary.json
+          node --input-type=module - coverage/rust-normalized.lcov <<'NODE'
+          import { readFileSync } from "node:fs";
+          import { coverageAvailability, summarizeLcov } from "./scripts/coverage-ratchet.mjs";
+
+          const summary = summarizeLcov(readFileSync(process.argv[2], "utf8"));
+          if (coverageAvailability(summary).branches.status !== "observed") {
+            throw new Error("Rust branch LCOV observations are unavailable; coverage candidate cannot be accepted");
+          }
+          NODE
           npm run test -- --coverage.enabled true --coverage.provider v8 --coverage.reporter lcov --coverage.reportsDirectory coverage/frontend --maxWorkers=1
           test -f coverage/frontend/lcov.info
       - name: Compare an existing ratchet or write a review candidate
@@ -171,11 +257,13 @@ jobs:
             baseline_args=(--baseline testdata/coverage/baseline.json)
           fi
           node scripts/coverage-ratchet.mjs \
-            --rust-lcov coverage/rust.lcov \
+            --rust-lcov coverage/rust-normalized.lcov \
+            --rust-normalization-summary coverage/rust-normalization-summary.json \
             --frontend-lcov coverage/frontend/lcov.info \
             --output coverage/candidate.json \
             "${baseline_args[@]}"
       - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        if: always()
         with:
           name: coverage-${{ github.run_id }}
           path: coverage/

@@ -1,0 +1,814 @@
+{
+  "schemaVersion": 1,
+  "receiptType": "resumed-current-native-load-and-reader-failures",
+  "status": "failed-native-acceptance-preserved",
+  "sourceManifestDigest": "4853dc68bac211ef68fd3b645f36210ebf133992aa1824e19d0c21c3cfff3f7c",
+  "governedFileCount": 1034,
+  "sourceIdentityKind": "sha256-path-and-content-manifest, not a Git commit",
+  "evidenceDate": "2026-10-23",
+  "evaluationBoundary": "Historical retained native run. Later working-tree fixes and later source checks are separate and do not change this run into a pass.",
+  "largeMailboxNative": {
+    "status": "failed-native-load-acceptance",
+    "executableSha256": "84cf7870c99a28058223d20eaf998f0770a250955ba87349428a454d74d2a734",
+    "result": {
+      "path": "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/schema-native-current/large30k-native-result.json",
+      "sha256": "f9b4de92fbb530d41b01509d01ec6567bdf0f327abfebd8ba9650cfab096412b",
+      "bytes": 328
+    },
+    "messageCount": 30000,
+    "databaseIntegrity": "ok",
+    "exitCode": 0,
+    "failure": "First native full-subject search remained pending; Compose captured Preparing a new message; no Reader acceptance claimed",
+    "mainObservedEndpoints": {
+      "searchInitial": "2026-10-23T12:26:17.136Z",
+      "searchStillPending": "2026-10-23T12:27:21.291Z",
+      "composePreparing": "2026-10-23T12:26:33.775Z"
+    },
+    "preservedProfile": "large30k-whole-profile-after-failed-native-search",
+    "transportScope": "This was the cached/offline native30k profile. The real production TLS connector/sync/Store/Reader MIME/CLI smoke is a separate source receipt, not a native load pass.",
+    "readerAcceptanceClaimed": false,
+    "controlledTimeoutClaim": "Only the main captured pending-search/Preparing-compose observations are stated. No invented exact acceptance deadline or adaptive retry-to-green result is added."
+  },
+  "readerThirteen": {
+    "status": "failed-first-open-native-reader",
+    "separateRunRoot": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.RaIWWa",
+    "executableSha256": "cb18a37572fc59afcfdfbaa57d5a046da120bfbbacb9c51b071e473e2ce94d3d",
+    "runtime": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.RaIWWa/sleep-wake-fixture.json",
+      "sha256": "cdc765be4cce3ab35bac74800a07fd48e3add598fe5d5bc65b7c905dfb66af07",
+      "bytes": 1128
+    },
+    "result": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.RaIWWa/native-reader-thirteen-failed-result.json",
+      "sha256": "370f01b0e3c8ef6d493d141910c9f0e983e874b5a544dfe2082b926c97406931",
+      "bytes": 23791
+    },
+    "sourceBefore": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.RaIWWa/source-before-build.json",
+      "sha256": "f6a4a553aa38974aceee534a0b728893b8f3da98bf05aa8ce7a7ba3963653b7f",
+      "bytes": 155
+    },
+    "sourceAfter": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.RaIWWa/source-after-run.json",
+      "sha256": "c6d7e33459d2e1a498bd4003d7787394f218c074eb3cd786e4fbe862d54589cb",
+      "bytes": 380
+    },
+    "sourceUnchangedDuringSeparateRun": true,
+    "uidNamespace": {
+      "first": 4,
+      "last": 16,
+      "fixtureCount": 13
+    },
+    "firstOpen": {
+      "settledFailures": [4, 16],
+      "statement": "UID4 remained blank after completed raw fetch/cache publication; UID16 also stayed blank after settling. Initial immediate samples for all13 empty; those alone are not timeout evidence.",
+      "immediateOtherUidObservations": [
+        {
+          "uid": 5,
+          "firstBodyObserved": false,
+          "error": false,
+          "retry": false
+        },
+        {
+          "uid": 6,
+          "firstBodyObserved": false,
+          "error": false,
+          "retry": false
+        },
+        {
+          "uid": 7,
+          "firstBodyObserved": false,
+          "error": false,
+          "retry": false
+        },
+        {
+          "uid": 8,
+          "firstBodyObserved": false,
+          "error": false,
+          "retry": false
+        },
+        {
+          "uid": 9,
+          "firstBodyObserved": false,
+          "error": false,
+          "retry": false
+        },
+        {
+          "uid": 10,
+          "firstBodyObserved": false,
+          "error": false,
+          "retry": false
+        },
+        {
+          "uid": 11,
+          "firstBodyObserved": false,
+          "error": false,
+          "retry": false
+        },
+        {
+          "uid": 12,
+          "firstBodyObserved": false,
+          "error": false,
+          "retry": false
+        },
+        {
+          "uid": 13,
+          "firstBodyObserved": false,
+          "error": false,
+          "retry": false
+        },
+        {
+          "uid": 14,
+          "firstBodyObserved": false,
+          "error": false,
+          "retry": false
+        },
+        {
+          "uid": 15,
+          "firstBodyObserved": false,
+          "error": false,
+          "retry": false
+        },
+        {
+          "uid": 16,
+          "firstBodyObserved": false,
+          "error": false,
+          "retry": false
+        }
+      ],
+      "scope": "UID4 remained blank after the completed raw fetch/cache publication according to main observations; UID16 also stayed blank after settling. Other immediate first captures are not classified as timeout failures. No batch13/13 first-open timeout assertion is made."
+    },
+    "cachedPresentation": {
+      "observedBodies": 13,
+      "total": 13,
+      "perUid": [
+        {
+          "uid": 4,
+          "bodyObserved": true,
+          "error": false,
+          "retry": false
+        },
+        {
+          "uid": 5,
+          "bodyObserved": true,
+          "error": false,
+          "retry": false
+        },
+        {
+          "uid": 6,
+          "bodyObserved": true,
+          "error": false,
+          "retry": false
+        },
+        {
+          "uid": 7,
+          "bodyObserved": true,
+          "error": false,
+          "retry": false
+        },
+        {
+          "uid": 8,
+          "bodyObserved": true,
+          "error": false,
+          "retry": false
+        },
+        {
+          "uid": 9,
+          "bodyObserved": true,
+          "error": false,
+          "retry": false
+        },
+        {
+          "uid": 10,
+          "bodyObserved": true,
+          "error": false,
+          "retry": false
+        },
+        {
+          "uid": 11,
+          "bodyObserved": true,
+          "error": false,
+          "retry": false
+        },
+        {
+          "uid": 12,
+          "bodyObserved": true,
+          "error": false,
+          "retry": false
+        },
+        {
+          "uid": 13,
+          "bodyObserved": true,
+          "error": false,
+          "retry": false
+        },
+        {
+          "uid": 14,
+          "bodyObserved": true,
+          "error": false,
+          "retry": false
+        },
+        {
+          "uid": 15,
+          "bodyObserved": true,
+          "error": false,
+          "retry": false
+        },
+        {
+          "uid": 16,
+          "bodyObserved": true,
+          "error": false,
+          "retry": false
+        }
+      ],
+      "scope": "Required body markers were visible for all thirteen after reopening cached content. This narrower success does not close first-open acceptance."
+    },
+    "providerTranscript": {
+      "artifact": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.RaIWWa/native-reader-thirteen-imap-transcript.jsonl",
+        "sha256": "f1958232f41ff190c15ee16d14ab1251dfa67b9046e9ec95f77c39a885932a67",
+        "bytes": 56532
+      },
+      "recordCount": 430,
+      "observedFixtureActions": [
+        {
+          "action": "metadata",
+          "observedUids": [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        },
+        {
+          "action": "mime",
+          "observedUids": [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        },
+        {
+          "action": "raw",
+          "observedUids": [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        }
+      ],
+      "scope": "The overlay intentionally attempted selective MIME and then forced full-raw fallback. These are not thirteen successful selective fetches; event metadata is not a replacement for native display acceptance."
+    },
+    "capturePathCorrection": {
+      "reason": "Main CUA capture helper retained its previous Pnb9mp root binding.",
+      "originalRoot": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.Pnb9mp",
+      "retainedRoot": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.RaIWWa/native-ui-evidence",
+      "filesCopied": 58,
+      "allOriginalAndRetainedHashesVerified": true,
+      "files": [
+        {
+          "name": "reader-uid-4-reopen.png",
+          "sha256": "9d11cc8634e525edabc5cf49c82655ac7463bd949a9ed128d9cacfe6274ec81f",
+          "bytes": 257543,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-13-first.png",
+          "sha256": "8bb6a372113139ab64f493d2d334b2b24fcfcc379e2397bee6607f3db189e883",
+          "bytes": 235164,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-4.ax.json",
+          "sha256": "56334f15fee47b30696234a40b8c7f2d641758a9b3a4784812ca8007dad4395a",
+          "bytes": 2859,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-5-cached.png",
+          "sha256": "1207bf9a4ac1eea1ca949f03692a7dfcddf038929da6b1019a46bb75790474b9",
+          "bytes": 270544,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-14-first.ax.json",
+          "sha256": "9d273a2f1928ff148ffa8769f7aa7c8ccbc14c8e6fc0f6895274da634f74a8ab",
+          "bytes": 2859,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-14-cached.png",
+          "sha256": "b7a846ac51843300f02d82062c716ecd059b82a223f9a7518fe3b2d2a69a97cd",
+          "bytes": 372497,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-8-cached.png",
+          "sha256": "def8cfaba6869b11d74e7dd6196ac1ecb4816043f56842af7f401b723b2986fe",
+          "bytes": 246455,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-10-first.ax.json",
+          "sha256": "5d25e647a32b1bf8ce470d27ffcc3702a9264b9e32fa1f8997c0d423c0557720",
+          "bytes": 2819,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-15-first.png",
+          "sha256": "57cf190961ac230634bb0b3511696e9f02fa3c2c84bd47666a3b9e988757ab64",
+          "bytes": 228091,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-11-cached.png",
+          "sha256": "ff7d2204b7cde768a8da0f60843950d6bb1c6542ddb8e73bd1193dd874fb6838",
+          "bytes": 257659,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-13-first.ax.json",
+          "sha256": "09188da39fcddd4ffe7cf447a2475b36884db87052c5d1b0353850ff0e5ec176",
+          "bytes": 2906,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-4-reopen.ax.json",
+          "sha256": "827f3de54da7f92ad14b1379a2d6368451b2ad883d604430e50be4923a890678",
+          "bytes": 3405,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-4-settled.png",
+          "sha256": "8fdc06d3cd9f6830784301420a486a29d3c37e9a0821b667052d0cb20706a60a",
+          "bytes": 226574,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-9-first.png",
+          "sha256": "9a27e8ed346e7a0fbdc234a1e4babb455f3d10a8c3ba66d595bd33a7d12770f8",
+          "bytes": 223212,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-8-first.ax.json",
+          "sha256": "3dc3c87db89f701ec9d8d5f6b149436cfd0f7bded473100d6e6520af65fe697b",
+          "bytes": 2834,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-6-first.ax.json",
+          "sha256": "a6252a7eb254a506e5d6c128e339e8ae0574065bd3c2b83b58290160c291fdcc",
+          "bytes": 2864,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-16-settled.png",
+          "sha256": "4317b94ba76ec66375ebe96a63ebb6cb4075a30c4a894459a669d4ac80b755fc",
+          "bytes": 232999,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-7-cached.png",
+          "sha256": "d648916bc76e6886694543f09ad68a778c15c9e45e039886c951f09fe333056c",
+          "bytes": 239945,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-12-first.png",
+          "sha256": "313e5cf420fc0b4968303e8fba63045f49dd438be52ecd1262bcf7a5dff5b4f6",
+          "bytes": 233274,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-4-settled.ax.json",
+          "sha256": "40ad335dac3d5b39e687edb8cc3576525510d07adc73f81e61ab88ebaaaead59",
+          "bytes": 2859,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-16-cached.png",
+          "sha256": "73dbd9e9b5d0feeae3e5e1abccfdca0182ed53d20b0ba14cb30691ed3151b8a3",
+          "bytes": 288927,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-16-settled.ax.json",
+          "sha256": "0f18e64295faeb55eeebecb93eec36ced090b708c3485680f3a8ff281ee3937a",
+          "bytes": 2889,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-14-first.png",
+          "sha256": "107e649d21dae9012e39e61917b9e507fa24b6faeed1e43a083024758f39c685",
+          "bytes": 227780,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-8-first.png",
+          "sha256": "6701e0ad8f7365e47b84362171d54042eb9c51afc5aa9a48d5f4c6c2c42376e0",
+          "bytes": 224009,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-13-cached.png",
+          "sha256": "4f19d350c0031ef771defdfa590cb1c506301944fe4ffa2debf01edc4574be61",
+          "bytes": 305977,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-5-first.ax.json",
+          "sha256": "f9578f22651d66bd82926c8fc2665491e5957eb912f2eefdbbac741ba338f119",
+          "bytes": 2844,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-5-first.png",
+          "sha256": "b9584466b223f8799b643152a13e45a26c4e47b4eba9da3b5c4e759c60d36f85",
+          "bytes": 226521,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-13-cached.ax.json",
+          "sha256": "3f8f0142881444d37f922c5f0f0f556d964139cc7835cbe088edbfdc17e70c17",
+          "bytes": 3894,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-10-cached.png",
+          "sha256": "5caf138c792b912d4debc7ee765c398bc9deaf1cc2deb35786e76a764e6d8ca4",
+          "bytes": 235028,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-11-first.png",
+          "sha256": "887a52aeaeafb51ce6ca315229afe7d1785d5c940cfae55e62bd2be09e6f42a3",
+          "bytes": 234625,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-9-cached.ax.json",
+          "sha256": "f642046eb208e327255ec0f186959c637c65519e50323cab1afab42b5150564b",
+          "bytes": 2877,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-14-cached.ax.json",
+          "sha256": "545cd0116724c1f591226720d7fe741ab8cf335a2b8b87bff2b12f4cc6fe330d",
+          "bytes": 4450,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-6-cached.ax.json",
+          "sha256": "f12424b11b196638f1f222b29118045e33252deb69d8129575faf11a725e6a65",
+          "bytes": 3183,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-7-cached.ax.json",
+          "sha256": "0fa5d10e955be93ff82cce827c15118211e8bed9aee747b3d4d59ba6b851fb1d",
+          "bytes": 3158,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-15-cached.ax.json",
+          "sha256": "508e0dfadfe461f00fe226a507cab9609952b42da398bb4550a02a917788bc1b",
+          "bytes": 3193,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-4-cached.png",
+          "sha256": "e3eba47845f2dcdd1bc488060f2841ebbaf1d5444e781f71e7a5d7eb9104a722",
+          "bytes": 260516,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-7-first.ax.json",
+          "sha256": "a6e0157e2987fd183b9c2c6c1da7dc15f148f74313fed57cf931f276765f3ca2",
+          "bytes": 2839,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-6-first.png",
+          "sha256": "210eb4b3eb7734e84468d6ba69d6fcb2132d33fdf3ef9fab8ba11a94204f9033",
+          "bytes": 228077,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-15-cached.png",
+          "sha256": "1861baf2c2725b5b92e2740c51a5546627419146502540f1bc9b999b9387ba64",
+          "bytes": 245445,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-12-cached.ax.json",
+          "sha256": "5f436c3dfd7d1388720acb69950ad234190ccafde28b329e10400de2cf096e46",
+          "bytes": 3657,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-9-cached.png",
+          "sha256": "bc2edb7cbb292f7391c6d16052b570c8f2ea94be3126f176902821ce7cec6176",
+          "bytes": 226199,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-8-cached.ax.json",
+          "sha256": "7862fcaf06804384f108cc526de55232b428ca0aa9f6bdf52b316b6876698741",
+          "bytes": 2986,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-4.png",
+          "sha256": "3854e68260855624b3882ce79607291bdf4ce9e3ebf00e28a455c112ecd65287",
+          "bytes": 226558,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-12-first.ax.json",
+          "sha256": "e737c4860101ddc06246bc1f0a84c3a3879242a154dd7fc2ca1f860138241a01",
+          "bytes": 2899,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-10-first.png",
+          "sha256": "dc2394928a184df88e5e23d5ad2bb1ea8c0b27eaf87732bf7d97d8b948de1b70",
+          "bytes": 221144,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-12-cached.png",
+          "sha256": "80265156dc79cbabff41c204b5f5e4dc53ebfa5519cb606acafc49b1c2b82082",
+          "bytes": 283964,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-10-cached.ax.json",
+          "sha256": "58996041d06a11cf58088c05158f3a1b391b68d3891a24a054794a8717ea7594",
+          "bytes": 3205,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-16-first.ax.json",
+          "sha256": "5446ec0373a33195928e9fd6ddc2a0f1a70a1986ce931eb846e5478bee2ab418",
+          "bytes": 2889,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-5-cached.ax.json",
+          "sha256": "694da32abba2a5463f0962a1bde6cecdd145a691c9f7258a8a245e4d7429e3ac",
+          "bytes": 3248,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-9-first.ax.json",
+          "sha256": "f1908f6920817567ee70a9392c2e44608d06262203cf53b7fe205c86b4abc290",
+          "bytes": 2834,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-6-cached.png",
+          "sha256": "b2ff5b36d0267b817868462f1632c6c6dc8a1b13f8a8c75285b96d6606bbe627",
+          "bytes": 258361,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-16-cached.ax.json",
+          "sha256": "caaf6cfca29128bf4bd50ec64b9f6069c494cac540b1055616fb5288797fa245",
+          "bytes": 3457,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-4-cached.ax.json",
+          "sha256": "ab9043841c8f8f99902b666c716ee78c05e7aaeeaa7b4ebf1dd2c3bd995844c3",
+          "bytes": 3441,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-16-first.png",
+          "sha256": "80c09d31f3c69dac10bc1e31d8d74ad07ca708123a28386d351d28039f9a41b9",
+          "bytes": 233007,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-7-first.png",
+          "sha256": "1da8b9567fb78a986a8aa1043959b1d71ae46d8300f7973ebcd54563f23c279a",
+          "bytes": 225035,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-11-first.ax.json",
+          "sha256": "957e06d42befc98afecd99ed5b1b9687ff6c882137bf8ae6bce9fa033fa33cc4",
+          "bytes": 2946,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-11-cached.ax.json",
+          "sha256": "80053cd376c9179b9e7971f3940658d6bc8a858e829856c326a1217bc1fa761a",
+          "bytes": 3495,
+          "originalMatches": true,
+          "retainedMatches": true
+        },
+        {
+          "name": "reader-uid-15-first.ax.json",
+          "sha256": "44d9766477782711c969caa7bf89989e4f5cd866175eea70e976990c86742fbe",
+          "bytes": 2861,
+          "originalMatches": true,
+          "retainedMatches": true
+        }
+      ],
+      "scope": "Original files were preserved, and exact bytes were copied without alteration. Names under Pnb9mp do not make these captures part of its earlier84cf run."
+    },
+    "attachments": {
+      "saveInvoked": false,
+      "downloadsEmptyAtMainCompletion": true,
+      "scope": "Main run handoff states no Save action and empty isolated Downloads. This is not attachment-save acceptance."
+    },
+    "strictSealer": {
+      "passingSealerInvoked": false,
+      "passingSealClaimed": false,
+      "reason": "First-open failures remain. Exact CID-to-data-URL rewriting in the native document was not inspected."
+    },
+    "exitCode": 0,
+    "sealedOriginalRestored": true,
+    "restoration": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.RaIWWa/approved-identity-swap-abaab882-724d-4024-b182-abd16a6cc997-restored.json",
+      "sha256": "ab4cdd23952aa869d96fa06fb7b7c3bb49058b85c5306f67ae9901c96f19b15b",
+      "bytes": 1457
+    }
+  },
+  "artifactSets": {
+    "largeNative": {
+      "root": "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/schema-native-current",
+      "files": [
+        {
+          "name": "large30k-native-result.json",
+          "sha256": "f9b4de92fbb530d41b01509d01ec6567bdf0f327abfebd8ba9650cfab096412b",
+          "bytes": 328
+        },
+        {
+          "name": "large30k-launch.json",
+          "sha256": "9266386f1fbbf2cbe2ed2c0f856e623abcff4024d06f1f43e69ca19859a52f7e",
+          "bytes": 1247
+        },
+        {
+          "name": "large30k-exit.json",
+          "sha256": "8e3d8d350d9dbf70c813122b954d81a7d65c67e614e10324cb3a26bd0c5ef46f",
+          "bytes": 60
+        }
+      ]
+    },
+    "largeMainCuaAx": {
+      "root": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.Pnb9mp",
+      "files": [
+        {
+          "name": "large30k-initial.ax.json",
+          "sha256": "719a7f68eedf47273a3cf2b559848202dca88465045fe2b687b66a392cdd24c1",
+          "bytes": 7254
+        },
+        {
+          "name": "large30k-search.ax.json",
+          "sha256": "d44cac3fdc2b57688742b1a8413e55178da52fe9a481d51cef3fb9438c647d71",
+          "bytes": 2040
+        },
+        {
+          "name": "large30k-compose-during-search.ax.json",
+          "sha256": "dfe683e009835cf4a2929eb3e4bc64600f3d401db35de81789a5b7219bc7dbd4",
+          "bytes": 1130
+        },
+        {
+          "name": "large30k-search-pending-final.ax.json",
+          "sha256": "4cd507361b92306ee083a157fc3d6a8dfae3c23eba23cf7fe2c03ac096661b80",
+          "bytes": 1971
+        }
+      ]
+    },
+    "largeMainCuaScreenshots": {
+      "root": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.Pnb9mp",
+      "files": [
+        {
+          "name": "large30k-initial.png",
+          "sha256": "68636f7ccf3dc41dd29a87cdc38aa0fecf311b12424fe8c0ccc56b902f061f57",
+          "bytes": 360581
+        },
+        {
+          "name": "large30k-search.png",
+          "sha256": "2d2034c113eec7533899b34f9cc9c60e881cce113b13ef0e10fe4fd43a7fdd9d",
+          "bytes": 185348
+        },
+        {
+          "name": "large30k-compose-during-search.png",
+          "sha256": "ebdb020c9f95981eeb68ca1a4d66e7ccf1196044a4feee99eab397bda0c313d3",
+          "bytes": 51412
+        },
+        {
+          "name": "large30k-search-pending-final.png",
+          "sha256": "4bd6b970e99af01d8bcd51ccce5670eefc5a1b01760e6a8583a666b65d094785",
+          "bytes": 185355
+        }
+      ]
+    },
+    "readerRun": {
+      "root": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.RaIWWa",
+      "files": [
+        {
+          "name": "native-reader-thirteen-failed-result.json",
+          "sha256": "370f01b0e3c8ef6d493d141910c9f0e983e874b5a544dfe2082b926c97406931",
+          "bytes": 23791
+        },
+        {
+          "name": "reader-first-open-results.json",
+          "sha256": "81dbefc5247092721222d2b9aec116fdc7ce5a2328f0203487f70b8c5c42c292",
+          "bytes": 2390
+        },
+        {
+          "name": "reader-cached-presentation-results.json",
+          "sha256": "2b091513033f92340f4ac271266870464a855d71d1e92cf542d0aafa69468a88",
+          "bytes": 2496
+        },
+        {
+          "name": "sleep-wake-fixture.json",
+          "sha256": "cdc765be4cce3ab35bac74800a07fd48e3add598fe5d5bc65b7c905dfb66af07",
+          "bytes": 1128
+        },
+        {
+          "name": "source-before-build.json",
+          "sha256": "f6a4a553aa38974aceee534a0b728893b8f3da98bf05aa8ce7a7ba3963653b7f",
+          "bytes": 155
+        },
+        {
+          "name": "source-after-build.json",
+          "sha256": "c6d7e33459d2e1a498bd4003d7787394f218c074eb3cd786e4fbe862d54589cb",
+          "bytes": 380
+        },
+        {
+          "name": "source-after-run.json",
+          "sha256": "c6d7e33459d2e1a498bd4003d7787394f218c074eb3cd786e4fbe862d54589cb",
+          "bytes": 380
+        },
+        {
+          "name": "app-exit-status.txt",
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "bytes": 2
+        },
+        {
+          "name": "approved-identity-swap-abaab882-724d-4024-b182-abd16a6cc997-restored.json",
+          "sha256": "ab4cdd23952aa869d96fa06fb7b7c3bb49058b85c5306f67ae9901c96f19b15b",
+          "bytes": 1457
+        }
+      ]
+    }
+  },
+  "currentWorkBoundary": "Native load and Reader failures were found on4853. Agents are now implementing fixes on a later changing source tree. Those fixes, proposed causes and future tests are not passing4853 native evidence and are not merged into these historical observations.",
+  "limitations": [
+    "Failed native30k and Reader first-open acceptance remains failed despite clean process exits, intact30000 messages and successful cached presentation.",
+    "No raw mail, credentials, proxy control nonce, credential values or database key bytes are exported. Only bounded results, hashes and artifact references are retained.",
+    "Initial first-open captures for all fixtures were immediate. Only UID4 and16 have the retained settled blank observations described by the main agent.",
+    "There is no passing strict native Reader seal and no direct verification of the native CID data-URL rewrite.",
+    "No attachment Save was invoked in the thirteen-fixture run. It cannot inherit the separate primary attachment acceptance.",
+    "No full WebKit, continuous soak, dark appearance, notification, physical sleep/wake or release acceptance is claimed."
+  ]
+}

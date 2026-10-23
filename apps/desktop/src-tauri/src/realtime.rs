@@ -1,13 +1,15 @@
-use dakia_core::{Account, CachedMessageContent, MailService, MailSummary, RealtimeMode, Store};
+use crate::account_locks::{AccountOperationGuard, AccountOperationLocks};
+use dakia_core::{Account, MailService, MailSummary, RealtimeMode, Store};
 use serde::Serialize;
 use std::{
     collections::HashMap,
     future::Future,
+    pin::Pin,
     sync::{Arc, RwLock as StdRwLock},
     time::{Duration, Instant},
 };
-use tauri::{AppHandle, Emitter};
-use tokio::sync::{mpsc, watch, Mutex, OwnedMutexGuard, RwLock, Semaphore};
+use tauri::{AppHandle, Emitter, Runtime};
+use tokio::sync::{mpsc, watch, Mutex, RwLock, Semaphore};
 use uuid::Uuid;
 
 const REALTIME_BATCH_LIMIT: u32 = 300;
@@ -23,12 +25,128 @@ const BODY_CACHE_FAILURE_COOLDOWN: Duration = Duration::from_secs(60 * 60);
 type HydrationCompleteHook = Arc<dyn Fn() + Send + Sync>;
 type HydrationCompleteHookStore = Arc<StdRwLock<Option<HydrationCompleteHook>>>;
 
+/// The Tauri event boundary is deliberately small so the watcher can be
+/// exercised with its production control flow without constructing a webview.
+/// Payloads are serialized before crossing this boundary, just as they are for
+/// Tauri's `Emitter` implementation.
+#[derive(Clone, Copy)]
+enum RealtimeEvent {
+    Arrived,
+    Changed,
+    Hydrated,
+    SyncState,
+}
+
+impl RealtimeEvent {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Arrived => "mail-arrived",
+            Self::Changed => "mail-changed",
+            Self::Hydrated => "mail-hydrated",
+            Self::SyncState => "mail-sync-state",
+        }
+    }
+}
+
+trait RealtimeEventSink: Send + Sync {
+    fn publish(&self, event: RealtimeEvent, payload: serde_json::Value);
+}
+
+struct TauriRealtimeEventSink<R: Runtime = tauri::Wry> {
+    app: AppHandle<R>,
+}
+
+impl<R: Runtime> RealtimeEventSink for TauriRealtimeEventSink<R> {
+    fn publish(&self, event: RealtimeEvent, payload: serde_json::Value) {
+        let result = match event {
+            RealtimeEvent::Arrived => self.app.emit("mail-arrived", payload),
+            RealtimeEvent::Changed => self.app.emit("mail-changed", payload),
+            RealtimeEvent::Hydrated => self.app.emit("mail-hydrated", payload),
+            RealtimeEvent::SyncState => self.app.emit("mail-sync-state", payload),
+        };
+        if let Err(error) = result {
+            let event = event.name();
+            tracing::warn!(event, error = %error, "could not publish real-time mail event");
+        }
+    }
+}
+
+fn publish_event<T: Serialize>(sink: &dyn RealtimeEventSink, event: RealtimeEvent, payload: T) {
+    match serde_json::to_value(payload) {
+        Ok(payload) => sink.publish(event, payload),
+        Err(error) => {
+            tracing::warn!(event = event.name(), error = %error, "could not serialize real-time mail event")
+        }
+    }
+}
+
+trait RealtimeCycleRunner: Send {
+    fn next_cycle<'a>(
+        &'a mut self,
+        cancel: &'a mut watch::Receiver<bool>,
+        idle_ready: watch::Sender<bool>,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<dakia_core::RealtimeCycle>> + Send + 'a>>;
+}
+
+trait WatcherDelay: Send + Sync {
+    fn wait<'a>(
+        &'a self,
+        delay: Duration,
+        cancel: &'a mut watch::Receiver<bool>,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
+}
+
+struct TokioWatcherDelay;
+
+impl WatcherDelay for TokioWatcherDelay {
+    fn wait<'a>(
+        &'a self,
+        delay: Duration,
+        cancel: &'a mut watch::Receiver<bool>,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(wait_or_cancel(delay, cancel))
+    }
+}
+
+struct MailServiceRealtimeCycleRunner {
+    store: Store,
+    account: Account,
+}
+
+impl RealtimeCycleRunner for MailServiceRealtimeCycleRunner {
+    fn next_cycle<'a>(
+        &'a mut self,
+        cancel: &'a mut watch::Receiver<bool>,
+        idle_ready: watch::Sender<bool>,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<dakia_core::RealtimeCycle>> + Send + 'a>> {
+        Box::pin(async move {
+            MailService::new(self.store.clone())
+                .realtime_inbox_cycle_with_idle_ready(
+                    &self.account,
+                    REALTIME_BATCH_LIMIT,
+                    cancel,
+                    move || {
+                        idle_ready.send_if_modified(|ready| {
+                            if *ready {
+                                false
+                            } else {
+                                *ready = true;
+                                true
+                            }
+                        });
+                    },
+                )
+                .await
+        })
+    }
+}
+
 struct WatcherTask {
     cancel: watch::Sender<bool>,
     handle: tauri::async_runtime::JoinHandle<()>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RealtimeSyncStatus {
     pub account_id: Uuid,
@@ -61,7 +179,7 @@ pub struct RealtimeSyncManager {
     // watcher, spawning its successor, and registering the successor. Without
     // this lock, two callers can both observe no task and the later insertion
     // can overwrite the first handle, leaving that watcher uncancellable.
-    account_task_locks: Arc<Mutex<HashMap<Uuid, Arc<Mutex<()>>>>>,
+    account_task_locks: Arc<AccountOperationLocks>,
     // Reconciliation and stop-all need an exclusive snapshot of the watcher
     // registry. Individual account transitions share this lock so they cannot
     // race a full replacement sweep.
@@ -77,7 +195,7 @@ impl RealtimeSyncManager {
         Self {
             store,
             tasks: Arc::new(Mutex::new(HashMap::new())),
-            account_task_locks: Arc::new(Mutex::new(HashMap::new())),
+            account_task_locks: Arc::new(AccountOperationLocks::default()),
             watcher_lifecycle: Arc::new(RwLock::new(())),
             statuses: Arc::new(RwLock::new(HashMap::new())),
             reconcile_lock: Arc::new(Mutex::new(())),
@@ -188,16 +306,10 @@ impl RealtimeSyncManager {
 }
 
 async fn account_task_lock(
-    account_task_locks: &Mutex<HashMap<Uuid, Arc<Mutex<()>>>>,
+    account_task_locks: &AccountOperationLocks,
     account_id: Uuid,
-) -> OwnedMutexGuard<()> {
-    let lock = account_task_locks
-        .lock()
-        .await
-        .entry(account_id)
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .clone();
-    lock.lock_owned().await
+) -> AccountOperationGuard {
+    account_task_locks.acquire(account_id).await
 }
 
 async fn replace_watcher_task<Fut>(
@@ -223,50 +335,130 @@ async fn run_watcher(
     store: Store,
     statuses: Arc<RwLock<HashMap<Uuid, RealtimeSyncStatus>>>,
     account: Account,
+    cancel: watch::Receiver<bool>,
+    hydration_slots: Arc<Semaphore>,
+    hydration_complete: HydrationCompleteHookStore,
+) {
+    let sink: Arc<dyn RealtimeEventSink> = Arc::new(TauriRealtimeEventSink { app });
+    let mut runner = MailServiceRealtimeCycleRunner {
+        store: store.clone(),
+        account: account.clone(),
+    };
+    let delay = TokioWatcherDelay;
+    run_watcher_with_runner(
+        sink,
+        store,
+        statuses,
+        account,
+        cancel,
+        hydration_slots,
+        hydration_complete,
+        &mut runner,
+        &delay,
+        true,
+    )
+    .await;
+}
+
+/// Runs the same watcher state machine as production with a cycle runner at
+/// the core boundary. Tests use this seam to make reconnect and cancellation
+/// deterministic; production supplies `MailServiceRealtimeCycleRunner`.
+#[allow(clippy::too_many_arguments)] // Test seam mirrors production watcher dependencies.
+async fn run_watcher_with_runner<R: RealtimeCycleRunner, D: WatcherDelay>(
+    sink: Arc<dyn RealtimeEventSink>,
+    store: Store,
+    statuses: Arc<RwLock<HashMap<Uuid, RealtimeSyncStatus>>>,
+    account: Account,
     mut cancel: watch::Receiver<bool>,
     hydration_slots: Arc<Semaphore>,
     hydration_complete: HydrationCompleteHookStore,
+    runner: &mut R,
+    delay: &D,
+    run_hydration: bool,
 ) {
     let mut failures = 0_usize;
     // Arrivals must never wait behind a long cache-warm pass. Keep their queue
     // separate and prioritize it in the worker; maintenance is coalesced to a
     // single pending pass because an extra empty IDLE renewal has no payload.
-    let (arrival_sender, arrival_receiver) = mpsc::unbounded_channel::<HydrationBatch>();
-    let (maintenance_sender, maintenance_receiver) =
-        mpsc::channel::<HydrationBatch>(HYDRATION_MAINTENANCE_QUEUE_CAPACITY);
-    let (hydration_cancel, hydration_cancel_receiver) = watch::channel(false);
-    let hydration_handle = tauri::async_runtime::spawn(run_hydration_worker(
-        app.clone(),
-        store.clone(),
-        account.clone(),
-        HydrationWorkerQueues {
-            arrivals: arrival_receiver,
-            maintenance: maintenance_receiver,
-        },
-        hydration_cancel_receiver,
-        hydration_slots,
-        hydration_complete,
-    ));
+    let hydration = run_hydration.then(|| {
+        let (arrival_sender, arrival_receiver) = mpsc::unbounded_channel::<HydrationBatch>();
+        let (maintenance_sender, maintenance_receiver) =
+            mpsc::channel::<HydrationBatch>(HYDRATION_MAINTENANCE_QUEUE_CAPACITY);
+        let (cancel, cancel_receiver) = watch::channel(false);
+        let handle = tauri::async_runtime::spawn(run_hydration_worker(
+            sink.clone(),
+            store.clone(),
+            account.clone(),
+            HydrationWorkerQueues {
+                arrivals: arrival_receiver,
+                maintenance: maintenance_receiver,
+            },
+            cancel_receiver,
+            hydration_slots,
+            hydration_complete,
+        ));
+        HydrationRuntime {
+            arrival_sender,
+            maintenance_sender,
+            cancel,
+            handle,
+        }
+    });
     let mut last_body_cache_warm = None;
     loop {
         if *cancel.borrow() {
             break;
         }
-        publish_status(&app, &statuses, account.id, "connecting", None, None).await;
-        let service = MailService::new(store.clone());
-        match service
-            .realtime_inbox_cycle(&account, REALTIME_BATCH_LIMIT, &mut cancel)
-            .await
-        {
+        publish_status(&*sink, &statuses, account.id, "connecting", None, None).await;
+        let cycle_result = {
+            let (idle_ready, mut idle_ready_events) = watch::channel(false);
+            // The cycle receives its own cancellation view so the supervisor
+            // can still drop a connect, authenticate, or reconcile future that
+            // has not yet reached a cooperative cancellation point.
+            let mut cycle_cancel = cancel.clone();
+            let cycle = runner.next_cycle(&mut cycle_cancel, idle_ready);
+            tokio::pin!(cycle);
+            loop {
+                tokio::select! {
+                    biased;
+                    result = &mut cycle => break result,
+                    _ = wait_for_cancellation(&mut cancel) => {
+                        break Ok(dakia_core::RealtimeCycle {
+                            mode: RealtimeMode::Idle,
+                            new_messages: Vec::new(),
+                            catalogue_changed: false,
+                            cancelled: true,
+                            detected_at: None,
+                            pending_hydration: Vec::new(),
+                        });
+                    }
+                    ready = idle_ready_events.changed() => {
+                        if ready.is_ok() && *idle_ready_events.borrow() {
+                            publish_status(
+                                &*sink,
+                                &statuses,
+                                account.id,
+                                "idle",
+                                None,
+                                None,
+                            )
+                            .await;
+                        }
+                    }
+                }
+            }
+        };
+        match cycle_result {
             Ok(cycle) if cycle.cancelled => break,
             Ok(cycle) => {
                 failures = 0;
-                let state = if cycle.mode == RealtimeMode::Idle {
-                    "idle"
-                } else {
-                    "polling"
-                };
-                publish_status(&app, &statuses, account.id, state, None, None).await;
+                // IDLE is published only from the continuation callback above.
+                // An IDLE-capable server can return an initial reconciliation
+                // before it ever accepts IDLE, and that connection is closed
+                // when this cycle completes.
+                if cycle.mode == RealtimeMode::Poll {
+                    publish_status(&*sink, &statuses, account.id, "polling", None, None).await;
+                }
                 if !cycle.new_messages.is_empty() {
                     let detected_at = cycle.detected_at.unwrap_or_else(chrono::Utc::now);
                     tracing::info!(
@@ -275,14 +467,26 @@ async fn run_watcher(
                         message_count = cycle.new_messages.len(),
                         "new mail headers persisted"
                     );
-                    let _ = app.emit(
-                        "mail-arrived",
+                    publish_event(
+                        &*sink,
+                        RealtimeEvent::Arrived,
                         MailArrival {
                             event_id: Uuid::new_v4(),
                             account_id: account.id,
                             messages: cycle.new_messages.clone(),
                             detected_at: detected_at.to_rfc3339(),
                         },
+                    );
+                }
+                if cycle.catalogue_changed {
+                    // A full INBOX reconciliation may only change flags or
+                    // remove a message. There is no arrival payload in that
+                    // case, so tell mounted views to reload their durable
+                    // catalogue.
+                    publish_event(
+                        &*sink,
+                        RealtimeEvent::Changed,
+                        serde_json::json!({ "accountId": account.id }),
                     );
                 }
                 // Only a real arrival enters the unbounded priority queue. A
@@ -293,31 +497,37 @@ async fn run_watcher(
                 if warm_recent {
                     last_body_cache_warm = Some(now);
                 }
-                if !cycle.pending_hydration.is_empty()
-                    && arrival_sender
-                        .send(HydrationBatch {
-                            pending: cycle.pending_hydration,
-                            warm_recent: false,
-                        })
-                        .is_err()
-                {
-                    tracing::warn!(
-                        account_id = %account.id,
-                        "background hydration worker stopped unexpectedly"
-                    );
-                    break;
+                if !cycle.pending_hydration.is_empty() {
+                    if let Some(hydration) = &hydration {
+                        if hydration
+                            .arrival_sender
+                            .send(HydrationBatch {
+                                pending: cycle.pending_hydration,
+                                warm_recent: false,
+                            })
+                            .is_err()
+                        {
+                            tracing::warn!(
+                                account_id = %account.id,
+                                "background hydration worker stopped unexpectedly"
+                            );
+                            break;
+                        }
+                    }
                 }
                 if warm_recent {
-                    // Full means a maintenance pass is already queued. It is
-                    // equivalent to this one, so coalescing preserves the
-                    // cadence without letting the IDLE watcher block.
-                    let _ = maintenance_sender.try_send(HydrationBatch {
-                        pending: Vec::new(),
-                        warm_recent: true,
-                    });
+                    if let Some(hydration) = &hydration {
+                        // Full means a maintenance pass is already queued. It is
+                        // equivalent to this one, so coalescing preserves the
+                        // cadence without letting the IDLE watcher block.
+                        let _ = hydration.maintenance_sender.try_send(HydrationBatch {
+                            pending: Vec::new(),
+                            warm_recent: true,
+                        });
+                    }
                 }
                 if cycle.mode == RealtimeMode::Poll
-                    && wait_or_cancel(poll_delay(account.id), &mut cancel).await
+                    && delay.wait(poll_delay(account.id), &mut cancel).await
                 {
                     break;
                 }
@@ -326,7 +536,7 @@ async fn run_watcher(
                 if is_authentication_failure(&error) {
                     tracing::warn!(account_id = %account.id, provider = %account.provider_id, "real-time sync authentication paused");
                     publish_status(
-                        &app,
+                        &*sink,
                         &statuses,
                         account.id,
                         "paused",
@@ -337,19 +547,19 @@ async fn run_watcher(
                     break;
                 }
                 failures = failures.saturating_add(1);
-                let delay = retry_delay(failures, account.id);
+                let reconnect_delay = retry_delay(failures, account.id);
                 let retry_at = (chrono::Utc::now()
-                    + chrono::Duration::from_std(delay).unwrap_or_default())
+                    + chrono::Duration::from_std(reconnect_delay).unwrap_or_default())
                 .to_rfc3339();
                 tracing::warn!(
                     account_id = %account.id,
                     provider = %account.provider_id,
-                    retry_seconds = delay.as_secs(),
+                    retry_seconds = reconnect_delay.as_secs(),
                     error = %error,
                     "real-time sync reconnect scheduled"
                 );
                 publish_status(
-                    &app,
+                    &*sink,
                     &statuses,
                     account.id,
                     "retrying",
@@ -357,16 +567,25 @@ async fn run_watcher(
                     Some("connection"),
                 )
                 .await;
-                if wait_or_cancel(delay, &mut cancel).await {
+                if delay.wait(reconnect_delay, &mut cancel).await {
                     break;
                 }
             }
         }
     }
-    let _ = hydration_cancel.send(true);
-    drop(arrival_sender);
-    drop(maintenance_sender);
-    let _ = hydration_handle.await;
+    if let Some(hydration) = hydration {
+        let _ = hydration.cancel.send(true);
+        drop(hydration.arrival_sender);
+        drop(hydration.maintenance_sender);
+        let _ = hydration.handle.await;
+    }
+}
+
+struct HydrationRuntime {
+    arrival_sender: mpsc::UnboundedSender<HydrationBatch>,
+    maintenance_sender: mpsc::Sender<HydrationBatch>,
+    cancel: watch::Sender<bool>,
+    handle: tauri::async_runtime::JoinHandle<()>,
 }
 
 fn is_authentication_failure(error: &anyhow::Error) -> bool {
@@ -399,12 +618,6 @@ struct HydrationWorkerQueues {
     maintenance: mpsc::Receiver<HydrationBatch>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ContentCacheDestination {
-    Regular,
-    Starred,
-}
-
 struct HydrationResult {
     target: HydrationTarget,
     started: std::time::Instant,
@@ -421,8 +634,13 @@ async fn pending_hydration_event(
         return None;
     }
     let hydrated = outcome.result.as_ref().ok()?.as_ref()?;
+    if !same_hydration_receipt(&outcome.target.message, hydrated) {
+        return None;
+    }
     let durable = store.message(&hydrated.id).await.ok().flatten()?;
-    if durable.account_id != account_id.to_string() {
+    if durable.account_id != account_id.to_string()
+        || !same_hydration_receipt(&outcome.target.message, &durable)
+    {
         return None;
     }
     Some(MailHydrated {
@@ -433,7 +651,7 @@ async fn pending_hydration_event(
 
 #[derive(Clone)]
 struct HydrationContext {
-    app: AppHandle,
+    sink: Arc<dyn RealtimeEventSink>,
     store: Store,
     service: MailService,
     account: Account,
@@ -527,29 +745,8 @@ fn next_recent_candidate_offset(
     }
 }
 
-fn content_cache_destination(message: &MailSummary) -> ContentCacheDestination {
-    if message.is_flagged {
-        ContentCacheDestination::Starred
-    } else {
-        ContentCacheDestination::Regular
-    }
-}
-
-fn display_cache_content(message: &MailSummary) -> CachedMessageContent {
-    CachedMessageContent {
-        body_text: message.body_text.clone(),
-        body_html: message.body_html.clone(),
-        unsubscribe_kind: message.unsubscribe_kind.clone(),
-        attachments: message
-            .attachments
-            .iter()
-            .map(|attachment| attachment.attachment.clone())
-            .collect(),
-    }
-}
-
 async fn run_hydration_worker(
-    app: AppHandle,
+    sink: Arc<dyn RealtimeEventSink>,
     store: Store,
     account: Account,
     queues: HydrationWorkerQueues,
@@ -559,7 +756,7 @@ async fn run_hydration_worker(
 ) {
     let service = MailService::new(store.clone());
     let context = HydrationContext {
-        app,
+        sink,
         store,
         service,
         account,
@@ -648,8 +845,9 @@ async fn hydrate_after_sync(
         };
         match refresh_result {
             Ok(messages) if !messages.is_empty() => {
-                let _ = context.app.emit(
-                    "mail-changed",
+                publish_event(
+                    &*context.sink,
+                    RealtimeEvent::Changed,
                     serde_json::json!({ "accountId": context.account.id }),
                 );
             }
@@ -719,7 +917,7 @@ async fn hydrate_after_sync(
                 hydration_ms = outcome.started.elapsed().as_millis(),
                 "new mail hydration complete"
             );
-            let _ = context.app.emit("mail-hydrated", event);
+            publish_event(&*context.sink, RealtimeEvent::Hydrated, event);
             notify_hydration_complete(&context.complete);
             continue;
         }
@@ -898,58 +1096,39 @@ async fn fetch_and_cache_target(
     let message = service
         .fetch_message(account, &target.message.mailbox, target.message.uid as u32)
         .await?;
-    cache_hydrated_message(store, message).await
+    cache_hydrated_message(store, &target.message, message).await
 }
 
 async fn cache_hydrated_message(
     store: &Store,
-    message: MailSummary,
+    target: &MailSummary,
+    fetched: MailSummary,
 ) -> anyhow::Result<Option<MailSummary>> {
-    if persist_display_cache(store, &message).await? {
-        // Cache readiness is local state. Do not upsert the provider snapshot
-        // here: a star/read operation may have finished while this body fetch
-        // was in flight, and stale FLAGS must not undo that user action.
-        store
-            .set_message_content_state(&message.id, "complete")
-            .await?;
-        // Account removal can complete after the cache write but before event
-        // publication. Re-read the durable row so a late worker neither
-        // revives storage nor reports a hydration for a removed account.
-        Ok(store.message(&message.id).await?.map(|_| message))
-    } else {
-        Ok(None)
+    if !same_hydration_receipt(target, &fetched) {
+        return Ok(None);
     }
-}
-
-async fn persist_display_cache(store: &Store, message: &MailSummary) -> anyhow::Result<bool> {
     if !store
-        .update_message_attachment_state(&message.id, message.has_attachments)
+        .publish_message_content_at_epoch(target, &fetched)
         .await?
     {
-        return Ok(false);
+        return Ok(None);
     }
-    let content = display_cache_content(message);
+    // Publication is fenced atomically, but a later rollover or account
+    // removal can finish before the event reaches the webview. Return only a
+    // current durable row with the exact fetched receipt identity.
+    Ok(store
+        .message(&target.id)
+        .await?
+        .filter(|current| same_hydration_receipt(target, current)))
+}
 
-    if content_cache_destination(message) == ContentCacheDestination::Starred
-        && store
-            .cache_starred_message_content(&message.id, content.clone())
-            .await?
-    {
-        return Ok(true);
-    }
-
-    // A concurrent unstar makes the regular cache authoritative. Conversely,
-    // if a message was starred while this selective fetch was in flight, the
-    // regular-cache write declines and the final starred attempt owns it.
-    store
-        .cache_message_content(&message.id, false, content.clone())
-        .await?;
-    if store.cached_message_content(&message.id).await?.is_some() {
-        return Ok(true);
-    }
-    store
-        .cache_starred_message_content(&message.id, content)
-        .await
+fn same_hydration_receipt(target: &MailSummary, message: &MailSummary) -> bool {
+    target.id == message.id
+        && target.account_id == message.account_id
+        && target.mailbox == message.mailbox
+        && target.uid == message.uid
+        && target.mailbox_uid_validity.is_some()
+        && target.mailbox_uid_validity == message.mailbox_uid_validity
 }
 
 async fn run_cancellable<F, T>(future: F, mut cancel: watch::Receiver<bool>) -> Option<T>
@@ -1045,7 +1224,7 @@ where
 }
 
 async fn publish_status(
-    app: &AppHandle,
+    sink: &dyn RealtimeEventSink,
     statuses: &RwLock<HashMap<Uuid, RealtimeSyncStatus>>,
     account_id: Uuid,
     state: &str,
@@ -1058,8 +1237,13 @@ async fn publish_status(
         retry_at,
         error_kind: error_kind.map(str::to_owned),
     };
-    statuses.write().await.insert(account_id, status.clone());
-    let _ = app.emit("mail-sync-state", status);
+    let mut statuses = statuses.write().await;
+    if statuses.get(&account_id) == Some(&status) {
+        return;
+    }
+    statuses.insert(account_id, status.clone());
+    drop(statuses);
+    publish_event(sink, RealtimeEvent::SyncState, status);
 }
 
 async fn wait_or_cancel(delay: Duration, cancel: &mut watch::Receiver<bool>) -> bool {
@@ -1092,15 +1276,224 @@ fn jitter(base: Duration, account_id: Uuid) -> Duration {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        collections::VecDeque,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Mutex as StdMutex,
+        },
+    };
+    use tokio::io::AsyncReadExt;
+
+    #[path = "l010_tls_tests.rs"]
+    mod l010_tls_tests;
+
+    #[derive(Default)]
+    struct RecordingEventSink {
+        events: StdMutex<Vec<(&'static str, serde_json::Value)>>,
+        changed: tokio::sync::Notify,
+    }
+
+    impl RealtimeEventSink for RecordingEventSink {
+        fn publish(&self, event: RealtimeEvent, payload: serde_json::Value) {
+            self.events.lock().unwrap().push((event.name(), payload));
+            self.changed.notify_waiters();
+        }
+    }
+
+    impl RecordingEventSink {
+        fn events(&self) -> Vec<(&'static str, serde_json::Value)> {
+            self.events.lock().unwrap().clone()
+        }
+
+        async fn wait_for_event(&self, event: &'static str) {
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if self.events().iter().any(|(name, _)| *name == event) {
+                        return;
+                    }
+                    self.changed.notified().await;
+                }
+            })
+            .await
+            .expect("watcher should publish its production event through the sink");
+        }
+    }
+
+    enum ScriptedCycleResult {
+        Cycle(dakia_core::RealtimeCycle),
+        Failure(&'static str),
+        WaitForCancellation,
+        IdleReadyThenWaitForCancellation,
+        StalledTransport(tokio::net::TcpStream),
+    }
+
+    struct ScriptedCycleRunner {
+        results: VecDeque<ScriptedCycleResult>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ScriptedCycleRunner {
+        fn new(results: impl IntoIterator<Item = ScriptedCycleResult>) -> Self {
+            Self {
+                results: results.into_iter().collect(),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn call_counter(&self) -> Arc<AtomicUsize> {
+            self.calls.clone()
+        }
+    }
+
+    impl RealtimeCycleRunner for ScriptedCycleRunner {
+        fn next_cycle<'a>(
+            &'a mut self,
+            cancel: &'a mut watch::Receiver<bool>,
+            idle_ready: watch::Sender<bool>,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<dakia_core::RealtimeCycle>> + Send + 'a>>
+        {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let result = self
+                .results
+                .pop_front()
+                .expect("scripted watcher must provide a cycle result");
+            Box::pin(async move {
+                match result {
+                    ScriptedCycleResult::Cycle(cycle) => Ok(cycle),
+                    ScriptedCycleResult::Failure(message) => Err(anyhow::anyhow!(message)),
+                    ScriptedCycleResult::WaitForCancellation => {
+                        wait_for_cancellation(cancel).await;
+                        Ok(dakia_core::RealtimeCycle {
+                            mode: RealtimeMode::Idle,
+                            new_messages: Vec::new(),
+                            catalogue_changed: false,
+                            cancelled: true,
+                            detected_at: None,
+                            pending_hydration: Vec::new(),
+                        })
+                    }
+                    ScriptedCycleResult::IdleReadyThenWaitForCancellation => {
+                        let _ = idle_ready.send(true);
+                        wait_for_cancellation(cancel).await;
+                        Ok(dakia_core::RealtimeCycle {
+                            mode: RealtimeMode::Idle,
+                            new_messages: Vec::new(),
+                            catalogue_changed: false,
+                            cancelled: true,
+                            detected_at: None,
+                            pending_hydration: Vec::new(),
+                        })
+                    }
+                    ScriptedCycleResult::StalledTransport(_transport) => {
+                        std::future::pending::<()>().await;
+                        unreachable!("stalled transport is released only by dropping its cycle")
+                    }
+                }
+            })
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum ControlledDelayStep {
+        Continue,
+        WaitForCancellation,
+    }
+
+    struct ControlledWatcherDelay {
+        steps: StdMutex<VecDeque<ControlledDelayStep>>,
+        requested: Arc<StdMutex<Vec<Duration>>>,
+        entered: mpsc::UnboundedSender<Duration>,
+    }
+
+    impl ControlledWatcherDelay {
+        fn new(
+            steps: impl IntoIterator<Item = ControlledDelayStep>,
+        ) -> (
+            Self,
+            Arc<StdMutex<Vec<Duration>>>,
+            mpsc::UnboundedReceiver<Duration>,
+        ) {
+            let (entered, receiver) = mpsc::unbounded_channel();
+            let requested = Arc::new(StdMutex::new(Vec::new()));
+            (
+                Self {
+                    steps: StdMutex::new(steps.into_iter().collect()),
+                    requested: requested.clone(),
+                    entered,
+                },
+                requested,
+                receiver,
+            )
+        }
+    }
+
+    impl WatcherDelay for ControlledWatcherDelay {
+        fn wait<'a>(
+            &'a self,
+            delay: Duration,
+            cancel: &'a mut watch::Receiver<bool>,
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            self.requested.lock().unwrap().push(delay);
+            self.entered
+                .send(delay)
+                .expect("controlled delay observer remains available");
+            let step = self
+                .steps
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("every watcher delay must have a controlled outcome");
+            Box::pin(async move {
+                match step {
+                    ControlledDelayStep::Continue => false,
+                    ControlledDelayStep::WaitForCancellation => {
+                        wait_for_cancellation(cancel).await;
+                        true
+                    }
+                }
+            })
+        }
+    }
+
+    fn realtime_account() -> Account {
+        dakia_core::AccountDraft {
+            email: "realtime@example.test".into(),
+            display_name: "Realtime".into(),
+            provider_id: Some("fastmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(dakia_core::provider::by_id("fastmail").unwrap())
+    }
+
+    fn cancelled_cycle() -> dakia_core::RealtimeCycle {
+        dakia_core::RealtimeCycle {
+            mode: RealtimeMode::Idle,
+            new_messages: Vec::new(),
+            catalogue_changed: false,
+            cancelled: true,
+            detected_at: None,
+            pending_hydration: Vec::new(),
+        }
+    }
 
     fn message(id: &str) -> MailSummary {
         MailSummary {
+            mailbox_uid_validity: None,
             id: id.into(),
             account_id: Uuid::nil().to_string(),
             mailbox: "INBOX".into(),
             uid: 1,
             message_id: None,
+            gmail_message_id: None,
             in_reply_to: None,
             reference_ids: None,
             thread_id: id.into(),
@@ -1140,7 +1533,7 @@ mod tests {
     }
 
     async fn replace_test_watcher(
-        account_task_locks: Arc<Mutex<HashMap<Uuid, Arc<Mutex<()>>>>>,
+        account_task_locks: Arc<AccountOperationLocks>,
         tasks: Arc<Mutex<HashMap<Uuid, WatcherTask>>>,
         account_id: Uuid,
         start_barrier: Arc<tokio::sync::Barrier>,
@@ -1158,11 +1551,638 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn production_watcher_loop_publishes_arrivals_through_the_event_sink() {
+        let store = Store::in_memory().await.unwrap();
+        let account = realtime_account();
+        let statuses = Arc::new(RwLock::new(HashMap::new()));
+        let sink = Arc::new(RecordingEventSink::default());
+        let mut arrived = message("arrived-from-realtime");
+        arrived.account_id = account.id.to_string();
+        let mut runner = ScriptedCycleRunner::new([
+            ScriptedCycleResult::Cycle(dakia_core::RealtimeCycle {
+                mode: RealtimeMode::Idle,
+                new_messages: vec![arrived.clone()],
+                catalogue_changed: false,
+                cancelled: false,
+                detected_at: Some(Utc::now()),
+                pending_hydration: Vec::new(),
+            }),
+            ScriptedCycleResult::Cycle(cancelled_cycle()),
+        ]);
+        let (_cancel, receiver) = watch::channel(false);
+
+        run_watcher_with_runner(
+            sink.clone(),
+            store,
+            statuses.clone(),
+            account.clone(),
+            receiver,
+            Arc::new(Semaphore::new(HYDRATION_CONCURRENCY)),
+            Arc::new(StdRwLock::new(None)),
+            &mut runner,
+            &TokioWatcherDelay,
+            false,
+        )
+        .await;
+
+        let events = sink.events();
+        assert_eq!(
+            events.iter().map(|(event, _)| *event).collect::<Vec<_>>(),
+            vec!["mail-sync-state", "mail-arrived"],
+            "the watcher must publish its status and arrival through the same sink used by Tauri"
+        );
+        let (_, arrival) = events
+            .iter()
+            .find(|(event, _)| *event == "mail-arrived")
+            .unwrap();
+        assert_eq!(arrival["accountId"], account.id.to_string());
+        assert_eq!(arrival["messages"][0]["id"], arrived.id);
+        assert_eq!(arrival["messages"][0]["account_id"], account.id.to_string());
+        assert_eq!(statuses.read().await[&account.id].state, "connecting");
+    }
+
+    #[tokio::test]
+    async fn idle_ready_progress_is_visible_before_cycle_completion_without_duplicate_status() {
+        let store = Store::in_memory().await.unwrap();
+        let account = realtime_account();
+        let account_id = account.id;
+        let statuses = Arc::new(RwLock::new(HashMap::new()));
+        let sink = Arc::new(RecordingEventSink::default());
+        let (cancel, receiver) = watch::channel(false);
+        let task_sink = sink.clone();
+        let task_statuses = statuses.clone();
+        let task = tokio::spawn(async move {
+            let mut runner =
+                ScriptedCycleRunner::new([ScriptedCycleResult::IdleReadyThenWaitForCancellation]);
+            run_watcher_with_runner(
+                task_sink,
+                store,
+                task_statuses,
+                account,
+                receiver,
+                Arc::new(Semaphore::new(HYDRATION_CONCURRENCY)),
+                Arc::new(StdRwLock::new(None)),
+                &mut runner,
+                &TokioWatcherDelay,
+                false,
+            )
+            .await;
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if statuses
+                    .read()
+                    .await
+                    .get(&account_id)
+                    .is_some_and(|status| status.state == "idle")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("IDLE continuation should publish readiness before the cycle returns");
+        cancel.send(true).unwrap();
+        task.await.unwrap();
+
+        let states = sink
+            .events()
+            .into_iter()
+            .filter(|(event, _)| *event == "mail-sync-state")
+            .map(|(_, payload)| payload["state"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(states, vec!["connecting", "idle"]);
+    }
+
+    #[tokio::test]
+    async fn idle_capability_without_an_accepted_idle_continuation_never_publishes_idle() {
+        let store = Store::in_memory().await.unwrap();
+        let account = realtime_account();
+        let statuses = Arc::new(RwLock::new(HashMap::new()));
+        let sink = Arc::new(RecordingEventSink::default());
+        let mut arrived = message("initial-reconciliation");
+        arrived.account_id = account.id.to_string();
+        let mut runner = ScriptedCycleRunner::new([
+            ScriptedCycleResult::Cycle(dakia_core::RealtimeCycle {
+                mode: RealtimeMode::Idle,
+                new_messages: vec![arrived],
+                catalogue_changed: false,
+                cancelled: false,
+                detected_at: Some(Utc::now()),
+                pending_hydration: Vec::new(),
+            }),
+            ScriptedCycleResult::Cycle(cancelled_cycle()),
+        ]);
+        let (_cancel, receiver) = watch::channel(false);
+
+        run_watcher_with_runner(
+            sink.clone(),
+            store,
+            statuses.clone(),
+            account.clone(),
+            receiver,
+            Arc::new(Semaphore::new(HYDRATION_CONCURRENCY)),
+            Arc::new(StdRwLock::new(None)),
+            &mut runner,
+            &TokioWatcherDelay,
+            false,
+        )
+        .await;
+
+        let states = sink
+            .events()
+            .into_iter()
+            .filter(|(event, _)| *event == "mail-sync-state")
+            .map(|(_, payload)| payload["state"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(states, ["connecting"]);
+        assert_eq!(statuses.read().await[&account.id].state, "connecting");
+    }
+
+    #[tokio::test]
+    async fn cancellation_drops_a_stalled_cycle_transport_before_watcher_exit() {
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stalled lifecycle listener");
+        let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .expect("connect stalled lifecycle transport");
+        let (mut peer, _) = listener
+            .accept()
+            .await
+            .expect("accept stalled lifecycle transport");
+        let store = Store::in_memory().await.unwrap();
+        let account = realtime_account();
+        let statuses = Arc::new(RwLock::new(HashMap::new()));
+        let sink = Arc::new(RecordingEventSink::default());
+        let (cancel, receiver) = watch::channel(false);
+        let task = tokio::spawn({
+            let task_sink = sink.clone();
+            let task_statuses = statuses.clone();
+            async move {
+                let mut runner =
+                    ScriptedCycleRunner::new([ScriptedCycleResult::StalledTransport(client)]);
+                run_watcher_with_runner(
+                    task_sink,
+                    store,
+                    task_statuses,
+                    account,
+                    receiver,
+                    Arc::new(Semaphore::new(HYDRATION_CONCURRENCY)),
+                    Arc::new(StdRwLock::new(None)),
+                    &mut runner,
+                    &TokioWatcherDelay,
+                    false,
+                )
+                .await;
+            }
+        });
+        sink.wait_for_event("mail-sync-state").await;
+
+        cancel.send(true).expect("cancel stalled production cycle");
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("watcher must not wait for a command timeout")
+            .expect("stalled watcher task");
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), peer.read(&mut byte))
+                .await
+                .expect("peer must observe prompt transport close")
+                .expect("read stalled transport EOF"),
+            0,
+            "dropping the in-flight cycle must close its transport before watcher exit"
+        );
+    }
+
+    #[tokio::test]
+    async fn production_tauri_mock_runtime_sink_serializes_the_watcher_arrival() {
+        use tauri::Listener;
+
+        let app = tauri::test::mock_app();
+        let (payload_sender, payload_receiver) = std::sync::mpsc::channel();
+        let (cancel, receiver) = watch::channel(false);
+        let cancellation = cancel.clone();
+        app.listen("mail-arrived", move |event| {
+            payload_sender
+                .send(event.payload().to_owned())
+                .expect("test receiver remains available");
+            // The runtime-produced cycle is polling. Cancel at the same
+            // production event boundary so this test exercises the watcher
+            // transition without sleeping for the provider poll interval.
+            let _ = cancellation.send(true);
+        });
+        let store = Store::in_memory().await.unwrap();
+        let core_cycle = std::env::var("DAKIA_REALTIME_DELIVERY_CORE_ARTIFACT")
+            .ok()
+            .map(|path| {
+                let artifact: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(path).expect("read scripted provider artifact"),
+                )
+                .expect("parse scripted provider artifact");
+                let nonce = std::env::var("DAKIA_REALTIME_DELIVERY_NONCE")
+                    .expect("orchestrated delivery proof supplies a nonce");
+                assert_eq!(artifact["nonce"], nonce);
+                let cycle = &artifact["cycle"];
+                let mode = match cycle["mode"].as_str() {
+                    Some("idle") => RealtimeMode::Idle,
+                    Some("poll") => RealtimeMode::Poll,
+                    other => panic!("unknown runtime-produced realtime mode: {other:?}"),
+                };
+                dakia_core::RealtimeCycle {
+                    mode,
+                    new_messages: serde_json::from_value(cycle["newMessages"].clone())
+                        .expect("decode runtime-produced realtime arrivals"),
+                    catalogue_changed: cycle["catalogueChanged"]
+                        .as_bool()
+                        .expect("runtime-produced catalogue change flag"),
+                    cancelled: cycle["cancelled"]
+                        .as_bool()
+                        .expect("runtime-produced cancellation flag"),
+                    detected_at: serde_json::from_value(cycle["detectedAt"].clone())
+                        .expect("decode runtime-produced detection time"),
+                    pending_hydration: serde_json::from_value(cycle["pendingHydration"].clone())
+                        .expect("decode runtime-produced hydration targets"),
+                }
+            });
+        let mut account = realtime_account();
+        let statuses = Arc::new(RwLock::new(HashMap::new()));
+        let cycle = core_cycle.unwrap_or_else(|| {
+            let mut arrived = message("runtime-arrival");
+            arrived.account_id = account.id.to_string();
+            arrived.mailbox_uid_validity = Some(424242);
+            arrived.subject = "Runtime emitted arrival".into();
+            dakia_core::RealtimeCycle {
+                mode: RealtimeMode::Idle,
+                new_messages: vec![arrived],
+                catalogue_changed: false,
+                cancelled: false,
+                detected_at: Some(Utc::now()),
+                pending_hydration: Vec::new(),
+            }
+        });
+        let expected = cycle
+            .new_messages
+            .first()
+            .cloned()
+            .expect("scripted provider cycle returns an arrival");
+        account.id =
+            Uuid::parse_str(&expected.account_id).expect("core cycle arrival has an account UUID");
+        let mut runner = ScriptedCycleRunner::new([ScriptedCycleResult::Cycle(cycle)]);
+        let sink: Arc<dyn RealtimeEventSink> = Arc::new(TauriRealtimeEventSink {
+            app: app.handle().clone(),
+        });
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            run_watcher_with_runner(
+                sink,
+                store,
+                statuses,
+                account.clone(),
+                receiver,
+                Arc::new(Semaphore::new(HYDRATION_CONCURRENCY)),
+                Arc::new(StdRwLock::new(None)),
+                &mut runner,
+                &TokioWatcherDelay,
+                // The coupled case verifies only header arrival publication.
+                // Do not spawn body workers from a scripted provider cycle.
+                false,
+            ),
+        )
+        .await
+        .expect("watcher must stop at the emitted arrival cancellation boundary");
+
+        let payload = payload_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the production Tauri emitter must receive watcher events");
+        let arrival: serde_json::Value = serde_json::from_str(&payload)
+            .expect("the exact Tauri-emitted payload must remain frontend-decodable");
+        assert_eq!(arrival["accountId"], account.id.to_string());
+        assert_eq!(arrival["messages"][0]["id"], expected.id);
+        assert_eq!(
+            arrival["messages"][0]["mailbox_uid_validity"],
+            serde_json::json!(expected.mailbox_uid_validity)
+        );
+        assert_eq!(arrival["messages"][0]["subject"], expected.subject);
+
+        if let Ok(path) = std::env::var("DAKIA_REALTIME_DELIVERY_ARTIFACT") {
+            let nonce = std::env::var("DAKIA_REALTIME_DELIVERY_NONCE")
+                .expect("orchestrated delivery proof supplies a nonce");
+            std::fs::write(
+                path,
+                serde_json::json!({ "nonce": nonce, "arrival": arrival }).to_string(),
+            )
+            .expect("write runtime-captured frontend delivery artifact");
+        }
+    }
+
+    #[tokio::test]
+    async fn production_watcher_loop_publishes_catalogue_changes_without_an_arrival() {
+        let store = Store::in_memory().await.unwrap();
+        let account = realtime_account();
+        let statuses = Arc::new(RwLock::new(HashMap::new()));
+        let sink = Arc::new(RecordingEventSink::default());
+        let mut runner = ScriptedCycleRunner::new([
+            ScriptedCycleResult::Cycle(dakia_core::RealtimeCycle {
+                mode: RealtimeMode::Idle,
+                new_messages: Vec::new(),
+                catalogue_changed: true,
+                cancelled: false,
+                detected_at: None,
+                pending_hydration: Vec::new(),
+            }),
+            ScriptedCycleResult::Cycle(cancelled_cycle()),
+        ]);
+        let (_cancel, receiver) = watch::channel(false);
+
+        run_watcher_with_runner(
+            sink.clone(),
+            store,
+            statuses,
+            account.clone(),
+            receiver,
+            Arc::new(Semaphore::new(HYDRATION_CONCURRENCY)),
+            Arc::new(StdRwLock::new(None)),
+            &mut runner,
+            &TokioWatcherDelay,
+            false,
+        )
+        .await;
+
+        let events = sink.events();
+        assert_eq!(
+            events.iter().map(|(event, _)| *event).collect::<Vec<_>>(),
+            vec!["mail-sync-state", "mail-changed"],
+            "flag or deletion reconciliation must reload the frontend even when no message arrived"
+        );
+        let (_, changed) = events
+            .iter()
+            .find(|(event, _)| *event == "mail-changed")
+            .unwrap();
+        assert_eq!(changed["accountId"], account.id.to_string());
+    }
+
+    #[tokio::test]
+    async fn uidvalidity_reconciliation_failure_publishes_retry_and_cancellation_stops_the_loop() {
+        let store = Store::in_memory().await.unwrap();
+        let account = realtime_account();
+        let statuses = Arc::new(RwLock::new(HashMap::new()));
+        let sink = Arc::new(RecordingEventSink::default());
+        let (cancel, receiver) = watch::channel(false);
+        let task = tokio::spawn({
+            let sink = sink.clone();
+            let statuses = statuses.clone();
+            let account = account.clone();
+            async move {
+                let mut runner = ScriptedCycleRunner::new([
+                    ScriptedCycleResult::Failure("UIDVALIDITY changed during reconciliation"),
+                    ScriptedCycleResult::WaitForCancellation,
+                ]);
+                run_watcher_with_runner(
+                    sink,
+                    store,
+                    statuses,
+                    account,
+                    receiver,
+                    Arc::new(Semaphore::new(HYDRATION_CONCURRENCY)),
+                    Arc::new(StdRwLock::new(None)),
+                    &mut runner,
+                    &TokioWatcherDelay,
+                    false,
+                )
+                .await;
+            }
+        });
+
+        sink.wait_for_event("mail-sync-state").await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if statuses
+                    .read()
+                    .await
+                    .get(&account.id)
+                    .is_some_and(|status| status.state == "retrying")
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("UIDVALIDITY failures should enter the reconnect state");
+        cancel.send(true).unwrap();
+        task.await.unwrap();
+
+        let events = sink.events();
+        assert_eq!(
+            events.iter().map(|(event, _)| *event).collect::<Vec<_>>(),
+            vec!["mail-sync-state", "mail-sync-state"],
+            "cancellation during backoff must not start another cycle or publish stale data"
+        );
+        let retry = &events[1].1;
+        assert_eq!(retry["state"], "retrying");
+        assert_eq!(retry["errorKind"], "connection");
+        assert!(retry["retryAt"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn transient_and_rate_limit_failures_wait_in_bounded_order_without_a_reconnect_storm() {
+        let store = Store::in_memory().await.unwrap();
+        let mut account = realtime_account();
+        account.id = Uuid::from_bytes([0; 16]);
+        let statuses = Arc::new(RwLock::new(HashMap::new()));
+        let sink = Arc::new(RecordingEventSink::default());
+        let mut runner = ScriptedCycleRunner::new([
+            ScriptedCycleResult::Failure("provider 429 rate limit"),
+            ScriptedCycleResult::Failure("connection reset"),
+            ScriptedCycleResult::Failure("provider temporarily unavailable"),
+            ScriptedCycleResult::Failure("idle connection closed"),
+            ScriptedCycleResult::Failure("network timeout"),
+            ScriptedCycleResult::Failure("provider 429 rate limit"),
+            ScriptedCycleResult::Cycle(cancelled_cycle()),
+        ]);
+        let calls = runner.call_counter();
+        let (delay, requested, mut entered) = ControlledWatcherDelay::new([
+            ControlledDelayStep::Continue,
+            ControlledDelayStep::Continue,
+            ControlledDelayStep::Continue,
+            ControlledDelayStep::Continue,
+            ControlledDelayStep::Continue,
+            ControlledDelayStep::Continue,
+        ]);
+        let (_cancel, receiver) = watch::channel(false);
+
+        run_watcher_with_runner(
+            sink.clone(),
+            store,
+            statuses.clone(),
+            account.clone(),
+            receiver,
+            Arc::new(Semaphore::new(HYDRATION_CONCURRENCY)),
+            Arc::new(StdRwLock::new(None)),
+            &mut runner,
+            &delay,
+            false,
+        )
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 7);
+        assert_eq!(
+            *requested.lock().unwrap(),
+            [
+                Duration::from_millis(900),
+                Duration::from_millis(1_800),
+                Duration::from_millis(4_500),
+                Duration::from_secs(9),
+                Duration::from_secs(27),
+                Duration::from_secs(54),
+            ],
+            "every failed connection must pass through the capped production retry schedule"
+        );
+        let mut observed = Vec::new();
+        while let Ok(delay) = entered.try_recv() {
+            observed.push(delay);
+        }
+        assert_eq!(observed, *requested.lock().unwrap());
+
+        let events = sink.events();
+        assert_eq!(events.len(), 13);
+        for failure in 0..6 {
+            let connecting = &events[failure * 2].1;
+            let retrying = &events[failure * 2 + 1].1;
+            assert_eq!(connecting["state"], "connecting");
+            assert_eq!(connecting["errorKind"], serde_json::Value::Null);
+            assert_eq!(retrying["state"], "retrying");
+            assert_eq!(retrying["errorKind"], "connection");
+            assert!(retrying["retryAt"].as_str().is_some());
+        }
+        assert_eq!(events.last().unwrap().1["state"], "connecting");
+        assert_eq!(statuses.read().await[&account.id].state, "connecting");
+    }
+
+    #[tokio::test]
+    async fn cancellation_inside_retry_delay_prevents_the_next_provider_attempt() {
+        let store = Store::in_memory().await.unwrap();
+        let mut account = realtime_account();
+        account.id = Uuid::from_bytes([0; 16]);
+        let statuses = Arc::new(RwLock::new(HashMap::new()));
+        let sink = Arc::new(RecordingEventSink::default());
+        let mut runner = ScriptedCycleRunner::new([
+            ScriptedCycleResult::Failure("provider 429 rate limit"),
+            ScriptedCycleResult::Failure("must never be attempted"),
+        ]);
+        let calls = runner.call_counter();
+        let (delay, requested, mut entered) =
+            ControlledWatcherDelay::new([ControlledDelayStep::WaitForCancellation]);
+        let (cancel, receiver) = watch::channel(false);
+
+        let watcher = tokio::spawn(async move {
+            run_watcher_with_runner(
+                sink.clone(),
+                store,
+                statuses,
+                account,
+                receiver,
+                Arc::new(Semaphore::new(HYDRATION_CONCURRENCY)),
+                Arc::new(StdRwLock::new(None)),
+                &mut runner,
+                &delay,
+                false,
+            )
+            .await;
+            sink.events()
+        });
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), entered.recv())
+                .await
+                .expect("watcher must enter its retry barrier"),
+            Some(Duration::from_millis(900))
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        cancel.send(true).unwrap();
+        let events = tokio::time::timeout(Duration::from_secs(1), watcher)
+            .await
+            .expect("cancellation must release the retry barrier")
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(*requested.lock().unwrap(), [Duration::from_millis(900)]);
+        assert_eq!(
+            events.iter().map(|(event, _)| *event).collect::<Vec<_>>(),
+            ["mail-sync-state", "mail-sync-state"]
+        );
+        assert_eq!(events[0].1["state"], "connecting");
+        assert_eq!(events[1].1["state"], "retrying");
+    }
+
+    #[tokio::test]
+    async fn permanent_authentication_failure_pauses_without_retrying_credentials() {
+        let store = Store::in_memory().await.unwrap();
+        let account = realtime_account();
+        let statuses = Arc::new(RwLock::new(HashMap::new()));
+        let sink = Arc::new(RecordingEventSink::default());
+        let mut runner = ScriptedCycleRunner::new([
+            ScriptedCycleResult::Failure("IMAP authentication rejected"),
+            ScriptedCycleResult::Failure("must never retry credentials"),
+        ]);
+        let calls = runner.call_counter();
+        let (delay, requested, _entered) =
+            ControlledWatcherDelay::new(std::iter::empty::<ControlledDelayStep>());
+        let (_cancel, receiver) = watch::channel(false);
+
+        run_watcher_with_runner(
+            sink.clone(),
+            store,
+            statuses.clone(),
+            account.clone(),
+            receiver,
+            Arc::new(Semaphore::new(HYDRATION_CONCURRENCY)),
+            Arc::new(StdRwLock::new(None)),
+            &mut runner,
+            &delay,
+            false,
+        )
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(requested.lock().unwrap().is_empty());
+        let events = sink.events();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].1["state"], "connecting");
+        assert_eq!(events[1].1["state"], "paused");
+        assert_eq!(events[1].1["errorKind"], "authentication");
+        assert_eq!(events[1].1["retryAt"], serde_json::Value::Null);
+        let final_status = statuses.read().await[&account.id].clone();
+        assert_eq!(final_status.state, "paused");
+        assert_eq!(final_status.error_kind.as_deref(), Some("authentication"));
+        assert!(final_status.retry_at.is_none());
+    }
+
     #[test]
     fn reconnect_backoff_is_bounded_and_jittered() {
-        let id = Uuid::from_bytes([7; 16]);
-        assert!(retry_delay(1, id) < Duration::from_secs(2));
-        assert!(retry_delay(100, id) <= Duration::from_secs(66));
+        // These account IDs select the two deterministic jitter extremes:
+        // byte 0 gives -10%, and byte 20 gives +10%.
+        let earlier = Uuid::from_bytes([0; 16]);
+        let later = Uuid::from_bytes([20; 16]);
+
+        assert_eq!(retry_delay(1, earlier), Duration::from_millis(900));
+        assert_eq!(retry_delay(1, later), Duration::from_millis(1_100));
+        assert_ne!(retry_delay(1, earlier), retry_delay(1, later));
+
+        // Failures cap at the six-step, 60-second production backoff before
+        // jitter. Both account-specific delays remain below the 66-second
+        // reconnect ceiling, even for an unbounded failure count.
+        assert_eq!(retry_delay(100, earlier), retry_delay(6, earlier));
+        assert_eq!(retry_delay(100, later), retry_delay(6, later));
+        assert_eq!(retry_delay(100, earlier), Duration::from_secs(54));
+        assert_eq!(retry_delay(100, later), Duration::from_secs(66));
+        assert!(retry_delay(100, later) <= Duration::from_secs(66));
     }
 
     #[test]
@@ -1309,56 +2329,169 @@ mod tests {
         assert_eq!(run_cancellable(async { 42 }, receiver).await, Some(42));
     }
 
-    #[test]
-    fn display_cache_decision_uses_the_authoritative_flagged_cache() {
-        let regular = message("regular");
-        assert_eq!(
-            content_cache_destination(&regular),
-            ContentCacheDestination::Regular
-        );
-        let mut starred = regular.clone();
-        starred.is_flagged = true;
-        starred.body_text = "display body".into();
-        starred.body_html = Some("<p>display body</p>".into());
-        starred.unsubscribe_kind = Some("mailto".into());
-        assert_eq!(
-            content_cache_destination(&starred),
-            ContentCacheDestination::Starred
-        );
-        let content = display_cache_content(&starred);
-        assert_eq!(content.body_text, "display body");
-        assert_eq!(content.body_html.as_deref(), Some("<p>display body</p>"));
-        assert_eq!(content.unsubscribe_kind.as_deref(), Some("mailto"));
+    async fn save_hydration_target(
+        store: &Store,
+        account: &Account,
+        id: &str,
+        uid_validity: u32,
+    ) -> MailSummary {
+        store.save_account(account).await.unwrap();
+        store
+            .save_mailbox_catalog_state(account.id, "INBOX", "INBOX", uid_validity, 1, true)
+            .await
+            .unwrap();
+        let mut target = message(id);
+        target.account_id = account.id.to_string();
+        target.uid = 42;
+        target.mailbox_uid_validity = Some(i64::from(uid_validity));
+        store
+            .upsert_messages(std::slice::from_ref(&target))
+            .await
+            .unwrap();
+        target
     }
 
     #[tokio::test]
-    async fn background_cache_commit_preserves_concurrent_star_changes() {
+    async fn stale_hydration_cannot_attach_a_recycled_uidvalidity_body_or_emit_completion() {
         let store = Store::in_memory().await.unwrap();
-        let local = message("star-race");
+        let account = realtime_account();
+        let target = save_hydration_target(&store, &account, "recycled-uid", 77).await;
+        let mut fetched = target.clone();
+        fetched.body_text = "old generation body".into();
+        fetched.content_state = "complete".into();
+        fetched.has_attachments = true;
+        fetched
+            .attachments
+            .push(dakia_core::storage::AttachmentData {
+                attachment: dakia_core::Attachment {
+                    id: "old-generation-paperclip".into(),
+                    message_id: target.id.clone(),
+                    filename: "old-generation.pdf".into(),
+                    mime_type: "application/pdf".into(),
+                    size_bytes: 42,
+                    size_kind: dakia_core::AttachmentSizeKind::Decoded,
+                    is_inline: false,
+                    presentation: dakia_core::AttachmentPresentation::Downloadable,
+                    is_potentially_unsafe: false,
+                },
+                bytes: Vec::new(),
+            });
+
+        // The same stable local ID and UID now identify the replacement
+        // generation. The old receipt must be unable to publish into it.
         store
-            .upsert_messages(std::slice::from_ref(&local))
+            .save_mailbox_catalog_state(account.id, "INBOX", "INBOX", 78, 1, true)
+            .await
+            .unwrap();
+        let mut replacement = target.clone();
+        replacement.mailbox_uid_validity = Some(78);
+        replacement.subject = "replacement generation".into();
+        replacement.body_text = String::new();
+        replacement.content_state = "headers_only".into();
+        replacement.has_attachments = false;
+        store
+            .upsert_messages(std::slice::from_ref(&replacement))
             .await
             .unwrap();
 
-        let mut stale_starred = local.clone();
-        stale_starred.is_flagged = true;
-        stale_starred.body_text = "fetched while starred".into();
-        assert!(persist_display_cache(&store, &stale_starred).await.unwrap());
-        assert!(!store.message(&local.id).await.unwrap().unwrap().is_flagged);
-        assert!(store
-            .cached_message_content(&local.id)
+        let result = cache_hydrated_message(&store, &target, fetched)
+            .await
+            .unwrap();
+        assert!(result.is_none());
+        let current = store.message(&target.id).await.unwrap().unwrap();
+        assert_eq!(current.mailbox_uid_validity, Some(78));
+        assert_eq!(current.subject, "replacement generation");
+        assert_eq!(current.body_text, "");
+        assert_eq!(current.content_state, "headers_only");
+        assert!(!current.has_attachments);
+        assert!(current.attachments.is_empty());
+        assert!(pending_hydration_event(
+            &store,
+            account.id,
+            &HydrationResult {
+                target: HydrationTarget {
+                    kind: HydrationKind::Pending,
+                    message: target,
+                },
+                started: Instant::now(),
+                result: Ok(result),
+                cancelled: false,
+            },
+        )
+        .await
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn current_hydration_returns_the_canonical_epoch_matched_row() {
+        let store = Store::in_memory().await.unwrap();
+        let account = realtime_account();
+        let target = save_hydration_target(&store, &account, "current-uid", 78).await;
+        let mut fetched = target.clone();
+        fetched.body_text = "current generation body".into();
+        fetched.content_state = "complete".into();
+
+        let current = cache_hydrated_message(&store, &target, fetched)
             .await
             .unwrap()
-            .is_some());
-
-        store.set_message_flagged(&local.id, true).await.unwrap();
-        let mut stale_unstarred = local.clone();
-        stale_unstarred.body_text = "fetched before star".into();
-        assert!(persist_display_cache(&store, &stale_unstarred)
+            .expect("the captured current generation should publish");
+        assert!(same_hydration_receipt(&target, &current));
+        // The catalogue projection deliberately leaves display bodies out of
+        // `messages`; publication stores the fetched body in the bounded
+        // cache used by the Reader. The event needs the canonical receipt,
+        // while this assertion proves the body was not silently discarded.
+        assert_eq!(current.content_state, "complete");
+        assert_eq!(current.body_text, "");
+        let cached = store
+            .cached_message_content(&target.id)
             .await
-            .unwrap());
-        assert!(store.message(&local.id).await.unwrap().unwrap().is_flagged);
-        assert!(store.starred_body(&local.id).await.unwrap().is_some());
+            .expect("read regular content cache")
+            .expect("successful hydration must retain display content");
+        assert_eq!(cached.body_text, "current generation body");
+    }
+
+    #[tokio::test]
+    async fn late_pending_hydration_does_not_emit_for_a_recycled_uidvalidity_row() {
+        let store = Store::in_memory().await.unwrap();
+        let account = realtime_account();
+        let target = save_hydration_target(&store, &account, "late-recycled-uid", 77).await;
+        let mut fetched = target.clone();
+        fetched.body_text = "old body".into();
+        fetched.content_state = "complete".into();
+        let cached = cache_hydrated_message(&store, &target, fetched)
+            .await
+            .unwrap()
+            .expect("initial generation cache must publish before the late-event race");
+
+        store
+            .save_mailbox_catalog_state(account.id, "INBOX", "INBOX", 78, 1, true)
+            .await
+            .unwrap();
+        let mut replacement = target.clone();
+        replacement.mailbox_uid_validity = Some(78);
+        replacement.subject = "replacement mail".into();
+        replacement.body_text = String::new();
+        replacement.content_state = "headers_only".into();
+        store.upsert_messages(&[replacement]).await.unwrap();
+
+        assert!(
+            pending_hydration_event(
+                &store,
+                account.id,
+                &HydrationResult {
+                    target: HydrationTarget {
+                        kind: HydrationKind::Pending,
+                        message: target,
+                    },
+                    started: Instant::now(),
+                    result: Ok(Some(cached)),
+                    cancelled: false,
+                },
+            )
+            .await
+            .is_none(),
+            "a late completion must not refresh a replacement stable id"
+        );
     }
 
     #[tokio::test]
@@ -1381,19 +2514,17 @@ mod tests {
         .into_account(dakia_core::provider::by_id("fastmail").unwrap());
         store.save_account(&account).await.unwrap();
 
-        let mut fetched = message("removed-while-fetching");
-        fetched.account_id = account.id.to_string();
+        let fetched = save_hydration_target(&store, &account, "removed-while-fetching", 77).await;
+        let mut fetched = fetched;
         fetched.body_text = "late body".into();
+        fetched.content_state = "complete".into();
         let target = HydrationTarget {
             kind: HydrationKind::Pending,
             message: fetched.clone(),
         };
-        store
-            .upsert_messages(std::slice::from_ref(&fetched))
+        let cached = cache_hydrated_message(&store, &target.message, fetched)
             .await
             .unwrap();
-
-        let cached = cache_hydrated_message(&store, fetched).await.unwrap();
         assert!(
             cached.is_some(),
             "the race must reach event publication with a completed cache"
@@ -1422,6 +2553,28 @@ mod tests {
         )
         .await
         .is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_pending_hydration_never_creates_a_mail_hydrated_event() {
+        let store = Store::in_memory().await.unwrap();
+        let target = HydrationTarget {
+            kind: HydrationKind::Pending,
+            message: message("failed-hydration"),
+        };
+        let outcome = HydrationResult {
+            target,
+            started: Instant::now(),
+            result: Err(anyhow::anyhow!("message body download failed")),
+            cancelled: false,
+        };
+
+        assert!(
+            pending_hydration_event(&store, Uuid::new_v4(), &outcome)
+                .await
+                .is_none(),
+            "the event sink must only receive mail-hydrated after a durable successful hydration"
+        );
     }
 
     #[test]
@@ -1640,7 +2793,7 @@ mod tests {
     #[tokio::test]
     async fn concurrent_account_replacements_leave_one_registered_live_watcher() {
         let account_id = Uuid::new_v4();
-        let account_task_locks = Arc::new(Mutex::new(HashMap::new()));
+        let account_task_locks = Arc::new(AccountOperationLocks::default());
         let tasks = Arc::new(Mutex::new(HashMap::new()));
         let running = Arc::new(AtomicUsize::new(0));
         let start_barrier = Arc::new(tokio::sync::Barrier::new(2));
@@ -1682,5 +2835,136 @@ mod tests {
 
         stop_watcher_task(tasks.lock().await.remove(&account_id)).await;
         assert_eq!(running.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn thousand_unique_account_watcher_lifecycles_release_tasks_and_transition_locks() {
+        const ACCOUNT_CYCLES: usize = 1_000;
+        let account_task_locks = AccountOperationLocks::default();
+        let tasks = Mutex::new(HashMap::new());
+        let running = Arc::new(AtomicUsize::new(0));
+
+        for _ in 0..ACCOUNT_CYCLES {
+            let account_id = Uuid::new_v4();
+            {
+                let _transition = account_task_lock(&account_task_locks, account_id).await;
+                replace_watcher_task(&tasks, account_id, async {
+                    tracked_watcher(Arc::clone(&running))
+                })
+                .await;
+            }
+            {
+                let _transition = account_task_lock(&account_task_locks, account_id).await;
+                stop_watcher_task(tasks.lock().await.remove(&account_id)).await;
+            }
+            assert_eq!(running.load(Ordering::SeqCst), 0);
+            assert!(tasks.lock().await.is_empty());
+        }
+
+        assert_eq!(account_task_locks.retained_entries(), 0);
+    }
+
+    #[tokio::test]
+    async fn repeated_manager_stop_and_account_removal_release_connections_without_late_events() {
+        const ACCOUNT_CYCLES: usize = 128;
+        let store = Store::in_memory().await.expect("open lifecycle store");
+        let manager = RealtimeSyncManager::new(store.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind lifecycle listener");
+        let listener_address = listener.local_addr().expect("lifecycle listener address");
+        let running = Arc::new(AtomicUsize::new(0));
+        let published = Arc::new(AtomicUsize::new(0));
+
+        for cycle in 0..ACCOUNT_CYCLES {
+            let mut account = realtime_account();
+            account.email = format!("lifecycle-{cycle}@example.test");
+            store
+                .save_account(&account)
+                .await
+                .expect("persist lifecycle account");
+
+            let (client, accepted) = tokio::join!(
+                tokio::net::TcpStream::connect(listener_address),
+                listener.accept()
+            );
+            let client = client.expect("connect lifecycle watcher socket");
+            let (mut server, _) = accepted.expect("accept lifecycle watcher socket");
+            let (cancel, mut receiver) = watch::channel(false);
+            let watcher_running = Arc::clone(&running);
+            let watcher_published = Arc::clone(&published);
+            watcher_running.fetch_add(1, Ordering::SeqCst);
+            let handle = tauri::async_runtime::spawn(async move {
+                // This models a watcher that has reached its connected event
+                // loop. The manager must signal it, await it, and only then
+                // return from stop_account.
+                watcher_published.fetch_add(1, Ordering::SeqCst);
+                wait_for_cancellation(&mut receiver).await;
+                drop(client);
+                watcher_running.fetch_sub(1, Ordering::SeqCst);
+            });
+
+            {
+                let _transition = account_task_lock(&manager.account_task_locks, account.id).await;
+                replace_watcher_task(&manager.tasks, account.id, async {
+                    WatcherTask { cancel, handle }
+                })
+                .await;
+            }
+            manager.statuses.write().await.insert(
+                account.id,
+                RealtimeSyncStatus {
+                    account_id: account.id,
+                    state: "idle".into(),
+                    retry_at: None,
+                    error_kind: None,
+                },
+            );
+
+            tokio::time::timeout(Duration::from_secs(1), manager.stop_account(account.id))
+                .await
+                .expect("manager stop must await the connected watcher");
+            assert_eq!(
+                running.load(Ordering::SeqCst),
+                0,
+                "stop_account must not return while its watcher is still alive"
+            );
+            let mut trailing = Vec::new();
+            tokio::time::timeout(Duration::from_secs(1), server.read_to_end(&mut trailing))
+                .await
+                .expect("stopped watcher must close its provider socket")
+                .expect("read lifecycle socket EOF");
+
+            store
+                .delete_account_with_credential(account.id)
+                .await
+                .expect("remove lifecycle account and credential atomically");
+            let events_after_stop = published.load(Ordering::SeqCst);
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+
+            assert_eq!(published.load(Ordering::SeqCst), events_after_stop);
+            assert_eq!(running.load(Ordering::SeqCst), 0);
+            assert!(manager.tasks.lock().await.is_empty());
+            assert!(manager.statuses().await.is_empty());
+            assert_eq!(manager.account_task_locks.retained_entries(), 0);
+            assert_eq!(
+                manager.hydration_slots.available_permits(),
+                HYDRATION_CONCURRENCY
+            );
+            assert!(store
+                .account(account.id)
+                .await
+                .expect("read removed lifecycle account")
+                .is_none());
+        }
+
+        assert_eq!(published.load(Ordering::SeqCst), ACCOUNT_CYCLES);
+        assert!(store
+            .accounts()
+            .await
+            .expect("list lifecycle accounts")
+            .is_empty());
     }
 }

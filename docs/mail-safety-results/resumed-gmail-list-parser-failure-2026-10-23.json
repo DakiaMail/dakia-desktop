@@ -1,0 +1,9 @@
+{
+  "outcome": "failed",
+  "rawProviderObservationsRetained": false,
+  "remoteMutationRequested": false,
+  "resultCode": "read_only_provider_proof_failed",
+  "roundtripId": "45bacd384f0c4a74893f14e4fea23d9a",
+  "schemaVersion": 1,
+  "sourceDigest": "670652ff0da3121eabc3f2ede32d2089828588da85904de8e17ef602a69d6870"
+}

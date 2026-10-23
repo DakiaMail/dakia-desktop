@@ -1,0 +1,48 @@
+Window: "New message", App: Dakia Fictional Provider Reader.
+0 standard window New message, Secondary Actions: Raise
+	1 scroll area
+		2 HTML content Description: New message, URL: 127.0.0.1:1420/?view=compose&seedKey=16f832e9-5182-46d8-accc-01e4cdf52c8c
+			3 container
+				4 container New message
+					5 text To
+					6 text field (settable) To, Value: fictional@example.test
+					7 button (expanded) Cc · Bcc, Secondary Actions: Collapse
+					8 text Cc
+					9 text field (settable) Cc, Value: fictional@example.testBcc:fictional@example.test
+					10 text Bcc
+					11 text field (settable) Bcc
+					12 text From
+					13 pop up button From, Value: Fictional Reader <fictional-reader@localhost>
+					14 text Subject
+					15 text field (settable) Subject, Value: Fictional report
+				16 container Formatting
+					17 text entry area (settable) Write your message…
+						18 text Write your message…
+					19 toolbar Formatting
+						20 button Bold
+						21 button Italic
+						22 button Underline
+						23 button Strikethrough
+						24 button Quote
+						25 button Code block
+						26 button Bulleted list
+						27 button Numbered list
+						28 button Add link
+						29 button Clear formatting
+				30 text Some address or subject fields contain line breaks. Remove them before sending.
+				31 button (disabled) Send ⌘↵
+				32 button Attach
+				33 text Rich text
+	34 close button
+	35 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	36 minimize button
+37 menu bar
+	38 Dakia Fictional Provider Reader
+	39 File
+	40 Edit
+	41 Mailbox
+	42 Message
+	43 Window
+	44 Help
+
+The focused UI element is 6 text field (settable) To, Value: fictional@example.test

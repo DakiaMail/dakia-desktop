@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "lane": "credentialed-provider-read-only-diagnostic",
+  "recordedAtUtc": "2026-10-21T08:46:00Z",
+  "scope": {
+    "account": "redacted approved disposable account",
+    "recoveryRunIdSha256": "8966d6e512feb156306e40653d57959d4908788b2b09200cf1991ae6a9ecbb60",
+    "remoteMutationRequested": false,
+    "forbiddenOperations": ["SMTP MAIL", "SMTP RCPT", "SMTP DATA", "send", "append", "mailbox mutation"]
+  },
+  "retainedArtifacts": {
+    "currentSmokeBinarySha256": "29646df6af5d8db0e5b0828b00f5319b4cefea7d311d7b44627e6c8858e2ae82",
+    "olderSmokeBinarySha256": "08b5f35eb801357529f39ab51e2425bc129a427aa842b693f312dd99761a9dce",
+    "recoverWrapperSha256": "592fa20e94ef6942d5ec5bc7c3ff4d897f89f1069c24e8cd5fd39bd3faaa3c59",
+    "independentImapControlSha256": "02b99d7281489290397eec1c57c5a8f075f3f3ccb0f56e517ee4965ed4878554"
+  },
+  "controls": [
+    {
+      "name": "older-immutable-smoke-through-expect",
+      "binarySha256": "08b5f35eb801357529f39ab51e2425bc129a427aa842b693f312dd99761a9dce",
+      "wrapperSha256": "592fa20e94ef6942d5ec5bc7c3ff4d897f89f1069c24e8cd5fd39bd3faaa3c59",
+      "temporaryDirectoryMode": "0700",
+      "evidenceBeforeCleanup": {
+        "outcome": "started",
+        "stage": "prepared",
+        "remoteMutationRequested": false
+      },
+      "expectExitCode": "unobserved",
+      "expectSignal": "unobserved",
+      "childExitCode": "unobserved",
+      "childSignal": "unobserved",
+      "observerWallTime": "about 32 seconds",
+      "interpretation": "The nonterminal prepared evidence is not an IMAP failure and does not distinguish an Expect lifecycle failure, child-process exit, or an externally bounded execution. The temporary directory was removed after the metadata capture."
+    },
+    {
+      "name": "independent-python-imap-tls-control",
+      "scriptSha256": "02b99d7281489290397eec1c57c5a8f075f3f3ccb0f56e517ee4965ed4878554",
+      "temporaryDirectoryMode": "0700",
+      "operations": ["TLS greeting", "LOGIN", "CAPABILITY", "LIST INBOX", "EXAMINE INBOX", "STATUS INBOX"],
+      "result": "passed",
+      "timingMs": {
+        "tlsGreeting": 76,
+        "login": 511,
+        "capability": 30,
+        "listInbox": 92,
+        "examineInbox": 67,
+        "statusInbox": 18
+      },
+      "remoteMutationRequested": false
+    }
+  ],
+  "priorPrivateMarkerEvidence": {
+    "status": "read-only inspected",
+    "observations": [
+      "TCP, TLS, greeting, and post-TLS capability completed before LOGIN.",
+      "A successful instrumented run recorded LOGIN write and flush, an untagged response, a matching tagged OK response, then LIST, EXAMINE, and STATUS completion.",
+      "The private marker patch records only stage names, timing, response class, and tagged status. It excludes command bytes, response lines, credentials, account addresses, and message content."
+    ]
+  },
+  "conclusion": "The successful independent control proves only that provider reachability, TLS, credentials, and read-only IMAP were healthy at its execution time. It does not exclude intermittent provider behavior at the failed smoke probe time. The smoke timeout root cause remains unresolved.",
+  "nextDiagnosticAfterExplicitApproval": {
+    "attemptLimit": 1,
+    "binary": "private disposable build only",
+    "privatePatchSha256": "a9339bd9088cdf4fe68891ff2f05532cba7f029d34915fcac66aacbd332f25c2",
+    "privateExpectTemplateSha256": "cc312f2ad27e1b25fa4e3a4b0a5bb080ea930fc41e11d4c8458ca24d874b4b17",
+    "readOnlyRecovery": true,
+    "instrumentation": [
+      "parent Expect records prompt seen, credential handoff attempted, EOF versus timeout, wait exit code, wait signal, and wrapper error code",
+      "child records password prompt entered and returned without recording password data",
+      "IMAP records LOGIN write, flush, response class, matching-tag status, and elapsed time without recording command bytes or response text",
+      "the smoke path records begin, end, or error plus elapsed time for the read-neutral IMAP probe and SMTP authentication/QUIT",
+      "the recovery path records begin, end, or error plus elapsed time for INBOX sync, exact remote search, Reader fetch, first fetched-body verification, Reader hydration, and cache/body verification"
+    ],
+    "recordedFields": ["stage", "elapsed time", "exit code", "signal", "public endpoint"],
+    "excludedFields": ["credentials", "account address", "raw AUTH", "raw IMAP commands", "server response text", "message body"]
+  }
+}

@@ -6,6 +6,8 @@ import type {
   AccountConnection,
   Attachment,
   AiSettings,
+  AiInput,
+  AiMessageTarget,
   ComposeAttachment,
   MailRebuildProgress,
   MailCursor,
@@ -15,16 +17,21 @@ import type {
   MailThread,
   MailThreadPage,
   SmartInboxPage,
+  RemoteSearchResult,
   SmartSectionId,
   MessageContentErrorKind,
   Provider,
   SyncProgress,
   SyncResult,
   RealtimeSyncStatus,
+  SendRecoveryPage,
+  SendRecoverySeed,
+  SendRecoveryStatus,
   TranslationDownloadProgress,
   TranslationLanguageDetection,
   TranslationModelFiles,
   TranslationModelStatus,
+  SendFailureKind,
 } from "./types";
 
 const messageContentErrorKinds = new Set<MessageContentErrorKind>([
@@ -41,6 +48,19 @@ function normalizeSenderAddress(address: string) {
     .replace(/[A-Z]/g, (character) => character.toLowerCase());
 }
 
+/**
+ * The hostile-mail fixture is strictly an opt-in native verification aid.
+ * Limit it to a non-privileged loopback HTTP origin so a development setting
+ * cannot turn the normal demo mailbox into a network client for another host.
+ */
+export function mailSafetyOrigin(value: string | undefined) {
+  const match = /^http:\/\/127\.0\.0\.1:([1-9]\d{3,4})\/?$/.exec(value ?? "");
+  if (!match) return undefined;
+  const port = Number(match[1]);
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) return undefined;
+  return `http://127.0.0.1:${port}`;
+}
+
 export class MessageContentError extends Error {
   readonly retryable: boolean;
 
@@ -49,6 +69,106 @@ export class MessageContentError extends Error {
     this.name = "MessageContentError";
     this.retryable = kind === "transient";
   }
+}
+
+/** A native bulk save can complete some files before a later safe failure. */
+export class AttachmentSaveError extends Error {
+  constructor(
+    readonly savedCount?: number,
+    readonly totalCount?: number,
+  ) {
+    super(
+      savedCount === undefined || totalCount === undefined
+        ? "Attachment save failed"
+        : `Saved ${savedCount} of ${totalCount} attachments`,
+    );
+    this.name = "AttachmentSaveError";
+  }
+}
+
+export function attachmentSaveErrorFromUnknown(
+  error: unknown,
+): AttachmentSaveError {
+  if (error instanceof AttachmentSaveError) return error;
+  const value =
+    typeof error === "string"
+      ? (() => {
+          try {
+            return JSON.parse(error) as unknown;
+          } catch {
+            return undefined;
+          }
+        })()
+      : error;
+  if (
+    value &&
+    typeof value === "object" &&
+    "kind" in value &&
+    value.kind === "partial" &&
+    "savedCount" in value &&
+    typeof value.savedCount === "number" &&
+    Number.isSafeInteger(value.savedCount) &&
+    value.savedCount >= 0 &&
+    "totalCount" in value &&
+    typeof value.totalCount === "number" &&
+    Number.isSafeInteger(value.totalCount) &&
+    value.totalCount > value.savedCount
+  ) {
+    return new AttachmentSaveError(value.savedCount, value.totalCount);
+  }
+  return new AttachmentSaveError();
+}
+
+const sendFailureKinds = new Set<SendFailureKind>([
+  "not_submitted",
+  "delivery_uncertain",
+  "sent_copy_failed",
+]);
+
+/**
+ * The native command returns a serialized, typed failure while keeping its
+ * command signature compatible with existing clients. Do not surface the
+ * provider diagnostic here: it can include transport details that are not
+ * useful or safe in a compose window.
+ */
+export class SendMessageError extends Error {
+  constructor(readonly kind: SendFailureKind) {
+    super(
+      kind === "sent_copy_failed"
+        ? "Message was sent but no Sent copy was saved."
+        : kind === "delivery_uncertain"
+          ? "Delivery status is uncertain."
+          : "Message was not sent.",
+    );
+    this.name = "SendMessageError";
+  }
+}
+
+export function sendMessageErrorFromUnknown(error: unknown): SendMessageError {
+  if (error instanceof SendMessageError) return error;
+  const value =
+    typeof error === "string"
+      ? (() => {
+          try {
+            return JSON.parse(error) as unknown;
+          } catch {
+            return undefined;
+          }
+        })()
+      : error;
+  if (
+    value &&
+    typeof value === "object" &&
+    "kind" in value &&
+    typeof value.kind === "string" &&
+    sendFailureKinds.has(value.kind as SendFailureKind)
+  ) {
+    return new SendMessageError(value.kind as SendFailureKind);
+  }
+  // IPC interruption leaves us unable to distinguish a rejected submission
+  // from one accepted immediately before the response was lost. Never make
+  // that state retryable without an explicit native outcome.
+  return new SendMessageError("delivery_uncertain");
 }
 
 /**
@@ -69,6 +189,73 @@ export function messageContentErrorFromUnknown(
     return new MessageContentError(error.kind as MessageContentErrorKind);
   }
   return new MessageContentError("transient");
+}
+
+const sendRecoveryStatuses = new Set<SendRecoveryStatus>([
+  "not_submitted",
+  "pending",
+  "delivery_uncertain",
+  "sent_copy_failed",
+]);
+
+export function sendRecoveryPageFromUnknown(
+  value: unknown,
+  allowedAccountIds?: readonly string[],
+): SendRecoveryPage {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Saved messages could not be loaded.");
+  }
+  const page = value as Record<string, unknown>;
+  if (
+    !Array.isArray(page.items) ||
+    !(
+      page.next_cursor === null ||
+      (typeof page.next_cursor === "string" && page.next_cursor.length > 0)
+    ) ||
+    !Number.isSafeInteger(page.total_count) ||
+    Number(page.total_count) < page.items.length
+  ) {
+    throw new Error("Saved messages could not be loaded.");
+  }
+  const allowedAccounts = allowedAccountIds
+    ? new Set(allowedAccountIds)
+    : undefined;
+  const identities = new Set<string>();
+  const items = page.items.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new Error("Saved messages could not be loaded.");
+    }
+    const summary = item as Record<string, unknown>;
+    if (
+      typeof summary.account_id !== "string" ||
+      typeof summary.attempt_id !== "string" ||
+      typeof summary.subject !== "string" ||
+      typeof summary.status !== "string" ||
+      !sendRecoveryStatuses.has(summary.status as SendRecoveryStatus) ||
+      typeof summary.updated_at !== "string" ||
+      (allowedAccounts !== undefined &&
+        !allowedAccounts.has(summary.account_id))
+    ) {
+      throw new Error("Saved messages could not be loaded.");
+    }
+    const identity = `${summary.account_id}\u0000${summary.attempt_id}`;
+    if (identities.has(identity)) {
+      throw new Error("Saved messages could not be loaded.");
+    }
+    identities.add(identity);
+    return {
+      account_id: summary.account_id,
+      attempt_id: summary.attempt_id,
+      subject: summary.subject,
+      status: summary.status as SendRecoveryStatus,
+      updated_at: summary.updated_at,
+    };
+  });
+  return {
+    items,
+    next_cursor: page.next_cursor as string | null,
+    total_count: Number(page.total_count),
+  };
 }
 
 const desktopApi = {
@@ -138,7 +325,7 @@ const desktopApi = {
     unreadOnly = false,
     flaggedOnly = false,
   ) =>
-    invoke<MailSummary[]>("search_remote", {
+    invoke<RemoteSearchResult>("search_remote", {
       query: {
         text,
         account_ids: accountIds,
@@ -151,12 +338,36 @@ const desktopApi = {
     }),
   conversationForTarget: (target: ConversationTarget) =>
     invoke<MailThread | null>("conversation_for_target", { target }),
-  setCategory: (messageId: string, category: string) =>
-    invoke<void>("set_message_category", { messageId, category }),
-  setStarred: (messageId: string, starred: boolean) =>
-    invoke<MailSummary>("set_message_starred", { messageId, starred }),
-  setRead: (messageId: string, read: boolean) =>
-    invoke<void>("set_message_read", { messageId, read }),
+  setCategory: (
+    messageId: string,
+    category: string,
+    expectedUidValidity: number | null = null,
+  ) =>
+    invoke<void>("set_message_category", {
+      messageId,
+      category,
+      expectedUidValidity,
+    }),
+  setStarred: (
+    messageId: string,
+    starred: boolean,
+    expectedUidValidity?: number | null,
+  ) =>
+    invoke<MailSummary>("set_message_starred", {
+      messageId,
+      starred,
+      expectedUidValidity: expectedUidValidity ?? null,
+    }),
+  setRead: (
+    messageId: string,
+    read: boolean,
+    expectedUidValidity?: number | null,
+  ) =>
+    invoke<void>("set_message_read", {
+      messageId,
+      read,
+      expectedUidValidity: expectedUidValidity ?? null,
+    }),
   starredCount: (accountIds: string[]) =>
     invoke<number>("starred_conversation_count", { accountIds }),
   classifyPending: () => invoke<number>("classify_pending"),
@@ -164,6 +375,20 @@ const desktopApi = {
   reconcileRealtimeSync: () => invoke<void>("reconcile_realtime_sync"),
   realtimeSyncStatus: () =>
     invoke<RealtimeSyncStatus[]>("realtime_sync_status"),
+  listSendRecoveries: async (accountIds: string[], cursor?: string) =>
+    sendRecoveryPageFromUnknown(
+      await invoke<unknown>("list_send_recoveries", {
+        accountIds,
+        cursor: cursor ?? null,
+      }),
+      accountIds,
+    ),
+  openSendRecoveryWindow: (accountId: string, attemptId: string) =>
+    invoke<void>("open_send_recovery_window", { accountId, attemptId }),
+  readSendRecoverySeed: (recoveryKey: string) =>
+    invoke<SendRecoverySeed>("read_send_recovery_seed", { recoveryKey }),
+  acknowledgeSendRecoverySeed: (recoveryKey: string) =>
+    invoke<void>("acknowledge_send_recovery_seed", { recoveryKey }),
   recordNotificationDelivered: (
     accountId: string,
     eventId: string,
@@ -184,8 +409,14 @@ const desktopApi = {
     count: number;
     sound?: string;
   }) => invoke<void>("send_desktop_notification", { notification }),
-  hydrateMessage: (messageId: string) =>
-    invoke<MailSummary>("hydrate_message", { messageId }),
+  hydrateMessage: (
+    messageId: string,
+    expectedUidValidity: number | null = null,
+  ) =>
+    invoke<MailSummary>("hydrate_message", {
+      messageId,
+      expectedUidValidity,
+    }),
   sync: (
     accountId: string,
     onProgress?: (progress: SyncProgress) => void,
@@ -201,47 +432,106 @@ const desktopApi = {
     });
   },
   mailRebuildStatus: () => invoke<MailRebuildProgress[]>("mail_rebuild_status"),
-  content: async (messageId: string) => {
+  content: async (
+    messageId: string,
+    expectedUidValidity: number | null = null,
+  ) => {
     try {
-      return await invoke<MessageContent>("message_content", { messageId });
+      return await invoke<MessageContent>("message_content", {
+        messageId,
+        expectedUidValidity,
+      });
     } catch (error) {
       throw messageContentErrorFromUnknown(error);
     }
   },
-  attachments: (messageId: string) =>
-    invoke<Attachment[]>("message_attachments", { messageId }),
-  saveAttachment: (messageId: string, attachmentId: string) =>
-    invoke<string>("save_attachment", { messageId, attachmentId }),
-  saveAllAttachments: (messageId: string) =>
-    invoke<string[]>("save_all_attachments", { messageId }),
-  exportMessage: (messageId: string) =>
-    invoke<string>("export_message", { messageId }),
-  forwardAttachments: (messageId: string) =>
-    invoke<ComposeAttachment[]>("forward_attachments", { messageId }),
+  attachments: (messageId: string, expectedUidValidity: number | null = null) =>
+    invoke<Attachment[]>("message_attachments", {
+      messageId,
+      expectedUidValidity,
+    }),
+  saveAttachment: (
+    messageId: string,
+    attachmentId: string,
+    expectedUidValidity: number | null = null,
+  ) =>
+    invoke<string>("save_attachment", {
+      messageId,
+      attachmentId,
+      expectedUidValidity,
+    }),
+  saveAllAttachments: async (
+    messageId: string,
+    expectedUidValidity: number | null = null,
+  ) => {
+    try {
+      return await invoke<string[]>("save_all_attachments", {
+        messageId,
+        expectedUidValidity,
+      });
+    } catch (error) {
+      throw attachmentSaveErrorFromUnknown(error);
+    }
+  },
+  exportMessage: (
+    messageId: string,
+    expectedUidValidity: number | null = null,
+  ) => invoke<string>("export_message", { messageId, expectedUidValidity }),
+  forwardAttachments: (
+    messageId: string,
+    expectedUidValidity: number | null = null,
+  ) =>
+    invoke<ComposeAttachment[]>("forward_attachments", {
+      messageId,
+      expectedUidValidity,
+    }),
   readDroppedFiles: (receipt: string) =>
     invoke<ComposeAttachment[]>("read_dropped_files", { receipt }),
-  send: (draft: Record<string, unknown>) =>
-    invoke<string>("send_message", { draft }),
+  send: async (draft: Record<string, unknown>) => {
+    try {
+      return await invoke<string>("send_message", { draft });
+    } catch (error) {
+      throw sendMessageErrorFromUnknown(error);
+    }
+  },
   action: (
     accountId: string,
     mailbox: string,
     uid: number,
     action: "archive" | "spam" | "not_spam" | "trash" | "delete",
+    messageId?: string,
+    expectedUidValidity?: number | null,
   ) =>
-    invoke<void>("apply_mailbox_action", { accountId, mailbox, uid, action }),
+    invoke<void>("apply_mailbox_action", {
+      accountId,
+      mailbox,
+      uid,
+      action,
+      messageId: messageId ?? null,
+      expectedUidValidity: expectedUidValidity ?? null,
+    }),
   openExternal: (url: string) => invoke<void>("open_external_url", { url }),
-  unsubscribe: (messageId: string) =>
-    invoke<UnsubscribeResult>("unsubscribe_message", { messageId }),
+  unsubscribe: (messageId: string, expectedUidValidity: number | null = null) =>
+    invoke<UnsubscribeResult>("unsubscribe_message", {
+      messageId,
+      expectedUidValidity,
+    }),
   trashMessagesFromSender: (accountId: string, senderAddress: string) =>
     invoke<TrashMessagesFromSenderResult>("trash_messages_from_sender", {
       accountId,
       senderAddress,
     }),
-  summarize: (settings: AiSettings, messageIds: string[]) =>
-    invoke<string>("ai_summarize", { input: aiInput(settings, messageIds) }),
-  draft: (settings: AiSettings, messageIds: string[], instruction: string) =>
+  summarize: (settings: AiSettings, messageTargets: AiMessageTarget[]) =>
+    invoke<string>("ai_summarize", {
+      input: aiInput(settings, messageTargets),
+    }),
+  draft: (
+    settings: AiSettings,
+    messageTargets: AiMessageTarget[],
+    instruction: string,
+  ) =>
     invoke<string>("ai_draft", {
-      input: { ...aiInput(settings, messageIds), instruction },
+      input: { ...aiInput(settings, messageTargets), instruction },
     }),
   aiAvailable: (settings: AiSettings) =>
     invoke<boolean>("ai_available", { input: aiInput(settings, []) }),
@@ -287,14 +577,18 @@ export type TrashMessagesFromSenderResult = {
   failed: number;
 };
 
-const aiInput = (settings: AiSettings, messageIds: string[]) => ({
+const aiInput = (
+  settings: AiSettings,
+  messageTargets: AiMessageTarget[],
+): AiInput => ({
   provider: settings.provider,
   baseUrl: settings.baseUrl || null,
   model: settings.model,
   apiKey: settings.apiKey || null,
   executable: settings.executable || null,
   modelPath: settings.modelPath || null,
-  messageIds,
+  messageIds: messageTargets.map((target) => target.messageId),
+  messageTargets,
   instruction: null,
 });
 
@@ -315,6 +609,10 @@ const demoAccount: Account = {
   spam_mailbox: "Spam",
   enabled: true,
 };
+const demoMailSafetyOrigin = mailSafetyOrigin(
+  import.meta.env.VITE_DAKIA_MAIL_SAFETY_ORIGIN,
+);
+
 const demoMessages: MailSummary[] = [
   {
     id: "demo-1",
@@ -403,34 +701,78 @@ const demoMessages: MailSummary[] = [
     classification_confidence: 0.91,
     classification_source: "model",
   },
-];
-
-const demoAttachments = (messageId: string): Attachment[] =>
-  messageId === "demo-2"
+  ...(demoMailSafetyOrigin
     ? [
         {
-          id: "demo-2:0",
+          id: "demo-mail-safety",
+          account_id: demoAccount.id,
+          mailbox: "INBOX",
+          uid: 5,
+          thread_id: "demo-thread-mail-safety",
+          subject: "Remote content safety check",
+          from_name: "Safety Fixture",
+          from_address: "fixture@privacy.example.test",
+          to_addresses: demoAccount.email,
+          received_at: new Date(Date.now() - 900000).toISOString(),
+          snippet: "This fictional message verifies remote-content consent.",
+          body_text:
+            "This fictional message verifies remote-content consent. Local safety marker.",
+          body_html: hostileDemoHtml(demoMailSafetyOrigin),
+          is_read: false,
+          is_flagged: false,
+          has_attachments: true,
+          category: "notifications" as const,
+          classification_confidence: 1,
+          classification_source: "model" as const,
+        } satisfies MailSummary,
+      ]
+    : []),
+];
+
+function hostileDemoHtml(origin: string) {
+  return `<link rel="stylesheet" href="${origin}/remote-style.css">
+<style>@import url('${origin}/remote-style.css'); @font-face { font-family: SafetyFixture; src: url('${origin}/remote-font.woff2'); } .remote-style-marker { background-image: url('${origin}/background.svg'); font-family: SafetyFixture, sans-serif; }</style>
+<div class="remote-style-marker"><p>Remote-content safety fixture.</p><p class="remote-style-marker">Remote style marker</p><img alt="Remote image" src="${origin}/remote-image.svg" srcset="${origin}/srcset-image.svg 1x"><img alt="Local safety marker" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1' height='1'%3E%3C/svg%3E"><svg width="1" height="1"><image href="${origin}/svg-external.svg" width="1" height="1" /></svg><script src="${origin}/hostile-script.js"></script><iframe src="${origin}/hostile-frame.html"></iframe><form action="${origin}/form-submit"><input name="fixture" value="blocked"></form></div>`;
+}
+
+const demoAttachments = (messageId: string): Attachment[] =>
+  messageId === "demo-mail-safety"
+    ? [
+        {
+          id: "demo-mail-safety:0",
           message_id: messageId,
-          filename: "field-notes.pdf",
-          mime_type: "application/pdf",
-          size_bytes: 2_850_000,
+          filename: "quarterly-report.pdf.command",
+          mime_type: "application/x-sh",
+          size_bytes: 1_024,
           is_inline: false,
-          is_potentially_unsafe: false,
+          is_potentially_unsafe: true,
         },
       ]
-    : messageId === "demo-3"
+    : messageId === "demo-2"
       ? [
           {
-            id: "demo-3:0",
+            id: "demo-2:0",
             message_id: messageId,
-            filename: "invoice-0726.pdf",
+            filename: "field-notes.pdf",
             mime_type: "application/pdf",
-            size_bytes: 184_000,
+            size_bytes: 2_850_000,
             is_inline: false,
             is_potentially_unsafe: false,
           },
         ]
-      : [];
+      : messageId === "demo-3"
+        ? [
+            {
+              id: "demo-3:0",
+              message_id: messageId,
+              filename: "invoice-0726.pdf",
+              mime_type: "application/pdf",
+              size_bytes: 184_000,
+              is_inline: false,
+              is_potentially_unsafe: false,
+            },
+          ]
+        : [];
 
 const demoSmartSectionIds: SmartSectionId[] = [
   "starred",
@@ -582,16 +924,19 @@ const demoApi: typeof desktopApi = {
   },
   searchRemote: async (text, accountIds, mailbox, unreadOnly, flaggedOnly) => {
     const allowedAccounts = new Set(accountIds);
-    return demoMessages.filter(
-      (message) =>
-        (!allowedAccounts.size || allowedAccounts.has(message.account_id)) &&
-        (!mailbox || mailboxFamily(message.mailbox) === mailbox) &&
-        (!unreadOnly || !message.is_read) &&
-        (!flaggedOnly || message.is_flagged) &&
-        `${message.subject} ${message.body_text} ${message.from_name}`
-          .toLowerCase()
-          .includes(text.toLowerCase()),
-    );
+    return {
+      messages: demoMessages.filter(
+        (message) =>
+          (!allowedAccounts.size || allowedAccounts.has(message.account_id)) &&
+          (!mailbox || mailboxFamily(message.mailbox) === mailbox) &&
+          (!unreadOnly || !message.is_read) &&
+          (!flaggedOnly || message.is_flagged) &&
+          `${message.subject} ${message.body_text} ${message.from_name}`
+            .toLowerCase()
+            .includes(text.toLowerCase()),
+      ),
+      limitReached: false,
+    };
   },
   conversationForTarget: async (target) => {
     const exact = target.localMessageId
@@ -621,7 +966,7 @@ const demoApi: typeof desktopApi = {
       )[0] ?? null
     );
   },
-  setCategory: async (messageId, category) => {
+  setCategory: async (messageId, category, _expectedUidValidity = null) => {
     const message = demoMessages.find((item) => item.id === messageId);
     if (message) {
       message.category = category as typeof message.category;
@@ -654,9 +999,21 @@ const demoApi: typeof desktopApi = {
   startRealtimeSync: async () => undefined,
   reconcileRealtimeSync: async () => undefined,
   realtimeSyncStatus: async () => [],
+  listSendRecoveries: async () => ({
+    items: [],
+    next_cursor: null,
+    total_count: 0,
+  }),
+  openSendRecoveryWindow: async () => {
+    throw new Error("Send recovery is available only in the desktop app.");
+  },
+  readSendRecoverySeed: async () => {
+    throw new Error("Send recovery is available only in the desktop app.");
+  },
+  acknowledgeSendRecoverySeed: async () => undefined,
   mailRebuildStatus: async () => [],
   recordNotificationDelivered: async () => undefined,
-  hydrateMessage: async (messageId) => {
+  hydrateMessage: async (messageId, _expectedUidValidity = null) => {
     const message = demoMessages.find((item) => item.id === messageId);
     if (!message) throw new Error("Message not found");
     return message;
@@ -680,7 +1037,7 @@ const demoApi: typeof desktopApi = {
     });
     return { syncedCount: demoMessages.length, newMessages: [] };
   },
-  content: async (messageId) => {
+  content: async (messageId, _expectedUidValidity = null) => {
     const message =
       demoMessages.find((item) => item.id === messageId) ?? demoMessages[0];
     return {
@@ -690,15 +1047,21 @@ const demoApi: typeof desktopApi = {
       attachments: demoAttachments(messageId),
     };
   },
-  attachments: async (messageId) => demoAttachments(messageId),
-  saveAttachment: async (_messageId, attachmentId) =>
+  attachments: async (messageId, _expectedUidValidity = null) =>
+    demoAttachments(messageId),
+  saveAttachment: async (
+    _messageId,
+    attachmentId,
+    _expectedUidValidity = null,
+  ) =>
     `~/Downloads/${attachmentId.includes("demo-3") ? "invoice-0726.pdf" : "field-notes.pdf"}`,
-  saveAllAttachments: async (messageId) =>
+  saveAllAttachments: async (messageId, _expectedUidValidity = null) =>
     messageId === "demo-2"
       ? ["~/Downloads/field-notes.pdf"]
       : ["~/Downloads/invoice-0726.pdf"],
-  exportMessage: async (messageId) => `~/Downloads/${messageId}.eml`,
-  forwardAttachments: async () => [],
+  exportMessage: async (messageId, _expectedUidValidity = null) =>
+    `~/Downloads/${messageId}.eml`,
+  forwardAttachments: async (_messageId, _expectedUidValidity = null) => [],
   readDroppedFiles: async () => {
     throw new Error("Native file drop support is unavailable in the web demo");
   },
@@ -707,7 +1070,7 @@ const demoApi: typeof desktopApi = {
   openExternal: async (url) => {
     window.open(url, "_blank", "noopener,noreferrer");
   },
-  unsubscribe: async () => ({
+  unsubscribe: async (_messageId, _expectedUidValidity = null) => ({
     kind: "completed" as const,
     cleanupTarget: {
       accountId: demoAccount.id,

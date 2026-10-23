@@ -1,0 +1,138 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T19:48:00.000Z",
+  "lane": "unchanged-source-three-run-baseline-detail",
+  "status": "passed",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "c56d2d806d8623dd14c858c8a8362729655496036405ad8c24162fce02a9a85b",
+    "fileCount": 939,
+    "manifestPath": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-window-handoff-recovery.json",
+    "manifestSha256": "6a983e12901b7042fd0c3bfbd0fe3d38e6c08447c667d19d03bcdc786654679b"
+  },
+  "sourceTreeAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "c56d2d806d8623dd14c858c8a8362729655496036405ad8c24162fce02a9a85b",
+    "fileCount": 939
+  },
+  "parentReport": "docs/mail-safety-results/remaining-gap-closure-three-run-source-window-handoff-recovery-2026-10-21.json",
+  "parentReportSha256": "081e7e708b2a02027ae442623ec3821240af35f66c2d100100635b30ee3e024f",
+  "startedAt": "2026-10-21T19:32:10.005Z",
+  "finishedAt": "2026-10-21T19:46:09.029Z",
+  "consecutiveRuns": 3,
+  "gatesPerRun": 16,
+  "perRun": {
+    "rustRuntimePassed": 1006,
+    "rustDoctestsPassed": 2,
+    "rustIgnored": 11,
+    "frontendPassed": 606,
+    "frontendSkipped": 2,
+    "frontendFilesPassed": 62,
+    "frontendFilesSkipped": 3,
+    "scriptTestsPassed": 245,
+    "scriptTestsFailed": 0,
+    "scriptTestsSkipped": 0,
+    "coupledRustTestsPassed": 6,
+    "coupledFrontendTestsPassed": 11,
+    "coupledIntegrationRunnersPassed": [
+      "realtime delivery",
+      "MIME Reader artifact",
+      "attachment command artifact",
+      "mail command TLS"
+    ]
+  },
+  "rawLog": {
+    "path": "/private/tmp/dakia-three-run-source-window-handoff-recovery-20261021.log",
+    "bytes": 503524,
+    "sha256": "0edb1cd291b9a8c491870e464d051930ea8d47173874d34124e15c989b2a7dbd"
+  },
+  "transcriptReconciliation": {
+    "perRun": [
+      {
+        "iteration": 1,
+        "totalRustLike": 1014,
+        "rustRuntime": 1006,
+        "doctests": 2,
+        "ignored": 11,
+        "coupledRust": 6,
+        "frontend": 606,
+        "frontendSkips": 2,
+        "frontendFiles": 62,
+        "frontendFileSkips": 3,
+        "scripts": 245
+      },
+      {
+        "iteration": 2,
+        "totalRustLike": 1014,
+        "rustRuntime": 1006,
+        "doctests": 2,
+        "ignored": 11,
+        "coupledRust": 6,
+        "frontend": 606,
+        "frontendSkips": 2,
+        "frontendFiles": 62,
+        "frontendFileSkips": 3,
+        "scripts": 245
+      },
+      {
+        "iteration": 3,
+        "totalRustLike": 1014,
+        "rustRuntime": 1006,
+        "doctests": 2,
+        "ignored": 11,
+        "coupledRust": 6,
+        "frontend": 606,
+        "frontendSkips": 2,
+        "frontendFiles": 62,
+        "frontendFileSkips": 3,
+        "scripts": 245
+      }
+    ],
+    "rawRustPassesIncludingCoupledAndDoctests": 1014,
+    "formula": "1006 workspace Rust runtime, including 15 CLI unit, 22 provider-smoke, and 14 CLI subprocess tests, plus 2 doctests and 6 coupled Rust assertions equals 1014 raw Rust test passes per run."
+  },
+  "historicalInputReconciliation": {
+    "comparedSource": {
+      "digest": "5bcd262aab449b72708b8f9a8991f414abbe56169468d3ccd6293e42195f28c4",
+      "fileCount": 937,
+      "manifestPath": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-csp-bridge-safe.json",
+      "manifestSha256": "6d434e154df647cb76e38437bbab131a2353d8998947a464ffe0f0ee95593043"
+    },
+    "changedPathCount": 19,
+    "coreInputsChanged": [
+      "crates/dakia-core/src/mail.rs",
+      "crates/dakia-core/src/mail/tests/probe_progress_tests.rs",
+      "crates/dakia-cli/src/bin/provider-smoke.rs"
+    ],
+    "conclusion": "The earlier core, deep, performance, and storage results are not carried forward as input-equivalent because the c56 source changes core mail and provider-smoke inputs."
+  },
+  "dependencyAuditInputEquivalence": {
+    "status": "passed",
+    "scope": "input equivalence only; no audit was rerun",
+    "referenceReport": "docs/mail-safety-results/final-dependency-audit-2026-10-21.json",
+    "referenceReportSha256": "b380755a49ca459cd642d4ad5d774bbf5a37858236b10f1c933713cf38777e42",
+    "inputFileCount": 9,
+    "currentMismatchCount": 0,
+    "inputs": [
+      "Cargo.lock",
+      "fuzz/Cargo.lock",
+      "package-lock.json",
+      ".cargo/audit.toml",
+      "scripts/audit-dependencies.sh",
+      "scripts/verify-vendored-crates.mjs",
+      "testdata/vendored-crates/mail-parser.json",
+      "testdata/vendored-crates/lettre.json",
+      "testdata/vendored-crates/tauri-plugin-updater.json"
+    ]
+  },
+  "retries": 0,
+  "observedFlakes": 0,
+  "limitations": [
+    "Ignored and skipped tests are not passes.",
+    "These are source tests, separate from native, credentialed provider, performance, fuzz, dependency and release lanes.",
+    "Historical provider-smoke failures from the 757 and b34 checkpoints remain retained. They are not retries in this clean three-run c56 sequence.",
+    "This receipt does not carry forward prior core, deep, performance, storage, or compiled-input results. Fresh deep and performance lanes are required for c56.",
+    "Build emitted the fixture-environment placeholder and browser externalization warnings; a successful build does not establish WebKit translation execution."
+  ],
+  "coupledFrontendNote": "The three artifact-gated files omitted by the ordinary Vitest invocation execute separately through the coupled runners: one realtime, nine MIME and one attachment frontend tests, with no pending cases. These are separate from 606 ordinary frontend passes."
+}

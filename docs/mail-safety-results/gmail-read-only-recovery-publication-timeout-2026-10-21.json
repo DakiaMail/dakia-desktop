@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "lane": "gmail-read-only-existing-message-recovery",
+  "status": "failed-timeout",
+  "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "2a4e14731ba246806f3700b020ff7c1ec4afdbce0ceea6466fcfa46cb41d475f",
+    "fileCount": 758
+  },
+  "sourceTreeAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "2a4e14731ba246806f3700b020ff7c1ec4afdbce0ceea6466fcfa46cb41d475f",
+    "fileCount": 758
+  },
+  "startedAt": "2026-10-21T08:40:18.141758+00:00",
+  "finishedAt": "2026-10-21T08:41:09.556418+00:00",
+  "executableSha256": "29646df6af5d8db0e5b0828b00f5319b4cefea7d311d7b44627e6c8858e2ae82",
+  "provider": "gmail",
+  "authenticationMethod": "app_password",
+  "stage": "timeout",
+  "remoteMutationRequested": false,
+  "newMessageSubmitted": false,
+  "roundtripId": "45bacd384f0c4a74893f14e4fea23d9a",
+  "roundtripMessageLimit": 0,
+  "probeExit": 1,
+  "privateEvidence": {
+    "root": "/private/tmp/dakia-gmail-recovery-publication-ednnbw6l",
+    "providerReportSha256": "ad372eac2418e50022c14a3a005fb95cf8f383fc7c7387181a13e0aa90c71e84"
+  },
+  "limitations": [
+    "The final-source probe hit its overall 45-second timeout; exact current failing protocol stage is not established.",
+    "A prior immutable source checkpoint passed, while earlier checkpoints also timed out.",
+    "No new send or mailbox mutation was requested.",
+    "Read-only control diagnosis is pending; no retry erases this failure."
+  ]
+}

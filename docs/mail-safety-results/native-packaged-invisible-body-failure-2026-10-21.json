@@ -1,0 +1,119 @@
+{
+  "schemaVersion": 1,
+  "status": "partial-failed",
+  "sourceDigest": "a3f5e5edcef56f09522ee3f5f4485b0a5b804df4065624e355a24aa532b15b71",
+  "sourceFileCount": 937,
+  "runRoot": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.Z5Wzxr",
+  "executableSha256": "f674dd2b75c9b7761e43da560e23672469c910bff566073b0e5b0da8edb2ee6f",
+  "pid": 59064,
+  "webview": "tauri://localhost",
+  "passed": [
+    "Exact native executable and bundled webview identity",
+    "Packaged ACL probes: all six recorded checks true",
+    "Fictional SMTP UID4 arrival appeared in mounted list without manual sync and opened in Reader",
+    "Local translation produced English in accessibility tree; Show original restored Estonian",
+    "Controlled remote-resource counters remained zero before consent",
+    "Normal Quit exited zero"
+  ],
+  "failure": "Both original and translated message bodies are present in the opaque iframe accessibility tree but invisible in the actual screenshot. Native visible rendering fails. Root cause under investigation.",
+  "notificationDelivery": "not-tested; typed LaunchServices unavailable and actual runtime warning recorded",
+  "deferred": [
+    "Remaining Reader layout/security interaction matrix",
+    "Attachment filesystem acceptance",
+    "Held-sync and queued-send native acceptance",
+    "Native resource cohort completion",
+    "H016 faithful previous-stable GUI upgrade",
+    "Two fixed fatal-startup exit checks"
+  ],
+  "resourceScope": "Only before-01 and during-reader-01 samples exist, no completed resource pass.",
+  "artifacts": [
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.Z5Wzxr/native-acl-acceptance.json",
+      "sha256": "a22b0e06f71e822cf11640332fc0c0006838fb2c53172f97f30131d5c068918e",
+      "bytes": 30297
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.Z5Wzxr/launch-services-registration-unavailable.json",
+      "sha256": "2dce6911a8405ed861e7b7c4bbe114503034cf738e1691ba27fd30623106c600",
+      "bytes": 2086
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.Z5Wzxr/native-ui-evidence/001-initial.ax.txt",
+      "sha256": "67bb84442bbe4c540d66c41f9a1c1ec0035c6a81994eacfc909aa9ec485d51da",
+      "bytes": 1865
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.Z5Wzxr/native-ui-evidence/003-translation.png",
+      "sha256": "f50d4aaec06954c9a94f39b43d8052df63edccbf6b309b2986aab29b6b2c004e",
+      "bytes": 330267
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.Z5Wzxr/native-ui-evidence/004-original-body-layout.ax.txt",
+      "sha256": "d3de76d27618b842ce2862f4117ccf125c19d38243f46bd8ee4d5b32cfb1eaa1",
+      "bytes": 3676
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.Z5Wzxr/native-ui-evidence/004-original-body-layout.png",
+      "sha256": "aebf871a046a699c660fca75f556e51094a39ee2397a4742ed645779e3ed1982",
+      "bytes": 316350
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.Z5Wzxr/native-ui-evidence/005-before-consent-counters.json",
+      "sha256": "7c0eb919a2c66b178eed164171cb4958beafc6402d0dfa7f89d349e411afc90e",
+      "bytes": 474
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.Z5Wzxr/app-exit-status.txt",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "bytes": 2
+    },
+    {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.Z5Wzxr/post-exit-acceptance-handoff.json",
+      "sha256": "d3d9f26845afa082dc8796f6e08a5a5d4018758740a1712a9b7e669d4950685c",
+      "bytes": 1012
+    }
+  ],
+  "cause": "Packaged outer CSP default-src self rejects the dynamically nonced inline srcdoc resize script. The iframe stays at its initial 1px height. The inner nonce cannot relax the inherited policy.",
+  "sourceRemediation": {
+    "status": "implemented-not-native-verified",
+    "design": "The trusted bootstrap is byte-static and reads its per-frame capability from its own data-dakia-renderer-token attribute. Its exact SHA-256 is allowlisted by both the inherited Tauri CSP and the inner srcdoc CSP.",
+    "preservedBoundaries": [
+      "Opaque sandbox keeps allow-scripts without allow-same-origin",
+      "No unsafe-inline script allowance",
+      "Sender markup still cannot supply a runnable script or replace currentScript"
+    ],
+    "sourceCoverage": [
+      "Rendered bootstrap bytes are hashed in the test and compared against both CSPs",
+      "A changed bootstrap byte derives a hash absent from both CSPs",
+      "Two frames retain distinct capabilities while their bootstrap bytes are identical"
+    ],
+    "remainingAcceptance": "A new packaged WebKit run must visibly confirm original and translated Reader bodies expand beyond the 1px bootstrap height, including history growth and collapse. This report remains a native failure record until that run passes."
+  },
+  "sourceValidation": {
+    "status": "passed",
+    "focusedTests": {
+      "command": "npm test -- apps/desktop/src/components/HtmlMessage.test.tsx apps/desktop/src/components/Reader.test.tsx apps/desktop/src/mailIdentityContinuity.integration.test.tsx apps/desktop/src/privacyBoundaries.test.ts",
+      "result": "4 files, 133 tests passed"
+    },
+    "typecheck": "npm run typecheck passed",
+    "format": "Prettier check passed for all changed files",
+    "cspHashCheck": "A direct SHA-256 recomputation over the static bootstrap matched the Tauri script-src hash.",
+    "sensitivity": {
+      "mutation": "Changed only the outer CSP hash prefix from DQ9s to AQ9s.",
+      "expectedFailure": "HtmlMessage CSP contract test failed because the actual bootstrap hash was absent from outer script-src.",
+      "restoredConfigSha256": "c2f33d90d573f42df98b952cba00fdad7b53a117b545acb266ee5ef55769b17f"
+    },
+    "nativeStatus": "not-run after source remediation"
+  },
+  "cleanup": {
+    "harnessExitCode": 0,
+    "appExitCode": 0,
+    "interpretation": "Harness cleanup success only. Native acceptance remains partial-failed. H016 was not run; the generic post-exit hold was released solely for restoration.",
+    "restorationPath": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.Z5Wzxr/approved-identity-swap-318e95dd-f0fd-4c5a-b1ba-9e1da64ffb33-restored.json",
+    "restorationSha256": "c03955a90d90fab8878031dd4d50974543dff4ebecaaccc3abbb00504dba3f77",
+    "ownedAppAndFixtureProcessesAbsent": true,
+    "fictionalDockerContainersAbsent": true,
+    "downloadsNeverMutated": true,
+    "diskImagesNeverMounted": true
+  }
+}

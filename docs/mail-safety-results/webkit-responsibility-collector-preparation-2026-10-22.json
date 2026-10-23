@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "status": "preparation-passed-native-collection-not-run",
+  "recordedAtUtc": "2026-10-22T10:48:31Z",
+  "scope": "MS-L-013 private preparation for responsibility-mapped native resource collection against an exact approved fictional Dakia process.",
+  "candidate": {
+    "directory": "/private/tmp/dakia-l013-responsibility-resource-helper-20261022",
+    "collector": {
+      "path": "/private/tmp/dakia-l013-responsibility-resource-helper-20261022/dakia-l013-native-resource-collector.mjs",
+      "sha256": "10a94af6ee021d44f88f4cf142c27ab3f4a26848e0670b7001288209ae83475c"
+    },
+    "nodeOfflineTests": {
+      "path": "/private/tmp/dakia-l013-responsibility-resource-helper-20261022/dakia-l013-native-resource-collector.offline.test.mjs",
+      "sha256": "2094d41b08d8d4b535a3a112f93b261d09a87125080e04b1292a53c432af3b04",
+      "passed": 35,
+      "failed": 0
+    },
+    "pythonFakeNativeTests": {
+      "path": "/private/tmp/dakia-l013-responsibility-resource-helper-20261022/dakia-l013-native-resource-helper.offline.test.py",
+      "sha256": "a266e735d0b797bec7ed98c1b6b49c721c20dad134a4a49f3ce6740950cbeb70",
+      "passed": 12,
+      "failed": 0
+    },
+    "manifest": {
+      "path": "/private/tmp/dakia-l013-responsibility-resource-helper-20261022/candidate-manifest.json",
+      "sha256": "0d3eb5fa9a8f9a9b69f198ad06c51617d8c2083854916817d6d852184aaf3ae9"
+    }
+  },
+  "independentReview": {
+    "status": "go",
+    "finding": "No remaining material correctness or truthfulness findings in the reviewed candidate."
+  },
+  "execution": {
+    "liveResourceCollectionRun": false,
+    "nativeApplicationLaunched": false,
+    "nativeUiUsed": false,
+    "providerAccessed": false,
+    "profileAccessedOrChanged": false,
+    "runnerBoundToCandidate": false
+  },
+  "interpretation": {
+    "mainProcessRssAndFileDescriptors": "complete_for_exact_approved_main_process_when_run",
+    "positiveResponsibilityMappedWebKitMetrics": "lower_bound_only",
+    "noPositiveResponsibilityMappedWebKitProcess": "unavailable_with_null_metrics",
+    "lowerBoundAtOrBelowCeiling": "unassessable",
+    "lowerBoundAboveCeiling": "failure",
+    "allWebKitMemoryClaimed": false,
+    "fullWebKitCohortPass": false
+  },
+  "limitations": [
+    "The existing native resource runner remains pinned to its prior collector and is not bound to this candidate.",
+    "responsibility_get_pid_responsible_for_pid is private SPI without a supported completeness contract.",
+    "Private SPI availability, ABI behavior and actual WebKit role coverage remain native-runtime questions.",
+    "Even a successful native run can report only positively attributed lower bounds and cannot establish the complete WebKit/XPC cohort or a full WebKit resource pass."
+  ]
+}

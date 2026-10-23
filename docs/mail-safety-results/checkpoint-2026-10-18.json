@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "checkpoint": "three-run-source-and-readonly-gmail",
+  "sourceReport": "expanded-three-run-source-2026-10-18.json",
+  "sourceDigest": "a682538db9e5bf78af7710a7429af62bda39288acdf4cd1ad0a8390cf177c155",
+  "sourceUnchangedDuringRuns": true,
+  "sourceRuns": [
+    {
+      "iteration": 1,
+      "status": "passed",
+      "commands": 13
+    },
+    {
+      "iteration": 2,
+      "status": "passed",
+      "commands": 13
+    },
+    {
+      "iteration": 3,
+      "status": "passed",
+      "commands": 13
+    }
+  ],
+  "countsPerSourceRun": {
+    "rustRuntimePassed": 738,
+    "rustDocPassed": 2,
+    "rustIgnored": 8,
+    "frontendPassed": 464,
+    "frontendSkippedTests": 1,
+    "frontendSkippedArtifactFiles": 2,
+    "nodePassed": 162
+  },
+  "providerReport": "gmail-readonly-recovery-2026-10-18.json",
+  "nativeStatus": "blocked_mac_locked",
+  "limitations": [
+    "Subsequent source work needs a new full-suite baseline.",
+    "Ignored tests and skipped artifact files do not count as passes; the separate realtime and MIME artifact commands passed in each source run.",
+    "Native WebKit and visible attachment saving are not accepted.",
+    "Published v0.4.4 downgrade refusal failed in the recorded isolated profile trial.",
+    "npm dependency audit remains blocked pending approval for dependency metadata transmission."
+  ]
+}

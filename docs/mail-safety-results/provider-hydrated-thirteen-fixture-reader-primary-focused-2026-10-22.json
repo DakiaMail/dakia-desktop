@@ -1,0 +1,304 @@
+{
+  "schemaVersion": 1,
+  "kind": "provider-hydrated-thirteen-fixture-reader-primary-focused-result",
+  "status": "passed",
+  "recordedAtUtc": "2026-10-22T14:32:05Z",
+  "scope": "One focused current-primary run of thirteen registered fictional MIME fixtures through production MailService full fetch, selective fetch, hydration into one shared SQLite profile, profile reopen, the Tauri message_content command, and the React Reader artifact consumer. The four added fixtures carry explicit visible attachment, save-control, inline-image, and warning-placement assertions. This is not a full source, native WebKit, attachment-byte saving, live-provider, package, release, performance, fuzz, or dependency-audit result.",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "before": "21cb7d875268b25d0f0a25d84c8922bba71a640dc39d52d62fe4f91d36598bab",
+    "after": "21cb7d875268b25d0f0a25d84c8922bba71a640dc39d52d62fe4f91d36598bab",
+    "fileCount": 996,
+    "executionManifest": {
+      "path": "/private/tmp/dakia-phase2-reader-primary-20261022/source-manifest.json",
+      "sha256": "7167382fd6f7841a75d58efc277728304eb08e15463755f5d0d89c7f80c17f02"
+    },
+    "bindingArtifact": {
+      "path": "/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-mime-reader-artifact-oR78xC/source-binding.json",
+      "sha256": "a76490f4085a1c1f5931f3c16cb559ccbf618d3e968adfcff23789092d1824f4"
+    },
+    "laterPrimaryStateExcluded": "The retained execution manifest and pipeline receipt are authoritative for this result. Later primary source changes do not expand its scope."
+  },
+  "application": {
+    "phase2Patch": {
+      "path": "/private/tmp/dakia-phase2-provider-reader-artifact-20261022/phase2-provider-reader-artifact-visible-oracles.patch",
+      "sha256": "414c2e085faa99a9049ab35d36a2f0cc82949babd8d7e7e0834a6ab540742158"
+    },
+    "applicationJournal": {
+      "path": "/private/tmp/dakia-phase2-reader-primary-20261022/application-journal.json",
+      "sha256": "ffc027792e3c738b78b79a3d4fd9304b9e44e18ce0661415a38f90295cb96085",
+      "note": "The journal's pending pipeline field records application-time state. The retained primary pipeline log and receipt below supersede that field."
+    },
+    "files": [
+      "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+      "apps/desktop/src-tauri/src/mime_reader_artifact_tests.rs",
+      "apps/desktop/src/components/mimeReaderArtifact.test.tsx",
+      "scripts/test-mime-reader-artifact.mjs",
+      "scripts/run-mail-safety.node-test.mjs"
+    ],
+    "privateExecutionOverlayExcluded": true
+  },
+  "execution": {
+    "session": 56138,
+    "command": "DAKIA_KEEP_MIME_READER_ARTIFACTS=1 node scripts/test-mime-reader-artifact.mjs",
+    "status": "passed",
+    "networkScope": "Loopback-only fictional IMAP listeners; no external provider or user mailbox access.",
+    "log": {
+      "path": "/private/tmp/dakia-phase2-reader-primary-20261022/pipeline.log",
+      "sha256": "34ef4f126b35bb34adbbe4449160c10362b602a53a9932d794820634915bf96b"
+    },
+    "retainedArtifactRoot": "/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-mime-reader-artifact-oR78xC",
+    "toolchain": {
+      "platform": "darwin",
+      "architecture": "arm64",
+      "node": "v22.23.2",
+      "cargo": "cargo 1.89.0 (c24e10642 2025-06-23)",
+      "rustc": "rustc 1.89.0 (29483883e 2025-08-04)"
+    }
+  },
+  "pipeline": {
+    "receipt": {
+      "path": "/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-mime-reader-artifact-oR78xC/pipeline-receipt.json",
+      "sha256": "cdb64d911c72cbe2db1041a91f49529684a324a5d56450f7e1f49cffa83e6102",
+      "nonce": "1a68722a-eb1a-4f08-8de9-85cb8b4eb7fa",
+      "producer": "MailService::hydrate_message_with_imap_endpoint_for_test",
+      "profileState": "closed-and-reopened-after-provider-hydration"
+    },
+    "productionBoundaries": [
+      "production MailService full fetch",
+      "production MailService selective fetch",
+      "production MailService hydration",
+      "SQLite close and reopen",
+      "Tauri message_content command",
+      "React Reader"
+    ],
+    "results": {
+      "coreProductionMailService": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "filteredOut": 770,
+        "fixtures": 13
+      },
+      "tauriMessageContent": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "filteredOut": 226,
+        "runtime": "Tauri mock runtime"
+      },
+      "reactReader": {
+        "passed": 13,
+        "failed": 0,
+        "skipped": 0,
+        "runtime": "Vitest jsdom"
+      }
+    },
+    "fixtures": [
+      {
+        "fixtureId": "competing-nested-alternatives",
+        "uid": 800,
+        "uidValidity": 7707
+      },
+      {
+        "fixtureId": "attached-message-rfc822",
+        "uid": 801,
+        "uidValidity": 7707
+      },
+      {
+        "fixtureId": "multipart-attachment-container",
+        "uid": 802,
+        "uidValidity": 7707
+      },
+      {
+        "fixtureId": "empty-alternative-leaf",
+        "uid": 803,
+        "uidValidity": 7707
+      },
+      {
+        "fixtureId": "truncated-multipart-lf",
+        "uid": 804,
+        "uidValidity": 7707
+      },
+      {
+        "fixtureId": "charset-matrix",
+        "uid": 805,
+        "uidValidity": 7707
+      },
+      {
+        "fixtureId": "format-flowed-delsp",
+        "uid": 806,
+        "uidValidity": 7707
+      },
+      {
+        "fixtureId": "international-reader-semantics",
+        "uid": 807,
+        "uidValidity": 7707
+      },
+      {
+        "fixtureId": "ambiguous-inline-identities",
+        "uid": 808,
+        "uidValidity": 7707
+      },
+      {
+        "fixtureId": "provider-signature-inline",
+        "uid": 809,
+        "uidValidity": 7707
+      },
+      {
+        "fixtureId": "filename-parameters-and-encodings",
+        "uid": 810,
+        "uidValidity": 7707
+      },
+      {
+        "fixtureId": "linkedin-inline-content-id",
+        "uid": 811,
+        "uidValidity": 7707
+      },
+      {
+        "fixtureId": "standards-unknown-transfer-encoding",
+        "uid": 812,
+        "uidValidity": 7707
+      }
+    ],
+    "sameProfileEvidence": {
+      "databasePath": "mime-reader-profile.sqlite",
+      "device": "16777231",
+      "inode": "145992470",
+      "beforeTauriDurableSha256": "a373b20bf0dc96e696c4c86e4ffa0403e9e30679745fe5bee56d3b2919b29476",
+      "beforeTauriWalBytes": 0,
+      "afterTauriDurableSha256": "6f20a6ee5fc1595c862deaba3d93efca9fb0d91a3fb45cd7b2929ba2740b98a1",
+      "afterTauriWalBytes": 123632,
+      "afterReactDurableSha256": "6f20a6ee5fc1595c862deaba3d93efca9fb0d91a3fb45cd7b2929ba2740b98a1",
+      "expectedTauriWrite": "message_content may update cache last_accessed in the same profile",
+      "interpretation": "The core stage checkpointed one coherent hydrated profile. Tauri consumed the same device and inode, and React did not change the post-Tauri durable database, WAL, and vault set."
+    },
+    "artifacts": {
+      "coreManifest": {
+        "path": "/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-mime-reader-artifact-oR78xC/core-manifest.json",
+        "sha256": "022da8ae9b73bf41073f158222d632b049b76aed28fe77be92af703b2771948c"
+      },
+      "tauriPayload": {
+        "path": "/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-mime-reader-artifact-oR78xC/tauri-message-content.json",
+        "sha256": "020c92ab08028d3c274a192cd40cbb7b461e775545935d587f84f935b4f6511e"
+      },
+      "frontendResults": {
+        "path": "/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-mime-reader-artifact-oR78xC/frontend-results.json",
+        "sha256": "e7dd9ab5dcd295b97fbeb982edca6327310cd06321b2a5684f9e98c980f7ce18"
+      },
+      "database": {
+        "path": "/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-mime-reader-artifact-oR78xC/mime-reader-profile.sqlite",
+        "sha256": "a7b21dcda84792049d024e3e3d442be678299f9f75565f261d35386c4924b4a5"
+      },
+      "databaseWal": {
+        "path": "/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-mime-reader-artifact-oR78xC/mime-reader-profile.sqlite-wal",
+        "sha256": "a4a8869b82890ae6075e090fa0c72ab0fd25d395c7cf949053b9ce3c7cd4d1f0"
+      }
+    }
+  },
+  "visibleReaderOracles": {
+    "provider-signature-inline": {
+      "visibleSaveControls": ["Save claim-documents.pdf to Downloads"],
+      "saveControlCount": 1,
+      "embeddedCidImageRemainsInline": true,
+      "image001PngAttachmentRowAbsent": true
+    },
+    "filename-parameters-and-encodings": {
+      "visibleFilenames": [
+        "quarterly report final.pdf",
+        "report-test.txt",
+        "Prügimaja plaan vaated 31.08.pdf",
+        "Prügimaja_31.08.pdf",
+        "Prügimaja.pdf",
+        "invoice;final.pdf",
+        "invoicegpj.exe",
+        "broken%ZZname.pdf"
+      ],
+      "exactPerFileSaveControlCount": 8,
+      "warningVisibleOnlyInRow": "invoicegpj.exe"
+    },
+    "linkedin-inline-content-id": {
+      "visibleBody": true,
+      "attachmentRows": 0,
+      "saveControls": 0
+    },
+    "standards-unknown-transfer-encoding": {
+      "visiblePlainBody": true,
+      "htmlDocumentSurfaceAbsent": true,
+      "visibleSaveControls": [
+        "Save invoice.exe to Downloads",
+        "Save attachment to Downloads"
+      ],
+      "saveControlCount": 2,
+      "warningVisibleInRow": "invoice.exe",
+      "warningAbsentFromRow": "attachment"
+    }
+  },
+  "focusedNodeChecks": {
+    "status": "passed",
+    "total": 21,
+    "passed": 21,
+    "failed": 0,
+    "skipped": 0,
+    "components": [
+      {
+        "category": "manual coverage and workflow contracts",
+        "passed": 10
+      },
+      {
+        "category": "mail-safety runner contracts",
+        "passed": 11
+      }
+    ],
+    "log": {
+      "path": "/private/tmp/dakia-phase2-reader-primary-20261022/orchestration-node.log",
+      "sha256": "513374fbd8fc42eccb2c6c6c8b71cb856a93b2b23d710ca8b094c22625e73b91"
+    },
+    "scope": "Focused orchestration and script-contract validation only. This is not a full source-lane result."
+  },
+  "sensitivity": {
+    "privateResult": {
+      "path": "/private/tmp/dakia-phase2-provider-reader-artifact-20261022/phase2-visible-oracles-private-result.json",
+      "sha256": "79575b2b55caaea333808f26b567565ea8603dcfc803813600e54fa9f781f2ba"
+    },
+    "mutation": "Suppress the production Reader warning branch in the private execution mirror while retaining the real final Tauri payload.",
+    "patch": {
+      "path": "/private/tmp/dakia-phase2-provider-reader-artifact-20261022/reader-warning-hidden-mutant.patch",
+      "sha256": "dfe361dd1edc11df96131a683620c9d7ed79f5ced3b204a3dc55934bf0409fd9"
+    },
+    "helper": {
+      "path": "/private/tmp/dakia-phase2-provider-reader-artifact-20261022/run-react-real-artifact.mjs",
+      "sha256": "a95dba847c140aee153c3f0e7a5ec119d7c3a108bf53054fe38fb58731a75295"
+    },
+    "log": {
+      "path": "/private/tmp/dakia-phase2-provider-reader-artifact-20261022/react-warning-hidden-mutant.log",
+      "sha256": "c6083af3cf956954cd11a15e4575a8b56daf1342b6150b1253a9b3d83466c924"
+    },
+    "result": {
+      "passed": 11,
+      "expectedFailures": 2,
+      "failedFixtures": [
+        "filename-parameters-and-encodings",
+        "standards-unknown-transfer-encoding"
+      ],
+      "failureReason": "The warning was absent from each unsafe attachment row.",
+      "classification": "Expected sensitivity failures in a private mutant. They are not product failures or flaky tests."
+    },
+    "restoration": {
+      "status": "restored-byte-for-byte",
+      "readerSha256": "4a4e2ffbcd66ebb92a3a7ac493ca72e364060789c5807b190ea25f50d36a76ba"
+    }
+  },
+  "review": {
+    "status": "go",
+    "scope": "Independent private follow-up review found no material correctness, security, or evidence-integrity issue in the visible row, save-control, warning-placement, same-profile, and sensitivity oracles."
+  },
+  "limitations": [
+    "The Tauri stage uses the mock runtime and the React stage uses jsdom. This result is not native WebKit evidence.",
+    "This lane verifies attachment metadata, visible filenames, save controls, and warning placement. It does not verify attachment bytes saved through the native filesystem path.",
+    "The orchestrated subprocesses do not have an explicit wall-clock timeout.",
+    "No full source lane is claimed by this focused result.",
+    "No live provider, user mailbox, native app, package, release, performance, fuzz, or dependency-audit result is claimed.",
+    "The private mutant's two expected failures establish warning-oracle sensitivity and are not counted as product failures or flakes."
+  ]
+}

@@ -1,0 +1,11 @@
+X-Dakia-Corpus-Case: obs-05-date-token-comments
+X-Dakia-Corpus-Source: RFC 5322 section 4.3; fictional
+From: Sender <sender@example.test>
+To: Reader <reader@example.test>
+Subject: Fictional obsolete syntax
+Message-ID: <obs-obs-05-date-token-comments@example.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Date: (d) 1 (m) Jan (y) 26 (t) 00 (h) : (m) 00 (s) : 00 GMT
+
+Fictional body obs-05-date-token-comments.

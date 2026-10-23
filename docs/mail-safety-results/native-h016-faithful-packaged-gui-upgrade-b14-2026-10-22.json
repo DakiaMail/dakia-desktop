@@ -1,0 +1,146 @@
+{
+  "schemaVersion": 1,
+  "status": "passed",
+  "recordedAtUtc": "2026-10-22T10:04:33.220Z",
+  "scope": "One sealed fictional v0.4.4 profile was forward-opened by the b14 fixture-enabled packaged macOS GUI. Its one unread, starred cached message was shown in the live Reader, the app exited normally, and the upgraded profile was moved out of normal Application Support. This is bounded forward-upgrade evidence, not release or broad upgrade evidence.",
+  "sourceTree": {
+    "digest": "b14fca648f7d0862f439fbb08890cef8085d025687e35d75322814d2f8dcca0e",
+    "fileCount": 961,
+    "manifest": {
+      "path": "/private/tmp/dakia-final-test-successor-evidence-v3-20261022/source-manifest.json",
+      "sha256": "5728448b1f79241dffbd132b71642bb2df9e7bcba1c0311bfe724611df42cbbc"
+    }
+  },
+  "candidate": {
+    "bundleIdentifier": "dev.dakia.fictional-provider-reader.run-OTAMH2",
+    "desktopSha256": "004f33084b3f9157f9e4e3da129bc63caede9b0aaf99708eb81f43ffc129f81f",
+    "cliSha256": "c3890ca8acb2cdb2365b5cfa0a89c92e03c377bcd44ffc6353da33f34bc98ac6",
+    "provenance": {
+      "path": "/private/tmp/dakia-h016-provider-adapter.447b99d2-a921-425c-8c89-8e59ee35aafc/artifact-provenance.json",
+      "sha256": "af90b5a3482484a6a3ecdc65c0732a7a2f8e4b23496bd8fa70a36418e5316f63"
+    },
+    "inventory": {
+      "path": "/private/tmp/dakia-h016-provider-adapter.447b99d2-a921-425c-8c89-8e59ee35aafc/app-inventory.json",
+      "sha256": "f217ae4f9b760fb4b78399a370ff62235900384055d680f1be23b543760370c3"
+    },
+    "releaseBoundary": "Private ad-hoc fixture-enabled arm64 app. This is not Developer ID, notarization, stapling, updater signing, installation, or publication evidence.",
+    "runtimePathBinding": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/Dakia Fictional Provider Reader.app/Contents/MacOS/dakia-desktop",
+      "desktopSha256": "004f33084b3f9157f9e4e3da129bc63caede9b0aaf99708eb81f43ffc129f81f",
+      "meaning": "This was the approved app-path binding during the historical H016 runtime. It is not the current bytes at that reused path after restoration."
+    },
+    "retainedTestedCandidateAfterRestoration": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.A50y6z/tested-approved-candidate.app/Contents/MacOS/dakia-desktop",
+      "desktopSha256": "004f33084b3f9157f9e4e3da129bc63caede9b0aaf99708eb81f43ffc129f81f"
+    }
+  },
+  "input": {
+    "sourceRelease": {
+      "tag": "v0.4.4",
+      "commit": "8af5c397d81cc9aa60ddaca9b5eb15ecac9f6255",
+      "tagSignature": "verified locally"
+    },
+    "sealedDatabaseSha256": "ce9a8ed68a41013a09c3d25e6d867e3d97aa4e579018a183cf388d232fa73330",
+    "profileSchemaBefore": "1",
+    "profileSchemaAfter": "2"
+  },
+  "nativeEvidence": {
+    "evidenceRoot": "/private/tmp/dakia-h016-packaged-upgrade.e53a6900-c220-487d-bfc1-bbbfe38a4604",
+    "evidenceId": "e53a6900-c220-487d-bfc1-bbbfe38a4604",
+    "runtimeAttestation": {
+      "path": "runtime-attestation.json",
+      "sha256": "09caecf8a40f1b00cf87ff8fd1960c8bc512a40018bbf8873f7d4436b62d2461",
+      "status": "passed",
+      "pid": 56854,
+      "internetSockets": []
+    },
+    "cua": {
+      "path": "cua-captures.json",
+      "pid": 56854,
+      "webviewUrl": "tauri://localhost/",
+      "captures": [
+        {
+          "name": "before-open-unread-star",
+          "accessibilitySha256": "4537f60217c866fb31cf43679bca340e0be2c6b39693a6c9d3ab31b1bfa20483",
+          "jpegSha256": "bf07197683b30a3a5911c4bc0068a3aa73c83b657461f31f8edd51884cd3ccfe"
+        },
+        {
+          "name": "after-open-preserved-body",
+          "accessibilitySha256": "b1e9894cbb17d1531efa423cb57b06a360b8122c8ff94f96fc492b7f5d17e8ee",
+          "jpegSha256": "a8564d77ac35855f0fdf6d93f651cd11c87f029a39c7f654606f2737bce8c473"
+        }
+      ]
+    },
+    "normalExit": {
+      "pid": 56854,
+      "code": 0,
+      "signal": null,
+      "method": "normal Cmd-Q"
+    }
+  },
+  "verified": {
+    "normalApplicationSupportPathWasAbsentBeforeLaunch": true,
+    "normalApplicationSupportPathRemovedAfterExit": true,
+    "preservedProfile": "profile-after",
+    "subject": "Fictional previous-stable upgrade evidence",
+    "cachedBody": "Preserve this fictional message across the forward upgrade.",
+    "unreadBeforeOpen": true,
+    "starred": true,
+    "readAfterCua": false,
+    "credentials": 0,
+    "sendAttempts": 0,
+    "recoveryPayloads": 0,
+    "classifierModelRevision": "1647390c9d90c7c09983f69ef239cd80da7d10368766ee5193b340ae3970bbf9"
+  },
+  "helper": {
+    "path": "/private/tmp/dakia-h016-b14f-lsof-status-repair.DswruQ/dakia-h016-b14f-lsof-status-repair.mjs",
+    "sha256": "cf707cbad64a8407456be08bee9c7f2de4e660298e636635ef47284a2a7f8a54",
+    "focusedTests": {
+      "count": 9,
+      "status": "passed",
+      "receipt": "/private/tmp/dakia-h016-b14f-lsof-status-repair.DswruQ/repair-receipt.json",
+      "receiptSha256": "245317074a76794af5c76d2de2e90e0c5ee53eb075c8836171fb75dc17683163"
+    }
+  },
+  "retainedIncompleteAttempt": {
+    "evidenceRoot": "/private/tmp/dakia-h016-packaged-upgrade.13adb0a0-23a8-431d-95bf-e7de4b45ad39",
+    "status": "incomplete-and-quarantined",
+    "normalExit": {
+      "pid": 38103,
+      "code": 0,
+      "signal": null
+    },
+    "attestationDiagnostic": {
+      "path": "attest-lsof-diagnostic.json",
+      "sha256": "c8f608ba4b5a6d24a6e58ad9d2ab777f6ee86200b6b65b33ca8118554b34bd8c",
+      "lsofStatus": 0,
+      "finding": "The exact known Time Machine mount warning accompanied valid owned profile rows. The old helper incorrectly accepted that warning only at status 1."
+    },
+    "quarantineDiagnostic": {
+      "finding": "The old all-profile ownership probe placed -F and pcn after profile paths, so lsof interpreted them as filenames. The repaired helper uses -Fpcn before all profile paths and retains unknown-warning rejection."
+    },
+    "laterQuarantine": {
+      "destinationRemoved": true,
+      "preservedAt": "profile-incomplete",
+      "snapshotError": "EEXIST for the already-present profile-incomplete-before-move snapshot was retained."
+    }
+  },
+  "limits": [
+    "The retained incomplete 13adb attempt is not a product failure result and is not counted as a passing run.",
+    "Opening the message did not demonstrate a mark-read mutation: readAfterCua is false.",
+    "Published v0.4.4 does not enforce schema version 2. Downgrade was not run and is unsupported; recovery requires a complete backup restore.",
+    "This does not establish conflicting-profile startup recovery, corrupt-profile recovery, same-profile restart, automatic rollback, updater behavior, public update feeds, signing, notarization, installation, publication, or Intel macOS behavior."
+  ],
+  "postRunIdentityRestoration": {
+    "status": "restored",
+    "receipt": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.A50y6z/approved-identity-swap-25834983-37df-4ebd-bedb-742d1e3bc852-restored.json",
+      "sha256": "e28ed42f4c2c32b22a10c345bf8db901fc3ae345da1568e1d0e7236086d4e5a5"
+    },
+    "currentOriginalAtReusablePath": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/Dakia Fictional Provider Reader.app/Contents/MacOS/dakia-desktop",
+      "desktopSha256": "2cc898a0691f8f9f3b015b33f841fca2847b7afca99b8a2c267c42a2e74c12f1"
+    },
+    "meaning": "The original same-identity app was restored after the sealed run. The tested candidate remains separately retained under A50y6z."
+  }
+}

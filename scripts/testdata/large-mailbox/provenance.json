@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "fixture": "fictional-30000",
+  "capturedRunSourceDigest": "670652ff0da3121eabc3f2ede32d2089828588da85904de8e17ef602a69d6870",
+  "capturedRunStatus": "failed",
+  "scope": "Exact fictional boundary observations from a failed runner attempt. No provider credentials or real email. This fixture is regression input, not passing acceptance.",
+  "files": {
+    "cli-search.json": {
+      "sha256": "4fe321e2d74486f14c6319f8f84e9a9e320b5e68ac16453e78d5646233ef95fe",
+      "bytes": 1052
+    },
+    "rust-smoke.json": {
+      "sha256": "f43fcf9d1801a005dc556f4fcb52e84173b69ac86185089e06e7e038c73357c4",
+      "bytes": 168
+    },
+    "imap-audit.json.gz": {
+      "sha256": "1880f61cdc68cdf857ebc18b866937ae12f33ddb7a1c1793e90f0227dc92753a",
+      "bytes": 77795,
+      "uncompressedSha256": "6cb7ae2c3a16f627eb99049c66ab49cfba2a824045b8458ea38b51aa03b1a2d8",
+      "uncompressedBytes": 1601968
+    }
+  }
+}

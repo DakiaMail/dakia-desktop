@@ -1,4 +1,5 @@
 import type { MailSummary } from "./types";
+import { localMailTimestamp } from "./mailTimestamp";
 
 type ReplyCitation = {
   readonly date: string;
@@ -22,7 +23,7 @@ export function formatReplyHistory({
   formatCitation,
 }: ReplyHistoryInput) {
   const citation = formatCitation({
-    date: new Date(message.received_at).toLocaleString(),
+    date: localMailTimestamp(message.received_at),
     sender: formatSender(message),
   });
   const normalizedBody = bodyText.replace(/\r\n?/g, "\n");

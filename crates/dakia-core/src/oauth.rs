@@ -22,8 +22,12 @@ pub(crate) struct OAuthTokens {
 
 impl OAuthTokens {
     pub(crate) fn should_refresh(&self) -> bool {
+        self.should_refresh_at(Utc::now())
+    }
+
+    fn should_refresh_at(&self, now: DateTime<Utc>) -> bool {
         self.expires_at
-            .map(|expiry| expiry <= Utc::now() + Duration::minutes(5))
+            .map(|expiry| expiry <= now + Duration::minutes(5))
             .unwrap_or(false)
     }
 
@@ -36,7 +40,7 @@ impl OAuthTokens {
         self.refresh_with_client(&client).await
     }
 
-    async fn refresh_with_client(&mut self, client: &reqwest::Client) -> Result<()> {
+    pub(crate) async fn refresh_with_client(&mut self, client: &reqwest::Client) -> Result<()> {
         let refresh_token = self.refresh_token.as_deref().ok_or_else(|| {
             anyhow!("OAuth authentication failed: access token expired and no refresh token is available")
         })?;
@@ -87,7 +91,16 @@ async fn oauth_response(response: reqwest::Response) -> Result<TokenResponse> {
         if refresh_failure_kind(status, provider_error.as_deref())
             == RefreshFailureKind::Authentication
         {
-            bail!("OAuth authentication failed ({status}): {body}");
+            // Provider responses can contain echoed credentials, request
+            // details, or other private diagnostics. The explicit OAuth code
+            // was already classified above, so keep the stable terminal-auth
+            // signal without copying provider-controlled text into logs or UI.
+            let safe_code = match provider_error.as_deref() {
+                Some("invalid_grant") => "invalid_grant",
+                Some("invalid_client") => "invalid_client",
+                _ => unreachable!("only explicit credential errors are terminal"),
+            };
+            bail!("OAuth authentication failed ({status}, {safe_code})");
         }
         // Do not include provider-controlled text in the retryable error.
         // Realtime sync still recognizes legacy authentication rejections by
@@ -129,10 +142,17 @@ struct TokenResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        account::{AccountAuth, AccountDraft},
+        mail::MailService,
+        provider,
+        storage::Store,
+    };
     use std::time::Duration;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpListener,
+        net::{TcpListener, TcpStream},
+        task::JoinSet,
     };
 
     fn expired_tokens(token_url: Url) -> OAuthTokens {
@@ -144,6 +164,338 @@ mod tests {
             client_secret: None,
             token_url,
         }
+    }
+
+    async fn read_http_request(socket: &mut TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let read = socket.read(&mut buffer).await.unwrap();
+            assert!(
+                read > 0,
+                "OAuth client closed before sending a complete request"
+            );
+            request.extend_from_slice(&buffer[..read]);
+            let Some(headers_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+            else {
+                continue;
+            };
+            let headers_end = headers_end + 4;
+            let headers = String::from_utf8_lossy(&request[..headers_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.split_once(':').and_then(|(name, value)| {
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                })
+                .unwrap_or(0);
+            if request.len() >= headers_end + content_length {
+                return request;
+            }
+        }
+    }
+
+    async fn write_json_response(socket: &mut TcpStream, status: &str, body: &str) {
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    }
+
+    fn legacy_oauth_account() -> crate::account::Account {
+        let mut account = AccountDraft {
+            email: "legacy@gmail.com".into(),
+            display_name: "Legacy OAuth".into(),
+            provider_id: Some("gmail".into()),
+            username: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            archive_mailbox: None,
+            spam_mailbox: None,
+        }
+        .into_account(provider::by_id("gmail").unwrap());
+        account.auth = AccountAuth::OAuth2 {
+            username: account.email.clone(),
+            provider: "gmail".into(),
+            access_token_expires_at: Some(Utc::now() - Duration::from_secs(60)),
+        };
+        account
+    }
+
+    #[test]
+    fn refresh_decision_has_a_deterministic_five_minute_boundary() {
+        let now = Utc::now();
+        let mut tokens = expired_tokens(Url::parse("https://example.test/token").unwrap());
+
+        tokens.expires_at = None;
+        assert!(!tokens.should_refresh_at(now));
+        tokens.expires_at = Some(now + chrono::Duration::minutes(5));
+        assert!(tokens.should_refresh_at(now));
+        tokens.expires_at =
+            Some(now + chrono::Duration::minutes(5) + chrono::Duration::milliseconds(1));
+        assert!(!tokens.should_refresh_at(now));
+        tokens.expires_at = Some(now - chrono::Duration::seconds(1));
+        assert!(tokens.should_refresh_at(now));
+    }
+
+    #[tokio::test]
+    async fn successful_refresh_rotates_tokens_and_preserves_rotation_when_omitted() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            let first_request = read_http_request(&mut first).await;
+            write_json_response(
+                &mut first,
+                "200 OK",
+                r#"{"access_token":"access-one","refresh_token":"refresh-one","expires_in":3600}"#,
+            )
+            .await;
+            let (mut second, _) = listener.accept().await.unwrap();
+            let second_request = read_http_request(&mut second).await;
+            write_json_response(
+                &mut second,
+                "200 OK",
+                r#"{"access_token":"access-two","expires_in":1800}"#,
+            )
+            .await;
+            (first_request, second_request)
+        });
+        let client = oauth_client(
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let mut tokens = expired_tokens(Url::parse(&format!("http://{address}/token")).unwrap());
+
+        tokens.refresh_with_client(&client).await.unwrap();
+        assert_eq!(tokens.access_token, "access-one");
+        assert_eq!(tokens.refresh_token.as_deref(), Some("refresh-one"));
+        tokens.refresh_with_client(&client).await.unwrap();
+        assert_eq!(tokens.access_token, "access-two");
+        assert_eq!(tokens.refresh_token.as_deref(), Some("refresh-one"));
+
+        let (first_request, second_request) = server.await.unwrap();
+        for request in [first_request, second_request] {
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.contains("grant_type=refresh_token"));
+            assert!(request.contains("client_id=client"));
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_refresh_preserves_the_persisted_credential() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_http_request(&mut socket).await;
+            write_json_response(
+                &mut socket,
+                "400 Bad Request",
+                r#"{"error":"invalid_grant"}"#,
+            )
+            .await;
+        });
+        let store = Store::in_memory().await.unwrap();
+        let account = legacy_oauth_account();
+        let secret_name = format!("dev.dakia.mail:{}:{}", account.id, account.auth.username());
+        let original = OAuthTokens {
+            access_token: "expired-access".into(),
+            refresh_token: Some("recoverable-refresh".into()),
+            expires_at: Some(Utc::now() - chrono::Duration::minutes(1)),
+            client_id: "client".into(),
+            client_secret: None,
+            token_url: Url::parse(&format!("http://{address}/token")).unwrap(),
+        };
+        let original_json = serde_json::to_string(&original).unwrap();
+        store
+            .save_account_with_secret(&account, &secret_name, &original_json)
+            .await
+            .unwrap();
+        let client = oauth_client(
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        let error = MailService::new(store.clone())
+            .credentials()
+            .secret_with_client(&account, &client)
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+
+        assert!(error.to_string().contains("OAuth authentication failed"));
+        assert_eq!(
+            store.secret(&secret_name).await.unwrap().as_deref(),
+            Some(original_json.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_grant_from_losing_refresh_uses_the_durable_winning_token() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let store = Store::in_memory().await.unwrap();
+        let account = legacy_oauth_account();
+        let secret_name = format!("dev.dakia.mail:{}:{}", account.id, account.auth.username());
+        let initial = OAuthTokens {
+            access_token: "expired-access".into(),
+            refresh_token: Some("original-refresh".into()),
+            expires_at: Some(Utc::now() - chrono::Duration::minutes(1)),
+            client_id: "client".into(),
+            client_secret: None,
+            token_url: Url::parse(&format!("http://{address}/token")).unwrap(),
+        };
+        store
+            .save_account_with_secret(
+                &account,
+                &secret_name,
+                &serde_json::to_string(&initial).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let accept = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            let first_request = read_http_request(&mut first).await;
+            let (mut second, _) = listener.accept().await.unwrap();
+            let second_request = read_http_request(&mut second).await;
+            (first, first_request, second, second_request)
+        });
+        let credentials = MailService::new(store.clone()).credentials().clone();
+        let mut refreshes = JoinSet::new();
+        for _ in 0..2 {
+            let credentials = credentials.clone();
+            let account = account.clone();
+            refreshes.spawn(async move {
+                let client = oauth_client(
+                    Duration::from_secs(1),
+                    Duration::from_secs(2),
+                    Duration::from_secs(1),
+                )
+                .unwrap();
+                credentials.secret_with_client(&account, &client).await
+            });
+        }
+        let (mut winner_socket, winner_request, mut loser_socket, loser_request) =
+            accept.await.unwrap();
+        assert!(String::from_utf8(winner_request)
+            .unwrap()
+            .contains("refresh_token=original-refresh"));
+        assert!(String::from_utf8(loser_request)
+            .unwrap()
+            .contains("refresh_token=original-refresh"));
+
+        write_json_response(
+            &mut winner_socket,
+            "200 OK",
+            r#"{"access_token":"winning-access","refresh_token":"winning-refresh","expires_in":3600}"#,
+        )
+        .await;
+        drop(winner_socket);
+        assert_eq!(
+            refreshes.join_next().await.unwrap().unwrap().unwrap(),
+            "winning-access"
+        );
+        write_json_response(
+            &mut loser_socket,
+            "400 Bad Request",
+            r#"{"error":"invalid_grant","error_description":"the original refresh token was rotated"}"#,
+        )
+        .await;
+        drop(loser_socket);
+        assert_eq!(
+            refreshes.join_next().await.unwrap().unwrap().unwrap(),
+            "winning-access",
+            "the late refresh must use the already-persisted winner"
+        );
+
+        let persisted: OAuthTokens = serde_json::from_str(
+            store
+                .secret(&secret_name)
+                .await
+                .unwrap()
+                .as_deref()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted.access_token, "winning-access");
+        assert_eq!(persisted.refresh_token.as_deref(), Some("winning-refresh"));
+    }
+
+    #[tokio::test]
+    async fn app_password_conversion_and_account_removal_fence_late_refreshes() {
+        let store = Store::in_memory().await.unwrap();
+        let oauth = legacy_oauth_account();
+        let secret_name = format!("dev.dakia.mail:{}:{}", oauth.id, oauth.auth.username());
+        store
+            .save_account_with_secret(&oauth, &secret_name, "old-oauth-json")
+            .await
+            .unwrap();
+
+        let mut converted = oauth.clone();
+        converted.auth = AccountAuth::Password {
+            username: oauth.auth.username().into(),
+        };
+        store
+            .save_account_with_secret(&converted, &secret_name, "new-app-password")
+            .await
+            .unwrap();
+        assert!(store
+            .compare_and_set_oauth_secret_if_current(
+                oauth.id,
+                &secret_name,
+                "old-oauth-json",
+                "late-refresh-json",
+            )
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            store.secret(&secret_name).await.unwrap().as_deref(),
+            Some("new-app-password")
+        );
+
+        let mut removed = legacy_oauth_account();
+        removed.id = uuid::Uuid::new_v4();
+        removed.email = "removed-oauth@example.test".into();
+        let removed_secret_name =
+            format!("dev.dakia.mail:{}:{}", removed.id, removed.auth.username());
+        store
+            .save_account_with_secret(&removed, &removed_secret_name, "removed-oauth-json")
+            .await
+            .unwrap();
+        store.delete_account(removed.id).await.unwrap();
+        assert!(store
+            .compare_and_set_oauth_secret_if_current(
+                removed.id,
+                &removed_secret_name,
+                "removed-oauth-json",
+                "late-removed-refresh-json",
+            )
+            .await
+            .unwrap()
+            .is_none());
+        assert!(
+            store.secret(&removed_secret_name).await.unwrap().is_none(),
+            "account removal atomically deletes its credential, so a stale refresh has no secret to mutate"
+        );
     }
 
     #[tokio::test]
@@ -162,12 +514,13 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = [0u8; 4096];
-            let _ = socket.read(&mut request).await.unwrap();
-            socket
-                .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: 25\r\n\r\n{\"error\":\"invalid_grant\"}")
-                .await
-                .unwrap();
+            read_http_request(&mut socket).await;
+            write_json_response(
+                &mut socket,
+                "400 Bad Request",
+                r#"{"error":"invalid_grant","error_description":"access-token-canary refresh-token-canary provider-debug-canary"}"#,
+            )
+            .await;
         });
         let client = oauth_client(
             Duration::from_secs(1),
@@ -181,6 +534,16 @@ mod tests {
         server.await.unwrap();
 
         assert!(error.to_string().contains("OAuth authentication failed"));
+        for secret in [
+            "access-token-canary",
+            "refresh-token-canary",
+            "provider-debug-canary",
+        ] {
+            assert!(
+                !error.to_string().contains(secret),
+                "provider-controlled OAuth error text leaked {secret}"
+            );
+        }
         assert_eq!(tokens.access_token, "expired");
     }
 

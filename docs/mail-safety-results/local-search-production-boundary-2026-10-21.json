@@ -1,0 +1,116 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T12:58:25Z",
+  "kind": "local-search-production-boundary-evidence",
+  "status": "passed-bounded-source",
+  "requirement": "MS-I-010",
+  "scope": "Local search semantics from SQLite through the production Tauri command and React App. This evidence covers Unicode and escaped text, active filters, account and mailbox isolation, stable keyset pagination, the 500-result cap, persistence after reopen, IPC contract decoding, frontend continuation, and logical stale-result fencing.",
+  "source": {
+    "checkoutHead": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+    "note": "The checkout contains concurrent scoped changes. The file hashes below identify the exact owned evidence inputs.",
+    "files": [
+      {
+        "path": "crates/dakia-core/tests/local_search_semantics.rs",
+        "sha256": "756907ae3ae0bc854a7a8cd983de57d728f34316efc3adf8968f123409227554"
+      },
+      {
+        "path": "apps/desktop/src-tauri/src/local_search_command_tests.rs",
+        "sha256": "92e0c32458a35a02d1fcf6f254fad2432c48f70608e67d413cac2efdb8e17843"
+      },
+      {
+        "path": "apps/desktop/src/apiLocalSearch.test.ts",
+        "sha256": "4d216e5d688693bdc7f9848b168b082fb45bb00d3c0edb7907eef8018de5dd93"
+      },
+      {
+        "path": "apps/desktop/src/localSearchSemantics.integration.test.tsx",
+        "sha256": "8d4f41161540e867968b58b1e38dcf9092a04bea5f987b40fbf1053ca9a0c6da"
+      },
+      {
+        "path": "apps/desktop/testdata/tauri-contracts/local-search.json",
+        "sha256": "dfc9ae32812da4534ab1cee8a889c8c25453aad5a4542a38cf530a20b47b363e"
+      }
+    ]
+  },
+  "productionBoundaries": [
+    {
+      "boundary": "SQLite Store",
+      "evidence": "Four Rust integration tests exercise real persisted messages, FTS update and reopen, Unicode and escaped input, account scope, filters, stable ordering, thread deduplication, and keyset pagination."
+    },
+    {
+      "boundary": "Tauri search command",
+      "evidence": "A MockRuntime IPC request reaches the registered production search handler and real Store. Adversarial rows differ in one active filter, account or mailbox. Exact initial and continuation IDs prove cursor behavior, the public 500-row clamp, scope, and no duplicate or skipped result. The same command is denied from a Reader window by the production ACL."
+    },
+    {
+      "boundary": "Shared IPC contract",
+      "evidence": "One checked-in query and nonempty response fixture round-trip through Rust serde and the frontend api.search decoder."
+    },
+    {
+      "boundary": "React App",
+      "evidence": "The selected account and mailbox send the exact Unicode query. Backend-injected cross-account collisions are hidden on the first and continued pages, and the real mail-scroll continuation sends the returned cursor."
+    }
+  ],
+  "focusedVerification": [
+    {
+      "command": "cargo test -p dakia-desktop local_search_command_tests::search_command_dispatches_shared_query_with_scope_cursor_and_limit_clamp -- --exact --nocapture",
+      "result": "passed",
+      "tests": 1
+    },
+    {
+      "command": "cargo test -p dakia-core --test local_search_semantics -- --nocapture",
+      "result": "passed",
+      "tests": 4
+    },
+    {
+      "command": "npm test -- --run apps/desktop/src/apiLocalSearch.test.ts apps/desktop/src/localSearchSemantics.integration.test.tsx",
+      "result": "passed",
+      "testFiles": 2,
+      "tests": 2
+    },
+    {
+      "command": "npm run typecheck",
+      "result": "passed"
+    },
+    {
+      "command": "rustfmt --edition 2021 --check crates/dakia-core/tests/local_search_semantics.rs apps/desktop/src-tauri/src/local_search_command_tests.rs",
+      "result": "passed"
+    },
+    {
+      "command": "npx prettier --check src/apiLocalSearch.test.ts src/localSearchSemantics.integration.test.tsx testdata/tauri-contracts/local-search.json",
+      "workingDirectory": "apps/desktop",
+      "result": "passed"
+    },
+    {
+      "command": "git diff --check -- crates/dakia-core/tests/local_search_semantics.rs apps/desktop/src-tauri/src/local_search_command_tests.rs apps/desktop/src/apiLocalSearch.test.ts apps/desktop/src/localSearchSemantics.integration.test.tsx apps/desktop/testdata/tauri-contracts/local-search.json",
+      "result": "passed"
+    }
+  ],
+  "mappedExistingStaleResultTests": [
+    "App.test.tsx: does not continue a stale local query into a remote provider search",
+    "App.test.tsx: clears stale pagination state so the current query can load its next page",
+    "App.test.tsx: does not reuse the old cursor while a new query first page is pending",
+    "App.test.tsx: rejects local and remote search rows outside the selected account scope",
+    "realtimeDelivery.integration.test.tsx: does not replace a newer query after a delayed realtime start",
+    "realtimeDelivery.integration.test.tsx: does not replace a newer account or mailbox after a delayed realtime start",
+    "realtimeDelivery.integration.test.tsx: does not reset an appended page after a delayed realtime start"
+  ],
+  "sensitivity": [
+    "Dropping account or mailbox filtering admits a post-cursor, top-ranked collision and breaks exact order or scope assertions.",
+    "Dropping any active text, read, flagged or category filter admits its single-difference adversarial row before valid results.",
+    "Ignoring the supplied cursor admits selected-000; mishandling continuation, skip or duplication breaks the exact selected-001 through selected-500 first page and exact selected-501 continuation.",
+    "Removing the 500-row Store clamp makes an oversized public limit return more than the asserted first page.",
+    "Allowing Reader access changes the production dispatcher response from the asserted ACL denial."
+  ],
+  "review": {
+    "reviewer": "independent dakia_reviewer",
+    "result": "approved after sensitivity correction",
+    "correction": "The wrong-account and wrong-mailbox collisions were moved after the fixture cursor and ahead of valid rows so cursor filtering cannot mask a broken scope filter.",
+    "remainingMaterialFindings": 0
+  },
+  "remainingLimits": [
+    "This is bounded local-search source evidence. It does not claim live-provider, native WebKit, packaged-app, performance, or full-suite acceptance.",
+    "Search cancellation is logical stale-result fencing in the frontend. The product has no remote transport cancellation or remote cursor RPC to test.",
+    "Remote search remains a capped provider batch with separately mapped tests. This evidence does not claim exhaustive provider-side pagination.",
+    "Large FTS performance, malformed-database recovery, and the complete CLI option matrix remain outside this bounded slice.",
+    "The repository-wide cargo fmt check was not counted because concurrent native acceptance edits in lib.rs and native_acl_acceptance.rs were unformatted. Both owned Rust files passed direct rustfmt checks."
+  ]
+}

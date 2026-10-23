@@ -1,0 +1,11 @@
+X-Dakia-Corpus-Case: obs-06-zone-matrix-a
+X-Dakia-Corpus-Source: RFC 5322 section 4.3; fictional
+From: Sender <sender@example.test>
+To: Reader <reader@example.test>
+Subject: Fictional obsolete syntax
+Message-ID: <obs-obs-06-zone-matrix-a@example.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Date: 1 Jan 26 12:00:00 A
+
+Fictional body obs-06-zone-matrix-a.

@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T16:40:00.468222+00:00",
+  "lane": "read-only-source-investigation",
+  "status": "inconclusive-root-cause",
+  "scope": "Existing Gmail recovery timeouts; no connections, credentials or mailbox actions performed.",
+  "observations": [
+    "The same immutable bf38 executable timed out under its 45-second outer deadline and later completed in 6676 ms.",
+    "Recovery exercises at least five separate IMAP TLS sessions and an SMTP authentication/QUIT probe.",
+    "The 45-second aggregate deadline is shorter than the core 60-second per-command timeout and can cancel a slow operation before its own diagnostic timeout.",
+    "Remote-search stage includes connection, authentication, LIST, SELECT, exact search, optional metadata/snippet fetch and publication.",
+    "Second hydration repeats selective fetching to establish persisted Reader cache behavior."
+  ],
+  "conclusion": "No deterministic product correctness bug or exact timeout cause was demonstrated. A passing direct Python search is not equivalent to the complete Dakia path.",
+  "nextDiagnostic": "Add nonsecret elapsed timings for IMAP probe, SMTP probe, header sync, search, first Reader fetch, cache-producing hydration and cache read before one further read-only recovery. Do not resend.",
+  "sourceReferences": [
+    "crates/dakia-cli/src/bin/provider-smoke.rs:1195",
+    "crates/dakia-cli/src/bin/provider-smoke.rs:989",
+    "crates/dakia-cli/src/bin/provider-smoke.rs:904",
+    "crates/dakia-core/src/mail.rs:3157",
+    "crates/dakia-core/src/mail.rs:2757"
+  ],
+  "limitations": [
+    "This is source investigation, not another provider acceptance run.",
+    "The extra sessions and deadline mismatch may affect latency but are not proven causes of the recorded timeouts."
+  ]
+}

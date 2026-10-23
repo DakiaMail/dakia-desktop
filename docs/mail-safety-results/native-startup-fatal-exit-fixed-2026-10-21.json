@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "status": "passed-bounded-native-fatal-exit",
+  "pid": 10896,
+  "executable": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/Dakia Fictional Provider Reader.app/Contents/MacOS/dakia-desktop",
+  "executableSha256": "2cc898a0691f8f9f3b015b33f841fca2847b7afca99b8a2c267c42a2e74c12f1",
+  "bundleIdentifier": "dev.dakia.fictional-provider-reader.run-OTAMH2",
+  "sourceDigest": "1a27848c0142d4b2f51439fc77caeae076acc9fd7a640b66569aa0b4d67376e6",
+  "profile": "/private/tmp/dakia-fatal-exit-current1a-48809dvu/profile",
+  "before": {
+    ".dakia-startup-failure-profile": "6fd40087aac5b6d179bdeb41b934370eb53baaa6a5f7e17995c2ec00fa860228",
+    "dakia.db": "f0482a5160339a4797dd58a6506c5ae58f80ddc6fc60538ad9187b90c98b28c7",
+    "vault.key": "75e312f3e7cbbc27542c7594f644bf3fa997af238adf8a2f7108b0edcb75cd68"
+  },
+  "expectedTitle": "This mail data needs a newer Dakia version",
+  "expectedExit": 1,
+  "nativeFixtureOverridesScrubbed": true,
+  "startedAt": "2026-10-21T12:35:39.436651+00:00",
+  "exitCode": 1,
+  "after": {
+    ".dakia-startup-failure-profile": "6fd40087aac5b6d179bdeb41b934370eb53baaa6a5f7e17995c2ec00fa860228",
+    "dakia.db": "f0482a5160339a4797dd58a6506c5ae58f80ddc6fc60538ad9187b90c98b28c7",
+    "vault.key": "75e312f3e7cbbc27542c7594f644bf3fa997af238adf8a2f7108b0edcb75cd68"
+  },
+  "durableFilesUnchanged": true,
+  "finishedAt": "2026-10-21T12:36:09.310694+00:00",
+  "humanObservation": {
+    "expectedTitleAndGuidanceAndNoInboxConfirmed": true,
+    "clickedQuitDakia": true,
+    "reply": "done",
+    "source": "user answer to explicit combined alert inspection and click question"
+  },
+  "limits": [
+    "One fixed future-version case executed; other two original alert text checks retained separately",
+    "Ad-hoc dev artifact, not signed public release",
+    "Native UI tool could not inspect macOS system dialog; alert observation was user-assisted"
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "name": "dakia-vitest-coverage-provider",
+  "private": true,
+  "dependencies": {
+    "@vitest/coverage-v8": "4.1.12"
+  }
+}

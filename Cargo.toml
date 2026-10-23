@@ -3,6 +3,7 @@ members = [
   "crates/dakia-core",
   "crates/dakia-cli",
   "apps/desktop/src-tauri",
+  "vendor/tauri-plugin-updater",
 ]
 resolver = "2"
 
@@ -21,6 +22,7 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 directories = "6"
 lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "pool", "smtp-transport", "tokio1-rustls-tls"] }
+libc = "0.2"
 mail-parser = { version = "0.11", features = ["full_encoding"] }
 percent-encoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["gzip", "json", "rustls-tls", "stream"] }
@@ -30,7 +32,7 @@ secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-sqlx = { version = "0.8", default-features = false, features = ["chrono", "macros", "migrate", "runtime-tokio-rustls", "sqlite", "uuid"] }
+sqlx = { version = "0.8", default-features = false, features = ["chrono", "macros", "migrate", "runtime-tokio", "sqlite", "uuid"] }
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "macros", "process", "rt-multi-thread", "sync", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"] }
@@ -39,3 +41,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 webpki-roots = "1"
+
+[patch.crates-io]
+# Upstream tauri-plugin-updater 2.10.1 is vendored so its Windows-only ZIP
+# extractor can use the fixed zip 9.x release while Dakia remains on Rust 1.89.
+tauri-plugin-updater = { path = "vendor/tauri-plugin-updater" }
+mail-parser = { path = "vendor/mail-parser" }
+lettre = { path = "vendor/lettre" }

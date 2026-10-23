@@ -1,0 +1,134 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-21T16:15:56Z",
+  "lane": "final-plist-safe-source-input-equivalence",
+  "status": "passed",
+  "scope": "read-only path-and-content equivalence for previously measured core, deep, performance, and storage inputs",
+  "sourceChain": {
+    "measuredCoreDeepPerformance": {
+      "digest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+      "fileCount": 933,
+      "manifestPath": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-c47c2de0.json",
+      "manifestSha256": "43060add67b37337eec6820d93c0d8dfe00db7fc0123fa188b58b452778bc3d2"
+    },
+    "intermediateNativeConfig": {
+      "digest": "f6c8094e26fc9982144aebf7e368d149926001835fa848b94c4445bc87bcfd27",
+      "fileCount": 933,
+      "manifestPath": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-f6c8094e.json",
+      "manifestSha256": "493df9b39cfc8283ecf9875701b26102be7538d58cc311f7ae979c74ecd06a64",
+      "equivalenceReport": "docs/mail-safety-results/final-native-config-source-input-equivalence-2026-10-21.json",
+      "equivalenceReportSha256": "a7372f5f8ee6c516ee586a28eef41b5009d967ec358af5828b83e5c10054a918"
+    },
+    "finalPlistSafeSource": {
+      "digest": "f8209887faad2ed25f965c55ef7a3680f7663852bfa33674406dc02da5b6063c",
+      "fileCount": 935,
+      "manifestPath": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-plist-safe.json",
+      "manifestSha256": "8e7c088c29283931b0f1f5e1d23109489b9c00679d46daff5d2527e1b4677979",
+      "liveFilesVerified": 935,
+      "liveMismatches": 0
+    }
+  },
+  "finalDelta": {
+    "fromDigest": "f6c8094e26fc9982144aebf7e368d149926001835fa848b94c4445bc87bcfd27",
+    "toDigest": "f8209887faad2ed25f965c55ef7a3680f7663852bfa33674406dc02da5b6063c",
+    "changedPathCount": 6,
+    "changedPaths": [
+      {
+        "path": "scripts/native-provider-reader-acceptance.sh",
+        "beforeSha256": "9df4e4d1a86599a521b28d228d863fa0a6488b6ba4def0f6b9461c8d84a526f6",
+        "afterSha256": "9569ff75d6a7caebee868c4695586cf7875b287e5caa7db98ae4c8ed0156f93c"
+      },
+      {
+        "path": "scripts/native-provider-reader-fixture.node-test.mjs",
+        "beforeSha256": "051acb54b5ec911fc6a01ba7d30f9692610d37b59ac8258d590691685a0653e5",
+        "afterSha256": "5fcd0c143ab3fc661d7a5fd3d7b98acade7f212be0b4354a9159c42c5dc78012"
+      },
+      {
+        "path": "scripts/native-shared-profile-acceptance.mjs",
+        "beforeSha256": "3e4b9cc02d2fc226e458a97f4917f4c8b2152530ccd936f0374c8f3f0b03c9e6",
+        "afterSha256": "876bd2610e0961b074f4280b7ff1ee9e0cc501805ed1fbf6636c1d7907aaaccb"
+      },
+      {
+        "path": "scripts/native-shared-profile-acceptance.node-test.mjs",
+        "beforeSha256": "7ec75ec4e25e6e5acf23d4bbcbce7b584c8e578855fce3854bec2b7f02e82d92",
+        "afterSha256": "d3cc3a4f0466c224862465bdd86b85568bc1601653d23753d9d7471e1caaac49"
+      },
+      {
+        "path": "testdata/native-mail-safety/packaged-info.plist",
+        "beforeSha256": null,
+        "afterSha256": "cd9d1f83516904f288db94d99271f014023c9ce5625a4059ff5dcf83e7900746"
+      },
+      {
+        "path": "testdata/native-mail-safety/packaged-info.plist.provenance.json",
+        "beforeSha256": null,
+        "afterSha256": "1ecf8b3181ceedf17e48c1a6246a42ac461347286664760bd47ed7d2eda101e1"
+      }
+    ],
+    "directC47ToFinalChangedPathCount": 7,
+    "directC47ToFinalChangedPaths": [
+      "apps/desktop/src-tauri/src/lib.rs",
+      "scripts/native-provider-reader-acceptance.sh",
+      "scripts/native-provider-reader-fixture.node-test.mjs",
+      "scripts/native-shared-profile-acceptance.mjs",
+      "scripts/native-shared-profile-acceptance.node-test.mjs",
+      "testdata/native-mail-safety/packaged-info.plist",
+      "testdata/native-mail-safety/packaged-info.plist.provenance.json"
+    ],
+    "privateVerificationArtifact": "/private/tmp/dakia-final-plist-safe-source-input-equivalence-2026-10-21.json",
+    "privateVerificationArtifactSha256": "ecf04c56d38d0c1ef8ab9f70e2f59031661980322f6bae401ba9af73488b4190"
+  },
+  "coreInputEquivalence": {
+    "status": "passed",
+    "referenceSourceReport": "docs/mail-safety-results/remaining-gap-closure-three-run-source-2026-10-21.json",
+    "referenceSourceReportSha256": "0b0d137906a3845ba87e23f18613d5768d2643c3d1fabe4311ce3b0f2252e6f9",
+    "referenceSourceDigest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+    "oracle": "The direct c47-to-final manifest diff contains no root Cargo, dakia-core, fuzz, mail-parser, lettre, or core test-data path.",
+    "conclusion": "The Rust core and vendored parser and SMTP inputs exercised by the c47 source run remain byte-identical. This does not carry forward the c47 whole-source or native desktop result."
+  },
+  "deepInputEquivalence": {
+    "status": "passed",
+    "referenceSourceReport": "docs/mail-safety-results/remaining-gap-closure-deep-current-source-2026-10-21.json",
+    "referenceSourceReportSha256": "3fcc68edc2aa7f378c194e64cdcec4d24faba880609c93917aa8aa729ced174f",
+    "referenceDetailReport": "docs/mail-safety-results/remaining-gap-closure-deep-current-detail-2026-10-21.json",
+    "referenceDetailReportSha256": "d97b02f5fd85f8a5e41e7f1a4bd8545180fb58b15e71ad199fa4bb921630cfd6",
+    "referenceSourceDigest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+    "entrypointHashes": {
+      "scripts/run-mail-safety.mjs": "263bb2d30aa7c81e35f046d80f6a5619f61695bc9a911d2feddfe0837d50ec0b",
+      "scripts/mail-safety-servers.sh": "67db72d6631db23d4896b77447a273ed0a40cdfdd2e7aff5863592d8dbc7c24a",
+      "scripts/run-mail-safety-fuzz.sh": "dab7c5caa313c2322111dd2ffc6775b2f9466fcb86d874a2e9bc9005d76c7d38",
+      "fuzz/Cargo.toml": "b02dfd24bab25267483d572c36da5e71af3b61a907d4912fb8c0e86cfb811eae",
+      "fuzz/Cargo.lock": "f07697a88633babbc07378ec41088987457527ec00f217566d6bb573411c71a3"
+    },
+    "oracle": "The deep entrypoints and their Cargo, core, fuzz corpus, fixture, and vendor inputs are absent from the direct c47-to-final changed path set.",
+    "conclusion": "The recorded c47 independent-server and bounded fuzz inputs remain byte-identical. This is not another deep execution."
+  },
+  "performanceInputEquivalence": {
+    "status": "passed",
+    "referenceReport": "docs/mail-safety-results/remaining-gap-closure-performance-2026-10-21.json",
+    "referenceReportSha256": "6b5d4c28d6f95f3370c6fe6689a43aade155b5caf65b7796d61df837a7b85352",
+    "referenceSourceDigest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+    "runnerPath": "scripts/run-mail-resilience-performance.mjs",
+    "runnerSha256": "7a7997823931a48979c25458ab3ab36230d39c858e921de004fe83a61c72c97f",
+    "oracle": "The performance runner, Cargo resolution, dakia-core implementation, and resilience and performance tests are absent from the direct c47-to-final changed path set.",
+    "conclusion": "The recorded c47 mailbox-scale and resource-soak inputs remain byte-identical. Matching inputs does not prove identical timing, code generation, system load, or incremental-cache state."
+  },
+  "storageCoverageInputEquivalence": {
+    "status": "passed",
+    "referenceReport": "docs/mail-safety-results/remaining-gap-closure-final-storage-branch-coverage-2026-10-21.json",
+    "referenceReportSha256": "0fb107639b55242dae6a360e43a408ec7bf145628bab7fa16f5fc88055705ea1",
+    "referenceMeasuredSourceDigest": "14081b6cb59e0ea43082ef5b2edd1dccba85736dfd17ce4674cf36042c7de308",
+    "inputManifestPath": "/private/tmp/dakia-mail-safety-remaining-gap-final-storage-branch-coverage-2026-10-21/input-after.sha256",
+    "inputManifestSha256": "28fdc43ae6ca1266cf7624f8b41a4b748e53265e23331c8ba681d7c10063141d",
+    "inputFileCount": 538,
+    "currentMismatchCount": 0,
+    "conclusion": "Every recorded root Cargo, dakia-core, mail-parser, and lettre input for the three separate storage coverage cohorts remains byte-identical."
+  },
+  "limitations": [
+    "This is path-and-content equivalence evidence. It does not rerun source, core, deep, fuzz, performance, coverage, native, provider, or packaged-app lanes.",
+    "The final source is not wholly equivalent to c47 or f6. Native desktop configuration, native acceptance scripts, their structured-plist tests, and two native plist fixtures changed.",
+    "No earlier native, packaged-app, shared-profile, or live UI result is carried forward by this report.",
+    "The deep result retains its recorded bounded fuzz limits and temporal-safety limitation.",
+    "The performance result remains tied to its recorded hardware, build profile, and load conditions.",
+    "The storage result remains three separate focused cohorts. Branch observations are not aggregated into product or workspace coverage."
+  ]
+}

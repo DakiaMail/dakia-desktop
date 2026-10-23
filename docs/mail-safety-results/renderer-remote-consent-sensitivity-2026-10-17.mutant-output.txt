@@ -1,0 +1,175 @@
+
+> dakia@0.4.4 test
+> vitest run --run apps/desktop/src/components/Reader.test.tsx -t does not revive remote-content consent after switching between mounted thread messages
+
+
+ RUN  v4.1.12 /private/tmp/dakia-reader-remote-sensitivity
+
+stdout | apps/desktop/src/components/Reader.test.tsx
+🌐 i18next is made possible by our own product, Locize — consider powering your project with managed localization (AI, CDN, integrations): https://locize.com 💙
+
+ ❯ apps/desktop/src/components/Reader.test.tsx (70 tests | 1 failed | 69 skipped) 1376ms
+     × does not revive remote-content consent after switching between mounted thread messages 1375ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  apps/desktop/src/components/Reader.test.tsx > Reader unsubscribe action > does not revive remote-content consent after switching between mounted thread messages
+AssertionError: expected true to be false // Object.is equality
+
+Ignored nodes: comments, script, style
+[36m<html[39m
+  [33mdata-mantine-color-scheme[39m=[32m"light"[39m
+[36m>[39m
+  [36m<head />[39m
+  [36m<body>[39m
+    [36m<div>[39m
+      [36m<main[39m
+        [33mclass[39m=[32m"reader"[39m
+        [33mid[39m=[32m"main-content"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"reader-toolbar"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33maria-label[39m=[32m"Archive"[39m
+            [33mclass[39m=[32m"mantine-focus-auto mantine-active m_8d3f4000 mantine-ActionIcon-root m_87cf2631 mantine-UnstyledButton-root"[39m
+            [33mdata-variant[39m=[32m"subtle"[39m
+            [33mstyle[39m=[32m"--ai-bg: transparent; --ai-hover: var(--mantine-color-gray-light-hover); --ai-color: var(--mantine-color-gray-light-color); --ai-bd: calc(0.0625rem * var(--mantine-scale)) solid transparent;"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"m_8d3afb97 mantine-ActionIcon-icon"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"tabler-icon tabler-icon-archive "[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"19"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"19"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M3 6a2 2 0 0 1 2 -2h14a2 2 0 0 1 2 2a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M5 8v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2 -2v-10"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M10 12l4 0"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+            [36m</span>[39m
+          [36m</button>[39m
+          [36m<button[39m
+            [33maria-label[39m=[32m"Mark as spam"[39m
+            [33mclass[39m=[32m"mantine-focus-auto mantine-active m_8d3f4000 mantine-ActionIcon-root m_87cf2631 mantine-UnstyledButton-root"[39m
+            [33mdata-variant[39m=[32m"subtle"[39m
+            [33mstyle[39m=[32m"--ai-bg: transparent; --ai-hover: var(--mantine-color-gray-light-hover); --ai-color: var(--mantine-color-gray-light-color); --ai-bd: calc(0.0625rem * var(--mantine-scale)) solid transparent;"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"m_8d3afb97 mantine-ActionIcon-icon"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"tabler-icon tabler-icon-shield-x "[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"18"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"18"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M13.252 20.601c-.408 .155 -.826 .288 -1.252 .399a12 12 0 0 1 -8.5 -15a12 12 0 0 0 8.5 -3a12 12 0 0 0 8.5 3a12 12 0 0 1 -.19 7.357"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M22 22l-5 -5"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M17 22l5 -5"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+            [36m</span>[39m
+          [36m</button>[39m
+          [36m<button[39m
+            [33maria-label[39m=[32m"Mark as read"[39m
+            [33mclass[39m=[32m"mantine-focus-auto mantine-active m_8d3f4000 mantine-ActionIcon-root m_87cf2631 mantine-UnstyledButton-root"[39m
+            [33mdata-variant[39m=[32m"subtle"[39m
+            [33mstyle[39m=[32m"--ai-bg: transparent; --ai-hover: var(--mantine-color-gray-light-hover); --ai-color: var(--mantine-color-gray-light-color); --ai-bd: calc(0.0625rem * var(--mantine-scale)) solid transparent;"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"m_8d3afb97 mantine-ActionIcon-icon"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"tabler-icon tabler-icon-mail "[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"18"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"18"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M3 7a2 2 0 0 1 2 -2h14a2 2 0 0 1 2 2v10a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-10"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M3 7l9 6l9 -6"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+            [36m</span>[39m
+          [36m</button>[39m
+          [36m<button[39m
+            [33maria-label[39m=[32m"Delete"[39m
+            [33mclass[39m=[32m"mantine-focus-auto mantine-active m_8d3f4000 mantine-ActionIcon-root m_87cf2631 mantine-UnstyledButton-root"[39m
+            [33mdata-variant[39m=[32m"subtle"[39m
+            [33mstyle[39m=[32m"--ai-bg: transparent; --ai-hover: var(--mantine-color-gray-light-hover); --ai-color: var(--mantine-color-gray-light-color); --ai-bd: calc(0.0625rem * var(--mantine-scale)) solid transparent;"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"m_8d3afb97 mantine-ActionIcon-icon"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"tabler-icon tabler-icon-trash "[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"18"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[...
+
+- Expected
++ Received
+
+- false
++ true
+
+ ❯ apps/desktop/src/components/Reader.test.tsx:352:9
+    350|           ?.querySelector("img")
+    351|           ?.hasAttribute("src"),
+    352|       ).toBe(false),
+       |         ^
+    353|     );
+    354|     expect(
+ ❯ runWithExpensiveErrorDiagnosticsDisabled ../../../Users/arsalan/code/codex-worktrees/36f9/dakia-desktop/node_modules/@testing-library/dom/dist/config.js:47:12
+ ❯ checkCallback ../../../Users/arsalan/code/codex-worktrees/36f9/dakia-desktop/node_modules/@testing-library/dom/dist/wait-for.js:124:77
+ ❯ Timeout.checkRealTimersCallback ../../../Users/arsalan/code/codex-worktrees/36f9/dakia-desktop/node_modules/@testing-library/dom/dist/wait-for.js:118:16
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 69 skipped (70)
+   Start at  23:24:10
+   Duration  3.27s (transform 232ms, setup 77ms, import 1.37s, tests 1.38s, environment 354ms)
+

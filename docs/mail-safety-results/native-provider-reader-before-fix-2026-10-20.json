@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-20",
+  "status": "failed",
+  "scope": "native provider to Reader, prior to renderer callback fix",
+  "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "executable": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.6wgpd2/Dakia Fictional Provider Reader.app/Contents/MacOS/dakia-desktop",
+  "executableSha256": "8db574af9128222dd2048ac1164f9c1471908619d49dacff4068ac439d2e9941",
+  "pid": 41363,
+  "webviewUrl": "http://127.0.0.1:1420/",
+  "beforeConsent": {
+    "schemaVersion": 2,
+    "startedAt": "2026-10-20T19:16:51.458Z",
+    "capturedAt": "2026-10-20T19:17:14.832Z",
+    "totalRequests": 0,
+    "tlsContactAttempts": 0,
+    "totalContacts": 0,
+    "counts": {},
+    "requests": []
+  },
+  "afterConsentSummary": {
+    "totalRequests": 35,
+    "tlsContactAttempts": 30,
+    "totalContacts": 65,
+    "counts": {
+      "/remote-image.svg": 27,
+      "/redirect-image": 8
+    }
+  },
+  "remotePaths": [
+    "/redirect-image",
+    "/remote-image.svg?via=direct",
+    "/remote-image.svg?via=encoded-html",
+    "/remote-image.svg?via=event-handler",
+    "/remote-image.svg?via=redirect"
+  ],
+  "flagsBefore": {
+    "stage": "before_reader_open",
+    "status": "OK",
+    "flags": [
+      "1 (FLAGS () UID 1)",
+      "2 (FLAGS () UID 2)",
+      "3 (FLAGS () UID 3)"
+    ]
+  },
+  "flagsAfter": {
+    "stage": "after_reader_open",
+    "status": "OK",
+    "flags": [
+      "1 (FLAGS () UID 1)",
+      "2 (FLAGS () UID 2)",
+      "3 (FLAGS (\\Seen) UID 3)"
+    ]
+  },
+  "historyTransitions": [
+    "expand",
+    "collapse",
+    "expand",
+    "collapse",
+    "expand"
+  ],
+  "historyObservation": "Actual WebKit AX history marker appeared on every expansion, disappeared on collapse; screenshot showed growth and shrinkage.",
+  "failure": "After one permission grant, unchanged-content parent rerenders replaced the sandboxed iframe and repeated image requests. Regression test fails on callback identity change.",
+  "otherObservations": [
+    "Local embedded SVG fixture displayed fallback text; successful local image rendering not established.",
+    "Attachment buttons exist but first offscreen click did not save; no native save pass claimed."
+  ],
+  "evidenceRoot": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.6wgpd2",
+  "additionalFailure": {
+    "boundary": "main window startup read-only status command",
+    "error": "mail_rebuild_status not allowed on window main, webview main, URL local",
+    "observation": "Native critical alert appeared after a renderer HMR update. Production App calls this command on startup and accounts/reload changes. Only Settings held the permission.",
+    "disposition": "Fixing read-only ACL with actual command-dispatch regression; no native attachment pass yet."
+  },
+  "cleanup": "Verified fictional app PID41363 stopped; runner exited143; fictional container and fixture listeners cleaned by runner; evidence/profile retained."
+}

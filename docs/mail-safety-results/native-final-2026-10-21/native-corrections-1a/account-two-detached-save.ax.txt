@@ -1,0 +1,47 @@
+Window: "Dakia", App: Dakia Fictional Provider Reader.
+0 standard window Dakia, Secondary Actions: Raise
+	1 scroll area
+		2 HTML content Description: Account two collision safety check, URL: 127.0.0.1:1420/?view=reader&seedKey=22f5fe3d-e384-4fb0-a336-768a107034de
+			3 container
+				4 button Archive
+				5 button Mark as spam
+				6 button Mark as unread
+				7 button Delete
+				8 button Star conversation
+				9 button Translate to English
+				10 container Account two collision safety check
+					11 heading Account two collision safety check, Value: 1
+						12 text Account two collision safety check
+					13 container Message from Fictional Provider
+						14 text F Fictional Provider
+						15 button Email provider@example.test
+						16 button (collapsed) Show full recipient details, Secondary Actions: Expand
+						17 text Fictional Reader Two <fictional-reader-two@localhost>
+						18 text Wednesday 21 Oct at 15:10
+						19 button Quick reply
+						20 button More actions
+						21 text Only account two owns this distinct cached body and attachment.
+						22 container Reply
+							23 button Reply
+							24 button Reply all
+							25 button Forward
+						26 container Attachments
+							27 text Attachments Saves directly to Downloads
+							28 text account-two-notes.txt
+							29 text Size unavailable ·  text/plain
+							30 button Save account-two-notes.txt to Downloads
+							31 text Saved 1 attachment to Downloads
+			32 text Save account-two-notes.txt to Downloads
+	33 close button
+	34 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	35 minimize button
+36 menu bar
+	37 Dakia Fictional Provider Reader
+	38 File
+	39 Edit
+	40 Mailbox
+	41 Message
+	42 Window
+	43 Help
+
+The focused UI element is 2 HTML content Description: Account two collision safety check, URL: 127.0.0.1:1420/?view=reader&seedKey=22f5fe3d-e384-4fb0-a336-768a107034de

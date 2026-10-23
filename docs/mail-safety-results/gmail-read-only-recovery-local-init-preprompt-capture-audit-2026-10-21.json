@@ -1,0 +1,43 @@
+{
+  "captureLimitation": {
+    "correction": "Prior reports must be read as no prompt captured by the wrapper, not as proof that the binary never reached rpassword.",
+    "rawChildStdoutAndStderrRetained": false,
+    "whatCannotBeDetermined": [
+      "whether rpassword emitted a prompt with terminal formatting that missed the exact Expect match",
+      "whether rpassword returned a terminal-read error before or after writing its prompt",
+      "the binary error classification behind the exit-one status"
+    ],
+    "wrapperPolicy": "The private Expect wrapper records only fixed allowlisted markers and recognizes one exact password-prompt string."
+  },
+  "interpretation": {
+    "confirmed": "The retained evidence does not support attributing the early exit to CLI argument parsing, configuration validation, Store initialization, credentials persistence, or provider networking.",
+    "nextStep": "No further execution is authorized. A future diagnostic would need a reviewed, fixed-string rpassword/PTY marker before and after the prompt call while retaining no raw prompt or credential data."
+  },
+  "kind": "private-local-initialization-preprompt-capture-audit",
+  "retainedLifecycleEvidence": {
+    "conclusion": "The recovery binary was spawned and returned; the failure is not an Expect wrapper preflight failure.",
+    "recoveryChildEofObserved": true,
+    "recoveryChildWaitClassification": "exit 1, no signal",
+    "recoveryParentTimeout": false,
+    "templateChildWaitClassification": "exit 0, no signal"
+  },
+  "schemaVersion": 1,
+  "scope": {
+    "credentialInput": "fictional-only",
+    "newExecution": false,
+    "providerConnectionAttempted": false,
+    "readOnlyAudit": true
+  },
+  "sourceAndInputAudit": {
+    "binarySha256": "5cf39c2b2b6ece617468d8bffdcb46364778c73041f6277caba326068cd9ae6c",
+    "configFilePrivateRegular": true,
+    "sourceFlow": "After those checks, execute_local calls rpassword::prompt_password before evidence creation, temporary Store opening, credential persistence, or the private network guard.",
+    "staticConfigShapePassesSourcePredicates": [
+      "JSON fields deserialize to the local provider configuration",
+      "account equals the CLI allowlist argument",
+      "dedicated mailbox is non-empty and not INBOX",
+      "Gmail TLS endpoint values match the local policy",
+      "recovery identifier matches the required hexadecimal shape"
+    ]
+  }
+}

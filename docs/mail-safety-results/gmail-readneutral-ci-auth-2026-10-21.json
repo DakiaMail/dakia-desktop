@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-21",
+  "kind": "credentialed-provider-ci-entrypoint-read-neutral-auth",
+  "provider": "gmail",
+  "scope": {
+    "entryPoint": "execute_legacy_ci -> run_smoke",
+    "operations": [
+      "IMAP authenticated read-neutral probe",
+      "SMTP authentication and QUIT"
+    ],
+    "forbiddenOperations": [
+      "message fetch",
+      "remote search",
+      "message body retrieval",
+      "SMTP MAIL",
+      "SMTP RCPT",
+      "SMTP DATA",
+      "message submission",
+      "APPEND",
+      "STORE",
+      "EXPUNGE",
+      "mailbox mutation",
+      "recovery round trip"
+    ]
+  },
+  "artifactBinding": {
+    "sourceTreeBefore": {
+      "algorithm": "sha256-path-and-content-manifest",
+      "digest": "1a27848c0142d4b2f51439fc77caeae076acc9fd7a640b66569aa0b4d67376e6",
+      "fileCount": 761
+    },
+    "sourceTreeAfter": {
+      "algorithm": "sha256-path-and-content-manifest",
+      "digest": "1a27848c0142d4b2f51439fc77caeae076acc9fd7a640b66569aa0b4d67376e6",
+      "fileCount": 761
+    },
+    "providerSmokeSourceSha256": "26adc271c59154ab15e58a7e772f91779162bbd5058dcc66a13dc5fcf7340fbe",
+    "binarySha256": "093afb949d63a59ec414fa8b4b324709e76cb726b66e1ef5037a5e91aad8f302",
+    "runnerSha256": "a96ab1fed343b270800544f537078f5de1f7c6d2c5c66da588c8305e8dfd3796"
+  },
+  "result": {
+    "outcome": "passed",
+    "processExitCode": 0,
+    "elapsedMs": 1822,
+    "imapAuthenticatedReadNeutralProbe": "passed",
+    "smtpAuthenticationAndQuit": "passed",
+    "outerTimeout": false,
+    "terminationRequested": false,
+    "forcedKillRequested": false,
+    "childReaped": true,
+    "ownedChildTempDirRemoved": true,
+    "cleanupIncomplete": false
+  },
+  "redaction": {
+    "omitted": [
+      "account address",
+      "credentials",
+      "private temporary paths",
+      "protocol commands and responses",
+      "message identifiers and content"
+    ]
+  },
+  "limitations": [
+    "This records only the legacy CI authentication entry point, not the separate existing-message recovery diagnostic.",
+    "It does not establish live-provider message reading, rendering, sending, mutation, or recovery behavior.",
+    "Earlier read-only recovery failures remain unresolved evidence and are intentionally retained in their original records."
+  ]
+}

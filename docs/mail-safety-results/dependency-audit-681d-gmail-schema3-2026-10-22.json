@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-22T12:02:16Z",
+  "kind": "dependency-audit-combined-rust-and-npm",
+  "status": "completed-log-supported-wrapper-exit-unavailable",
+  "sourceTreeBefore": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "681dfc29e1cc782d363999cf572dc56be9498565d34f78ba5f0120187e0c70e9",
+    "fileCount": 996
+  },
+  "sourceTreeAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "681dfc29e1cc782d363999cf572dc56be9498565d34f78ba5f0120187e0c70e9",
+    "fileCount": 996
+  },
+  "inputs": {
+    "Cargo.lock": "78e7136d6ff7a477e2317feb99a976a75376b1283a331babaca26b83c27f58b2",
+    "package-lock.json": "ec85e8d77a670963d49224d083cc9133b30763f048e8b520360f9c51c4bb5e1b",
+    ".cargo/audit.toml": "0a31dab852dead3b6c393c395475001792fde4cb008bad2c478d6776d0e52cc0",
+    "scripts/audit-dependencies.sh": "78a1949129f8863be0f70e4e54651552c537781aab07f3da7dce8ace5fe9503b"
+  },
+  "command": {
+    "script": "./scripts/audit-dependencies.sh --npm",
+    "cargoAudit": "/private/tmp/dakia-mail-safety-tools/bin/cargo-audit",
+    "cargoAuditVersion": "0.22.2",
+    "npmVersion": "10.9.8",
+    "stdin": "/dev/null",
+    "providerRelatedEnvironment": "GMAIL_ACCOUNT, GMAIL_PASSWORD, DAKIA_GMAIL_ACCOUNT, DAKIA_GMAIL_PASSWORD, PROVIDER_SMOKE_CONFIG, DAKIA_AI_API_KEY, and OPENAI_API_KEY were unset for the process.",
+    "rawLog": "/private/tmp/dakia-681d-dependency-audit-combined-20261022.log",
+    "rawLogSha256": "5a800a3e85a4af37e23f275903069d11eb3bf280f6a1cda704d4b846f53aed9c"
+  },
+  "advisoryDatabase": {
+    "revision": "640bf5a9f06e66d8721e8772766531fe77c8630d",
+    "lastCommitAt": "2026-10-22T12:49:47+02:00",
+    "loadedAdvisories": 1349
+  },
+  "observations": {
+    "vendoredProvenance": "The raw log records all five expected vendored path-crate provenance checks before cargo-audit.",
+    "rust": {
+      "scannedDependencies": 757,
+      "vulnerabilityFinding": "No vulnerability finding appears in the retained cargo-audit output.",
+      "allowedUnmaintainedWarnings": [
+        "RUSTSEC-2024-0436 paste@1.0.15",
+        "RUSTSEC-2024-0370 proc-macro-error@1.0.4",
+        "RUSTSEC-2025-0081 unic-char-property@0.9.0",
+        "RUSTSEC-2025-0075 unic-char-range@0.9.0",
+        "RUSTSEC-2025-0080 unic-common@0.9.0",
+        "RUSTSEC-2025-0100 unic-ucd-ident@0.9.0",
+        "RUSTSEC-2025-0098 unic-ucd-version@0.9.0",
+        "RUSTSEC-2026-0371 zbus_names@4.3.3",
+        "RUSTSEC-2026-0370 zvariant@5.13.0",
+        "RUSTSEC-2026-0372 zvariant_derive@5.13.0"
+      ],
+      "warningPolicyEvidence": "cargo-audit reported '10 allowed warnings found'. These unmaintained warnings are not evidence that zero vulnerabilities exist."
+    },
+    "npm": {
+      "registryDisclosure": "The approved npm audit submitted package-lock metadata to registry.npmjs.org.",
+      "result": "found 0 vulnerabilities"
+    }
+  },
+  "terminalStatusQualification": {
+    "wrapperExitCode": 1,
+    "wrapperFailure": "The surrounding zsh recorder assigned to reserved readonly parameter status after the audit script returned, so it did not capture the script exit code.",
+    "auditScriptExitCode": "unavailable",
+    "whyThisIsNotRetried": "The requested combined audit ran once. The retained log reached npm audit and reported its result; rerunning solely to repair recorder metadata would duplicate the network audit."
+  },
+  "limitations": [
+    "This is dependency-audit evidence only. It does not establish source, deep, native, provider, packaged-release, or performance acceptance.",
+    "The shell wrapper error prevents treating this record as an unqualified terminal pass even though the retained log completed both audit phases.",
+    "Cargo-audit warnings and npm audit output remain tools' reported scope; they do not prove the absence of every supply-chain or runtime vulnerability."
+  ]
+}

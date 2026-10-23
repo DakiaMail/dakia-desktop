@@ -48,7 +48,7 @@ describe("MailboxNav accounts", () => {
       <MailboxNav
         accounts={[account]}
         mailbox="INBOX"
-        outboxCount={2}
+        outboxSendingCount={2}
         onSelectAccount={vi.fn()}
         onAccountContextMenu={vi.fn()}
         onAddAccount={vi.fn()}
@@ -61,6 +61,70 @@ describe("MailboxNav accounts", () => {
       "2",
     );
     expect(screen.getByLabelText("2 emails sending")).toBeVisible();
+  });
+
+  it("labels terminal Outbox recoveries as needing attention", () => {
+    render(
+      <MailboxNav
+        accounts={[account]}
+        mailbox="INBOX"
+        outboxRecoveryCount={1}
+        onSelectAccount={vi.fn()}
+        onAccountContextMenu={vi.fn()}
+        onAddAccount={vi.fn()}
+        onMailbox={vi.fn()}
+        onFeedback={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /Outbox/ })).toHaveTextContent(
+      "1",
+    );
+    expect(screen.getByLabelText("1 email needs attention")).toBeVisible();
+    expect(screen.queryByLabelText("1 email sending")).not.toBeInTheDocument();
+  });
+
+  it("pluralizes terminal Outbox recoveries", () => {
+    render(
+      <MailboxNav
+        accounts={[account]}
+        mailbox="INBOX"
+        outboxRecoveryCount={2}
+        onSelectAccount={vi.fn()}
+        onAccountContextMenu={vi.fn()}
+        onAddAccount={vi.fn()}
+        onMailbox={vi.fn()}
+        onFeedback={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /Outbox/ })).toHaveTextContent(
+      "2",
+    );
+    expect(screen.getByLabelText("2 emails need attention")).toBeVisible();
+  });
+
+  it("describes active sends and terminal Outbox recoveries separately", () => {
+    render(
+      <MailboxNav
+        accounts={[account]}
+        mailbox="INBOX"
+        outboxSendingCount={2}
+        outboxRecoveryCount={1}
+        onSelectAccount={vi.fn()}
+        onAccountContextMenu={vi.fn()}
+        onAddAccount={vi.fn()}
+        onMailbox={vi.fn()}
+        onFeedback={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /Outbox/ })).toHaveTextContent(
+      "3",
+    );
+    expect(
+      screen.getByLabelText("2 emails sending, 1 email needs attention"),
+    ).toBeVisible();
   });
 
   it("shows the scoped starred conversation count", () => {

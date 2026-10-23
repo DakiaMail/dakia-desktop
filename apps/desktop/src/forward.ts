@@ -1,4 +1,5 @@
 import type { MailSummary, MessageContent } from "./types";
+import { localMailTimestamp } from "./mailTimestamp";
 
 export function forwardSubject(subject: string, prefix: string) {
   const trimmed = subject.trim();
@@ -21,7 +22,7 @@ export function formatForwardHistory(
   const headerLines = [
     `---------- ${labels.originalMessage} ----------`,
     `${labels.from}: ${formatSender(message)}`,
-    `${labels.date}: ${new Date(message.received_at).toLocaleString()}`,
+    `${labels.date}: ${localMailTimestamp(message.received_at)}`,
     `${labels.subject}: ${message.subject}`,
     `${labels.to}: ${message.to_addresses}`,
   ];

@@ -5,7 +5,7 @@ export function cleanEmailSnippet(value: string) {
   let text = value.replace(/\r\n?/g, "\n");
 
   if (HTML_MARKUP.test(text) || HTML_ENTITY.test(text)) {
-    const document = new DOMParser().parseFromString(text, "text/html");
+    const document = parseInertHtml(text);
     document
       .querySelectorAll("head, style, script, noscript, svg, template")
       .forEach((element) => element.remove());
@@ -25,3 +25,4 @@ export function cleanEmailSnippet(value: string) {
     .replace(/\s+/g, " ")
     .trim();
 }
+import { parseInertHtml } from "./inertHtml";

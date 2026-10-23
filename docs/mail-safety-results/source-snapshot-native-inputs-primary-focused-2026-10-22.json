@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-22",
+  "kind": "source-snapshot-native-inputs-primary-focused",
+  "status": "applied-focused-followup-inventory-repair-required",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "f0ba75577e5a4d77c4db9953f7d5296907e18dedf00cdf20f81c5fff6fd633e9",
+    "fileCount": 990,
+    "manifest": "/private/tmp/dakia-native-snapshot-scope-successor-20261022/source-manifest.json",
+    "manifestSha256": "226f21690bcc213f94a821d26a00a6fd73d95398869eabc336d041e0389a0f5d"
+  },
+  "application": {
+    "baseSourceTree": {
+      "digest": "4e6eb1b7f7cf6f9dfdb8e2eba96c23f74a73d03a2f5d185b02c1e506f7608d6c",
+      "fileCount": 961
+    },
+    "journal": "/private/tmp/dakia-snapshot-primary-application-20261022/application-journal.json",
+    "journalSha256": "8a0b3b8828462fdb8f09c5f6b55b43045c44463ea82f695dfff3f63c48b6529b",
+    "changedPaths": [
+      "scripts/run-mail-safety.mjs",
+      "scripts/run-mail-safety.node-test.mjs"
+    ],
+    "changedPathHashes": {
+      "scripts/run-mail-safety.mjs": "d8240122f8998ee3fcbee0743f215dbb2bbf883f92da1f093d9173b9baab096d",
+      "scripts/run-mail-safety.node-test.mjs": "abf6a951264cab812494f13cb691c0494f960d556d536b0bc6aff53e9bc55f31"
+    }
+  },
+  "snapshotScope": {
+    "newlyBoundDirectories": [
+      "apps/desktop/src-tauri/testdata",
+      "apps/desktop/src-tauri/icons",
+      "apps/desktop/src-tauri/resources"
+    ],
+    "newlyBoundTrackedFiles": 29,
+    "includedExamples": [
+      "translation_detection fixtures used by compiled include_str paths",
+      "tray icon and other packaged icons used by include_bytes or packaging",
+      "classifier model, metadata, and license assets"
+    ],
+    "excluded": "Target directories, framework outputs, and generated sidecars remain outside SOURCE_SNAPSHOT_PATHS because their bytes can legitimately vary between builds.",
+    "historicalLimitation": "Prior 961-file manifests omitted these 29 tracked native inputs. Their recorded digests and reports remain unchanged and cannot retroactively prove those inputs were bound."
+  },
+  "ordinarySourceGate": {
+    "command": ["node", ["scripts/test-unsubscribe-command-tls.mjs"]],
+    "sourceGateCountBefore": 17,
+    "sourceGateCountAfter": 18,
+    "position": "after test-mail-command-tls.mjs and before release-script tests",
+    "status": "pending-companion-runner-integration",
+    "scope": "The plan and inventory test bind the command. This receipt does not claim the companion command has run as part of a combined 18-gate source cycle."
+  },
+  "verification": {
+    "applicationReported": "The applied two-file focused Node suite reported 11 passing tests.",
+    "currentFollowUp": {
+      "command": "node --test scripts/run-mail-safety.node-test.mjs",
+      "result": "10 passed, 1 failed",
+      "failure": "An existing MIME artifact inventory regex expects mime_tauri_artifact_export_tests, which is absent from the concurrently updated scripts/test-mime-reader-artifact.mjs.",
+      "qualification": "The new native-input sensitivity and unsubscribe-plan tests passed. The stale MIME inventory assertion must be repaired before this focused suite can be treated as currently green."
+    }
+  },
+  "limitations": [
+    "This is source-snapshot and plan evidence only. It does not establish a full source run, deep lane, native UI, provider, package, performance, audit, or release result for f0ba.",
+    "The original private 01a5 preview selected the new directories but did not bind the private runner files. It is superseded by the applied f0ba manifest.",
+    "The new unsubscribe boundary command is planned as an ordinary gate but remains pending companion-runner integration and a complete source run."
+  ]
+}

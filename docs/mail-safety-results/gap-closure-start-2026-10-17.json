@@ -1,0 +1,360 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-17T19:37:39.987Z",
+  "purpose": "Immutable starting set for the requested 69-gap follow-up; not execution evidence",
+  "gapCount": 69,
+  "scenarios": [
+    {
+      "id": "MS-B-003",
+      "title": "Fragmented literals, malformed lengths, wrong UIDs, wrong sections, and oversized responses fail safely",
+      "area": "imap-sync"
+    },
+    {
+      "id": "MS-B-004",
+      "title": "Missing extensions, delimiter edge cases, Unicode mailboxes, Gmail labels, and read-neutral fetches",
+      "area": "imap-sync"
+    },
+    {
+      "id": "MS-B-005",
+      "title": "Large mailboxes remain bounded and interruptible at documented scales",
+      "area": "imap-sync"
+    },
+    {
+      "id": "MS-C-004",
+      "title": "Envelope Bcc privacy, Unicode/SMTPUTF8, header injection, dot-stuffing, and size handling",
+      "area": "sending"
+    },
+    {
+      "id": "MS-D-004",
+      "title": "Opposing optimistic actions, partial failure, cancellation, and multi-device changes converge safely",
+      "area": "mutations-concurrency"
+    },
+    {
+      "id": "MS-E-004",
+      "title": "Malformed MIME, charset, header, date, threading, and resource-limit behavior has full cross-path conformance",
+      "area": "mime-rendering"
+    },
+    {
+      "id": "MS-F-003",
+      "title": "Remote URLs in srcset, CSS, fonts, SVG, redirects, and encoded syntax make zero initial requests",
+      "area": "html-remote-content"
+    },
+    {
+      "id": "MS-G-003",
+      "title": "Unsafe warning, exact bytes, native save, collisions, symlinks, and disk failures preserve safe user-visible outcomes",
+      "area": "attachments-filesystem"
+    },
+    {
+      "id": "MS-H-002",
+      "title": "Interrupted migration, write failure, disk full, corruption, and profile concurrency preserve recoverable state",
+      "area": "persistence-recovery"
+    },
+    {
+      "id": "MS-H-003",
+      "title": "Supported-version upgrades preserve accounts, messages, credentials, and action state",
+      "area": "persistence-recovery"
+    },
+    {
+      "id": "MS-I-002",
+      "title": "Reply, reply-all, forward, search, threading, offline cache, and account selection remain isolated across unified surfaces",
+      "area": "everyday-workflows"
+    },
+    {
+      "id": "MS-J-003",
+      "title": "One-click unsubscribe verification and backend URL fetch reject unsafe schemes, private networks, redirects, and DNS rebinding",
+      "area": "privacy-network-actions"
+    },
+    {
+      "id": "MS-J-004",
+      "title": "AI, translation, and local classification do not transmit message data except through explicit configured actions",
+      "area": "privacy-network-actions"
+    },
+    {
+      "id": "MS-K-004",
+      "title": "Tampered updater artifacts, interrupted downloads, and incompatible packaged upgrades fail safely",
+      "area": "tauri-bridge-release"
+    },
+    {
+      "id": "MS-L-003",
+      "title": "Slow servers, wake/reconnect, large attachments, resource leaks, and performance regression have measured baselines",
+      "area": "resilience-performance"
+    },
+    {
+      "id": "MS-A-014",
+      "title": "Handshake and greeting timeout errors remain bounded",
+      "area": "connection-authentication"
+    },
+    {
+      "id": "MS-A-015",
+      "title": "Capabilities after TLS determine supported authentication selection",
+      "area": "connection-authentication"
+    },
+    {
+      "id": "MS-A-017",
+      "title": "OAuth expiry, refresh failure, concurrent refresh, conversion, and account removal keep credentials recoverable",
+      "area": "connection-authentication"
+    },
+    {
+      "id": "MS-B-010",
+      "title": "Fragmented and coalesced responses, multiline responses, literals, escaped strings, NIL, and token case parse safely",
+      "area": "imap-sync"
+    },
+    {
+      "id": "MS-B-011",
+      "title": "Wrong tags, UIDs, body sections, truncated literals, malformed lengths, and oversized literals fail without corrupting state",
+      "area": "imap-sync"
+    },
+    {
+      "id": "MS-B-012",
+      "title": "Empty, sparse, and large UIDs plus changing counts during paging preserve durable identity",
+      "area": "imap-sync"
+    },
+    {
+      "id": "MS-B-014",
+      "title": "IDLE arrival, flag change, expunge, renewal, disconnect, reconnect, cancellation, and polling fallback converge safely",
+      "area": "imap-sync"
+    },
+    {
+      "id": "MS-B-015",
+      "title": "Missing CONDSTORE or SPECIAL-USE, unusual delimiters, and Unicode folder names have documented fallback behavior",
+      "area": "imap-sync"
+    },
+    {
+      "id": "MS-B-016",
+      "title": "Gmail labels and multiple folder representations do not duplicate or delete a message incorrectly",
+      "area": "imap-sync"
+    },
+    {
+      "id": "MS-B-017",
+      "title": "Preview and background fetch stay read-neutral while explicit open follows mark-read policy",
+      "area": "imap-sync"
+    },
+    {
+      "id": "MS-C-012",
+      "title": "Subject, names, addresses, reply headers, filenames, and mailto inputs cannot inject CRLF headers",
+      "area": "sending"
+    },
+    {
+      "id": "MS-C-013",
+      "title": "SMTP CRLF serialization, dot-stuffing, multiline replies, MIME encoding, and message size limits are tested at transport boundary",
+      "area": "sending"
+    },
+    {
+      "id": "MS-C-015",
+      "title": "Disconnect before DATA, during upload, after terminator, and final rejection have distinct send outcomes",
+      "area": "sending"
+    },
+    {
+      "id": "MS-C-017",
+      "title": "Sent-copy APPEND timeout, missing folder, restart reconciliation, and Gmail automatic Sent behavior avoid duplicate delivery",
+      "area": "sending"
+    },
+    {
+      "id": "MS-D-010",
+      "title": "Read, flag, archive, spam, restore, trash, permanent delete, and bulk actions preserve their exact remote target",
+      "area": "mutations-concurrency"
+    },
+    {
+      "id": "MS-D-011",
+      "title": "MOVE and COPY/STORE fallback preserve destination UID semantics when UIDPLUS is unavailable",
+      "area": "mutations-concurrency"
+    },
+    {
+      "id": "MS-D-013",
+      "title": "Remote flag, move, and deletion changes reconcile against concurrent local work",
+      "area": "mutations-concurrency"
+    },
+    {
+      "id": "MS-D-015",
+      "title": "Rapid opposing mutations, overlapping batches, partial failures, cancellation, and out-of-order results converge to the latest intent",
+      "area": "mutations-concurrency"
+    },
+    {
+      "id": "MS-D-016",
+      "title": "Account removal fences in-flight sync, content, attachment, classification, and mutation work",
+      "area": "mutations-concurrency"
+    },
+    {
+      "id": "MS-D-017",
+      "title": "A converged synchronization is idempotent and produces no extra local changes",
+      "area": "mutations-concurrency"
+    },
+    {
+      "id": "MS-E-010",
+      "title": "Nested mixed, alternative, related, forwarded, malformed-boundary, and empty MIME parts have stable Reader semantics",
+      "area": "mime-rendering"
+    },
+    {
+      "id": "MS-E-011",
+      "title": "Encoded and folded headers, duplicate singleton fields, unknown charsets, and malformed transfer encoding fail predictably",
+      "area": "mime-rendering"
+    },
+    {
+      "id": "MS-E-012",
+      "title": "RFC 2231 filenames, duplicate filenames, Content-ID collisions, Content-Location, and inline attachments preserve intended presentation",
+      "area": "mime-rendering"
+    },
+    {
+      "id": "MS-E-013",
+      "title": "Plain text, HTML, flowed text, signatures, bidirectional text, emoji, and international scripts remain readable",
+      "area": "mime-rendering"
+    },
+    {
+      "id": "MS-E-015",
+      "title": "Message-ID collisions and malformed References never merge unrelated accounts or create thread cycles",
+      "area": "mime-rendering"
+    },
+    {
+      "id": "MS-E-016",
+      "title": "Resource limits are tested below, at, and above each boundary and malformed messages do not block unrelated mail",
+      "area": "mime-rendering"
+    },
+    {
+      "id": "MS-F-016",
+      "title": "Native link handling rejects unsafe schemes and preserves exact safe external/mailto target",
+      "area": "html-remote-content"
+    },
+    {
+      "id": "MS-G-010",
+      "title": "Exact attachment bytes survive MIME parsing, storage, IPC, and save",
+      "area": "attachments-filesystem"
+    },
+    {
+      "id": "MS-G-011",
+      "title": "Unsafe classification survives parser, storage, IPC, Reader warning, individual save, and Save all",
+      "area": "attachments-filesystem"
+    },
+    {
+      "id": "MS-G-012",
+      "title": "Traversal, absolute path, symlink, collision, Unicode control, double-extension, and misleading MIME filename inputs save safely",
+      "area": "attachments-filesystem"
+    },
+    {
+      "id": "MS-G-013",
+      "title": "Interrupted download, disk full, denied permission, cancellation, and partial bulk save have truthful recovery",
+      "area": "attachments-filesystem"
+    },
+    {
+      "id": "MS-H-012",
+      "title": "Interruption during migration, rebuild, fetch claim, and cache write reopens safely",
+      "area": "persistence-recovery"
+    },
+    {
+      "id": "MS-H-013",
+      "title": "Disk-full, read-only storage, lock contention, failed fsync/write, and malformed rows retain recoverable data",
+      "area": "persistence-recovery"
+    },
+    {
+      "id": "MS-H-014",
+      "title": "Supported-version database upgrades preserve messages, accounts, credentials, and action state",
+      "area": "persistence-recovery"
+    },
+    {
+      "id": "MS-H-015",
+      "title": "Desktop and bundled CLI safely share one profile",
+      "area": "persistence-recovery"
+    },
+    {
+      "id": "MS-H-016",
+      "title": "Failed upgrades and unsupported old binaries fail without destructive migration",
+      "area": "persistence-recovery"
+    },
+    {
+      "id": "MS-I-010",
+      "title": "Local and remote search preserve Unicode, escaping, pagination, cancellation, and stale-result boundaries",
+      "area": "everyday-workflows"
+    },
+    {
+      "id": "MS-I-011",
+      "title": "Incomplete indexing never presents a definitive no-results claim",
+      "area": "everyday-workflows"
+    },
+    {
+      "id": "MS-I-012",
+      "title": "Account and mailbox filters cannot leak results across boundaries",
+      "area": "everyday-workflows"
+    },
+    {
+      "id": "MS-I-013",
+      "title": "Reply, reply-all, forward, Reply-To, aliases, threading headers, and attachment choices preserve recipient intent",
+      "area": "everyday-workflows"
+    },
+    {
+      "id": "MS-I-014",
+      "title": "Unified inbox, search, detached Reader, compose, offline cache, reconnect, keyboard focus, and notification privacy retain account context",
+      "area": "everyday-workflows"
+    },
+    {
+      "id": "MS-J-011",
+      "title": "Local classification and offline translation do not transmit message content",
+      "area": "privacy-network-actions"
+    },
+    {
+      "id": "MS-J-012",
+      "title": "External AI requests require explicit user action and contain only intended content",
+      "area": "privacy-network-actions"
+    },
+    {
+      "id": "MS-J-014",
+      "title": "Unsubscribe never runs on render and one-click actions verify required signed headers",
+      "area": "privacy-network-actions"
+    },
+    {
+      "id": "MS-J-015",
+      "title": "Backend URL fetch rejects unsafe schemes, local/private addresses, redirect escape, and DNS rebinding",
+      "area": "privacy-network-actions"
+    },
+    {
+      "id": "MS-K-010",
+      "title": "Every mail-changing Tauri command validates immutable account and message target data",
+      "area": "tauri-bridge-release"
+    },
+    {
+      "id": "MS-K-011",
+      "title": "Shared IPC fixtures include unsafe attachments, absent/null fields, typed errors, and late events",
+      "area": "tauri-bridge-release"
+    },
+    {
+      "id": "MS-K-016",
+      "title": "Unauthorized content cannot invoke privileged commands",
+      "area": "tauri-bridge-release"
+    },
+    {
+      "id": "MS-K-017",
+      "title": "Tampered updater manifests/artifacts, invalid signatures, interrupted downloads, and incompatible update fail safely",
+      "area": "tauri-bridge-release"
+    },
+    {
+      "id": "MS-L-010",
+      "title": "Slow server, fragmented packet, reconnect loop, rate limit, and wake-from-sleep behavior use bounded retries without storms",
+      "area": "resilience-performance"
+    },
+    {
+      "id": "MS-L-011",
+      "title": "Foreground reading and sending remain responsive during background sync",
+      "area": "resilience-performance"
+    },
+    {
+      "id": "MS-L-012",
+      "title": "Cancellation releases tasks, sockets, file handles, and database claims",
+      "area": "resilience-performance"
+    },
+    {
+      "id": "MS-L-013",
+      "title": "Repeated account open/close detects accumulating resources",
+      "area": "resilience-performance"
+    },
+    {
+      "id": "MS-L-014",
+      "title": "Fixed-hardware performance baselines investigate regressions over 20 percent with repeat measurements",
+      "area": "resilience-performance"
+    }
+  ],
+  "userDecisions": {
+    "upgradeSource": "latest published stable v0.4.4 into unreleased candidate",
+    "liveProvider": "dedicated disposable Gmail account with app password; credentials pending"
+  },
+  "limitations": [
+    "No gap is closed merely by this starting inventory."
+  ]
+}

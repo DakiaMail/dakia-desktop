@@ -1,0 +1,564 @@
+{
+  "schemaVersion": 2,
+  "lane": "manual-mailbox-performance",
+  "status": "passed",
+  "startedAt": "2026-10-23T09:40:23.417Z",
+  "finishedAt": "2026-10-23T09:45:14.898Z",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "c9076b46e5937de89ee653639fdf446530682f81d3890f4fa33c3b20f2cfbe6e",
+    "fileCount": 1032
+  },
+  "sourceTreeAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "c9076b46e5937de89ee653639fdf446530682f81d3890f4fa33c3b20f2cfbe6e",
+    "fileCount": 1032
+  },
+  "hardware": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "osRelease": "25.6.0",
+    "cpuModel": "Apple M1 Max",
+    "logicalCpuCount": 10,
+    "totalMemoryBytes": 68719476736,
+    "node": "v22.23.2"
+  },
+  "build": {
+    "rustProfile": "cargo-test-unoptimized-debuginfo",
+    "rustc": "rustc 1.89.0 (29483883e 2025-08-04)\nbinary: rustc\ncommit-hash: 29483883eed69d5fb4db01964cdf2af4d86e9cb2\ncommit-date: 2025-08-04\nhost: aarch64-apple-darwin\nrelease: 1.89.0\nLLVM version: 20.1.7",
+    "cargo": "cargo 1.89.0 (c24e10642 2025-06-23)"
+  },
+  "repeat": 3,
+  "measurements": [
+    {
+      "iteration": 1,
+      "testName": "manual_two_thousand_message_snapshot_baseline",
+      "messageCount": 2000,
+      "pageSize": 500,
+      "pageCount": 4,
+      "elapsedMilliseconds": 628,
+      "phases": {
+        "setupMilliseconds": 77,
+        "fixtureGenerationMilliseconds": 4,
+        "fixtureInsertionMilliseconds": 393,
+        "transportSetupMilliseconds": 0,
+        "syncMilliseconds": 148,
+        "syncAuthenticationMilliseconds": 1,
+        "syncInventoryMilliseconds": 106,
+        "syncFinalizationMilliseconds": 40,
+        "serverFinalizationMilliseconds": 0,
+        "assertionMilliseconds": 4
+      },
+      "observer": {
+        "callCount": 5,
+        "elapsedNanoseconds": 1876
+      },
+      "execution": {
+        "startedAt": "2026-10-23T09:40:23.466Z",
+        "finishedAt": "2026-10-23T09:40:24.575Z",
+        "wallMilliseconds": 1109,
+        "loadAverageBefore": [
+          18.32080078125,
+          32.6328125,
+          56.73779296875
+        ],
+        "loadAverageAfter": [
+          17.013671875,
+          32.1240234375,
+          56.4169921875
+        ]
+      }
+    },
+    {
+      "iteration": 1,
+      "testName": "manual_thirty_thousand_message_snapshot_baseline",
+      "messageCount": 30000,
+      "pageSize": 500,
+      "pageCount": 60,
+      "elapsedMilliseconds": 8376,
+      "phases": {
+        "setupMilliseconds": 60,
+        "fixtureGenerationMilliseconds": 38,
+        "fixtureInsertionMilliseconds": 6030,
+        "transportSetupMilliseconds": 0,
+        "syncMilliseconds": 2174,
+        "syncAuthenticationMilliseconds": 0,
+        "syncInventoryMilliseconds": 1495,
+        "syncFinalizationMilliseconds": 678,
+        "serverFinalizationMilliseconds": 0,
+        "assertionMilliseconds": 72
+      },
+      "observer": {
+        "callCount": 5,
+        "elapsedNanoseconds": 2960
+      },
+      "execution": {
+        "startedAt": "2026-10-23T09:40:24.575Z",
+        "finishedAt": "2026-10-23T09:40:33.227Z",
+        "wallMilliseconds": 8651,
+        "loadAverageBefore": [
+          17.013671875,
+          32.1240234375,
+          56.4169921875
+        ],
+        "loadAverageAfter": [
+          16.69189453125,
+          31.80615234375,
+          56.162109375
+        ]
+      }
+    },
+    {
+      "iteration": 1,
+      "testName": "manual_one_hundred_thousand_message_snapshot_baseline",
+      "messageCount": 100000,
+      "pageSize": 500,
+      "pageCount": 200,
+      "elapsedMilliseconds": 28143,
+      "phases": {
+        "setupMilliseconds": 63,
+        "fixtureGenerationMilliseconds": 129,
+        "fixtureInsertionMilliseconds": 19999,
+        "transportSetupMilliseconds": 0,
+        "syncMilliseconds": 7744,
+        "syncAuthenticationMilliseconds": 0,
+        "syncInventoryMilliseconds": 5251,
+        "syncFinalizationMilliseconds": 2492,
+        "serverFinalizationMilliseconds": 0,
+        "assertionMilliseconds": 205
+      },
+      "observer": {
+        "callCount": 5,
+        "elapsedNanoseconds": 5375
+      },
+      "execution": {
+        "startedAt": "2026-10-23T09:40:33.227Z",
+        "finishedAt": "2026-10-23T09:41:01.661Z",
+        "wallMilliseconds": 28435,
+        "loadAverageBefore": [
+          16.69189453125,
+          31.80615234375,
+          56.162109375
+        ],
+        "loadAverageAfter": [
+          14.61669921875,
+          29.82470703125,
+          54.59765625
+        ]
+      }
+    },
+    {
+      "iteration": 1,
+      "testName": "manual_two_hundred_thousand_message_snapshot_baseline",
+      "messageCount": 200000,
+      "pageSize": 500,
+      "pageCount": 400,
+      "elapsedMilliseconds": 57802,
+      "phases": {
+        "setupMilliseconds": 61,
+        "fixtureGenerationMilliseconds": 253,
+        "fixtureInsertionMilliseconds": 41072,
+        "transportSetupMilliseconds": 0,
+        "syncMilliseconds": 15981,
+        "syncAuthenticationMilliseconds": 0,
+        "syncInventoryMilliseconds": 10788,
+        "syncFinalizationMilliseconds": 5191,
+        "serverFinalizationMilliseconds": 0,
+        "assertionMilliseconds": 433
+      },
+      "observer": {
+        "callCount": 5,
+        "elapsedNanoseconds": 3958
+      },
+      "execution": {
+        "startedAt": "2026-10-23T09:41:01.661Z",
+        "finishedAt": "2026-10-23T09:41:59.813Z",
+        "wallMilliseconds": 58154,
+        "loadAverageBefore": [
+          14.61669921875,
+          29.82470703125,
+          54.59765625
+        ],
+        "loadAverageAfter": [
+          8.83984375,
+          25.37109375,
+          51.2412109375
+        ]
+      }
+    },
+    {
+      "iteration": 2,
+      "testName": "manual_two_thousand_message_snapshot_baseline",
+      "messageCount": 2000,
+      "pageSize": 500,
+      "pageCount": 4,
+      "elapsedMilliseconds": 608,
+      "phases": {
+        "setupMilliseconds": 62,
+        "fixtureGenerationMilliseconds": 2,
+        "fixtureInsertionMilliseconds": 387,
+        "transportSetupMilliseconds": 0,
+        "syncMilliseconds": 146,
+        "syncAuthenticationMilliseconds": 0,
+        "syncInventoryMilliseconds": 104,
+        "syncFinalizationMilliseconds": 41,
+        "serverFinalizationMilliseconds": 0,
+        "assertionMilliseconds": 9
+      },
+      "observer": {
+        "callCount": 5,
+        "elapsedNanoseconds": 1458
+      },
+      "execution": {
+        "startedAt": "2026-10-23T09:41:59.813Z",
+        "finishedAt": "2026-10-23T09:42:00.716Z",
+        "wallMilliseconds": 902,
+        "loadAverageBefore": [
+          8.83984375,
+          25.37109375,
+          51.2412109375
+        ],
+        "loadAverageAfter": [
+          8.83984375,
+          25.37109375,
+          51.2412109375
+        ]
+      }
+    },
+    {
+      "iteration": 2,
+      "testName": "manual_thirty_thousand_message_snapshot_baseline",
+      "messageCount": 30000,
+      "pageSize": 500,
+      "pageCount": 60,
+      "elapsedMilliseconds": 8193,
+      "phases": {
+        "setupMilliseconds": 59,
+        "fixtureGenerationMilliseconds": 38,
+        "fixtureInsertionMilliseconds": 5814,
+        "transportSetupMilliseconds": 0,
+        "syncMilliseconds": 2206,
+        "syncAuthenticationMilliseconds": 0,
+        "syncInventoryMilliseconds": 1499,
+        "syncFinalizationMilliseconds": 706,
+        "serverFinalizationMilliseconds": 0,
+        "assertionMilliseconds": 73
+      },
+      "observer": {
+        "callCount": 5,
+        "elapsedNanoseconds": 6248
+      },
+      "execution": {
+        "startedAt": "2026-10-23T09:42:00.716Z",
+        "finishedAt": "2026-10-23T09:42:09.232Z",
+        "wallMilliseconds": 8516,
+        "loadAverageBefore": [
+          8.83984375,
+          25.37109375,
+          51.2412109375
+        ],
+        "loadAverageAfter": [
+          9.4130859375,
+          25.21533203125,
+          51.03466796875
+        ]
+      }
+    },
+    {
+      "iteration": 2,
+      "testName": "manual_one_hundred_thousand_message_snapshot_baseline",
+      "messageCount": 100000,
+      "pageSize": 500,
+      "pageCount": 200,
+      "elapsedMilliseconds": 28127,
+      "phases": {
+        "setupMilliseconds": 59,
+        "fixtureGenerationMilliseconds": 127,
+        "fixtureInsertionMilliseconds": 20158,
+        "transportSetupMilliseconds": 0,
+        "syncMilliseconds": 7573,
+        "syncAuthenticationMilliseconds": 0,
+        "syncInventoryMilliseconds": 5107,
+        "syncFinalizationMilliseconds": 2465,
+        "serverFinalizationMilliseconds": 0,
+        "assertionMilliseconds": 208
+      },
+      "observer": {
+        "callCount": 5,
+        "elapsedNanoseconds": 3124
+      },
+      "execution": {
+        "startedAt": "2026-10-23T09:42:09.232Z",
+        "finishedAt": "2026-10-23T09:42:37.925Z",
+        "wallMilliseconds": 28465,
+        "loadAverageBefore": [
+          9.4130859375,
+          25.21533203125,
+          51.03466796875
+        ],
+        "loadAverageAfter": [
+          9.48681640625,
+          23.78955078125,
+          49.62646484375
+        ]
+      }
+    },
+    {
+      "iteration": 2,
+      "testName": "manual_two_hundred_thousand_message_snapshot_baseline",
+      "messageCount": 200000,
+      "pageSize": 500,
+      "pageCount": 400,
+      "elapsedMilliseconds": 59197,
+      "phases": {
+        "setupMilliseconds": 57,
+        "fixtureGenerationMilliseconds": 252,
+        "fixtureInsertionMilliseconds": 42345,
+        "transportSetupMilliseconds": 0,
+        "syncMilliseconds": 16133,
+        "syncAuthenticationMilliseconds": 0,
+        "syncInventoryMilliseconds": 10934,
+        "syncFinalizationMilliseconds": 5198,
+        "serverFinalizationMilliseconds": 0,
+        "assertionMilliseconds": 409
+      },
+      "observer": {
+        "callCount": 5,
+        "elapsedNanoseconds": 4627
+      },
+      "execution": {
+        "startedAt": "2026-10-23T09:42:37.925Z",
+        "finishedAt": "2026-10-23T09:43:37.459Z",
+        "wallMilliseconds": 59533,
+        "loadAverageBefore": [
+          9.48681640625,
+          23.78955078125,
+          49.62646484375
+        ],
+        "loadAverageAfter": [
+          9.7421875,
+          21.359375,
+          46.96240234375
+        ]
+      }
+    },
+    {
+      "iteration": 3,
+      "testName": "manual_two_thousand_message_snapshot_baseline",
+      "messageCount": 2000,
+      "pageSize": 500,
+      "pageCount": 4,
+      "elapsedMilliseconds": 612,
+      "phases": {
+        "setupMilliseconds": 59,
+        "fixtureGenerationMilliseconds": 2,
+        "fixtureInsertionMilliseconds": 387,
+        "transportSetupMilliseconds": 0,
+        "syncMilliseconds": 157,
+        "syncAuthenticationMilliseconds": 0,
+        "syncInventoryMilliseconds": 117,
+        "syncFinalizationMilliseconds": 39,
+        "serverFinalizationMilliseconds": 0,
+        "assertionMilliseconds": 4
+      },
+      "observer": {
+        "callCount": 5,
+        "elapsedNanoseconds": 1541
+      },
+      "execution": {
+        "startedAt": "2026-10-23T09:43:37.459Z",
+        "finishedAt": "2026-10-23T09:43:38.725Z",
+        "wallMilliseconds": 1265,
+        "loadAverageBefore": [
+          9.7421875,
+          21.359375,
+          46.96240234375
+        ],
+        "loadAverageAfter": [
+          9.7421875,
+          21.359375,
+          46.96240234375
+        ]
+      }
+    },
+    {
+      "iteration": 3,
+      "testName": "manual_thirty_thousand_message_snapshot_baseline",
+      "messageCount": 30000,
+      "pageSize": 500,
+      "pageCount": 60,
+      "elapsedMilliseconds": 8142,
+      "phases": {
+        "setupMilliseconds": 60,
+        "fixtureGenerationMilliseconds": 38,
+        "fixtureInsertionMilliseconds": 5783,
+        "transportSetupMilliseconds": 0,
+        "syncMilliseconds": 2194,
+        "syncAuthenticationMilliseconds": 0,
+        "syncInventoryMilliseconds": 1493,
+        "syncFinalizationMilliseconds": 700,
+        "serverFinalizationMilliseconds": 0,
+        "assertionMilliseconds": 65
+      },
+      "observer": {
+        "callCount": 5,
+        "elapsedNanoseconds": 2540
+      },
+      "execution": {
+        "startedAt": "2026-10-23T09:43:38.725Z",
+        "finishedAt": "2026-10-23T09:43:47.145Z",
+        "wallMilliseconds": 8419,
+        "loadAverageBefore": [
+          9.7421875,
+          21.359375,
+          46.96240234375
+        ],
+        "loadAverageAfter": [
+          9.80078125,
+          20.9853515625,
+          46.5302734375
+        ]
+      }
+    },
+    {
+      "iteration": 3,
+      "testName": "manual_one_hundred_thousand_message_snapshot_baseline",
+      "messageCount": 100000,
+      "pageSize": 500,
+      "pageCount": 200,
+      "elapsedMilliseconds": 27545,
+      "phases": {
+        "setupMilliseconds": 59,
+        "fixtureGenerationMilliseconds": 128,
+        "fixtureInsertionMilliseconds": 19502,
+        "transportSetupMilliseconds": 0,
+        "syncMilliseconds": 7643,
+        "syncAuthenticationMilliseconds": 0,
+        "syncInventoryMilliseconds": 5159,
+        "syncFinalizationMilliseconds": 2483,
+        "serverFinalizationMilliseconds": 0,
+        "assertionMilliseconds": 210
+      },
+      "observer": {
+        "callCount": 5,
+        "elapsedNanoseconds": 3166
+      },
+      "execution": {
+        "startedAt": "2026-10-23T09:43:47.145Z",
+        "finishedAt": "2026-10-23T09:44:14.988Z",
+        "wallMilliseconds": 27842,
+        "loadAverageBefore": [
+          9.80078125,
+          20.9853515625,
+          46.5302734375
+        ],
+        "loadAverageAfter": [
+          10.19287109375,
+          19.99951171875,
+          45.28662109375
+        ]
+      }
+    },
+    {
+      "iteration": 3,
+      "testName": "manual_two_hundred_thousand_message_snapshot_baseline",
+      "messageCount": 200000,
+      "pageSize": 500,
+      "pageCount": 400,
+      "elapsedMilliseconds": 57245,
+      "phases": {
+        "setupMilliseconds": 61,
+        "fixtureGenerationMilliseconds": 253,
+        "fixtureInsertionMilliseconds": 40296,
+        "transportSetupMilliseconds": 0,
+        "syncMilliseconds": 16219,
+        "syncAuthenticationMilliseconds": 0,
+        "syncInventoryMilliseconds": 11055,
+        "syncFinalizationMilliseconds": 5163,
+        "serverFinalizationMilliseconds": 0,
+        "assertionMilliseconds": 414
+      },
+      "observer": {
+        "callCount": 5,
+        "elapsedNanoseconds": 3583
+      },
+      "execution": {
+        "startedAt": "2026-10-23T09:44:14.988Z",
+        "finishedAt": "2026-10-23T09:45:12.582Z",
+        "wallMilliseconds": 57593,
+        "loadAverageBefore": [
+          10.19287109375,
+          19.99951171875,
+          45.28662109375
+        ],
+        "loadAverageAfter": [
+          7.42724609375,
+          17.54296875,
+          42.7861328125
+        ]
+      }
+    }
+  ],
+  "resourceSoak": {
+    "reconnectCycles": 200,
+    "storeOpenCycles": 100,
+    "elapsedMilliseconds": 1660,
+    "fileDescriptorsBefore": 10,
+    "fileDescriptorsAfter": 10,
+    "residentBytesBefore": 27901952,
+    "residentBytesAfter": 29147136,
+    "residentGrowthBytes": 1245184,
+    "residentGrowthLimitBytes": 67108864,
+    "execution": {
+      "startedAt": "2026-10-23T09:45:12.582Z",
+      "finishedAt": "2026-10-23T09:45:14.647Z",
+      "wallMilliseconds": 2065,
+      "loadAverageBefore": [
+        7.42724609375,
+        17.54296875,
+        42.7861328125
+      ],
+      "loadAverageAfter": [
+        7.42724609375,
+        17.54296875,
+        42.7861328125
+      ]
+    }
+  },
+  "comparisons": [
+    {
+      "messageCount": 2000,
+      "currentMedianMilliseconds": 612,
+      "baselineMedianMilliseconds": 560,
+      "changePercent": 9.285714285714286,
+      "status": "passed"
+    },
+    {
+      "messageCount": 30000,
+      "currentMedianMilliseconds": 8193,
+      "baselineMedianMilliseconds": 7660,
+      "changePercent": 6.958224543080941,
+      "status": "passed"
+    },
+    {
+      "messageCount": 100000,
+      "currentMedianMilliseconds": 28127,
+      "baselineMedianMilliseconds": 25662,
+      "changePercent": 9.60564258436599,
+      "status": "passed"
+    },
+    {
+      "messageCount": 200000,
+      "currentMedianMilliseconds": 57802,
+      "baselineMedianMilliseconds": 52573,
+      "changePercent": 9.946170087307173,
+      "status": "passed"
+    }
+  ],
+  "limitations": [
+    "Loopback scripted IMAP measures Dakia's production protocol and SQLite paths, not provider latency.",
+    "Elapsed time is comparable only on the same idle hardware and build profile.",
+    "Per-command host load is observational context; it cannot prove that competing work did or did not affect a sample.",
+    "This runner does not establish native WebKit responsiveness or sustained process memory."
+  ]
+}

@@ -1,0 +1,141 @@
+{
+  "captures": [
+    {
+      "command": "UID FETCH 6 (FLAGS INTERNALDATE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES CONTENT-TYPE CONTENT-TRANSFER-ENCODING CONTENT-ID CONTENT-LOCATION CONTENT-DISPOSITION LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)])",
+      "items": [
+        {
+          "kind": "literal",
+          "literalBase64": "RnJvbTogIkZpY3Rpb25hbCBSZWFkZXIiIDxmaWN0aW9uYWwtcmVhZGVyQGxvY2FsaG9zdD4NClN1YmplY3Q6IERha2lhIGZpY3Rpb25hbCBoZWxkLXN5bmMgc2luZ2xlLXNlbmQgOFZSb0xtDQpUbzogZmljdGlvbmFsLXJlYWRlckBsb2NhbGhvc3QNCkRhdGU6IFdlZCwgMjEgT2N0IDIwMjYgMjI6MTk6NDcgKzAwMDANCkNvbnRlbnQtVHlwZTogbXVsdGlwYXJ0L21peGVkOw0KIGJvdW5kYXJ5PSJoMzFpNkhpb2dtaEdMdnZteVplVXRHTmI1NFNKOVFkcmtuUHNwYnoxIg0K",
+          "literalBytes": 267,
+          "literalSha256": "4c5bf1067a7c67850c2a1ee9c3f55ce897b8b5820d7b7272588b508d2c703a70",
+          "metadataBase64": "NiAoRkxBR1MgKFxTZWVuKSBJTlRFUk5BTERBVEUgIjIxLU9jdC0yMDI2IDIyOjE5OjQ3ICswMDAwIiBCT0RZU1RSVUNUVVJFICgoKCJ0ZXh0IiAicGxhaW4iICgiY2hhcnNldCIgInV0Zi04IikgTklMIE5JTCAicXVvdGVkLXByaW50YWJsZSIgMTcyIDQgTklMIE5JTCBOSUwpKCJ0ZXh0IiAiaHRtbCIgKCJjaGFyc2V0IiAidXRmLTgiKSBOSUwgTklMICJxdW90ZWQtcHJpbnRhYmxlIiAxNzEgNCBOSUwgTklMIE5JTCkgImFsdGVybmF0aXZlIiAoImJvdW5kYXJ5IiAibHN1aUZrR3dDM2FZUEN6Zk9PWFFBbURqVTE4Q3JzTTlLcUZGU0IwaCIpIE5JTCBOSUwpICJtaXhlZCIgKCJib3VuZGFyeSIgImgzMWk2SGlvZ21oR0x2dm15WmVVdEdOYjU0U0o5UWRya25Qc3BiejEiKSBOSUwgTklMKSBVSUQgNiBCT0RZW0hFQURFUi5GSUVMRFMgKERBVEUgRlJPTSBUTyBDQyBCQ0MgUkVQTFktVE8gU1VCSkVDVCBNRVNTQUdFLUlEIElOLVJFUExZLVRPIFJFRkVSRU5DRVMgQ09OVEVOVC1UWVBFIENPTlRFTlQtVFJBTlNGRVItRU5DT0RJTkcgQ09OVEVOVC1JRCBDT05URU5ULUxPQ0FUSU9OIENPTlRFTlQtRElTUE9TSVRJT04gTElTVC1JRCBMSVNULVVOU1VCU0NSSUJFIExJU1QtVU5TVUJTQ1JJQkUtUE9TVCBQUkVDRURFTkNFIEFVVE8tU1VCTUlUVEVEKV0gezI2N30=",
+          "metadataBytes": 653,
+          "metadataSha256": "815914248b09cf193e28d9583411f900ae27cccce4b406eb6a0f2c2d14ffe918"
+        },
+        {
+          "base64": "KQ==",
+          "bytes": 1,
+          "kind": "bytes",
+          "sha256": "ba5ec51d07a4ac0e951608704431d59a02b21a4e951acc10505a8dc407c501ee"
+        }
+      ]
+    },
+    {
+      "command": "UID FETCH 6 (BODY.PEEK[1.MIME])",
+      "items": [
+        {
+          "kind": "literal",
+          "literalBase64": "Q29udGVudC1UeXBlOiBtdWx0aXBhcnQvYWx0ZXJuYXRpdmU7DQogYm91bmRhcnk9ImxzdWlGa0d3QzNhWVBDemZPT1hRQW1EalUxOENyc005S3FGRlNCMGgi",
+          "literalBytes": 90,
+          "literalSha256": "86f8f5a58f38172aac48c20b1a35112361d835dd9605df0ebcbc2d9b064945f4",
+          "metadataBase64": "NiAoVUlEIDYgQk9EWVsxLk1JTUVdIHs5MH0=",
+          "metadataBytes": 26,
+          "metadataSha256": "1889427287313758e96dbfcfc6eb6ca2aec4bd53d274cea773793058db234b72"
+        },
+        {
+          "base64": "KQ==",
+          "bytes": 1,
+          "kind": "bytes",
+          "sha256": "ba5ec51d07a4ac0e951608704431d59a02b21a4e951acc10505a8dc407c501ee"
+        }
+      ]
+    },
+    {
+      "command": "UID FETCH 6 (BODY.PEEK[1.1.MIME])",
+      "items": [
+        {
+          "kind": "literal",
+          "literalBase64": "Q29udGVudC1UeXBlOiBtdWx0aXBhcnQvYWx0ZXJuYXRpdmU7DQogYm91bmRhcnk9ImxzdWlGa0d3QzNhWVBDemZPT1hRQW1EalUxOENyc005S3FGRlNCMGgi",
+          "literalBytes": 90,
+          "literalSha256": "86f8f5a58f38172aac48c20b1a35112361d835dd9605df0ebcbc2d9b064945f4",
+          "metadataBase64": "NiAoVUlEIDYgQk9EWVsxLjEuTUlNRV0gezkwfQ==",
+          "metadataBytes": 28,
+          "metadataSha256": "e9d6f37bfa1fb3f141dd5a756de0a09f6d35f28a7345396af9324efbcbd5182b"
+        },
+        {
+          "base64": "KQ==",
+          "bytes": 1,
+          "kind": "bytes",
+          "sha256": "ba5ec51d07a4ac0e951608704431d59a02b21a4e951acc10505a8dc407c501ee"
+        }
+      ]
+    },
+    {
+      "command": "UID FETCH 6 (BODY.PEEK[1.2.MIME])",
+      "items": [
+        {
+          "kind": "literal",
+          "literalBase64": "Q29udGVudC1UeXBlOiBtdWx0aXBhcnQvYWx0ZXJuYXRpdmU7DQogYm91bmRhcnk9ImxzdWlGa0d3QzNhWVBDemZPT1hRQW1EalUxOENyc005S3FGRlNCMGgi",
+          "literalBytes": 90,
+          "literalSha256": "86f8f5a58f38172aac48c20b1a35112361d835dd9605df0ebcbc2d9b064945f4",
+          "metadataBase64": "NiAoVUlEIDYgQk9EWVsxLjIuTUlNRV0gezkwfQ==",
+          "metadataBytes": 28,
+          "metadataSha256": "a5d411bf16d381168a6d2b03c024db5582c894f0014647cbb7f38ccf3eeb7f03"
+        },
+        {
+          "base64": "KQ==",
+          "bytes": 1,
+          "kind": "bytes",
+          "sha256": "ba5ec51d07a4ac0e951608704431d59a02b21a4e951acc10505a8dc407c501ee"
+        }
+      ]
+    },
+    {
+      "command": "UID FETCH 6 (BODY.PEEK[1.1])",
+      "items": [
+        {
+          "kind": "literal",
+          "literalBase64": "T25lIGlzb2xhdGVkIGZpY3Rpb25hbCBtZXNzYWdlIGZvciBuYXRpdmUgc2VuZCBvdXRjb21lIGFjY2VwdGFuY2UuIERvIG5vdCByPQ0KZXNlbmQu",
+          "literalBytes": 84,
+          "literalSha256": "f84ed921434718d04660a5e9a1fc23563e9449eac6d3bdcaa5efaa8e95b8bf14",
+          "metadataBase64": "NiAoVUlEIDYgQk9EWVsxLjFdIHs4NH0=",
+          "metadataBytes": 23,
+          "metadataSha256": "9ea1f9d8290bcd7ab31cb8499f9aa304dc77a40399912455ebd766f2d8059ae2"
+        },
+        {
+          "base64": "KQ==",
+          "bytes": 1,
+          "kind": "bytes",
+          "sha256": "ba5ec51d07a4ac0e951608704431d59a02b21a4e951acc10505a8dc407c501ee"
+        }
+      ]
+    },
+    {
+      "command": "UID FETCH 6 (BODY.PEEK[1.2])",
+      "items": [
+        {
+          "kind": "literal",
+          "literalBase64": "T25lIGlzb2xhdGVkIGZpY3Rpb25hbCBtZXNzYWdlIGZvciBuYXRpdmUgc2VuZCBvdXRjb21lIGFjY2VwdGFuY2UuIERvIG5vdCByPQ0KZXNlbmQu",
+          "literalBytes": 84,
+          "literalSha256": "f84ed921434718d04660a5e9a1fc23563e9449eac6d3bdcaa5efaa8e95b8bf14",
+          "metadataBase64": "NiAoVUlEIDYgQk9EWVsxLjJdIHs4NH0=",
+          "metadataBytes": 23,
+          "metadataSha256": "52f2dbfb35274f484a81eeb6b2fe53e405cf525f7bb322afb201842927b7df43"
+        },
+        {
+          "base64": "KQ==",
+          "bytes": 1,
+          "kind": "bytes",
+          "sha256": "ba5ec51d07a4ac0e951608704431d59a02b21a4e951acc10505a8dc407c501ee"
+        }
+      ]
+    }
+  ],
+  "kind": "dakia-fictional-uid6-selective-reader-transcript",
+  "protocol": [
+    "EXAMINE INBOX",
+    "STATUS INBOX (UIDNEXT)",
+    "UID FETCH 6 (FLAGS INTERNALDATE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES CONTENT-TYPE CONTENT-TRANSFER-ENCODING CONTENT-ID CONTENT-LOCATION CONTENT-DISPOSITION LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST PRECEDENCE AUTO-SUBMITTED)])",
+    "UID FETCH 6 (BODY.PEEK[1.MIME])",
+    "UID FETCH 6 (BODY.PEEK[1.1.MIME])",
+    "UID FETCH 6 (BODY.PEEK[1.2.MIME])",
+    "UID FETCH 6 (BODY.PEEK[1.1])",
+    "UID FETCH 6 (BODY.PEEK[1.2])"
+  ],
+  "readOnly": true,
+  "schemaVersion": 1,
+  "sourceDigest": "a86feeae88ffe172c8697a84f1d29afa123856661ee3765ca3307562c410193c",
+  "sourceFileCount": 940,
+  "uid": 6,
+  "uidNext": 7
+}

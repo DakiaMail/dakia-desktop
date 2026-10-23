@@ -1,0 +1,115 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-21T22:31:39.029Z",
+  "lane": "native-WebKit-packaged-fixture-checkpoint-followup",
+  "status": "partial-failed",
+  "companionTo": {
+    "path": "docs/mail-safety-results/native-provider-reader-a86-partial-checkpoint-2026-10-22.json",
+    "sha256": "2622c1ed041e70366fbca6cfdbe1afbf88187ce09e9176ac1274ea9ad6cd906b",
+    "relationship": "Adds later failures and limited observations without changing the original checkpoint."
+  },
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "a86feeae88ffe172c8697a84f1d29afa123856661ee3765ca3307562c410193c",
+    "fileCount": 940
+  },
+  "runtime": {
+    "desktopSha256": "1f3a21dff8d83bad428602b1950b79280af5b88d08809517a1a5dc4176135510",
+    "bundledCliSha256": "1e5b9aee65b422b06af5812830d0f6fbd994fb4aa1bcd337137049f593a6ca25",
+    "mainExit": "normal exit 0 recorded after the primary packaged acceptance",
+    "releaseBoundary": "ad-hoc fixture-enabled debug app, not a public release"
+  },
+  "uid6SelectiveReaderFailure": {
+    "status": "observed-failure",
+    "rawSource": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8VRoLm/.dakia-uid6-readonly-source.eml",
+      "bytes": 1075,
+      "sha256": "47b7a1060fdaf4fc57122fe3491b31d38a2a902f48e6db952182289a5c1584ba"
+    },
+    "rawSourceReceipt": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8VRoLm/.dakia-uid6-readonly-source-receipt.json",
+      "bytes": 691,
+      "sha256": "2b0ecbd6ea0c1a4dfa4a104c120e7586e566aa083e9b9d4a94c34b9a714f0160"
+    },
+    "selectiveTranscript": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8VRoLm/.dakia-uid6-selective-reader-transcript.json",
+      "bytes": 6936,
+      "sha256": "5aed47c1d302baf844fdbe43a55cdb8a8d09b9172af4d4dbb31b373ee64a72c0"
+    },
+    "readerAfterFullHydrationText": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8VRoLm/native-ui-evidence/2007-single-send-received-reader-after-full-hydration.txt",
+      "bytes": 3935,
+      "sha256": "f72207c8f0fbbffdb3f7e7a662530d1ddffd7ae5134d020a81c98aeaa7decf9f"
+    },
+    "readerAfterFullHydrationImage": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8VRoLm/native-ui-evidence/2007-single-send-received-reader-after-full-hydration.png",
+      "bytes": 357197,
+      "sha256": "4dc3133c64d2a0a981bc40919d417a0b358f7926c13a82ffa175a1480a9243fb"
+    },
+    "readerSettledText": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8VRoLm/native-ui-evidence/2008-single-send-received-reader-settled.txt",
+      "bytes": 3935,
+      "sha256": "96807906d325f4a1a1049f16b959d4bae54fb13ee22a95f7cd9863c1ab3f1d5f"
+    },
+    "readerSettledImage": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8VRoLm/native-ui-evidence/2008-single-send-received-reader-settled.png",
+      "bytes": 357202,
+      "sha256": "2d514c05ed7a5d75178f9ccf0b2dfdde6c6e328e636069b33fdf83817370e4ff"
+    },
+    "observed": "The UID 6 raw message is a valid mixed/alternative plain-and-HTML message with no attachment. The native Reader showed a blank body and two fake multipart/alternative attachments after selective hydration and after settling.",
+    "protocolFinding": "The captured BODYSTRUCTURE is valid, but the fixture returned the parent multipart/alternative MIME header for BODY.PEEK[1.1.MIME] and BODY.PEEK[1.2.MIME]. Dakia consequently received parent-type data at leaf sections.",
+    "ownership": "The diagnostic owner has not yet established whether the defect is in fixture server section handling, client interpretation, or both. This receipt records the failure without attributing ownership.",
+    "consequences": [
+      "The expected UID 6 Message-ID is absent from the raw source.",
+      "The planned leap-second UID 7 scenario did not run.",
+      "Do not treat the prior UID 6 send-boundary observation as Reader rendering acceptance."
+    ]
+  },
+  "h016Observation": {
+    "status": "observed-not-accepted",
+    "root": "/private/tmp/dakia-h016-packaged-upgrade.e533ef27-0273-483c-b250-daadeb19d406",
+    "incompleteRun": {
+      "path": "/private/tmp/dakia-h016-packaged-upgrade.e533ef27-0273-483c-b250-daadeb19d406/h016-incomplete-run.json",
+      "bytes": 283,
+      "sha256": "2b94a48dd758fc39f44007f08909a405e51012b414ad0cbe5b48866bdf4446fb"
+    },
+    "runtimeAttestation": {
+      "path": "/private/tmp/dakia-h016-packaged-upgrade.e533ef27-0273-483c-b250-daadeb19d406/runtime-attestation.json",
+      "bytes": 1483,
+      "sha256": "dcc7cf900e6138359c755cdcc8cc25c0f3c5ac0fdcd6f097cf34b5d6e2258e31"
+    },
+    "cuaObservation": {
+      "path": "/private/tmp/dakia-h016-packaged-upgrade.e533ef27-0273-483c-b250-daadeb19d406/cua-observation.json",
+      "bytes": 941,
+      "sha256": "334d7229af97098b97cf448024fac192952f419facd234d01cdec2d29c3c4c8b"
+    },
+    "exit": {
+      "path": "/private/tmp/dakia-h016-packaged-upgrade.e533ef27-0273-483c-b250-daadeb19d406/exit.json",
+      "bytes": 464,
+      "sha256": "6d4b5993e6ab8529e523a1bc7a24ff894f6875760fa725ecfdd8449eacdd5db1"
+    },
+    "profileBeforeLaunch": {
+      "path": "/private/tmp/dakia-h016-packaged-upgrade.e533ef27-0273-483c-b250-daadeb19d406/profile-before-launch.json",
+      "bytes": 4200,
+      "sha256": "46ca6f7292e1a09f40092c169b4c5b7af14d494c1653086324395f48316a9101"
+    },
+    "profileAfterStartupBeforeCua": {
+      "path": "/private/tmp/dakia-h016-packaged-upgrade.e533ef27-0273-483c-b250-daadeb19d406/profile-after-startup-before-cua.json",
+      "bytes": 4375,
+      "sha256": "6bce155b908a18559ce445a36f09493ae1067bccf2ba4d736666f80ecc9fff1c"
+    },
+    "observed": "The faithful GUI upgrade showed unread, starred, cached-body and tauri://localhost state, then exited normally.",
+    "blockingFailure": "The strict sealing helper failed its appMeta oracle after close. The quarantined profile and normal Library absence are retained for diagnosis.",
+    "conclusion": "MS-H-016 is not passed by this observation."
+  },
+  "retainedFailures": [
+    "The external STAR duplicate and terminal Compose recovery failure from the companion checkpoint remain open.",
+    "The UID 7 leap-second replay remains unrun.",
+    "Native overall remains partial-failed. No composite native, packaged GUI, upgrade, or release claim is made."
+  ],
+  "limitations": [
+    "No code ownership or fix is inferred from the selective MIME transcript.",
+    "This companion does not alter source, catalogue or earlier evidence.",
+    "Later native work may add a separate result; it cannot retroactively turn this partial-failed checkpoint into a pass."
+  ]
+}

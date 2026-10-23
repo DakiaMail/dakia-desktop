@@ -1,0 +1,12 @@
+X-Dakia-Corpus-Case: obs-09-null-recipients
+X-Dakia-Corpus-Source: RFC 5322 section 4.4; fictional
+Date: Tue, 28 Jul 2026 12:01:00 +0000
+From: Sender <sender@example.test>
+Subject: Fictional obsolete syntax
+Message-ID: <obs-obs-09-null-recipients@example.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+To: ,first@example.test,, second@example.test,
+Cc: Empty: , , ;
+
+Fictional body obs-09-null-recipients.

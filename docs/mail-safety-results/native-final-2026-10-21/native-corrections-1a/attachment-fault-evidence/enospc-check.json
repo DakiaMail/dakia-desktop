@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "operation": "enospc-check",
+  "root": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2",
+  "recordedAt": "2026-10-21T12:29:23.702Z",
+  "filler": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/Downloads/.dakia-enospc-fill",
+  "fillerBytes": "64970752",
+  "fillerDevice": "16777244",
+  "fillerInode": "20",
+  "prohibitedArtifacts": "[]",
+  "availableKiB": "0",
+  "result": "no final or partial attachment file"
+}

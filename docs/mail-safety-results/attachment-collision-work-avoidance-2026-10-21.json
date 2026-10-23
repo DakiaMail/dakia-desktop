@@ -1,0 +1,80 @@
+{
+  "report": "attachment collision work avoidance",
+  "date": "2026-10-21",
+  "scope": {
+    "production_function": "save_private_download_with_directory_descriptor_and_cleanup",
+    "candidate_probe": "private_download_candidate_exists_at",
+    "production_change": "Before allocating, writing, fsyncing, quarantining, and publishing a temporary download, probe the candidate through the already pinned Downloads directory descriptor with fstatat(AT_SYMLINK_NOFOLLOW). Existing regular files and leaf symlinks are treated as occupied. Only ENOENT proceeds. Other probe errors fail closed.",
+    "race_safety": "The preprobe is advisory. The existing descriptor-relative exclusive publish remains the authority when another process creates the target after the probe. Directory identity verification and temporary-file cleanup remain unchanged."
+  },
+  "prior_native_evidence": {
+    "fixture_root": "OaVD6G",
+    "result": "partial correctness evidence",
+    "observed": "The safe 32-byte attachment was published without a partial snapshot during the Save All collision exercise.",
+    "limitation": "The 10,000 unsafe-name collision sequence remained in progress after more than three minutes because the prior implementation performed durable temporary work for each occupied candidate. It is correctness evidence only, not a completed optimized timing result."
+  },
+  "regression_tests": [
+    {
+      "name": "native_attachment_save_skips_existing_collision_names_before_durable_temporary_work",
+      "coverage": "9,999 occupied names, including a leaf symlink; asserts one write, one quarantine operation, one temporary allocation, final name report (9999).pdf, and an unchanged symlink target."
+    },
+    {
+      "name": "native_attachment_save_rechecks_exclusivity_when_a_leaf_appears_after_the_probe",
+      "coverage": "A leaf symlink appears after the absence probe; exclusive publish skips it and preserves its target."
+    },
+    {
+      "name": "native_attachment_save_exhausts_existing_names_without_temporary_work",
+      "coverage": "All 10,000 candidate names exist; the operation fails without writing, quarantining, or allocating a temporary file."
+    },
+    {
+      "name": "native_attachment_save_fails_closed_when_the_descriptor_probe_errors",
+      "coverage": "A descriptor probe error stops the operation before writing, quarantining, or allocating a temporary file."
+    }
+  ],
+  "sensitivity": {
+    "method": "Temporarily replaced only private_download_candidate_exists_at with Ok(false), reproducing the former publish-only collision discovery, then restored the fstatat implementation.",
+    "command": "cargo test --locked -p dakia-desktop attachment_pipeline_tests::native_attachment_save_skips_existing_collision_names_before_durable_temporary_work --lib -- --exact --nocapture",
+    "outcome": "failed as expected in 3.33 seconds before restoration",
+    "assertion": "occupied names must not be written and fsynced: writes was 10000, expected 1",
+    "log": "/private/tmp/dakia-attachment-collision-probe-mutant-20261021.log",
+    "log_sha256": "7d653d9ec47b551eb5c6411285d4c534b47ff8913e02c2413fe8973311938f90",
+    "restoration": "The helper was restored before the positive runs."
+  },
+  "verification": [
+    {
+      "command": "cargo test --locked -p dakia-desktop attachment_pipeline_tests::native_attachment_save_skips_existing_collision_names_before_durable_temporary_work --lib -- --exact --nocapture",
+      "result": "passed: 1 passed, 0 failed"
+    },
+    {
+      "command": "cargo test --locked -p dakia-desktop attachment_pipeline_tests --lib -- --nocapture",
+      "result": "passed: 21 passed, 0 failed"
+    },
+    {
+      "command": "cargo test --locked -p dakia-desktop attachment_pipeline_tests --lib --features native-mail-safety-fixture -- --nocapture",
+      "result": "passed: 22 passed, 0 failed"
+    },
+    {
+      "command": "cargo clippy --locked -p dakia-desktop --lib --tests -- -D warnings",
+      "result": "passed"
+    },
+    {
+      "command": "cargo fmt -- --check",
+      "result": "passed"
+    }
+  ],
+  "review": {
+    "reviewer": "/root/attachment_review",
+    "result": "GO",
+    "scope": "fstatat collision probe and attachment pipeline tests"
+  },
+  "source_provenance": {
+    "candidate_probe_sha256": "a471a83bb1c2abdf29dbaec4f236975dcb351240910e7680f28fe37df528afd4",
+    "lib_rs_sha256_at_report_time": "7bf8f5c4f09b45ba6773706780e8022c7ffeb5c4846a05e09427a300f2994cbc",
+    "attachment_pipeline_tests_rs_sha256": "3bbc7bc35f45e1eeb48682d634c542dc63caa093226c44856c8d70b3aeac9154",
+    "note": "lib.rs has concurrent owners. The candidate-probe hash identifies the scoped production function; the full-file hash is recorded only at report time."
+  },
+  "remaining_acceptance": {
+    "native_optimized_timing": "pending a fresh native Save All collision run after a final source freeze",
+    "unchanged_limits": "This report does not claim native UI, provider, or external-network verification."
+  }
+}

@@ -1,0 +1,396 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-10-21T14:25:35Z",
+  "status": "preflight-passed-runtime-pending",
+  "scope": "Governed evidence for the same-identity packaged fictional-mailbox harness, native ACL boundary, attachment filesystem acceptance, shared-profile CLI acceptance, and faithful previous-stable forward-upgrade handoff",
+  "source": {
+    "revision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+    "state": "shared dirty checkout; the hashes below bind exact reviewed files and do not claim a committed or final full-source baseline",
+    "platform": {
+      "architecture": "arm64",
+      "macOS": "26.6.2"
+    }
+  },
+  "requiredDocuments": [
+    "docs/tauri-dev-ui-verification.md",
+    "docs/publishing-macos-release.md"
+  ],
+  "governedArtifacts": [
+    {
+      "path": "scripts/native-provider-reader-acceptance.sh",
+      "sha256": "50419da17ac70e8bf2a497758c5bcaab147413834fe6662d096d7c2e3bb0745b",
+      "purpose": "fictional provider, packaged custom-protocol build, sealed identity transaction, runtime evidence, and H016 hold"
+    },
+    {
+      "path": "scripts/native-provider-reader-fixture.node-test.mjs",
+      "sha256": "1b63b7b33d03dc79b84341cb3e0cfcd589ffb37c6a5602523063cc3fedfc60f3",
+      "purpose": "extracted executable harness tests, rejection tests, and transaction sensitivity"
+    },
+    {
+      "path": "scripts/native-fictional-imap-proxy.mjs",
+      "sha256": "150a549459486c9ddace45f0cec034200273635eaff85d88389fb6f0e500264a",
+      "purpose": "nonce-owned fictional IMAP disconnect, bounded hold, automatic release, and explicit resume control"
+    },
+    {
+      "path": "scripts/native-fictional-imap-proxy.node-test.mjs",
+      "sha256": "48d41090fedfcddbe41c3529f2f7e0c8c4719a9961794b895a9dcd27f0b8779f",
+      "purpose": "loopback byte preservation, hold timing, rejection, automatic recovery, and stale-PID independence tests"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/lib.rs",
+      "sha256": "8acbc2887a088bb2f33caaf10baf3ae621148742898eba7c851620b207a3f05b",
+      "sha256AtFocusedNativeReview": "304e14573f91ffc351d23a7a08b969a66013996df40c1cf277d1cb13ee5b2f42",
+      "purpose": "feature-only fictional mailbox setup and per-run WebKit data-store propagation",
+      "state": "the shared entrypoint changed after focused native review due to concurrent owned source work; the final complete source baseline remains pending"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/native_acl_acceptance.rs",
+      "sha256": "2bf3fb340b6562c24a3cfb270a040c47da23b6a6b2cd7c005fcd558062d7d9e5",
+      "purpose": "feature-only local and remote Wry ACL probes with atomic evidence"
+    },
+    {
+      "path": "scripts/native-shared-profile-acceptance.mjs",
+      "sha256": "3e4b9cc02d2fc226e458a97f4917f4c8b2152530ccd936f0374c8f3f0b03c9e6",
+      "purpose": "bounded read-only bundled CLI waves against the live fictional desktop profile"
+    },
+    {
+      "path": "scripts/native-shared-profile-acceptance.node-test.mjs",
+      "sha256": "7ec75ec4e25e6e5acf23d4bbcbce7b584c8e578855fce3854bec2b7f02e82d92",
+      "purpose": "shared-profile command, identity, and no-mutation contract tests"
+    },
+    {
+      "path": "scripts/native-attachment-fault-acceptance.sh",
+      "sha256": "5caadb830454fa2eb8af4da21dbed0e998b40a24fdb466f360fa5d2389e915cf",
+      "purpose": "guarded native leaf-symlink and bounded HFS+ ENOSPC acceptance"
+    },
+    {
+      "path": "scripts/test-native-attachment-fault-acceptance.sh",
+      "sha256": "48282a04379d3e39b39d3c303935024b2a4605fcc65bf8998c9d47f6e6202b50",
+      "purpose": "shell rejection and synthetic recovery checks"
+    },
+    {
+      "path": "scripts/native-attachment-fault-acceptance.node-test.mjs",
+      "sha256": "125525b7dc8b7e7440de6e40abcc6c8382eb34e1ee73d8241048b19537b9aebf",
+      "purpose": "portable extracted filesystem oracle and sensitivity tests"
+    }
+  ],
+  "privatePreparationArtifacts": [
+    {
+      "path": "/private/tmp/dakia-native-translation-arrival.py",
+      "sha256": "843efa3079bbbb018d1a568f1918c10328a6f6e24ba914b52c027e0d95473a13",
+      "shippingStatus": "private helper; not a governed or shipped product artifact"
+    },
+    {
+      "path": "/private/tmp/test-dakia-native-translation-arrival.py",
+      "sha256": "4fe27f68d82f17e9c703f76cba5529251e6ef9a7086a298c31c37a34ca8e025f",
+      "shippingStatus": "private helper test; not a governed or shipped product artifact"
+    },
+    {
+      "path": "/private/tmp/dakia-h016-faithful-upgrade.mjs",
+      "sha256": "00079250e9ae21ee557093da555f8bcdfd7c1aa277db13053a01049f83250f97",
+      "shippingStatus": "historical private helper; incompatible with the provider Reader hold receipts and must not be used for the current run"
+    },
+    {
+      "path": "/private/tmp/dakia-h016-faithful-upgrade.node-test.mjs",
+      "sha256": "455a0d17a9ec47aa324725316085dd693cf40ddc0c787f20f641b9d72ae4f084",
+      "shippingStatus": "historical test for the incompatible helper; retained as prior evidence only"
+    },
+    {
+      "path": "/private/tmp/dakia-h016-provider-reader-adapter.mjs",
+      "sha256": "ddb1afb45ee2f026aa62a36b6c8572d162bc39e44ef29941dd864a5693734b31",
+      "shippingStatus": "current approved private adapter for governed provider Reader hold receipts; not a governed or shipped product artifact"
+    },
+    {
+      "path": "/private/tmp/dakia-h016-provider-reader-adapter.node-test.mjs",
+      "sha256": "d9f0111beaa0cb45d7800401e54d5302e17155dca71350d19e8c5506a76c849b",
+      "shippingStatus": "current private adapter tests; 9 of 9 passed in each of three consecutive runs"
+    },
+    {
+      "path": "/private/tmp/dakia-h016-faithful-upgrade-provider-reader.mjs",
+      "sha256": "2e4b4282f11cccf7511d33ee6930ea8e3595fd6e041312b0d8163a2cc1793e0b",
+      "shippingStatus": "current approved private faithful-upgrade helper for the provider Reader candidate; not a governed or shipped product artifact"
+    },
+    {
+      "path": "/private/tmp/dakia-h016-faithful-upgrade-provider-reader.node-test.mjs",
+      "sha256": "8265e4a2d26454e16a1a4a3674a93a2cc5be22a8c2c90d6d18024f3df372e449",
+      "shippingStatus": "current corrected helper tests; 10 of 10 passed in each of three consecutive runs"
+    },
+    {
+      "path": "/private/tmp/dakia-h016-provider-reader-preparation-final.json",
+      "sha256": "31ecb205f97de40a59dd7b3743e1f088e7224a20913a707983534ac52acd6d62",
+      "shippingStatus": "current preparation manifest; binds exact approved private artifacts and records native execution as pending"
+    }
+  ],
+  "approvedIdentity": {
+    "record": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/approved-native-identity.json",
+    "recordSha256": "5da99cfafb42678e72d1cc47e16183439ee15aaac304bc6d3e9b19a44c90d23e",
+    "contract": "dakia-native-provider-reader-approved-identity-v1",
+    "root": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2",
+    "app": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/Dakia Fictional Provider Reader.app",
+    "displayName": "Dakia Fictional Provider Reader",
+    "bundleIdentifier": "dev.dakia.fictional-provider-reader.run-OTAMH2",
+    "desktopSha256": "2cc898a0691f8f9f3b015b33f841fca2847b7afca99b8a2c267c42a2e74c12f1",
+    "cliSha256": "6b72b2de4f89f6910b01f0b7fc6198f42f3d54ccb5708c20aaea6d955e5ea0cd",
+    "inventory": {
+      "sha256": "55483dc79e6d0abaead46550a11703b1bda95a67c73e0a4189130b1a7651ce8e",
+      "entries": 18
+    },
+    "filesystem": "record is an owned mode-0600 regular file; root is an owned mode-0700 canonical directory",
+    "bootstrapResult": "passed before this documentation turn; the original application bundle remained intact and no application was launched by bootstrap"
+  },
+  "readyCommand": "DAKIA_KEEP_NATIVE_PROVIDER_READER_ARTIFACTS=1 DAKIA_NATIVE_MAIL_SAFETY_SECOND_ACCOUNT=1 DAKIA_NATIVE_MAIL_SAFETY_ACL_PROBE=1 ./scripts/native-provider-reader-acceptance.sh --packaged --reuse-approved-identity '/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/approved-native-identity.json' --hold-approved-candidate-after-exit",
+  "h016CurrentPrivateWorkflow": {
+    "status": "preparation-passed-live-run-pending",
+    "manifest": "/private/tmp/dakia-h016-provider-reader-preparation-final.json",
+    "historicalIncompatibility": "the old dakia-h016-faithful-upgrade helper accepts only dev.dakia.fictional-packaged-acl identifiers and the older artifact-provenance schema; it cannot consume this provider Reader harness",
+    "adapterCommand": "node /private/tmp/dakia-h016-provider-reader-adapter.mjs create --handoff $RUN_ROOT/post-exit-acceptance-handoff.json --repo-root /Users/arsalan/code/codex-worktrees/36f9/dakia-desktop --output-dir /private/tmp/dakia-h016-provider-adapter.$ADAPTER_UUID",
+    "preflightCommand": "node /private/tmp/dakia-h016-faithful-upgrade-provider-reader.mjs preflight --provenance $ADAPTER_ROOT/artifact-provenance.json --inventory $ADAPTER_ROOT/app-inventory.json --expected-app-sha $APP_SHA --expected-provenance-sha $PROVENANCE_SHA --expected-inventory-sha $INVENTORY_SHA --expected-bundle-identifier dev.dakia.fictional-provider-reader.run-OTAMH2 --expected-source-digest $SOURCE_DIGEST",
+    "prepareRule": "run the corrected helper with the same arguments and prepare command only after preflight passes and the exact normal Application Support destination is rechecked absent",
+    "remaining": "the adapter has not consumed future governed hold receipts, and the corrected helper has not copied the profile, launched the app, produced WebKit evidence, sealed the profile, written the release sentinel, or triggered original-app restoration"
+  },
+  "expectedPackagedBoundary": {
+    "executableProof": "record the exact approved app executable path, SHA-256, PID, architecture, and bundle inventory before UI interaction",
+    "webviewProof": "the accessibility tree must report tauri://localhost/; a Vite URL is not packaged evidence",
+    "buildContract": [
+      "private static Vite assets",
+      "Tauri debug custom-protocol application",
+      "build.devUrl is null",
+      "updater endpoints are empty",
+      "createUpdaterArtifacts is false",
+      "no Developer ID signing, notarization, stapling, updater signing, upload, or publication"
+    ],
+    "isolation": "one random version-4 WebKit data-store identifier from the main Tauri window config is reused by main, detached mail, local ACL, and remote ACL windows only under the exact enabled fictional fixture gate",
+    "aclEvidence": "local unlisted Wry IPC must reach the dispatcher and receive ACL rejection for privileged commands while an allowed read-only main-window control succeeds; remote untrusted content has no IPC bridge and is reported separately"
+  },
+  "boundedSyncHold": {
+    "command": "node scripts/native-fictional-imap-proxy.mjs --control-root <RUN_ROOT> --action hold --duration-ms 35000",
+    "acknowledgement": "before clicking Sync require held=true, holdDurationMs=35000, the exact lastCommandId, and a parseable future holdDeadlineAt with enough time remaining",
+    "release": "the in-process timer automatically resumes within 35 seconds; --action resume uses the same release path for early completion",
+    "transport": "existing and newly accepted fictional proxy socket pairs remain pending through socket backpressure and resume with exact bytes; the helper does not signal a PID or stop GreenMail",
+    "nativeClaimLimit": "the pending native run can prove cached Reader and Compose remain usable during the bounded shared-proxy hold; it does not prove uncached Reader fetch, physical sleep and wake, or send completion before release"
+  },
+  "postExitHandoff": {
+    "handoffFile": "<RUN_ROOT>/post-exit-acceptance-handoff.json",
+    "status": "waiting-for-post-exit-acceptance",
+    "releaseSentinel": "<RUN_ROOT>/.native-provider-reader-post-exit-complete",
+    "expectedReleaseContent": "dakia-native-provider-reader-post-exit-complete-v1\n",
+    "expectedReleaseBytes": "the final two bytes are 0x31 0x0a; a literal backslash followed by n is rejected",
+    "releaseMode": "0600 owned regular nonsymlink at the exact canonical run-root path",
+    "procedure": [
+      "After the primary packaged run exits with status 0, keep the exact approved candidate and provider services active under the guarded hold.",
+      "Run H016 against the candidate at the canonical approved application path before any restoration or relocation.",
+      "Prove the H016 PID uses that executable, the WebView URL is tauri://localhost/, the old cached fictional message body is visible, unread and star state are preserved, and the application exits normally.",
+      "Write the exact expectedReleaseContent from the handoff record to the release sentinel only after the candidate process is proven absent.",
+      "Let the original harness validate the sentinel and absent process, restore the sealed original byte-for-byte, and write the final transaction and retention receipts."
+    ],
+    "failClosedConditions": [
+      "signal",
+      "timeout",
+      "invalid or premature sentinel",
+      "handoff write failure",
+      "process probe error",
+      "candidate process still running",
+      "unknown or changed bundle inventory"
+    ]
+  },
+  "focusedGates": [
+    {
+      "gate": "provider harness executable regression suite",
+      "status": "passed",
+      "command": "node --test scripts/native-provider-reader-fixture.node-test.mjs",
+      "result": "1 passed, 0 failed; required unsandboxed /bin/ps access for the guarded process probe",
+      "sensitivity": "the test reads expectedReleaseContent from the generated handoff, proves the validator accepts it, and proves a literal backslash-n payload is rejected"
+    },
+    {
+      "gate": "fictional IMAP bounded hold integration suite",
+      "status": "passed",
+      "command": "node --test scripts/native-fictional-imap-proxy.node-test.mjs",
+      "result": "9 passed, 0 failed",
+      "sensitivity": "removing the pause from an existing socket pair makes the focused regression fail; invalid duration, disabled hold, early resume, timer replacement, automatic release, new connection, and close-while-held paths are covered"
+    },
+    {
+      "gate": "provider harness shell and JavaScript syntax and formatting",
+      "status": "passed",
+      "command": "bash -n scripts/native-provider-reader-acceptance.sh && node --check scripts/native-provider-reader-fixture.node-test.mjs && npx prettier --check scripts/native-provider-reader-fixture.node-test.mjs"
+    },
+    {
+      "gate": "feature-only WebKit data-store gate",
+      "status": "passed",
+      "command": "cargo test --locked -p dakia-desktop --features native-mail-safety-fixture data_store_identifier_requires_the_exact_fixture_and_random_uuid --lib -- --nocapture",
+      "result": "1 passed, 0 failed; 201 filtered at that run"
+    },
+    {
+      "gate": "fixture endpoint and exact SMTP target gate",
+      "status": "passed",
+      "command": "cargo test --locked -p dakia-desktop --features native-mail-safety-fixture fixture_endpoints_accept_loopback_only_and_seed_exact_smtp_tls_targets --lib -- --nocapture",
+      "result": "1 passed, 0 failed; 203 filtered at that run"
+    },
+    {
+      "gate": "fixture feature compilation",
+      "status": "passed",
+      "command": "cargo check --locked -p dakia-desktop --features native-mail-safety-fixture --lib"
+    },
+    {
+      "gate": "shared live-profile helper suite",
+      "status": "passed",
+      "command": "node --test scripts/native-shared-profile-acceptance.node-test.mjs",
+      "result": "7 passed, 0 failed"
+    },
+    {
+      "gate": "native attachment fault helper suites",
+      "status": "passed",
+      "command": "node --test scripts/native-attachment-fault-acceptance.node-test.mjs && ./scripts/test-native-attachment-fault-acceptance.sh",
+      "result": "7 Node tests passed and the shell rejection suite passed; these source suites do not create or mount a disk image"
+    },
+    {
+      "gate": "private translation-arrival helper suite",
+      "status": "passed",
+      "command": "python3 /private/tmp/test-dakia-native-translation-arrival.py",
+      "result": "7 passed, 0 failed"
+    },
+    {
+      "gate": "historical private H016 helper suite",
+      "status": "historical-incompatible",
+      "command": "node --test /private/tmp/dakia-h016-faithful-upgrade.node-test.mjs",
+      "result": "9 passed, 0 failed for its older dev.dakia.fictional-packaged-acl schema; it cannot consume the governed provider Reader hold receipts and is not ready for this run"
+    },
+    {
+      "gate": "current provider Reader H016 adapter suite",
+      "status": "passed-preparation-only",
+      "command": "node --test /private/tmp/dakia-h016-provider-reader-adapter.node-test.mjs",
+      "result": "9 passed, 0 failed in each of three consecutive runs; actual future hold-receipt adaptation remains pending"
+    },
+    {
+      "gate": "current provider Reader faithful-upgrade helper suite",
+      "status": "passed-preparation-only",
+      "command": "node --test /private/tmp/dakia-h016-faithful-upgrade-provider-reader.node-test.mjs",
+      "result": "10 passed, 0 failed in each of three consecutive runs; profile preparation, app launch, WebKit verification, and sealing remain pending"
+    },
+    {
+      "gate": "Rust formatting",
+      "status": "passed",
+      "command": "cargo fmt --all -- --check"
+    },
+    {
+      "gate": "scoped diff whitespace",
+      "status": "passed",
+      "command": "git diff --check -- scripts/native-provider-reader-acceptance.sh scripts/native-provider-reader-fixture.node-test.mjs"
+    }
+  ],
+  "priorNativeEvidence": [
+    {
+      "gate": "fictional native attachment leaf-symlink collision",
+      "status": "passed",
+      "result": "symlink and owned canary stayed unchanged; exact collision copy was mode 0600, quarantined, and did not auto-open",
+      "provenance": "parent-driven native run recorded in docs/mail-safety-results/native-corrections-provider-reader-2026-10-21.json"
+    },
+    {
+      "gate": "fictional native 64 MiB HFS+ ENOSPC save and retry",
+      "status": "passed",
+      "result": "save failed visibly, spinner cleared, no final or partial file remained, original Downloads was restored, and retry saved exact 32-byte content with mode 0600 and quarantine",
+      "provenance": "parent-driven native run recorded in docs/mail-safety-results/native-corrections-provider-reader-2026-10-21.json"
+    },
+    {
+      "gate": "live desktop plus bundled CLI shared profile",
+      "status": "passed",
+      "result": "eight bounded read-only CLI processes passed while the fictional desktop remained active",
+      "provenance": "parent-driven native run recorded in docs/mail-safety-results/native-corrections-provider-reader-2026-10-21.json"
+    }
+  ],
+  "resolvedReviewFindings": [
+    "Removed rejected machine-specific OTAMH2 paths, bundle IDs, and executable hashes from governed source. Reuse now requires an explicit portable sealed identity record bootstrapped from an existing owned fictional harness root.",
+    "Closed the identity transaction gap before the active state, added directory fsync, rejected equal candidate and original inventories, and covered interrupted stages and physical-state recovery.",
+    "Moved record type checks before reads so FIFO and symlink records fail closed. Exact CFBundleName, bundle identifier, ownership, regular-file types, complete inventory, and executable hashes are validated.",
+    "Changed attachment hdiutil observations to exclusive unique evidence files. The earlier deterministic same-second collision remains recorded rather than hidden.",
+    "Added post-sign bundled CLI execution and recursive packaged classifier inventory verification.",
+    "Hardened the private translation helper against profile symlink escape and required canonical owned mode-0700 roots, nonsymlink markers, sealed full inventories, journal digests, and exact PID commands.",
+    "Rejected IMAP and SMTP port zero and required exact loopback TLS SMTP host, port, and server name for both fictional accounts.",
+    "Replaced fail-open process probing with running, absent, and probe-error states. Only an explicit absent result permits restoration.",
+    "Kept the H016 hold active until a valid release sentinel and an absent candidate probe. Signals, timeouts, malformed release files, and process probe errors retain the transaction for explicit recovery.",
+    "Derived the per-run WebKit data-store identifier from the main Tauri config instead of a second environment source, and required an exact random version-4 UUID under the fictional feature gate.",
+    "Corrected the handoff record to publish a newline byte in expectedReleaseContent. The validator rejects the previous literal backslash-n value.",
+    "Replaced the rejected process-stop preparation with a nonce-owned fictional IMAP proxy hold. Duration is bounded to 100 through 35000 milliseconds, the same in-process release path serves explicit and automatic resume, and control never signals a stored PID."
+  ],
+  "independentReview": {
+    "reviewer": "/root/native_acl_acceptance/native_harness_review",
+    "status": "passed with no blockers against the exact final two-file hashes",
+    "previousResult": "approved the sealed identity transaction, process tri-state, persistent post-exit hold, packaged mode, bundled CLI checks, classifier inventory, and mutation-sensitive tests without blockers",
+    "finalDeltaResult": "the test executes the production handoff writer and validator, confirms the JSON value contains a newline byte, confirms that value creates an accepted sentinel, and confirms the former literal backslash-n bytes are rejected; the broken writer fails both the exact-value assertion and validator path",
+    "boundedHoldIntegrationResult": "approved exact proxy and provider hashes with no blockers; the guidance requires the owned control root, bounded 35-second hold, held state, exact duration, acknowledged command ID, a parseable future deadline with useful time remaining, and explicit early resume while preserving identity, H016, and newline contracts"
+  },
+  "observedFailuresAndFlakes": [
+    {
+      "kind": "environment restriction",
+      "status": "resolved",
+      "observation": "the first sandboxed Node suite attempt returned probe-error because /bin/ps process enumeration was unavailable",
+      "resolution": "the same exact suite passed with the authorized native process-probe access",
+      "classification": "not a product failure and not a retry-hidden flake"
+    },
+    {
+      "kind": "historical helper defect",
+      "status": "resolved",
+      "observation": "two hdiutil observations within one second selected the same evidence filename",
+      "resolution": "exclusive unique observation files and a private failure artifact were added and covered by sensitivity tests"
+    },
+    {
+      "kind": "handoff contract defect",
+      "status": "resolved",
+      "observation": "the generated handoff previously published literal backslash-n while the release validator required a newline byte",
+      "resolution": "the generated value now round-trips through the exact validator, and the old value is rejected"
+    }
+  ],
+  "unexecutedAndWaivedGates": [
+    {
+      "gate": "final full source baseline on the final shared tree",
+      "status": "pending",
+      "reason": "this report binds focused artifacts while concurrent source work remains; parent runs the final complete baseline"
+    },
+    {
+      "gate": "packaged custom-protocol build and immutable candidate inventory",
+      "status": "pending",
+      "reason": "no build was launched in this documentation and final-delta turn"
+    },
+    {
+      "gate": "packaged executable identity and live WebView URL",
+      "status": "pending",
+      "reason": "the exact new executable path, PID, SHA-256, architecture, and tauri://localhost/ URL require the parent-driven live run"
+    },
+    {
+      "gate": "packaged Wry ACL evidence",
+      "status": "pending",
+      "reason": "source and dev-fixture evidence cannot replace actual custom-protocol Wry IPC and untrusted-origin results"
+    },
+    {
+      "gate": "faithful v0.4.4 to current GUI forward upgrade",
+      "status": "pending",
+      "reason": "H016 must run against the held canonical candidate before the release sentinel and restoration"
+    },
+    {
+      "gate": "final sealed-original restoration receipt",
+      "status": "pending",
+      "reason": "the harness writes it only after packaged acceptance and H016 finish"
+    },
+    {
+      "gate": "physical sleep and wake reconnect",
+      "status": "skipped",
+      "reason": "the user explicitly declined interrupting the Mac"
+    },
+    {
+      "gate": "Intel macOS native execution",
+      "status": "waived",
+      "reason": "no Intel hardware is available in this Apple Silicon acceptance lane; this is not counted as a pass"
+    },
+    {
+      "gate": "Developer ID signing, notarization, stapling, updater signature, public reachability, installation, latest.json, and publication",
+      "status": "waived-not-applicable",
+      "reason": "the candidate is an ad-hoc private debug fixture. No external release action is authorized and none is performed by the ready command."
+    }
+  ],
+  "claimLimits": [
+    "This record proves focused source and harness readiness, not the pending packaged runtime.",
+    "The existing approved identity binds a historical dev fixture. The new candidate must receive its own complete inventory, executable hashes, architecture, signature, and runtime identity evidence.",
+    "Controlled fixture network counters do not constitute a system-wide egress capture.",
+    "The ad-hoc packaged candidate does not provide Developer ID, notarization, stapling, updater, installed-client, or public-release assurance.",
+    "Missing native, architecture, provider, or release infrastructure is never counted as a pass."
+  ]
+}

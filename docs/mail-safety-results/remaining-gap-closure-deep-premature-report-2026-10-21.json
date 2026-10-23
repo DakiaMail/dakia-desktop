@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-21",
+  "lane": "deep",
+  "status": "invalid-premature-report",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "e9d99598cfa7d3adf3cba2fee4487a8fb61151f9bfd29950dd3bc50950dd74c4",
+    "fileCount": 929
+  },
+  "sourceTreeAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "e9d99598cfa7d3adf3cba2fee4487a8fb61151f9bfd29950dd3bc50950dd74c4",
+    "fileCount": 929
+  },
+  "environment": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "cargoBuildJobs": 2,
+    "fuzzTargetDirectory": "/private/tmp/dakia-mail-safety-expanded-fuzz-target-20261021"
+  },
+  "attempts": [
+    {
+      "number": 1,
+      "access": "sandbox",
+      "status": "failed",
+      "stage": "independent-server startup",
+      "result": "Docker daemon unavailable",
+      "exitCode": 69,
+      "rawLog": "/private/tmp/dakia-remaining-gap-closure-deep-20261021.log",
+      "rawLogSha256": "b87c239ed8d4248d7b199452a37820507f8add85877a278143c3c640ef5d61ba"
+    },
+    {
+      "number": 2,
+      "access": "authorized local Docker daemon",
+      "status": "failed",
+      "independentServers": [
+        {
+          "name": "GreenMail public-root TLS rejection",
+          "status": "passed",
+          "tests": 1
+        },
+        {
+          "name": "GreenMail trusted IMAP/SMTP round trip",
+          "status": "passed",
+          "tests": 1
+        },
+        {
+          "name": "Dovecot trusted production-connector round trip",
+          "status": "passed",
+          "tests": 1
+        }
+      ],
+      "fuzz": {
+        "seedCount": 75,
+        "seedManifestSha256": "3c7b7baad7f2b08377a371ef9bd398b60b201ab3362df63397bab1088dfbabf3",
+        "targets": {
+          "mime_budget": {
+            "status": "failed-before-execution",
+            "executions": 0,
+            "crashArtifact": false,
+            "failure": "AddressSanitizer fuzz executable aborted at dynamic-loader startup: libonnxruntime.1.23.2.dylib was not resolved despite the checked-in framework library existing."
+          },
+          "attachment_metadata": {
+            "status": "not-started",
+            "executions": 0,
+            "crashArtifact": false
+          }
+        }
+      },
+      "rawLog": "/private/tmp/dakia-remaining-gap-closure-deep-20261021-retry.log",
+      "rawLogSha256": "19ff6155639f0b5fcfa631470f703f29949634f3dce2094b3c33c775328d5560",
+      "fuzzTargetLog": "/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-mail-safety-fuzz.07tp0x/mime_budget.log",
+      "fuzzTargetLogSha256": "32a675ced25c535a5a85b5852bd25792d411986a7448145bbcd5e0abd75823d0"
+    }
+  ],
+  "limitations": [
+    "The bounded fuzz campaign did not execute a test input and therefore establishes no fuzzing pass.",
+    "This lane does not establish native WebKit, live-provider, packaged-release, or performance acceptance."
+  ],
+  "invalidReportReason": "An unfinished current campaign was confused with a historical fuzz log. This report must not be used as current outcome evidence; await actual current session completion."
+}

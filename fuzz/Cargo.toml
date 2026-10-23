@@ -1,0 +1,44 @@
+[package]
+name = "dakia-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# These direct pins make the standalone fuzz resolution use the same critical
+# parser and SMTP/TLS dependency versions as Dakia's checked-in workspace lock.
+# They are intentionally not called by targets; Cargo's unified resolver also
+# applies them to the `dakia-core` path dependency.
+mail-parser = "=0.11.5"
+# Keep Lettre's features solely under dakia-core's workspace dependency. The
+# standalone pin must not re-enable Lettre's default native-TLS features,
+# which conflict with Dakia's tokio1-rustls-tls production configuration.
+lettre = { version = "=0.11.22", default-features = false }
+
+[dependencies.dakia-core]
+path = "../crates/dakia-core"
+features = ["fuzzing"]
+
+[workspace]
+members = ["."]
+
+[patch.crates-io]
+# Keep standalone fuzzing on the same reviewed parser patch as the workspace.
+mail-parser = { path = "../vendor/mail-parser" }
+lettre = { path = "../vendor/lettre" }
+
+[[bin]]
+name = "mime_budget"
+path = "fuzz_targets/mime_budget.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "attachment_metadata"
+path = "fuzz_targets/attachment_metadata.rs"
+test = false
+doc = false

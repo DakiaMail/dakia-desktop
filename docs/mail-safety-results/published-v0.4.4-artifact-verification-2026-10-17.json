@@ -1,0 +1,41 @@
+{
+  "kind": "published-artifact-verification",
+  "tag": "v0.4.4",
+  "sourceTagObject": "fb54cbb06d3995e0158aa3de338908c917cf1e2a",
+  "sourceCommit": "8af5c397d81cc9aa60ddaca9b5eb15ecac9f6255",
+  "archive": {
+    "file": "Dakia-aarch64.app.tar.gz",
+    "bytes": 158455755,
+    "sha256": "8c52b32572e3d31d867cecac9c0306df0dda614251e6fa477c93ef569b442888",
+    "tauriSignature": "passed"
+  },
+  "signature": {
+    "file": "Dakia-aarch64.app.tar.gz.sig",
+    "bytes": 412,
+    "sha256": "3a29859be317be008fd29c1d1d99712859b49dc9a23044e6d600e5172d593bb1"
+  },
+  "checksumManifest": {
+    "file": "SHA256SUMS.txt",
+    "bytes": 276,
+    "sha256": "0810cf80b749be5985831cfc39ad176233c768863377ad40cb434c2935aa5800"
+  },
+  "bundle": {
+    "path": "extracted/Dakia.app",
+    "identifier": "dev.dakia.mail",
+    "shortVersion": "0.4.4",
+    "bundleVersion": "0.4.4",
+    "architecture": "arm64",
+    "developerIdTeam": "34T9L3FGZC",
+    "codesign": "passed-host",
+    "gatekeeper": "accepted-notarized-developer-id",
+    "stapler": "passed"
+  },
+  "archiveSafety": {
+    "entries": 29,
+    "traversalPaths": 0,
+    "links": 0
+  },
+  "launched": false,
+  "profileWrites": false,
+  "sourceMutations": false
+}

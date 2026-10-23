@@ -1,0 +1,151 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21",
+  "kind": "read-only-imap-list-standards-gap-map",
+  "status": "gap-mapped",
+  "scope": "RFC 3501 LIST response representation, hierarchy delimiter handling, and safe boundaries for accepting literal mailbox names. This report makes no source, test, native, provider, or release acceptance claim.",
+  "source": {
+    "checkoutHead": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+    "current1aNativeInputDigest": "1a27848c0142d4b2f51439fc77caeae076acc9fd7a640b66569aa0b4d67376e6",
+    "digestAlgorithm": "sha256-path-and-content-manifest",
+    "fileCount": 761,
+    "digestMeaning": "Copied from the current1a sourceTree in docs/mail-safety-results/native-corrections-three-run-source-2026-10-21.json. This read-only mapping did not recompute it and does not assert that the mutable checkout still matches it."
+  },
+  "rfcCorrection": {
+    "trackedRequirement": "MSR-3501-list",
+    "incorrectReference": {
+      "section": "RFC 3501 section 6.3.6",
+      "meaning": "SUBSCRIBE, not LIST",
+      "url": "https://www.rfc-editor.org/rfc/rfc3501.html#section-6.3.6"
+    },
+    "correctReference": [
+      {
+        "section": "RFC 3501 section 6.3.8",
+        "meaning": "LIST command request semantics",
+        "url": "https://www.rfc-editor.org/rfc/rfc3501.html#section-6.3.8"
+      },
+      {
+        "section": "RFC 3501 section 7.2.2",
+        "meaning": "LIST response grammar: attributes, hierarchy delimiter, and mailbox name",
+        "url": "https://www.rfc-editor.org/rfc/rfc3501.html#section-7.2.2"
+      }
+    ],
+    "catalogueAction": "Do not mutate the machine-readable requirement catalogue while the current1a native run is active. Apply this section correction when its next governed update is made."
+  },
+  "currentBehavior": {
+    "implemented": [
+      {
+        "behavior": "LIST command lines are parsed for attributes, quoted or atom mailbox names, escaped strings, and a NIL hierarchy delimiter.",
+        "sources": [
+          "crates/dakia-core/src/mail.rs:parse_list_mailbox",
+          "crates/dakia-core/src/mail/tests/imap_gap_matrix_tests.rs:ms_b_010_list_grammar_handles_case_escaping_nil_delimiters_and_unicode"
+        ]
+      },
+      {
+        "behavior": "Configured logical non-ASCII mailbox names use the strict modified UTF-7 codec, while a server-provided remote_name remains its exact wire identity for storage and later commands.",
+        "sources": [
+          "crates/dakia-core/src/imap_mailbox.rs",
+          "crates/dakia-core/src/mail.rs:MailboxCatalogState.remote_name"
+        ]
+      },
+      {
+        "behavior": "Special-use selection uses LIST attributes; the application does not construct or normalize mailbox hierarchy paths from the returned delimiter.",
+        "sources": [
+          "crates/dakia-core/src/mail.rs:resolve_special_mailboxes"
+        ]
+      }
+    ],
+    "testedSafeRejection": [
+      {
+        "behavior": "A LIST response with a literal mailbox name is rejected before SELECT or destructive catalog pruning; the existing local family remains preserved.",
+        "sources": [
+          "crates/dakia-core/src/mail.rs:scripted_reset_list_literal_mailbox_cannot_select_or_prune_a_family",
+          "crates/dakia-core/src/mail/tests/imap_gap_matrix_tests.rs:ms_b_010_list_grammar_handles_case_escaping_nil_delimiters_and_unicode"
+        ],
+        "evidenceStatus": "Declared by existing tests; not rerun by this read-only mapping."
+      },
+      {
+        "behavior": "Malformed quoted or atom forms fail validation rather than being interpreted as a different mailbox.",
+        "sources": [
+          "crates/dakia-core/src/mail.rs:validate_list_response",
+          "crates/dakia-core/src/mail.rs:parse_imap_astring"
+        ],
+        "evidenceStatus": "Implementation inspection only in this mapping."
+      }
+    ],
+    "unsupportedProfileFeatures": [
+      {
+        "feature": "Accepting a literal mailbox name in a LIST response",
+        "currentResult": "Unsupported and fail-closed. The generic IMAP command path retains response literals separately from lines, while LIST parsing only accepts atom or quoted mailbox names."
+      },
+      {
+        "feature": "Binding a LIST literal to the exact response line that declared it",
+        "currentResult": "Unsupported. ImapLiteral has content metadata but no originating response-line index, so safe association cannot be proven."
+      },
+      {
+        "feature": "\u005cNoselect enforcement",
+        "currentResult": "Unsupported. LIST attribute parsing does not currently fence a configured, special-use, or action destination mailbox marked \\Noselect before SELECT, APPEND, or MOVE."
+      },
+      {
+        "feature": "Hierarchy delimiter behavior beyond syntactic validation",
+        "currentResult": "Intentionally unused after parsing because Dakia neither creates nor derives mailbox paths from the delimiter. It must preserve the returned mailbox wire name without splitting or normalizing it."
+      }
+    ],
+    "notClaimed": [
+      "Complete RFC 3501 LIST conformance",
+      "Support for arbitrary response literals in every IMAP response type",
+      "Provider acceptance or independent-server coverage for LIST literal mailbox names"
+    ]
+  },
+  "minimumSafeImplementation": [
+    {
+      "id": "LIST-IMP-001",
+      "change": "Extend ImapLiteral with its originating response-line index, recorded while command_with_literal reads the literal. Do not infer ownership from literal order or from adjacent FETCH data."
+    },
+    {
+      "id": "LIST-IMP-002",
+      "change": "Add a LIST-specific response parser accepting exactly one mailbox-name representation: atom, quoted string, or a literal attached to that LIST line. Parse flags separately and accept a hierarchy delimiter only as NIL or one quoted character, as RFC 3501 defines. Reject missing, extra, cross-line, non-ASCII, control-containing, malformed modified UTF-7, oversized mailbox literals, atom delimiters, multi-character delimiters, and literal delimiters before catalog mutation."
+    },
+    {
+      "id": "LIST-IMP-003",
+      "change": "Cap a LIST mailbox literal at 8 KiB, independent of the generic 100 MiB response-literal limit. Decode it only through the strict modified UTF-7 codec; retain the original accepted wire bytes as remote_name."
+    },
+    {
+      "id": "LIST-IMP-004",
+      "change": "Treat \\Noselect as non-selectable: ignore it as a special-use candidate, fail an exact configured target before SELECT or APPEND, and fence MOVE/COPY destinations. Tolerate unknown and HasChildren or HasNoChildren attributes without assigning hierarchy semantics."
+    }
+  ],
+  "finiteAcceptanceCases": [
+    {
+      "id": "LIST-ACC-001",
+      "case": "A fragmented public-TLS fictional IMAP server returns a canonical modified-UTF-7 literal mailbox name for a non-ASCII Archive. Synchronization selects the exact original wire name and reopening storage retains that exact remote_name."
+    },
+    {
+      "id": "LIST-ACC-002",
+      "case": "Case-insensitive LIST, flags, NIL delimiter, one-character quoted dot or escaped-backslash delimiter, atom mailbox name, quoted escaped mailbox name, and line-bound literal mailbox name all parse. Atom, multi-character, and literal delimiters fail closed. The delimiter never changes or synthesizes the stored wire name."
+    },
+    {
+      "id": "LIST-ACC-003",
+      "case": "Missing, extra, oversized, raw non-ASCII, control-containing, malformed, or noncanonical modified-UTF-7 LIST literals fail before SELECT or catalog reset, preserving the prior local mailbox family."
+    },
+    {
+      "id": "LIST-ACC-004",
+      "case": "A \\Noselect \\Sent or \\Archive candidate is not selected or used for APPEND or MOVE. An exact configured noselect mailbox fails early. Unknown attributes and HasChildren or HasNoChildren remain tolerated when the candidate is selectable."
+    },
+    {
+      "id": "LIST-ACC-005",
+      "case": "An unrelated FETCH literal in the same response cannot supply a mailbox name to a LIST line. Cross-line literal association is rejected."
+    }
+  ],
+  "documentationCorrection": {
+    "file": "docs/mail-safety-remaining-gaps.md",
+    "requirement": "MS-B-010",
+    "correction": "The row now distinguishes supported quoted or atom LIST grammar from fragmented FETCH literals, and explicitly records that LIST mailbox literals are fail-closed and unsupported."
+  },
+  "execution": {
+    "testsRun": [],
+    "buildsRun": [],
+    "nativeAppsRun": [],
+    "reason": "The coordinator requested a read-only documentation mapping while current1a native verification is in progress."
+  }
+}

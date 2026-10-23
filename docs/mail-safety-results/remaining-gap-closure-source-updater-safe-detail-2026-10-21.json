@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T17:44:36.205Z",
+  "lane": "unchanged-source-three-run-baseline-detail",
+  "status": "passed",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "4e75af1f1febac3f261f7002d85565dafdd2860fe714cf99d9fbdaa970c6e4eb",
+    "fileCount": 937
+  },
+  "sourceTreeAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "4e75af1f1febac3f261f7002d85565dafdd2860fe714cf99d9fbdaa970c6e4eb",
+    "fileCount": 937
+  },
+  "parentReport": "docs/mail-safety-results/remaining-gap-closure-three-run-source-updater-safe-2026-10-21.json",
+  "parentReportSha256": "681bc99dc4985c85305b523bc71b8f8bc8eae9993bd0868bd7ad47894c4750c8",
+  "consecutiveRuns": 3,
+  "gatesPerRun": 16,
+  "perRun": {
+    "rustRuntimePassed": 992,
+    "rustDoctestsPassed": 2,
+    "rustIgnored": 11,
+    "frontendPassed": 593,
+    "frontendSkipped": 2,
+    "frontendFilesPassed": 61,
+    "frontendFilesSkipped": 3,
+    "scriptTestsPassed": 244,
+    "scriptTestsFailed": 0,
+    "scriptTestsSkipped": 0,
+    "coupledRustTestsPassed": 6,
+    "coupledFrontendTestsPassed": 11,
+    "coupledIntegrationRunnersPassed": [
+      "realtime delivery",
+      "MIME Reader artifact",
+      "attachment command artifact",
+      "mail command TLS"
+    ]
+  },
+  "rawLog": {
+    "path": "/private/tmp/dakia-three-run-source-updater-safe-20261021.log",
+    "bytes": 497841,
+    "sha256": "db9469cb4f064c29e4cc4e30be0e8c0058c7172530b4b31b34177c1c729b9df2"
+  },
+  "transcriptReconciliation": {
+    "perRun": [
+      {
+        "iteration": 1,
+        "totalRustLike": 1000,
+        "rustRuntime": 992,
+        "doctests": 2,
+        "ignored": 11,
+        "coupledRust": 6,
+        "frontend": 593,
+        "frontendSkips": 2,
+        "frontendFiles": 61,
+        "frontendFileSkips": 3,
+        "scripts": 244
+      },
+      {
+        "iteration": 2,
+        "totalRustLike": 1000,
+        "rustRuntime": 992,
+        "doctests": 2,
+        "ignored": 11,
+        "coupledRust": 6,
+        "frontend": 593,
+        "frontendSkips": 2,
+        "frontendFiles": 61,
+        "frontendFileSkips": 3,
+        "scripts": 244
+      },
+      {
+        "iteration": 3,
+        "totalRustLike": 1000,
+        "rustRuntime": 992,
+        "doctests": 2,
+        "ignored": 11,
+        "coupledRust": 6,
+        "frontend": 593,
+        "frontendSkips": 2,
+        "frontendFiles": 61,
+        "frontendFileSkips": 3,
+        "scripts": 244
+      }
+    ],
+    "rawRustPassesIncludingCoupledAndDoctests": 1000,
+    "formula": "992 workspace Rust runtime + 2 doctests + 6 coupled Rust assertions = 1000 raw Rust test passes per run."
+  },
+  "retries": 0,
+  "observedFlakes": 0,
+  "limitations": [
+    "Ignored and skipped tests are not passes.",
+    "These are source tests, separate from native, credentialed provider, performance, fuzz, dependency and release lanes.",
+    "Earlier invalidated and failed checkpoints remain retained; their corrected executions are not counted as retries in this clean three-run sequence.",
+    "Build emitted existing fixture-environment placeholder and browser externalization warnings; successful build alone does not establish WebKit translation execution."
+  ],
+  "coupledFrontendNote": "The three artifact-gated files omitted by the ordinary Vitest invocation execute separately through the coupled runners: one realtime, nine MIME and one attachment frontend tests, with no pending cases. These are separate from 593 ordinary frontend passes."
+}

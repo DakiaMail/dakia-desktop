@@ -1,0 +1,26 @@
+X-Dakia-Corpus-Case: standards-multipart-digest
+Date: Tue, 28 Jul 2026 10:21:00 +0000
+From: sender@example.test
+To: recipient@example.test
+Subject: Synthetic multipart digest defaults
+MIME-Version: 1.0
+Content-Type: multipart/digest; boundary="digest-boundary"
+
+--digest-boundary
+
+Date: Tue, 28 Jul 2026 09:00:00 +0000
+From: first@example.test
+To: archive@example.test
+Subject: First encapsulated message
+
+First encapsulated body.
+--digest-boundary
+Content-Type: message/rfc822
+
+Date: Tue, 28 Jul 2026 09:01:00 +0000
+From: second@example.test
+To: archive@example.test
+Subject: Explicit encapsulated message
+
+Second encapsulated body.
+--digest-boundary--

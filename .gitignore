@@ -21,3 +21,7 @@ apps/desktop/src-tauri/icons/android/
 apps/desktop/src-tauri/icons/ios/
 apps/desktop/src-tauri/icons/Square*.png
 apps/desktop/src-tauri/icons/StoreLogo.png
+
+# Python test helper bytecode
+__pycache__/
+*.py[cod]

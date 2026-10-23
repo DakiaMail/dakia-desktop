@@ -1,0 +1,164 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-21T21:05:39.798Z",
+  "lane": "unchanged-source-three-run-baseline-detail",
+  "status": "passed",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "8218b1f3621ee3cba9b2cb697275f0d85c0cac6abc39b5b90a817ed876abe605",
+    "fileCount": 940,
+    "manifestPath": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-targeted-window-seed-handoff.json",
+    "manifestSha256": "6207c844963d47316127e254b9e55a4de7d7dab9cffcb38b8b8c5cd64abd80ca"
+  },
+  "sourceTreeAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "8218b1f3621ee3cba9b2cb697275f0d85c0cac6abc39b5b90a817ed876abe605",
+    "fileCount": 940
+  },
+  "parentReport": "docs/mail-safety-results/remaining-gap-closure-three-run-source-targeted-window-seed-handoff-2026-10-21.json",
+  "parentReportSha256": "ee1ff8a33ef067d916f1d31a4ab1860ac98c482ba0127d91ce7e9d8a85d2259a",
+  "startedAt": "2026-10-21T20:51:52.208Z",
+  "finishedAt": "2026-10-21T21:04:55.629Z",
+  "consecutiveRuns": 3,
+  "gatesPerRun": 16,
+  "gateExecution": {
+    "totalGates": 48,
+    "allExitCodeZero": true,
+    "allSignalsNull": true,
+    "failedGateCount": 0,
+    "perRun": [
+      {
+        "iteration": 1,
+        "gateCount": 16,
+        "allPassed": true
+      },
+      {
+        "iteration": 2,
+        "gateCount": 16,
+        "allPassed": true
+      },
+      {
+        "iteration": 3,
+        "gateCount": 16,
+        "allPassed": true
+      }
+    ]
+  },
+  "perRun": {
+    "iteration": 1,
+    "workspaceRustRuntimePassed": 1007,
+    "rustDoctestsPassed": 2,
+    "rustIgnored": 11,
+    "coupledRustAssertionsPassed": 6,
+    "rawRustPassesIncludingWorkspaceDoctestsAndCoupled": 1015,
+    "ordinaryFrontendTestsPassed": 614,
+    "ordinaryFrontendTestsSkipped": 2,
+    "ordinaryFrontendFilesPassed": 63,
+    "ordinaryFrontendFilesSkipped": 3,
+    "coupledFrontendTestsPassed": 11,
+    "scriptTestsPassed": 246,
+    "allWorkspaceRustBlocksPassed": true,
+    "allExtractedRustBlocksPassed": true
+  },
+  "transcriptReconciliation": {
+    "perRun": [
+      {
+        "iteration": 1,
+        "workspaceRustRuntimePassed": 1007,
+        "rustDoctestsPassed": 2,
+        "rustIgnored": 11,
+        "coupledRustAssertionsPassed": 6,
+        "rawRustPassesIncludingWorkspaceDoctestsAndCoupled": 1015,
+        "ordinaryFrontendTestsPassed": 614,
+        "ordinaryFrontendTestsSkipped": 2,
+        "ordinaryFrontendFilesPassed": 63,
+        "ordinaryFrontendFilesSkipped": 3,
+        "coupledFrontendTestsPassed": 11,
+        "scriptTestsPassed": 246,
+        "allWorkspaceRustBlocksPassed": true,
+        "allExtractedRustBlocksPassed": true
+      },
+      {
+        "iteration": 2,
+        "workspaceRustRuntimePassed": 1007,
+        "rustDoctestsPassed": 2,
+        "rustIgnored": 11,
+        "coupledRustAssertionsPassed": 6,
+        "rawRustPassesIncludingWorkspaceDoctestsAndCoupled": 1015,
+        "ordinaryFrontendTestsPassed": 614,
+        "ordinaryFrontendTestsSkipped": 2,
+        "ordinaryFrontendFilesPassed": 63,
+        "ordinaryFrontendFilesSkipped": 3,
+        "coupledFrontendTestsPassed": 11,
+        "scriptTestsPassed": 246,
+        "allWorkspaceRustBlocksPassed": true,
+        "allExtractedRustBlocksPassed": true
+      },
+      {
+        "iteration": 3,
+        "workspaceRustRuntimePassed": 1007,
+        "rustDoctestsPassed": 2,
+        "rustIgnored": 11,
+        "coupledRustAssertionsPassed": 6,
+        "rawRustPassesIncludingWorkspaceDoctestsAndCoupled": 1015,
+        "ordinaryFrontendTestsPassed": 614,
+        "ordinaryFrontendTestsSkipped": 2,
+        "ordinaryFrontendFilesPassed": 63,
+        "ordinaryFrontendFilesSkipped": 3,
+        "coupledFrontendTestsPassed": 11,
+        "scriptTestsPassed": 246,
+        "allWorkspaceRustBlocksPassed": true,
+        "allExtractedRustBlocksPassed": true
+      }
+    ],
+    "workspaceRustFormula": "15 CLI unit + 22 provider-smoke + 14 CLI subprocess + 728 core-library runtime + 2 AI privacy + 4 local search semantics + 5 mail boundary properties + 4 mutation convergence + 1 state model + 3 mailbox epoch + 205 desktop-library + 4 updater runtime = 1,007.",
+    "rawRustFormula": "1,007 workspace Rust runtime + 2 doctests + 6 coupled Rust assertions = 1,015 raw Rust passes per run.",
+    "coupledIntegrationRunners": [
+      {
+        "name": "realtime delivery",
+        "rustAssertions": 2,
+        "frontendTests": 1
+      },
+      {
+        "name": "MIME Reader artifact",
+        "rustAssertions": 2,
+        "frontendTests": 9
+      },
+      {
+        "name": "attachment command artifact",
+        "rustAssertions": 1,
+        "frontendTests": 1
+      },
+      {
+        "name": "mail command TLS",
+        "rustAssertions": 1,
+        "frontendTests": 0
+      }
+    ],
+    "ordinaryFrontendExclusions": "Three artifact-gated frontend files are skipped by ordinary Vitest and executed through the coupled runners."
+  },
+  "rawLog": {
+    "path": "/private/tmp/dakia-three-run-source-targeted-window-seed-handoff-20261021.log",
+    "bytes": 508134,
+    "sha256": "dc6b9ba8fa040f8e739057568aabf87712d2dcdc3a0c927f6fbc953ee9cd08b4"
+  },
+  "privateExtraction": {
+    "path": "/private/tmp/dakia-targeted-window-seed-source-detail-extract.json",
+    "sha256": "95056a2624dfc09951e5734b8c796191ea23f3bb429cafc0039545bbfd919492",
+    "description": "Read-only transcript extraction. The durable counts above were reconciled against the raw workspace and coupled-run boundaries."
+  },
+  "buildWarnings": {
+    "status": "completed-build-with-retained-warnings",
+    "occurrencesPerRun": 5,
+    "description": "Vite externalized node:worker_threads, node:fs, node:path and node:fs/promises from @browsermt/bergamot-translator worker or translator modules for browser compatibility.",
+    "limitation": "A successful web build and these retained externalization warnings do not establish WebKit translation-worker behavior."
+  },
+  "retries": 0,
+  "observedFlakes": 0,
+  "limitations": [
+    "Ignored Rust tests and skipped frontend files are not passes.",
+    "This is source-test evidence only. Native WebKit, credentialed provider, performance, fuzz, dependency-audit and release lanes remain separate.",
+    "The active source tree was unchanged across this run, but this receipt does not carry forward results from other source identities.",
+    "Historical failures remain retained and are not retries in this sequence."
+  ]
+}

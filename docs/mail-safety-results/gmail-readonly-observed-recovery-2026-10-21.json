@@ -1,0 +1,199 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T15:50:23.649335+00:00",
+  "lane": "production-read-only-gmail-recovery-with-private-stage-observation",
+  "status": "passed-once-intermittent-provider-lane",
+  "evidence": {
+    "binarySha256": "bf38c4af2975f25cc9656b0290340dbd11ec70ee6a77f2f6ba0db5a4b977e276",
+    "childReaped": true,
+    "cleanupIncomplete": false,
+    "elapsedMs": 6676,
+    "fixedRecoveryId": "redacted-fixed-id",
+    "forcedKillRequested": false,
+    "implementation": {
+      "focusedProviderSmokeTests": "20 passed",
+      "independentReview": "approved"
+    },
+    "innerTimeoutSeconds": 45,
+    "kind": "private-provider-smoke-ci-read-only-recovery",
+    "mailSubmissionRequested": false,
+    "operations": [
+      "read-only exact recovery"
+    ],
+    "outerTimeout": false,
+    "outerTimeoutSeconds": 70,
+    "ownedChildTempDirRemoved": true,
+    "processExitCode": 0,
+    "providerSourceSha256": "fc67c93e35e6507d3ae84f98c38239994ad9eeda18199444d0df3f55de4287db",
+    "rawEvidence": {
+      "bytes": 1186,
+      "schemaValid": true,
+      "sha256": "6e630fdc23586f0ccdc32ee7d15a98af4ecc5d95b4550dfe4acf301e2ca08a3f"
+    },
+    "recoveryEvidence": {
+      "outcome": "passed",
+      "stage": "inbox_observation",
+      "stageHistory": [
+        "prepared",
+        "recovery_store_open",
+        "recovery_account_persist",
+        "recovery_credential_persist",
+        "recovery_smoke",
+        "recovery_header_sync",
+        "recovery_exact_search",
+        "recovery_body_fetch",
+        "recovery_cache_verify",
+        "recovery_hydrate",
+        "recovery_cache_read",
+        "inbox_observation"
+      ]
+    },
+    "recoveryEvidenceRemoved": true,
+    "remoteMutationRequested": false,
+    "roundtripRequested": false,
+    "schemaVersion": 1,
+    "sourceBindingSha256": "e2eedf003489cf42c4fb5e9e2bf76ef7a96de6b43c39e020e78fb2fb88a1a814",
+    "terminationRequested": false,
+    "workspaceSourceSha256": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c"
+  },
+  "stageObservation": {
+    "coalescedStageGroups": [
+      {
+        "firstObservedAtMs": 3713,
+        "stages": [
+          "prepared"
+        ]
+      },
+      {
+        "firstObservedAtMs": 3738,
+        "stages": [
+          "recovery_store_open"
+        ]
+      },
+      {
+        "firstObservedAtMs": 3782,
+        "stages": [
+          "recovery_account_persist",
+          "recovery_credential_persist",
+          "recovery_smoke"
+        ]
+      },
+      {
+        "firstObservedAtMs": 4251,
+        "stages": [
+          "recovery_header_sync"
+        ]
+      },
+      {
+        "firstObservedAtMs": 5323,
+        "stages": [
+          "recovery_exact_search"
+        ]
+      },
+      {
+        "firstObservedAtMs": 5580,
+        "stages": [
+          "recovery_body_fetch"
+        ]
+      },
+      {
+        "firstObservedAtMs": 6653,
+        "stages": [
+          "recovery_cache_verify",
+          "recovery_hydrate"
+        ]
+      },
+      {
+        "firstObservedAtMs": 6996,
+        "stages": [
+          "recovery_cache_read",
+          "inbox_observation"
+        ]
+      }
+    ],
+    "evidenceObserved": true,
+    "evidenceValidation": "valid_snapshots",
+    "forcedKillRequestedByMonitor": false,
+    "invalidEvidenceReadCount": 0,
+    "kind": "private-wrapper-recovery-stage-observation",
+    "missedFastStages": [
+      "recovery_account_persist",
+      "recovery_credential_persist",
+      "recovery_cache_verify",
+      "recovery_cache_read"
+    ],
+    "monitorElapsedMs": 7046,
+    "monitorMaximumTotalSeconds": 80,
+    "monitorNormalWrapperSeconds": 70,
+    "monitorPollMilliseconds": 20,
+    "observedStages": [
+      {
+        "firstObservedAtMs": 3713,
+        "stage": "prepared"
+      },
+      {
+        "firstObservedAtMs": 3738,
+        "stage": "recovery_store_open"
+      },
+      {
+        "firstObservedAtMs": 3782,
+        "stage": "recovery_account_persist"
+      },
+      {
+        "firstObservedAtMs": 3782,
+        "stage": "recovery_credential_persist"
+      },
+      {
+        "firstObservedAtMs": 3782,
+        "stage": "recovery_smoke"
+      },
+      {
+        "firstObservedAtMs": 4251,
+        "stage": "recovery_header_sync"
+      },
+      {
+        "firstObservedAtMs": 5323,
+        "stage": "recovery_exact_search"
+      },
+      {
+        "firstObservedAtMs": 5580,
+        "stage": "recovery_body_fetch"
+      },
+      {
+        "firstObservedAtMs": 6653,
+        "stage": "recovery_cache_verify"
+      },
+      {
+        "firstObservedAtMs": 6653,
+        "stage": "recovery_hydrate"
+      },
+      {
+        "firstObservedAtMs": 6996,
+        "stage": "recovery_cache_read"
+      },
+      {
+        "firstObservedAtMs": 6996,
+        "stage": "inbox_observation"
+      }
+    ],
+    "remoteMutationRequested": false,
+    "rootWasEmptyBeforeWrapper": true,
+    "schemaVersion": 1,
+    "sidecarWrittenAfterWrapperExit": true,
+    "stageTimingScope": "poll snapshots only; no command durations are inferred",
+    "terminationRequestedByMonitor": false,
+    "transientEvidenceReadCount": 151,
+    "wrapperCommandChanged": false,
+    "wrapperExitCode": 0,
+    "wrapperSha256": "6f88c4d83d02ade862899150db1fccdaafb3956cd671a3822a492c07fcc37ce3"
+  },
+  "sanitizedReportSha256": "1f6ac8ee0ede07b21fc12643d2320c7e990aaba07b262eea2561d0975a66f32f",
+  "stageSidecarSha256": "b9e4bb897c0387c9e3eb380b44cf0ade2734032f4acb29e416514d758aec7d2b",
+  "sourceIdentityNote": "Immutable bf38 executable and CLI source are identical to the preceding c47 recovery timeout. Later f6 changes affect desktop fixture configuration and harness tests only; this is not a rebuild or a native result.",
+  "limitations": [
+    "One observed invocation completed in 6,676 ms without retries or forced termination; the prior failures on this same executable and earlier build remain.",
+    "20 ms polling may coalesce or miss fast stages; these timestamps are observations, not exact command durations.",
+    "The passing invocation does not explain the retained 45-second timeouts or establish reliable provider acceptance, multi-label convergence, other accounts, native Reader behavior or a new SMTP round trip.",
+    "No sends, flags, labels, deletes or other remote mutations were requested; owned temporary credential state was removed."
+  ]
+}

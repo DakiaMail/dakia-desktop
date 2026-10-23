@@ -1,0 +1,218 @@
+{
+  "schemaVersion": 1,
+  "kind": "bounded-component-evidence-equivalence",
+  "status": "go-component-only",
+  "recordedAt": "2026-10-22",
+  "decision": "The retained 0e1 deep independent-server and fuzz result, manual mailbox-performance result, and dependency-audit result may be cited for the listed byte-identical inputs at b14. This is not a b14 whole-source, native, provider, package, release, or rerun result.",
+  "fromMeasuredSource": {
+    "digest": "0e1a6829efb3c3e8620d68b0e9d8864f39f12d7b844ed2f792c8abd0474fb953",
+    "fileCount": 961,
+    "manifest": "/private/tmp/dakia-final-test-successor-evidence-v2-20261022/source-manifest.json",
+    "manifestSha256": "f5674652e76918feaf220e49a0a5c6fad910f327dcd5d4fb2f66fce43227f10e"
+  },
+  "toCandidateSource": {
+    "digest": "b14fca648f7d0862f439fbb08890cef8085d025687e35d75322814d2f8dcca0e",
+    "fileCount": 961,
+    "manifest": "/private/tmp/dakia-final-test-successor-evidence-v3-20261022/source-manifest.json",
+    "manifestSha256": "5728448b1f79241dffbd132b71642bb2df9e7bcba1c0311bfe724611df42cbbc"
+  },
+  "manifestComparison": {
+    "unchangedPathCount": 959,
+    "changedPathCount": 2,
+    "changedPaths": [
+      {
+        "path": "scripts/native-provider-reader-acceptance.sh",
+        "from": {
+          "bytes": 112410,
+          "sha256": "3cb60a4ed0985df002dae7c8fee415a36e7117605dd9a3a9ca156b408597caa9"
+        },
+        "to": {
+          "bytes": 112610,
+          "sha256": "71e17daae017d4cf98d34fdb9f1561ee3892509ebde69b4c967373cdd2a5a863"
+        },
+        "reviewedChange": "Fixture marker files are created under umask 0177, and --attachment-interruption --prepare-only now waits for the interruption proxies before exiting."
+      },
+      {
+        "path": "scripts/native-provider-reader-attachment-interruption-wiring.node-test.mjs",
+        "from": {
+          "bytes": 8756,
+          "sha256": "9513760818905053b2d490c752fd3ebe28dd8615db060a8c194f80140b4c281f"
+        },
+        "to": {
+          "bytes": 12115,
+          "sha256": "27899a2b97aea1c4b0f26bca7c8bfc274a0463052d74f151fb43f989784c44d6"
+        },
+        "reviewedChange": "The wiring regression checks marker mode and requires the opt-in prepare-only exit to occur after proxy readiness and before profile bootstrap."
+      }
+    ]
+  },
+  "retainedMeasuredEvidence": {
+    "deepIndependentServersAndFuzz": {
+      "report": "docs/mail-safety-results/test-only-successor-deep-2026-10-22.json",
+      "reportSha256": "92051bc2b526cdcde5a125745a954ddc4d532db341e7e021f196e0e5679240cf",
+      "measuredStatus": "passed",
+      "measuredSourceDigest": "0e1a6829efb3c3e8620d68b0e9d8864f39f12d7b844ed2f792c8abd0474fb953",
+      "retainedInputs": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "sha256": "47ffc21b8e0b1840c2ce42161a9764e677adfad5030fdc955271cf3aedc954eb"
+        },
+        {
+          "path": "crates/dakia-core/src/storage.rs",
+          "sha256": "62498fcfea355efd5c9e949d0fecaa6afb2d26b99864e469349ed5f8dbf7ebfd"
+        },
+        {
+          "path": "crates/dakia-core/src/independent_server_tests.rs",
+          "sha256": "39d126ec3a29ba6ad733f9f286d81d1bc9382dc104bd01563feb75c7924b34df"
+        },
+        {
+          "path": "crates/dakia-cli/src/bin/provider-smoke.rs",
+          "sha256": "b2d699c1b25a283518a950ce1feda05c7dc9c89e7cc6fa1fc089fd7a7b9d2338"
+        },
+        {
+          "path": "fuzz/Cargo.toml",
+          "sha256": "b02dfd24bab25267483d572c36da5e71af3b61a907d4912fb8c0e86cfb811eae"
+        },
+        {
+          "path": "fuzz/fuzz_targets/mime_budget.rs",
+          "sha256": "7f4eb17483e2748edebfdeeae248ad42d24fe8c644c51eec778852264a3ea378"
+        },
+        {
+          "path": "fuzz/fuzz_targets/attachment_metadata.rs",
+          "sha256": "2cb79fbd206ce1308ee13778c745d94d1791112d251f57494045dce7202e54d1"
+        },
+        {
+          "path": "scripts/mail-safety-servers.sh",
+          "sha256": "7f4ecc1b29187f94d70e59787dfb731ed3aeb0a0464bf5398a910eaa1ec1c86a"
+        },
+        {
+          "path": "scripts/run-mail-safety-fuzz.sh",
+          "sha256": "dab7c5caa313c2322111dd2ffc6775b2f9466fcb86d874a2e9bc9005d76c7d38"
+        },
+        {
+          "path": "testdata/realistic-fixtures.manifest.json",
+          "sha256": "cc7e39fc4b017368c06c87af126c564703be5ba79853f9d59c61b763f89a8071"
+        }
+      ],
+      "retainedResult": "The 0e1 run passed public-root TLS rejection and trusted GreenMail IMAP/SMTP round trips, plus Dovecot 2.4.5 selective metadata, plain, and HTML fetches without full-raw fallback or STORE. It completed two 31-second fuzz campaigns with 76 seeds, 41263 MIME-budget executions, 116378 attachment-metadata executions, and no crash artifact.",
+      "limits": [
+        "The 0e1 report did not capture the completed process ASAN_OPTIONS value, so no ASAN runtime setting is carried.",
+        "This does not establish b14 native, live-provider, package, release, signing, notarization, updater, or performance behavior."
+      ]
+    },
+    "manualMailboxPerformance": {
+      "report": "docs/mail-safety-results/test-only-successor-performance-2026-10-22.json",
+      "reportSha256": "f973a1bffa59aa1f4a6303cacb6355bdaee06ce898735a9ebce9e82a621598d5",
+      "measuredStatus": "passed",
+      "measuredSourceDigest": "0e1a6829efb3c3e8620d68b0e9d8864f39f12d7b844ed2f792c8abd0474fb953",
+      "retainedInputs": [
+        {
+          "path": "crates/dakia-core/src/mail.rs",
+          "sha256": "47ffc21b8e0b1840c2ce42161a9764e677adfad5030fdc955271cf3aedc954eb"
+        },
+        {
+          "path": "crates/dakia-core/src/storage.rs",
+          "sha256": "62498fcfea355efd5c9e949d0fecaa6afb2d26b99864e469349ed5f8dbf7ebfd"
+        },
+        {
+          "path": "crates/dakia-core/src/mail/tests/resilience_performance_tests.rs",
+          "sha256": "bf469680858e5bd29de4f7c42e781541ac192080b0a084c7bc261d821a8eb2ee"
+        },
+        {
+          "path": "scripts/run-mail-resilience-performance.mjs",
+          "sha256": "7a7997823931a48979c25458ab3ab36230d39c858e921de004fe83a61c72c97f"
+        }
+      ],
+      "retainedResult": "The 0e1 Apple M1 Max debug-profile loopback run passed three measurements at each 2k, 30k, 100k, and 200k scale. The median changes against its retained baseline were +15.71%, +3.56%, +4.26%, and +2.68%. Its 200 reconnect and 100 Store-open soak held file descriptors at 10 and grew resident memory by 1359872 bytes, below the 64 MiB limit.",
+      "limits": [
+        "This carries only the recorded loopback performance component, not a b14 rerun.",
+        "It does not establish provider latency, native WebKit responsiveness, or long-process memory behavior."
+      ]
+    },
+    "dependencyAudit": {
+      "report": "docs/mail-safety-results/successor-dependency-audit-2026-10-22.json",
+      "reportSha256": "4315d8a0205090c6001ab3d97fa8c437f4733e7199dd89f2abef4a3230107f38",
+      "measuredStatus": "passed-with-allowed-warnings",
+      "measuredSourceDigest": "0e1a6829efb3c3e8620d68b0e9d8864f39f12d7b844ed2f792c8abd0474fb953",
+      "retainedInputs": [
+        {
+          "path": "Cargo.toml",
+          "sha256": "a101a1b7d6ef9e1015f15d93fc722a927f38a60cf5fe85c0fc494d41d95561eb"
+        },
+        {
+          "path": "Cargo.lock",
+          "sha256": "78e7136d6ff7a477e2317feb99a976a75376b1283a331babaca26b83c27f58b2"
+        },
+        {
+          "path": "crates/dakia-core/Cargo.toml",
+          "sha256": "f69475dc8dd0741daa758a623a886d37431b7969ae6e87cc23e268ab136f0d13"
+        },
+        {
+          "path": "crates/dakia-cli/Cargo.toml",
+          "sha256": "3c2e830d6aef5a1b34bc989aaf2b61632359bd721377ba198c0204b5bb197951"
+        },
+        {
+          "path": "apps/desktop/src-tauri/Cargo.toml",
+          "sha256": "07b3145666e7ee2bf014e6b1d32a5dad216d758696a55989f361ed320a96f03c"
+        },
+        {
+          "path": "fuzz/Cargo.toml",
+          "sha256": "b02dfd24bab25267483d572c36da5e71af3b61a907d4912fb8c0e86cfb811eae"
+        },
+        {
+          "path": "fuzz/Cargo.lock",
+          "sha256": "f07697a88633babbc07378ec41088987457527ec00f217566d6bb573411c71a3"
+        },
+        {
+          "path": "package-lock.json",
+          "sha256": "ec85e8d77a670963d49224d083cc9133b30763f048e8b520360f9c51c4bb5e1b"
+        },
+        {
+          "path": ".cargo/audit.toml",
+          "sha256": "0a31dab852dead3b6c393c395475001792fde4cb008bad2c478d6776d0e52cc0"
+        },
+        {
+          "path": "scripts/audit-dependencies.sh",
+          "sha256": "78a1949129f8863be0f70e4e54651552c537781aab07f3da7dce8ace5fe9503b"
+        },
+        {
+          "path": "scripts/verify-vendored-crates.mjs",
+          "sha256": "1b5edfd506b5cd15fb96b8a1ce702fbf01791ff1c105815a2a8984dae4ad504c"
+        }
+      ],
+      "retainedResult": "The recorded audit reported zero npm vulnerabilities and ten configured cargo-audit unmaintained-package warnings.",
+      "limits": [
+        "The advisory database was not refetched for b14.",
+        "The root .gitignore is outside both source manifests, so this receipt makes no claim about it.",
+        "This is advisory and dependency evidence, not proof of absence of application vulnerabilities."
+      ]
+    }
+  },
+  "successorHarnessPreparation": {
+    "reviewedHarnessRevision": "71e17daae017d4cf98d34fdb9f1561ee3892509ebde69b4c967373cdd2a5a863",
+    "reviewedPreparation": {
+      "receipt": "/private/tmp/dakia-native-provider-prepare-only-fix-20261022/preparation-receipt.json",
+      "receiptSha256": "0375ecac4183ff6a1ef932488bb05ca6251ae98b5a9644cbe368e2aa00ac8c68",
+      "focusedNodeTests": {
+        "passed": 9,
+        "failed": 0,
+        "skipped": 0
+      },
+      "scope": "Static harness preparation only. The reviewed receipt records shell syntax, marker-mode, and prepare-only ordering checks."
+    },
+    "isolatedPrepareOnlyRun": {
+      "status": "passed-prepare-only",
+      "runRoot": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.SN3YU3",
+      "receipt": "/private/tmp/dakia-g013-prepare-only-receipt-20261022.json",
+      "receiptSha256": "9197c23adea42d4de5e923a4d145460089fb480e61c94ec948347a3b944868cf",
+      "logSha256": "4cd8c95306cf5731e22940517437dc182110ac95890aa1590527f798a6a5b7e0",
+      "scope": "An isolated fictional GreenMail fixture prepared the account-bound attachment interruption overlay. It did not launch Dakia, arm the proxy, interrupt a save, or establish retry behavior."
+    }
+  },
+  "nonCarryForward": [
+    "b14 source validation was still running when this receipt was written.",
+    "Neither the changed native harness nor its changed wiring test carries native UI or attachment-interruption acceptance forward.",
+    "No live credentialed provider, package, release, signing, notarization, updater, or whole-source result is implied.",
+    "The 0e1 deep and performance environments were not rerun at b14."
+  ]
+}

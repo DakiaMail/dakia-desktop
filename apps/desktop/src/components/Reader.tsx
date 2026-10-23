@@ -30,7 +30,6 @@ import {
   IconShieldX,
 } from "@tabler/icons-react";
 import { AI_FEATURES_VISIBLE } from "../features";
-import { format } from "date-fns";
 import {
   Fragment,
   useCallback,
@@ -42,7 +41,11 @@ import {
 } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { useTranslation } from "react-i18next";
-import { api, messageContentErrorFromUnknown } from "../api";
+import {
+  api,
+  attachmentSaveErrorFromUnknown,
+  messageContentErrorFromUnknown,
+} from "../api";
 import type { ComposeSeed } from "../composeWindow";
 import { composeSeedFromMailto } from "../mailto";
 import { confirmNativeAction, showNativeMessage } from "../nativeFeedback";
@@ -63,6 +66,7 @@ import {
   splitAddressValues,
 } from "../recipients";
 import { splitQuotedText } from "../quotedHistory";
+import { formatMailTimestamp } from "../mailTimestamp";
 import { EmptyState } from "./EmptyState";
 import { HtmlMessage } from "./HtmlMessage";
 
@@ -97,6 +101,15 @@ type Props = {
   onUnsubscribe: (message: MailSummary) => void;
   onToggleStar: (message: MailSummary, starred: boolean) => void;
 };
+
+type MessageContentTarget = Pick<
+  MailSummary,
+  "account_id" | "id" | "mailbox_uid_validity"
+>;
+
+function messageContentIdentity(message: MessageContentTarget) {
+  return `${message.account_id}:${message.id}:${message.mailbox_uid_validity ?? "none"}`;
+}
 
 export function Reader({
   message,
@@ -266,14 +279,17 @@ export function Reader({
     [threadKey],
   );
   const loadContent = useCallback(
-    (messageId: string) => {
-      const existing = contentRequests.get(messageId);
+    (target: MessageContentTarget) => {
+      const requestKey = messageContentIdentity(target);
+      const existing = contentRequests.get(requestKey);
       if (existing) return existing;
-      const request = api.content(messageId).catch((error) => {
-        contentRequests.delete(messageId);
-        throw error;
-      });
-      contentRequests.set(messageId, request);
+      const request = api
+        .content(target.id, target.mailbox_uid_validity ?? null)
+        .catch((error) => {
+          contentRequests.delete(requestKey);
+          throw error;
+        });
+      contentRequests.set(requestKey, request);
       return request;
     },
     [contentRequests],
@@ -327,7 +343,17 @@ export function Reader({
         message.subject,
         threadMessages,
         {
-          loadContent,
+          loadContent: (messageId) => {
+            const target = threadMessages.find(
+              (threadMessage) => threadMessage.id === messageId,
+            );
+            if (!target) {
+              return Promise.reject(
+                new Error("Message is no longer available"),
+              );
+            }
+            return loadContent(target);
+          },
           detectLanguage: detectTranslationLanguage,
           listModels: api.translationModels,
           approveDownload: (model) => {
@@ -562,7 +588,7 @@ export function Reader({
         ) : null}
         {threadMessages.map((threadMessage) => (
           <ThreadMessage
-            key={threadMessage.id}
+            key={messageContentIdentity(threadMessage)}
             message={threadMessage}
             isSent={
               Boolean(accountEmail) &&
@@ -650,7 +676,7 @@ function ThreadMessage({
   unsubscribeLoading: boolean;
   onUnsubscribe: (message: MailSummary) => void;
   translatedContent?: MessageContent;
-  loadContent: (messageId: string) => Promise<MessageContent>;
+  loadContent: (message: MessageContentTarget) => Promise<MessageContent>;
 }) {
   const { t } = useTranslation();
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -660,6 +686,9 @@ function ThreadMessage({
   const [loadingContent, setLoadingContent] = useState(false);
   const [contentError, setContentError] = useState<MessageContentErrorKind>();
   const [contentAttempt, setContentAttempt] = useState(0);
+  const [remoteContentAllowedFor, setRemoteContentAllowedFor] = useState<
+    string | undefined
+  >();
   const [loadingAttachments, setLoadingAttachments] = useState(false);
   const [saving, setSaving] = useState<string>();
   const [saveStatus, setSaveStatus] = useState<string>();
@@ -669,6 +698,22 @@ function ThreadMessage({
   const [recipientsExpanded, setRecipientsExpanded] = useState(false);
   const summaryDescriptionId = useId();
   const displayContent = translatedContent ?? content;
+  // Permission is tied to the full durable IMAP identity. Comparing the key
+  // during render means a retargeted Reader cannot briefly reuse prior consent
+  // before an effect resets state. UIDVALIDITY is required because a mailbox
+  // rollover can reuse a UID for a different email.
+  const remoteContentIdentity = `${message.account_id}:${message.id}:${message.mailbox_uid_validity}`;
+  const remoteContentAllowed =
+    remoteContentAllowedFor === remoteContentIdentity;
+  const contentIdentity = messageContentIdentity(message);
+  const contentTarget = useMemo<MessageContentTarget>(
+    () => ({
+      account_id: message.account_id,
+      id: message.id,
+      mailbox_uid_validity: message.mailbox_uid_validity,
+    }),
+    [message.account_id, message.id, message.mailbox_uid_validity],
+  );
   const recipients = useMemo(() => messageRecipients(message), [message]);
   const downloadableAttachments = useMemo(
     () => attachments.filter(isDownloadableAttachment),
@@ -677,6 +722,17 @@ function ThreadMessage({
   const hasDownloadableAttachments = attachmentsAuthoritative
     ? downloadableAttachments.length > 0
     : message.has_attachments;
+
+  // Thread rows remain mounted while collapsed. Remote-content consent is a
+  // viewing-session grant, so a later expand must not revive a prior view's
+  // permission. The durable identity reset also fences a reused row before
+  // any late content work can render it.
+  useEffect(() => {
+    if (!isExpanded) setRemoteContentAllowedFor(undefined);
+  }, [isExpanded]);
+  useEffect(() => {
+    setRemoteContentAllowedFor(undefined);
+  }, [remoteContentIdentity]);
 
   const showAddressContextMenu = (
     address: string,
@@ -688,9 +744,10 @@ function ThreadMessage({
   };
 
   useEffect(() => {
+    setContent(undefined);
     setAttachments([]);
     setAttachmentsAuthoritative(false);
-  }, [message.id]);
+  }, [contentIdentity]);
 
   useEffect(() => {
     if (!isExpanded) return;
@@ -698,7 +755,7 @@ function ThreadMessage({
     setContentError(undefined);
     setLoadingContent(true);
     setLoadingAttachments(true);
-    void loadContent(message.id)
+    void loadContent(contentTarget)
       .then((next) => {
         if (current) {
           setContent(next);
@@ -720,13 +777,17 @@ function ThreadMessage({
     return () => {
       current = false;
     };
-  }, [contentAttempt, isExpanded, loadContent, message.id]);
+  }, [contentAttempt, contentIdentity, contentTarget, isExpanded, loadContent]);
 
   const saveOne = async (attachment: Attachment) => {
     if (saving) return;
     setSaving(attachment.id);
     try {
-      await api.saveAttachment(message.id, attachment.id);
+      await api.saveAttachment(
+        message.id,
+        attachment.id,
+        message.mailbox_uid_validity ?? null,
+      );
       setSaveStatus(t("attachments.saved", { count: 1 }));
     } catch {
       setSaveStatus(t("attachments.saveError"));
@@ -738,10 +799,21 @@ function ThreadMessage({
     if (saving || downloadableAttachments.length < 2) return;
     setSaving("all");
     try {
-      const saved = await api.saveAllAttachments(message.id);
+      const saved = await api.saveAllAttachments(
+        message.id,
+        message.mailbox_uid_validity ?? null,
+      );
       setSaveStatus(t("attachments.saved", { count: saved.length }));
-    } catch {
-      setSaveStatus(t("attachments.saveError"));
+    } catch (error) {
+      const outcome = attachmentSaveErrorFromUnknown(error);
+      setSaveStatus(
+        outcome.savedCount === undefined || outcome.totalCount === undefined
+          ? t("attachments.saveError")
+          : t("attachments.savePartial", {
+              saved: outcome.savedCount,
+              total: outcome.totalCount,
+            }),
+      );
     } finally {
       setSaving(undefined);
     }
@@ -752,7 +824,10 @@ function ThreadMessage({
     setExporting(true);
     setExportStatus(undefined);
     try {
-      const path = await api.exportMessage(message.id);
+      const path = await api.exportMessage(
+        message.id,
+        message.mailbox_uid_validity ?? null,
+      );
       setExportStatus(t("reader.exportSuccess", { path }));
     } catch {
       setExportStatus(t("reader.exportError"));
@@ -799,7 +874,10 @@ function ThreadMessage({
             </span>
             <span className="reader-visually-hidden" id={summaryDescriptionId}>
               {message.snippet}.{" "}
-              {format(new Date(message.received_at), "EEEE d MMM 'at' HH:mm")}
+              {formatMailTimestamp(
+                message.received_at,
+                "EEEE d MMM 'at' HH:mm",
+              )}
               {hasDownloadableAttachments ? `. ${t("inbox.attachment")}` : ""}
             </span>
           </span>
@@ -813,7 +891,7 @@ function ThreadMessage({
             </span>
           ) : null}
           <time className="reader-date">
-            {format(new Date(message.received_at), "EEEE d MMM 'at' HH:mm")}
+            {formatMailTimestamp(message.received_at, "EEEE d MMM 'at' HH:mm")}
           </time>
         </button>
       </section>
@@ -931,7 +1009,7 @@ function ThreadMessage({
           ) : null}
         </div>
         <time className="reader-date">
-          {format(new Date(message.received_at), "EEEE d MMM 'at' HH:mm")}
+          {formatMailTimestamp(message.received_at, "EEEE d MMM 'at' HH:mm")}
         </time>
         <Tooltip label={t("actions.reply")}>
           <ActionIcon
@@ -1077,6 +1155,11 @@ function ThreadMessage({
           title={message.subject}
           showHistoryLabel={t("reader.showHistory")}
           hideHistoryLabel={t("reader.hideHistory")}
+          remoteContentAllowed={remoteContentAllowed}
+          loadRemoteContentLabel={t("reader.loadRemoteContent")}
+          onLoadRemoteContent={() =>
+            setRemoteContentAllowedFor(remoteContentIdentity)
+          }
           onMailto={(href) => {
             const seed = composeSeedFromMailto(href);
             if (seed) onComposeLink(seed);
@@ -1148,7 +1231,10 @@ function ThreadMessage({
               <span className="attachment-details">
                 <strong>{attachment.filename}</strong>
                 <small>
-                  {formatBytes(attachment.size_bytes)} · {attachment.mime_type}
+                  {attachment.size_kind === "decoded"
+                    ? formatBytes(attachment.size_bytes)
+                    : t("attachments.sizeUnavailable")}{" "}
+                  · {attachment.mime_type}
                   {attachment.is_inline ? ` · ${t("attachments.inline")}` : ""}
                 </small>
                 {attachment.is_potentially_unsafe ? (

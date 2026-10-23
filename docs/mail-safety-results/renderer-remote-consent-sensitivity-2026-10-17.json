@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "lane": "deterministic-sensitivity",
+  "status": "passed",
+  "baseRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "source": {
+    "path": "apps/desktop/src/components/Reader.tsx",
+    "sha256": "c7ae22f3f52014238be296ddad04d006f948eb3771552c4aca3f4d6a9206aaee",
+    "copyRoot": "/private/tmp/dakia-reader-remote-sensitivity",
+    "liveCheckoutModified": false
+  },
+  "scenario": {
+    "id": "reader-remote-content-session-isolation",
+    "test": "does not revive remote-content consent after switching between mounted thread messages",
+    "securityProperty": "A remote-content grant expires when a thread row is collapsed, so returning to that mounted row cannot restore the previous message's remote image without a new explicit action."
+  },
+  "mutation": {
+    "description": "Removed only the collapse effect that clears remoteContentAllowedFor.",
+    "removedSource": "useEffect(() => { if (!isExpanded) setRemoteContentAllowedFor(undefined); }, [isExpanded]);",
+    "expectedBrokenOutcome": "After allowing remote content for message A, expanding message B, and expanding A again, A's remote image retains its src without renewed consent."
+  },
+  "commands": {
+    "command": "NODE_OPTIONS=--localstorage-file=/private/tmp/dakia-reader-remote-sensitivity-localstorage npm test -- --run apps/desktop/src/components/Reader.test.tsx -t 'does not revive remote-content consent after switching between mounted thread messages'",
+    "initial": {
+      "exitCode": 0,
+      "passed": 1,
+      "skipped": 69,
+      "log": "renderer-remote-consent-sensitivity-2026-10-17.initial-output.txt"
+    },
+    "mutant": {
+      "exitCode": 1,
+      "killed": true,
+      "failure": "Reader.test.tsx:352 expected the re-expanded A image to have no src, but received true.",
+      "log": "renderer-remote-consent-sensitivity-2026-10-17.mutant-output.txt"
+    },
+    "restored": {
+      "exitCode": 0,
+      "passed": 1,
+      "skipped": 69,
+      "sha256MatchesOriginal": true,
+      "log": "renderer-remote-consent-sensitivity-2026-10-17.restored-output.txt"
+    }
+  },
+  "artifacts": [
+    "renderer-remote-consent-sensitivity-2026-10-17.source-sha256.txt",
+    "renderer-remote-consent-sensitivity-2026-10-17.restored-sha256.txt",
+    "renderer-remote-consent-sensitivity-2026-10-17.initial.exit-code",
+    "renderer-remote-consent-sensitivity-2026-10-17.mutant.exit-code",
+    "renderer-remote-consent-sensitivity-2026-10-17.restored.exit-code"
+  ],
+  "limitations": [
+    "This is a jsdom component sensitivity test. Native WebKit network and iframe behavior require separate acceptance evidence.",
+    "The isolated copy reused the checkout's read-only installed dependencies and did not access provider credentials or mailboxes."
+  ]
+}

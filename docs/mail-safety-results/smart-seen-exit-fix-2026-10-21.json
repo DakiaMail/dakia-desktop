@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "lane": "smart-inbox-seen-row-exit-marker",
+  "recordedAt": "2026-10-21T12:38:41Z",
+  "status": "passed-source-native-replay-pending",
+  "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "nativeObservation": {
+    "run": "1a",
+    "status": "failed-before-fix",
+    "artifact": {
+      "path": "docs/mail-safety-results/native-final-2026-10-21/native-corrections-1a/smart-missing-remote-after-offline.ax.txt",
+      "sha256": "d2ba121e063c4e302efd29b2e2e2dae5722adeb1c36eeb15e501879f0c2fca43"
+    },
+    "detail": "After UID 3 and UID 4 had both become read, the Smart Inbox showed only UID 4 in Seen after opening UID 4, an offline mark-unread failure and rollback, and a realtime refresh. UID 3 remained present in the database and in List view. Changing account or view restored both messages in Seen.",
+    "provenCause": "A thread that was already authoritative in Seen still received the global ordinary-section exit marker when another thread opened. If that marker remained, the completed CSS animation left the row at zero opacity even after an authoritative refresh continued to return it.",
+    "timingQualification": "The native sequence is consistent with the 180 ms cleanup callback being delayed while other native and offline work occurred, but that exact native timer interleaving was not instrumented and is therefore probable rather than proven."
+  },
+  "fix": {
+    "detail": "Pass ordinary Smart exit markers only to ordinary category sections. Seen and Starred use ThreadRows' empty exit-marker set, while ordinary sections retain the existing 180 ms transition.",
+    "scope": "Presentation marker routing only. Account scope, thread contents, immutable message targets, selection state, pagination, and mutation reconciliation are unchanged."
+  },
+  "regressions": [
+    {
+      "test": "MailList action feedback > does not apply an ordinary Smart exit marker to Seen or Starred",
+      "path": "apps/desktop/src/components/MailList.test.tsx",
+      "coverage": "Renders one account-scoped thread in Other, Starred, and Seen. It asserts data-smart-exiting=true for Other and false for Starred and Seen, proving the ordinary animation remains while special sections are exempt."
+    },
+    {
+      "test": "App read state > keeps an earlier Seen thread visible through a failed offline unread rollback",
+      "path": "apps/desktop/src/App.test.tsx",
+      "coverage": "Replays UID 3 Seen, UID 4 Seen/open, failed offline mark-unread rollback, and an authoritative refresh containing both Seen rows. The test deliberately holds only the production 180 ms cleanup callback and asserts UID 3's DOM data-smart-exiting marker is false. It does not rely on jsdom visibility or CSS animation behavior; it verifies that an authoritative Seen row no longer depends on stale timer cleanup for its rendered state."
+    }
+  ],
+  "sensitivity": {
+    "method": "With both regressions present, temporarily restored the old global exit-marker propagation in MailList.tsx, ran the exact two tests, and then restored the fix.",
+    "status": "failed-as-expected",
+    "failures": [
+      {
+        "test": "App read state > keeps an earlier Seen thread visible through a failed offline unread rollback",
+        "assertion": "expected data-smart-exiting=false, received true"
+      },
+      {
+        "test": "MailList action feedback > does not apply an ordinary Smart exit marker to Seen or Starred",
+        "assertion": "expected data-smart-exiting=false, received true"
+      }
+    ],
+    "rawLog": {
+      "path": "/private/tmp/dakia-smart-seen-exit-sensitivity.log",
+      "sha256": "8c4719b940408472b165347819020e4a77206ed82b61376ef9b2849b5f16c0ef"
+    }
+  },
+  "focusedVerification": {
+    "command": "npx vitest run apps/desktop/src/App.test.tsx apps/desktop/src/components/MailList.test.tsx apps/desktop/src/realtimeDelivery.integration.test.tsx apps/desktop/src/mutationStateModel.integration.test.tsx --maxWorkers=1 --reporter=dot",
+    "status": "passed",
+    "testFilesPassed": 4,
+    "testsPassed": 141
+  },
+  "staticVerification": {
+    "typecheck": {
+      "command": "npm run typecheck",
+      "status": "passed"
+    },
+    "format": {
+      "command": "npx prettier --check apps/desktop/src/App.test.tsx apps/desktop/src/components/MailList.tsx apps/desktop/src/components/MailList.test.tsx",
+      "status": "passed"
+    },
+    "diffCheck": {
+      "command": "git diff --check -- apps/desktop/src/App.test.tsx apps/desktop/src/components/MailList.tsx apps/desktop/src/components/MailList.test.tsx",
+      "status": "passed"
+    }
+  },
+  "independentReview": {
+    "reviewer": "/root/remaining_realtime/startup_reconcile_review",
+    "status": "approved",
+    "materialFindings": 0,
+    "detail": "The reviewer confirmed that ordinary sections retain the 180 ms exit behavior, Seen and Starred are correctly exempt, the App test follows the native rollback and refresh sequence, the timer spy is restored in a finally block, and the change does not alter account, selection, or pagination state."
+  },
+  "files": [
+    {
+      "path": "apps/desktop/src/App.test.tsx",
+      "sha256": "82b82d6a6038d4362007a0366b85e9eac36bc63f236c2f4b1405fcf9cc47a66c"
+    },
+    {
+      "path": "apps/desktop/src/components/MailList.tsx",
+      "sha256": "267645b284e7f4d06c583a2597737abd8441dea3745b11e9b2550126f58cdad1"
+    },
+    {
+      "path": "apps/desktop/src/components/MailList.test.tsx",
+      "sha256": "3952e2524111b45615d947f2acfeb400dd167bc7a2231d97c703093bbe651012"
+    }
+  ],
+  "limitations": [
+    "The fixed behavior has not yet been replayed in a fresh isolated native run.",
+    "The exact native scheduling event that left the exit marker stale was not instrumented; the source and sensitivity tests prove the stale-marker failure mode and remove the timer dependency for Seen and Starred.",
+    "This focused verification does not replace the coordinated full source baseline."
+  ]
+}

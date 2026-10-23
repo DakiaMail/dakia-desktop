@@ -1,0 +1,21 @@
+{
+  "source_revision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "date": "2026-10-21",
+  "scope": "private-copy standalone vendor mail-parser address parser tests",
+  "workspace_source": "vendor/mail-parser/src/parsers/fields/address.rs",
+  "sha256": {
+    "workspace_before": "ee8452925234c366910f44d5a1b78a9fb4cfdb9b5e1fdbf80443e57e7a7d9284",
+    "private_copy_before": "ee8452925234c366910f44d5a1b78a9fb4cfdb9b5e1fdbf80443e57e7a7d9284",
+    "private_copy_after": "ee8452925234c366910f44d5a1b78a9fb4cfdb9b5e1fdbf80443e57e7a7d9284"
+  },
+  "license": {
+    "apache_2_0_copy_matches_workspace": true
+  },
+  "command": "cargo test --manifest-path <private-copy>/Cargo.toml --lib --features serde parsers::fields::address::tests --target-dir <private-copy>/target -- --nocapture",
+  "result": {
+    "exit_code": 0,
+    "passed": 2,
+    "failed": 0,
+    "notes": "The private copy isolates dependency resolution and generated Cargo.lock from the Dakia workspace."
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "status": "passed",
+  "recordedAtUtc": "2026-10-22T00:57:14.939202+00:00",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "04b1368f7a758b2ad77d95442a2d5a0d3b7ce74f1f100bb59967aeef8b9ad471",
+    "fileCount": 952
+  },
+  "report": "/private/tmp/dakia-deep-logout-and-full-list-tools-20261022.json",
+  "reportSha256": "3d924b6a1461ea7c58582f7ef3b025452b14fbe65ff2f4aebb6759bd6ddbf18d",
+  "log": "/private/tmp/dakia-deep-logout-and-full-list-tools-20261022.log",
+  "logSha256": "90b633cdf02495e9625321f68d337863f66cca2ab51b678d11a6a75d6ef52efa",
+  "independentServers": [
+    "GreenMail untrusted-TLS rejection and production roundtrip",
+    "Dovecot production connector roundtrip",
+    "Dovecot selective MIME/cache/reopen; no full-raw fallback or STORE"
+  ],
+  "fuzz": {
+    "seedCount": 76,
+    "mimeBudgetExecutions": 35811,
+    "attachmentMetadataExecutions": 113348,
+    "secondsPerTarget": 31,
+    "crashArtifacts": 0,
+    "cargoFuzzVersion": "0.13.2"
+  },
+  "retainedInfrastructureFailure": "staged-logout-full-list-deep-tool-discovery-failure-2026-10-22.json",
+  "limitations": [
+    "64 MiB sanitizer quarantine limits temporal use-after-free sensitivity.",
+    "Bounded fuzzing does not establish absence of vulnerabilities.",
+    "No native WebKit, live-provider, packaged-upgrade, release, performance or global branch-coverage acceptance."
+  ]
+}

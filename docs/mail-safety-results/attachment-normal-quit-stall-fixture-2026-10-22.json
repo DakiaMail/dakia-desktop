@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-22T11:39:23Z",
+  "status": "passed-fixture-contract-native-acceptance-pending",
+  "scope": "Focused TLS fixture evidence for an interrupted individual attachment fetch while a future native test performs an ordinary Dakia Quit. This records the applied fixture contract only. It does not record a GUI run, application Quit, restart, download-directory result, provider result, or user cancellation API.",
+  "appliedFiles": [
+    {
+      "path": "scripts/native-fictional-attachment-interruption-proxy.mjs",
+      "sha256": "467ea913ca459f00789767f7e5b9963935bd7116b98170847fc68f12c63028c5",
+      "previousSha256": "8faf3d76c2bc26e066ea1794315f22bb7b38f8eccfa322ada2a77adf81edeab1"
+    },
+    {
+      "path": "scripts/native-fictional-attachment-interruption-proxy.node-test.mjs",
+      "sha256": "8b90b4dce4ba642997a22da96fda6fe6a4a15a4e8a05e2d36771932e2c43dec7",
+      "previousSha256": "94804d3893c6f2389198f99a0256644896ab75f7de32514eb6950a8692e11a75"
+    }
+  ],
+  "focusedRun": {
+    "command": "node --test scripts/native-fictional-attachment-interruption-proxy.node-test.mjs",
+    "transport": "local TLS loopback only",
+    "passed": 17,
+    "failed": 0,
+    "skipped": 0,
+    "log": "/private/tmp/dakia-attachment-quit-stall-primary-20261022/focused-tls.log",
+    "logSha256": "7a9bc7d483b4418ffe3e5bfa55314f346140216d7ac0b027ad706aebe09e3019"
+  },
+  "coveredFixtureContract": {
+    "arm": "The guarded arm-stall-single control accepts only the bound account A, INBOX, UID 3, UIDVALIDITY, and MIME part 3 selective fetch.",
+    "literal": {
+      "announcedBytes": 44,
+      "forwardedBytes": 12,
+      "withheldBytes": 32,
+      "prefix": "The complete binding-defined prefix is hashed before forwarding. The regression uses the faithful 12-byte prefix."
+    },
+    "receipts": [
+      "pending state exposes timestamps and protocol counts",
+      "client-eof is distinct from fixture-deadline, server-error, and fixture-closed",
+      "fixture-deadline is a controlled test timeout, not evidence of user cancellation"
+    ],
+    "isolationAndSafety": [
+      "An authenticated fictional account B can make the same UID fetch without consuming account A's armed or in-flight fault.",
+      "Mutating IMAP commands are rejected after the read-only window opens.",
+      "Unauthenticated and bound-but-unselected requests fail closed.",
+      "TLS client and backend sockets are cleaned up for client EOF and explicit fixture shutdown."
+    ]
+  },
+  "sensitivityAndCorrections": [
+    {
+      "issue": "A private review found that the initial stall implementation hashed only one byte even though the production fixture binding uses a 12-byte prefix.",
+      "correction": "LiteralStaller now receives and hashes the exact binding prefix length, bounded by the 12 forwarded bytes."
+    },
+    {
+      "issue": "The initial withheld-byte receipt depended on TLS chunk boundaries.",
+      "correction": "The receipt records the deterministic declared value 44 minus 12, and the regression holds the upstream remainder after the forwarded prefix."
+    },
+    {
+      "issue": "Socket event order could label an intentional fixture shutdown as a server error.",
+      "correction": "Fixture shutdown finalizes before socket destruction, and dedicated tests distinguish explicit shutdown from an upstream close."
+    }
+  ],
+  "review": {
+    "status": "GO",
+    "scope": "Private TLS fixture contract only",
+    "independentChecks": ["node --check", "17 of 17 local TLS tests"]
+  },
+  "applicationRecord": {
+    "journal": "/private/tmp/dakia-attachment-quit-stall-primary-20261022/application-journal.json",
+    "journalSha256": "abf5cd5694d9be21b47c31e231885909a381307232d2434f53086dccda8b0357",
+    "priorSourceDigest": "21cb7d875268b25d0f0a25d84c8922bba71a640dc39d52d62fe4f91d36598bab",
+    "priorSourceFileCount": 996,
+    "preMutationIncident": {
+      "description": "The first wrapper copy failed before mutation because its backup directory was missing. The source hashes were rechecked, the old proxy result was retained, and the reviewed files were then applied.",
+      "oldCheckLog": "/private/tmp/dakia-attachment-quit-stall-primary-20261022/old-proxy-preapplication-check.log",
+      "oldCheckLogSha256": "0ed5d2bff307341110d607f10b234fcb36be51c9aa7a09dad4ed4a49f6b2c23e",
+      "oldCheckResult": "13 passed, 0 failed, 0 skipped",
+      "countedAsCurrentResult": false
+    }
+  },
+  "remainingAcceptance": [
+    "Run the planned native fictional-mailbox scenario: start the bound stalled attachment fetch, perform an ordinary Dakia Quit, verify the client-EOF receipt and closed sockets, relaunch, then verify no automatic resume or write and a truthful retry path.",
+    "Verify user-visible Reader and download state during that native scenario.",
+    "This does not add or validate a user-facing cancellation control."
+  ]
+}

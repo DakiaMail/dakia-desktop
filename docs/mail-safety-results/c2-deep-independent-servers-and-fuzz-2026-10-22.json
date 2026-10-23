@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "kind": "bounded-deep-lane-result",
+  "status": "passed",
+  "recordedAtUtc": "2026-10-22T08:10:07.549Z",
+  "scope": "One current-primary c2 independent-server and bounded fuzz execution. It does not establish native, live-provider, package, performance, audit, release, or original-programme completion.",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "before": "c2e8ba357d822b2ef086e497916e77f6555a422605e7a4b99acfb1e81e379888",
+    "after": "c2e8ba357d822b2ef086e497916e77f6555a422605e7a4b99acfb1e81e379888",
+    "fileCount": 956
+  },
+  "execution": {
+    "attempts": 1,
+    "commands": [
+      "bash scripts/mail-safety-servers.sh all",
+      "bash scripts/run-mail-safety-fuzz.sh 30"
+    ],
+    "privateReport": {
+      "path": "/private/tmp/dakia-c2-deep-20261022.json",
+      "sha256": "3603f927383cc505cc541e79d7fa25d78421f656bd9d54a07e10fe083d0910ea"
+    },
+    "privateEvidenceReceipt": {
+      "path": "/private/tmp/dakia-c2-deep-evidence-receipt-20261022.json",
+      "sha256": "6438172d12f01a9c3a2758e84ccb4bfab6a061438438f902037b544f7eebe02d"
+    },
+    "log": {
+      "path": "/private/tmp/dakia-c2-deep-20261022.log",
+      "sha256": "05c184dd85636414367a115f59cd3fbede9d974d59099f43a2fb84f60bb310f8"
+    },
+    "environment": {
+      "platform": "darwin",
+      "architecture": "arm64",
+      "node": "v22.23.2",
+      "stdin": "null",
+      "gmailEnvironment": "unset"
+    }
+  },
+  "independentServers": {
+    "greenmail": {
+      "publicRootTlsRejected": true,
+      "trustedSmtpImapRoundtrip": true
+    },
+    "dovecot": {
+      "image": "dovecot/dovecot:2.4.5",
+      "imageDigest": "dovecot/dovecot@sha256:43c14def08a57f25107593cbcf64a0a6fbae84a7b9de7aa038513c9b21e91914",
+      "selectiveCommandCount": 8,
+      "metadataFetchObserved": true,
+      "plainLeafFetchObserved": true,
+      "htmlLeafFetchObserved": true,
+      "fullRawFallbackObserved": false,
+      "mutatingStoreObserved": false,
+      "normalizedCommandSha256": "7b2f28a44267dc3e49cd1251aab27aaa8dc373d0a10c64795315f77b056f91b8"
+    },
+    "containersRemaining": 0
+  },
+  "fuzz": {
+    "cargoFuzzVersion": "0.13.2",
+    "seedCount": 76,
+    "seedManifestSha256": "a8c95acf02f6994a8ea1b2b5bf0b2750144d59cfb979390323b01c9fad8bf8c3",
+    "secondsPerTarget": 30,
+    "mimeBudgetExecutions": 35832,
+    "attachmentMetadataExecutions": 114367,
+    "crashArtifacts": 0
+  },
+  "limitations": [
+    "No live provider account was contacted.",
+    "The two bounded fuzz targets do not establish absence of parser vulnerabilities or broad MIME conformance.",
+    "The 64 MiB sanitizer quarantine limits temporal use-after-free sensitivity.",
+    "No native, package, performance, audit, release, or broader provider result is carried forward."
+  ]
+}

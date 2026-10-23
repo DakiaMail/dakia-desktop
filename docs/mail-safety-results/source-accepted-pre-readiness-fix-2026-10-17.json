@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "status": "passed-with-known-flake",
+  "sourceReports": [
+    {
+      "path": "source-accepted-one-2026-10-17.json",
+      "sha256": "33faeeb6d182e42e5c644ab444a3aa70b8b9080f7290fc52b0f3862b4af92324",
+      "status": "passed",
+      "iterations": 1,
+      "sourceManifest": "ad502e348cd774298b68d7a00f0816cc8914b41a592acca0f54641d23abf6130"
+    },
+    {
+      "path": "source-accepted-two-2026-10-17.json",
+      "sha256": "ab49d4ee09d5997d60538105e06c55df7892ad80bf8e70f7366263ee0ada63cc",
+      "status": "passed",
+      "iterations": 2,
+      "sourceManifest": "ad502e348cd774298b68d7a00f0816cc8914b41a592acca0f54641d23abf6130"
+    }
+  ],
+  "consecutivePassedIterations": 3,
+  "priorSameSourceFailure": "source-known-flake-2026-10-17.json",
+  "limitation": "Earlier editor-restoration assertion failed on this same source. These passes do not establish that the readiness race was fixed."
+}

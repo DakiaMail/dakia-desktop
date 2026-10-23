@@ -38,6 +38,7 @@ describe("native message-content API bridge", () => {
     });
     expect(apiMocks.invoke).toHaveBeenCalledWith("message_content", {
       messageId: "message-1",
+      expectedUidValidity: null,
     });
     await api.content("message-1").catch((error: unknown) => {
       expect(error).toBeInstanceOf(MessageContentError);

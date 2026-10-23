@@ -1,0 +1,73 @@
+{
+  "execution": {
+    "childExitCode": 1,
+    "childSignal": "none",
+    "durationMs": 29,
+    "evidenceFileCreated": false,
+    "guardMarkerObserved": false,
+    "localStageMarkerCount": 0,
+    "parentTimeout": false,
+    "passwordPromptObserved": false,
+    "timeline": [
+      {
+        "elapsedSinceRecoveryBeginMs": -805,
+        "marker": "parent.template.begin"
+      },
+      {
+        "elapsedSinceRecoveryBeginMs": 0,
+        "marker": "parent.template.eof"
+      },
+      {
+        "elapsedSinceRecoveryBeginMs": 0,
+        "marker": "parent.recovery.begin"
+      },
+      {
+        "elapsedSinceRecoveryBeginMs": 29,
+        "marker": "parent.child.eof"
+      }
+    ],
+    "wrapperExitCode": 1
+  },
+  "guardReview": {
+    "guardLocation": "after both recovery and nested-smoke local store/account/credential initialization, before IMAP probe",
+    "networkPathsBlockedByGuard": [
+      "IMAP",
+      "SMTP",
+      "DNS resolution"
+    ],
+    "osSandboxNetworkDeny": "unavailable because sandbox-exec sandbox_apply returned operation-not-permitted",
+    "reviewed": "independent read-only review"
+  },
+  "interpretation": {
+    "confirmed": [
+      "The wrapper captured child EOF and classified exit code 1 without a signal or parent timeout.",
+      "No password prompt, local stage marker, or guard marker was captured. This does not prove those events were absent.",
+      "No provider network operation or mailbox mutation was reachable through the reviewed private guard."
+    ],
+    "nextStep": "Do not retry under this diagnostic budget. Any future local diagnosis must instrument and verify the pre-prompt configuration-validation boundary first.",
+    "notConfirmed": [
+      "This attempt does not measure the local store or credential initialization duration.",
+      "This attempt cannot explain the earlier timeout."
+    ],
+    "correction": {
+      "originalReportSha256": "d50b87dffc3a120b34e057753be356f07f94b4aa62582c14692f4b85ca7bb0c6",
+      "audit": "gmail-read-only-recovery-local-init-preprompt-capture-audit-2026-10-21.json",
+      "reason": "Raw child output was discarded and only one prompt form was recognized. The earlier claim that the binary never reached its prompt or local initialization was stronger than the evidence."
+    }
+  },
+  "kind": "private-local-initialization-diagnostic",
+  "privateBuild": {
+    "binarySha256": "5cf39c2b2b6ece617468d8bffdcb46364778c73041f6277caba326068cd9ae6c",
+    "guardLiteralPresentInBinary": true,
+    "localStageLiteralPresentInBinary": true,
+    "patchSha256": "9e4ea70bd6f65d73fa3a27952406f50a4f4f5a44fd021420d5cc28371a7c5877"
+  },
+  "schemaVersion": 1,
+  "scope": {
+    "attemptCount": 1,
+    "mailSubmissionAllowed": false,
+    "mailboxMutationAllowed": false,
+    "networkConnectionsAllowed": false,
+    "runIdentifier": "redacted-existing-fixture"
+  }
+}

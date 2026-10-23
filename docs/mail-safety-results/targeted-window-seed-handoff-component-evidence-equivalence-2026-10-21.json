@@ -1,0 +1,427 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-21T20:53:17.206Z",
+  "lane": "targeted-window-seed-handoff-component-evidence-equivalence",
+  "status": "component-inputs-match-with-explicit-exclusions",
+  "scope": "read-only path-and-content comparison of c56 component inputs against the frozen targeted-window-seed-handoff source",
+  "sourceManifests": {
+    "c56": {
+      "digest": "c56d2d806d8623dd14c858c8a8362729655496036405ad8c24162fce02a9a85b",
+      "fileCount": 939,
+      "path": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-window-handoff-recovery.json",
+      "sha256": "6a983e12901b7042fd0c3bfbd0fe3d38e6c08447c667d19d03bcdc786654679b"
+    },
+    "targetedWindowSeedHandoff": {
+      "digest": "8218b1f3621ee3cba9b2cb697275f0d85c0cac6abc39b5b90a817ed876abe605",
+      "fileCount": 940,
+      "path": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-targeted-window-seed-handoff.json",
+      "sha256": "6207c844963d47316127e254b9e55a4de7d7dab9cffcb38b8b8c5cd64abd80ca"
+    }
+  },
+  "existingEvidenceReceipts": [
+    {
+      "path": "docs/mail-safety-results/remaining-gap-closure-three-run-source-window-handoff-recovery-2026-10-21.json",
+      "sha256": "081e7e708b2a02027ae442623ec3821240af35f66c2d100100635b30ee3e024f"
+    },
+    {
+      "path": "docs/mail-safety-results/remaining-gap-closure-source-window-handoff-recovery-detail-2026-10-21.json",
+      "sha256": "a05f00880b623f91f7249739a5283ec8c65e3731fcfdaca9cd735c615faac08f"
+    },
+    {
+      "path": "docs/mail-safety-results/remaining-gap-closure-deep-window-handoff-recovery-tools-2026-10-21.json",
+      "sha256": "9e03e377d42cf62a04f6830e3c749de810dde9cc0c90ed1fc46d5cfadede2d0b"
+    },
+    {
+      "path": "docs/mail-safety-results/remaining-gap-closure-performance-window-handoff-recovery-2026-10-21.json",
+      "sha256": "8de443644dd4b5b38811c2e4776d0d2fc8dd101dad33ffe4a9fc5b7f9503cac2"
+    },
+    {
+      "path": "docs/mail-safety-results/remaining-gap-closure-performance-regression-investigation-2026-10-21.json",
+      "sha256": "a0f6e5b77812ac6350f3306f18ea38f29c0f91dd9cdb444c63ca4f85e63e1f2f"
+    },
+    {
+      "path": "docs/mail-safety-results/final-dependency-audit-2026-10-21.json",
+      "sha256": "b380755a49ca459cd642d4ad5d774bbf5a37858236b10f1c933713cf38777e42"
+    }
+  ],
+  "manifestDelta": {
+    "changedPathCount": 21,
+    "changedPaths": [
+      {
+        "path": "apps/desktop/src-tauri/src/bridge_security_tests.rs",
+        "beforeSha256": "2c849c174a582cc5d962978055b4becfe76c4a18bc55a298fb9a1996a8a49c75",
+        "afterSha256": "e320e0cc3bc0198d955aac8cec173af43416f1c35f8fb4ecda9a9396ac1dc25e",
+        "beforeState": "present",
+        "afterState": "present"
+      },
+      {
+        "path": "apps/desktop/src-tauri/src/lib.rs",
+        "beforeSha256": "7bf8f5c4f09b45ba6773706780e8022c7ffeb5c4846a05e09427a300f2994cbc",
+        "afterSha256": "58a60ec0ede86417d263296b9b7560e2a77f327db81ab98b3a524330ce0b0916",
+        "beforeState": "present",
+        "afterState": "present"
+      },
+      {
+        "path": "apps/desktop/src/ComposeApp.ai-privacy.test.tsx",
+        "beforeSha256": "e8dbe1d5e77994cd4fafdb49cf68f3db7c17623308d45c6abdca4a3d0360fa3a",
+        "afterSha256": "2a9fa3aa9dffb9c660f2b8791af9d1b6584632525ec3567fbe33cfd131dd2758",
+        "beforeState": "present",
+        "afterState": "present"
+      },
+      {
+        "path": "apps/desktop/src/ComposeApp.seed.integration.test.tsx",
+        "beforeSha256": null,
+        "afterSha256": "3d8095102cb50ded6e42a67a4e96066eca23c61138a38b3862a6e4c07d3d5c09",
+        "beforeState": "absent",
+        "afterState": "present"
+      },
+      {
+        "path": "apps/desktop/src/ComposeApp.test.tsx",
+        "beforeSha256": "3f63ff4460f5c2ee86f05493f36909542a2131e92e6542cfbcdf330a6468311c",
+        "afterSha256": "9128eaa94a9da77739d21394bd5c99570a9a3c8c8bc3c2a0b9b966850e1a5227",
+        "beforeState": "present",
+        "afterState": "present"
+      },
+      {
+        "path": "apps/desktop/src/ComposeApp.tsx",
+        "beforeSha256": "ca2e89389c0e3b8e82e0ae0b4fca73390d62ce7d9c2a495efde7457ed0ed9708",
+        "afterSha256": "0b3e98f20ed1b68394bdccd17b017392bc2351623f7b7bff7c8e408a3bc7ec01",
+        "beforeState": "present",
+        "afterState": "present"
+      },
+      {
+        "path": "apps/desktop/src/ReaderWindowApp.seed.integration.test.tsx",
+        "beforeSha256": "321766fe0fa5a887031efe08aa2eeb1e258aba8de9ec06855b87c86260b3c1f9",
+        "afterSha256": "791a0deeba0ac94c4f5289f963331a28994d6464ee8b9ccd124c94aca88b5e62",
+        "beforeState": "present",
+        "afterState": "present"
+      },
+      {
+        "path": "apps/desktop/src/ReaderWindowApp.test.tsx",
+        "beforeSha256": "9f9718e2feaf49fef5538ae7c98cca9f1641cdc571a7038df413c11da5808c96",
+        "afterSha256": "b67e165ff4fe80d09a4ef55c4ccacf3019a3bdbc23b1bdf926e52b08324000fb",
+        "beforeState": "present",
+        "afterState": "present"
+      },
+      {
+        "path": "apps/desktop/src/ReaderWindowApp.tsx",
+        "beforeSha256": "a314902e97730b0369567dad92c29a88c17505fbe0d5434e0b06783b92a68306",
+        "afterSha256": "138d8f300bd03bfaa37e2a1ebf102147ca586ea26d73e64a919a5fcb95926860",
+        "beforeState": "present",
+        "afterState": "present"
+      },
+      {
+        "path": "apps/desktop/src/ReaderWindowApp.unsubscribe.integration.test.tsx",
+        "beforeSha256": "a150ecf9f12fa91f2d85c6bb66e96dd79cd9b8fbda7f980da711bf1a397826ce",
+        "afterSha256": "0c977b11aea98af708a7f108e050f34d1a12509bcec9259410d2e0f30311103b",
+        "beforeState": "present",
+        "afterState": "present"
+      },
+      {
+        "path": "apps/desktop/src/components/Composer.test.tsx",
+        "beforeSha256": "f45cb5298ae8883107f0328d1dbde75e50b2350bdaa41aa2f8c5dd55d8e11f27",
+        "afterSha256": "2b9c824124146ac7f0653c0c0c3c8bed7bd00a20b353c6b82b0ae51c3fa09c3b",
+        "beforeState": "present",
+        "afterState": "present"
+      },
+      {
+        "path": "apps/desktop/src/components/Composer.tsx",
+        "beforeSha256": "fe85f3144f168f1a2af75b0de919ff5f9317d4369d4372ef66c3bfbc7097c8e2",
+        "afterSha256": "ae0e4e0e035d890bef3f62266b73f52d12dcb8a53104b06b24205db460f3feca",
+        "beforeState": "present",
+        "afterState": "present"
+      },
+      {
+        "path": "apps/desktop/src/composeWindow.test.ts",
+        "beforeSha256": "b1c42850ccf3cf2cf06f4ddec97f1b0081ef6258094dfa755716835372fc9ac5",
+        "afterSha256": "62de887702840502058a4ba6785258b41d44ca541ccf087b6e6db761cc282fff",
+        "beforeState": "present",
+        "afterState": "present"
+      },
+      {
+        "path": "apps/desktop/src/composeWindow.ts",
+        "beforeSha256": "4b179ef482290b2ede19f99ba6585d0f1980ed34b738f1901d40bbb8d2beea3e",
+        "afterSha256": "6f81b31152b01594285ebd955c313167b242b046b6cc447b77494eb4c07fc12b",
+        "beforeState": "present",
+        "afterState": "present"
+      },
+      {
+        "path": "apps/desktop/src/foregroundDuringSync.integration.test.tsx",
+        "beforeSha256": "5c0fb99aa4845833fa9116f2756c56b5269abed1d8d45a31ea55c7cd7b107a57",
+        "afterSha256": "d8b9e759ed1c15e51e2cae40402b0a9ebf0ef40277b3e00858e43d0b9dc71db1",
+        "beforeState": "present",
+        "afterState": "present"
+      },
+      {
+        "path": "apps/desktop/src/mailIdentityContinuity.integration.test.tsx",
+        "beforeSha256": "edc46ff9a3df82b9b6cef59ab31a939e31e88886862120d09069ffc48dfaa886",
+        "afterSha256": "2ca9be15b2ceaf6cae4a03f652daa36b424119ebdf01c865edec1450fc328821",
+        "beforeState": "present",
+        "afterState": "present"
+      },
+      {
+        "path": "apps/desktop/src/readerWindow.test.ts",
+        "beforeSha256": "29ced42fdb222eec5739d7f2ac10babe6d9f75321afd47d83c73ce176f64558b",
+        "afterSha256": "114d1ffb035d1eaef0dad2cd26ad89de02ead171a371ec27bbb51c4da435f0dd",
+        "beforeState": "present",
+        "afterState": "present"
+      },
+      {
+        "path": "apps/desktop/src/readerWindow.ts",
+        "beforeSha256": "76ca6dfac08ac596ba5915ac033b1f602bce5fee7abf9f3a5881dee1a8e3bee2",
+        "afterSha256": "67fd9450d65965d20b6946b029e108738204bfcc4d68753e858511209d38d9b5",
+        "beforeState": "present",
+        "afterState": "present"
+      },
+      {
+        "path": "apps/desktop/testdata/tauri-contract-origins.json",
+        "beforeSha256": "86361b3a24a9deebd9a26b174fdcd7976ec717010504cd8d9b451711e306d46c",
+        "afterSha256": "d125bcba20ef9bd24250c59a6b2705456c4d4f3a87a96a3e74868c07f4926642",
+        "beforeState": "present",
+        "afterState": "present"
+      },
+      {
+        "path": "scripts/tauri-contract-inventory.node-test.mjs",
+        "beforeSha256": "cd711a81114b5231f915519bf354ac7132db7c37bc635f30b6a0b56c46f12291",
+        "afterSha256": "46ac50a3962450efd890bd8d3639018fe31f4e67b2e1797d7abd7047d92e6c4f",
+        "beforeState": "present",
+        "afterState": "present"
+      },
+      {
+        "path": "testdata/mail-safety-catalogue.json",
+        "beforeSha256": "66a9e22386aa441e70ab8b07f29ec10d02b8c31ffa1bf97b1ab2264a1716c518",
+        "afterSha256": "ee9e29db08637ee6bd94ee60405751681f9900a81d02e6c5f3536bea85df81fe",
+        "beforeState": "present",
+        "afterState": "present"
+      }
+    ]
+  },
+  "componentInputComparisons": {
+    "deep": {
+      "status": "inputs-match",
+      "referenceReceipt": "docs/mail-safety-results/remaining-gap-closure-deep-window-handoff-recovery-tools-2026-10-21.json",
+      "inputPathSets": [
+        "Cargo.toml and Cargo.lock",
+        "crates/dakia-core/**",
+        "vendor/**",
+        "fuzz/**",
+        "crates/dakia-core/testdata/mime/**",
+        "scripts/run-mail-safety.mjs",
+        "scripts/mail-safety-servers.sh",
+        "scripts/run-mail-safety-fuzz.sh"
+      ],
+      "changedInputs": [],
+      "conclusion": "The bounded independent-server and fuzz inputs are byte-identical. testdata/mail-safety-catalogue.json changed but is not read by either deep runner."
+    },
+    "performance": {
+      "status": "inputs-match",
+      "referenceReceipt": "docs/mail-safety-results/remaining-gap-closure-performance-window-handoff-recovery-2026-10-21.json",
+      "inputPathSets": [
+        "Cargo.toml and Cargo.lock",
+        "crates/dakia-core/**",
+        "scripts/run-mail-resilience-performance.mjs"
+      ],
+      "changedInputs": [],
+      "conclusion": "The mailbox-scale and resource-soak inputs are byte-identical. The retained c56 performance result is regressed, not accepted."
+    },
+    "dependencyAudit": {
+      "status": "inputs-match",
+      "referenceReceipt": "docs/mail-safety-results/final-dependency-audit-2026-10-21.json",
+      "inputs": [
+        {
+          "path": "Cargo.lock",
+          "beforeSha256": "78e7136d6ff7a477e2317feb99a976a75376b1283a331babaca26b83c27f58b2",
+          "afterSha256": "78e7136d6ff7a477e2317feb99a976a75376b1283a331babaca26b83c27f58b2",
+          "matches": true
+        },
+        {
+          "path": "fuzz/Cargo.lock",
+          "beforeSha256": "f07697a88633babbc07378ec41088987457527ec00f217566d6bb573411c71a3",
+          "afterSha256": "f07697a88633babbc07378ec41088987457527ec00f217566d6bb573411c71a3",
+          "matches": true
+        },
+        {
+          "path": "package-lock.json",
+          "beforeSha256": "ec85e8d77a670963d49224d083cc9133b30763f048e8b520360f9c51c4bb5e1b",
+          "afterSha256": "ec85e8d77a670963d49224d083cc9133b30763f048e8b520360f9c51c4bb5e1b",
+          "matches": true
+        },
+        {
+          "path": ".cargo/audit.toml",
+          "beforeSha256": "0a31dab852dead3b6c393c395475001792fde4cb008bad2c478d6776d0e52cc0",
+          "afterSha256": "0a31dab852dead3b6c393c395475001792fde4cb008bad2c478d6776d0e52cc0",
+          "matches": true
+        },
+        {
+          "path": "scripts/audit-dependencies.sh",
+          "beforeSha256": "78a1949129f8863be0f70e4e54651552c537781aab07f3da7dce8ace5fe9503b",
+          "afterSha256": "78a1949129f8863be0f70e4e54651552c537781aab07f3da7dce8ace5fe9503b",
+          "matches": true
+        },
+        {
+          "path": "scripts/verify-vendored-crates.mjs",
+          "beforeSha256": "1b5edfd506b5cd15fb96b8a1ce702fbf01791ff1c105815a2a8984dae4ad504c",
+          "afterSha256": "1b5edfd506b5cd15fb96b8a1ce702fbf01791ff1c105815a2a8984dae4ad504c",
+          "matches": true
+        },
+        {
+          "path": "testdata/vendored-crates/mail-parser.json",
+          "beforeSha256": "c3e8a70769cff092572b7c596c4e8f577c8073db15f241648a3a406dfeddcf58",
+          "afterSha256": "c3e8a70769cff092572b7c596c4e8f577c8073db15f241648a3a406dfeddcf58",
+          "matches": true
+        },
+        {
+          "path": "testdata/vendored-crates/lettre.json",
+          "beforeSha256": "e83a4564682f3d2d6619068efafb1af2c9854d1e941fab6fc0393319850ff50e",
+          "afterSha256": "e83a4564682f3d2d6619068efafb1af2c9854d1e941fab6fc0393319850ff50e",
+          "matches": true
+        },
+        {
+          "path": "testdata/vendored-crates/tauri-plugin-updater.json",
+          "beforeSha256": "b1eca38b3ce7e43c84929ddeafb53ceed67b79f6106f8108f19d520f90ee3815",
+          "afterSha256": "b1eca38b3ce7e43c84929ddeafb53ceed67b79f6106f8108f19d520f90ee3815",
+          "matches": true
+        }
+      ],
+      "conclusion": "All nine recorded dependency-audit inputs are byte-identical. This is not a fresh audit."
+    },
+    "sourceAndBridge": {
+      "status": "not-equivalent",
+      "changedInputs": [
+        {
+          "path": "apps/desktop/src-tauri/src/bridge_security_tests.rs",
+          "beforeSha256": "2c849c174a582cc5d962978055b4becfe76c4a18bc55a298fb9a1996a8a49c75",
+          "afterSha256": "e320e0cc3bc0198d955aac8cec173af43416f1c35f8fb4ecda9a9396ac1dc25e",
+          "beforeState": "present",
+          "afterState": "present"
+        },
+        {
+          "path": "apps/desktop/src-tauri/src/lib.rs",
+          "beforeSha256": "7bf8f5c4f09b45ba6773706780e8022c7ffeb5c4846a05e09427a300f2994cbc",
+          "afterSha256": "58a60ec0ede86417d263296b9b7560e2a77f327db81ab98b3a524330ce0b0916",
+          "beforeState": "present",
+          "afterState": "present"
+        },
+        {
+          "path": "apps/desktop/src/ComposeApp.ai-privacy.test.tsx",
+          "beforeSha256": "e8dbe1d5e77994cd4fafdb49cf68f3db7c17623308d45c6abdca4a3d0360fa3a",
+          "afterSha256": "2a9fa3aa9dffb9c660f2b8791af9d1b6584632525ec3567fbe33cfd131dd2758",
+          "beforeState": "present",
+          "afterState": "present"
+        },
+        {
+          "path": "apps/desktop/src/ComposeApp.seed.integration.test.tsx",
+          "beforeSha256": null,
+          "afterSha256": "3d8095102cb50ded6e42a67a4e96066eca23c61138a38b3862a6e4c07d3d5c09",
+          "beforeState": "absent",
+          "afterState": "present"
+        },
+        {
+          "path": "apps/desktop/src/ComposeApp.test.tsx",
+          "beforeSha256": "3f63ff4460f5c2ee86f05493f36909542a2131e92e6542cfbcdf330a6468311c",
+          "afterSha256": "9128eaa94a9da77739d21394bd5c99570a9a3c8c8bc3c2a0b9b966850e1a5227",
+          "beforeState": "present",
+          "afterState": "present"
+        },
+        {
+          "path": "apps/desktop/src/ComposeApp.tsx",
+          "beforeSha256": "ca2e89389c0e3b8e82e0ae0b4fca73390d62ce7d9c2a495efde7457ed0ed9708",
+          "afterSha256": "0b3e98f20ed1b68394bdccd17b017392bc2351623f7b7bff7c8e408a3bc7ec01",
+          "beforeState": "present",
+          "afterState": "present"
+        },
+        {
+          "path": "apps/desktop/src/ReaderWindowApp.seed.integration.test.tsx",
+          "beforeSha256": "321766fe0fa5a887031efe08aa2eeb1e258aba8de9ec06855b87c86260b3c1f9",
+          "afterSha256": "791a0deeba0ac94c4f5289f963331a28994d6464ee8b9ccd124c94aca88b5e62",
+          "beforeState": "present",
+          "afterState": "present"
+        },
+        {
+          "path": "apps/desktop/src/ReaderWindowApp.test.tsx",
+          "beforeSha256": "9f9718e2feaf49fef5538ae7c98cca9f1641cdc571a7038df413c11da5808c96",
+          "afterSha256": "b67e165ff4fe80d09a4ef55c4ccacf3019a3bdbc23b1bdf926e52b08324000fb",
+          "beforeState": "present",
+          "afterState": "present"
+        },
+        {
+          "path": "apps/desktop/src/ReaderWindowApp.tsx",
+          "beforeSha256": "a314902e97730b0369567dad92c29a88c17505fbe0d5434e0b06783b92a68306",
+          "afterSha256": "138d8f300bd03bfaa37e2a1ebf102147ca586ea26d73e64a919a5fcb95926860",
+          "beforeState": "present",
+          "afterState": "present"
+        },
+        {
+          "path": "apps/desktop/src/ReaderWindowApp.unsubscribe.integration.test.tsx",
+          "beforeSha256": "a150ecf9f12fa91f2d85c6bb66e96dd79cd9b8fbda7f980da711bf1a397826ce",
+          "afterSha256": "0c977b11aea98af708a7f108e050f34d1a12509bcec9259410d2e0f30311103b",
+          "beforeState": "present",
+          "afterState": "present"
+        },
+        {
+          "path": "apps/desktop/src/components/Composer.test.tsx",
+          "beforeSha256": "f45cb5298ae8883107f0328d1dbde75e50b2350bdaa41aa2f8c5dd55d8e11f27",
+          "afterSha256": "2b9c824124146ac7f0653c0c0c3c8bed7bd00a20b353c6b82b0ae51c3fa09c3b",
+          "beforeState": "present",
+          "afterState": "present"
+        },
+        {
+          "path": "apps/desktop/src/components/Composer.tsx",
+          "beforeSha256": "fe85f3144f168f1a2af75b0de919ff5f9317d4369d4372ef66c3bfbc7097c8e2",
+          "afterSha256": "ae0e4e0e035d890bef3f62266b73f52d12dcb8a53104b06b24205db460f3feca",
+          "beforeState": "present",
+          "afterState": "present"
+        },
+        {
+          "path": "apps/desktop/src/composeWindow.test.ts",
+          "beforeSha256": "b1c42850ccf3cf2cf06f4ddec97f1b0081ef6258094dfa755716835372fc9ac5",
+          "afterSha256": "62de887702840502058a4ba6785258b41d44ca541ccf087b6e6db761cc282fff",
+          "beforeState": "present",
+          "afterState": "present"
+        },
+        {
+          "path": "apps/desktop/src/composeWindow.ts",
+          "beforeSha256": "4b179ef482290b2ede19f99ba6585d0f1980ed34b738f1901d40bbb8d2beea3e",
+          "afterSha256": "6f81b31152b01594285ebd955c313167b242b046b6cc447b77494eb4c07fc12b",
+          "beforeState": "present",
+          "afterState": "present"
+        },
+        {
+          "path": "apps/desktop/src/foregroundDuringSync.integration.test.tsx",
+          "beforeSha256": "5c0fb99aa4845833fa9116f2756c56b5269abed1d8d45a31ea55c7cd7b107a57",
+          "afterSha256": "d8b9e759ed1c15e51e2cae40402b0a9ebf0ef40277b3e00858e43d0b9dc71db1",
+          "beforeState": "present",
+          "afterState": "present"
+        },
+        {
+          "path": "apps/desktop/src/mailIdentityContinuity.integration.test.tsx",
+          "beforeSha256": "edc46ff9a3df82b9b6cef59ab31a939e31e88886862120d09069ffc48dfaa886",
+          "afterSha256": "2ca9be15b2ceaf6cae4a03f652daa36b424119ebdf01c865edec1450fc328821",
+          "beforeState": "present",
+          "afterState": "present"
+        },
+        {
+          "path": "apps/desktop/src/readerWindow.test.ts",
+          "beforeSha256": "29ced42fdb222eec5739d7f2ac10babe6d9f75321afd47d83c73ce176f64558b",
+          "afterSha256": "114d1ffb035d1eaef0dad2cd26ad89de02ead171a371ec27bbb51c4da435f0dd",
+          "beforeState": "present",
+          "afterState": "present"
+        },
+        {
+          "path": "apps/desktop/src/readerWindow.ts",
+          "beforeSha256": "76ca6dfac08ac596ba5915ac033b1f602bce5fee7abf9f3a5881dee1a8e3bee2",
+          "afterSha256": "67fd9450d65965d20b6946b029e108738204bfcc4d68753e858511209d38d9b5",
+          "beforeState": "present",
+          "afterState": "present"
+        }
+      ],
+      "conclusion": "Desktop, Tauri bridge and frontend handoff inputs changed. No c56 whole-source, native, bridge-security, provider, packaged-app or live UI result is carried forward."
+    }
+  },
+  "limitations": [
+    "This receipt does not rerun source, deep, fuzz, performance, audit, native, provider, packaged-app or UI work.",
+    "Input equality does not establish equivalent compilation, code generation, incremental-cache state, timing, system load or runtime behavior.",
+    "The c56 performance comparison remains regressed. The compiler-free follow-up remains root-cause-unproven.",
+    "The active frozen-source run is not represented as passed by this receipt."
+  ]
+}

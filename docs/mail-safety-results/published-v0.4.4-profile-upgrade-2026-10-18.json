@@ -1,0 +1,49 @@
+{
+  "evidenceRoot": "/private/tmp/dakia-v044-cli-profile.yBjTlu",
+  "fixture": {
+    "account": "upgrade-fixture@example.test",
+    "enabled": false,
+    "credentials": 0,
+    "messages": 1
+  },
+  "binaries": {
+    "publishedV044": {
+      "source": "8af5c397d81cc9aa60ddaca9b5eb15ecac9f6255",
+      "sha256": "73f4d7fdde0a8322b0152aa0778def1766a00d7e5ed9314f36a53142db712806",
+      "arch": "arm64"
+    },
+    "workspaceCandidate": {
+      "sourceBase": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+      "sha256": "c4c4f4e3f56a1cc254d3b615cb06c5c2ea7851fbf89ad17e74cf27d1b466d946",
+      "arch": "arm64",
+      "displayVersion": "0.4.4",
+      "exactSourceHashesFile": "current-source.sha256"
+    }
+  },
+  "results": {
+    "previousStableProfileCreation": "passed",
+    "upgradeToCandidate": "passed",
+    "logicalAccountPreservation": "passed",
+    "logicalMessagePreservation": "passed",
+    "vaultPreservation": "passed",
+    "databaseIntegrity": "passed",
+    "foreignKeys": "passed",
+    "candidateFutureVersionRefusal": "passed",
+    "candidateFutureVersionNonMutation": "passed",
+    "publishedV044RefusalAfterCandidate": "failed",
+    "publishedV044LiteralFutureVersionRefusal": "failed",
+    "publishedV044ObservedMutationInBoundedTrial": false,
+    "reopenWithCandidateAfterOldBinary": "passed"
+  },
+  "network": {
+    "providerCommandsRun": false,
+    "credentialsPresent": false
+  },
+  "limitations": [
+    "CLI and SQLite profile boundary only",
+    "No GUI launch",
+    "No installed-app replacement",
+    "No interruption or rollback installer exercise",
+    "Published v0.4.4 cannot be retrofitted to reject newer profile markers"
+  ]
+}

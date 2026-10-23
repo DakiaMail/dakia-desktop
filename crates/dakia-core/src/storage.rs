@@ -1,4 +1,8 @@
 use crate::{account::Account, provider, AccountAuth, AccountId};
+#[path = "send_journal.rs"]
+mod send_journal;
+#[path = "send_recovery.rs"]
+mod send_recovery;
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use chrono::{DateTime, Utc};
@@ -7,6 +11,11 @@ use ring::{
     rand::{SecureRandom, SystemRandom},
 };
 use schemars::JsonSchema;
+pub use send_journal::{SendAttemptClaim, SendAttemptStatus};
+pub use send_recovery::{
+    SendRecovery, SendRecoveryClaim, SendRecoveryCursor, SendRecoveryPage, SendRecoveryStatus,
+    SendRecoverySummary,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
@@ -14,7 +23,8 @@ use sqlx::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    fs::{File, FileTimes, OpenOptions},
+    fs::{File, FileTimes, OpenOptions, TryLockError},
+    future::Future,
     io::{ErrorKind, Read, Write},
     path::{Path, PathBuf},
     str::FromStr,
@@ -23,11 +33,15 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
 const VAULT_KEY_FILE: &str = "vault.key";
 const VAULT_KEY_LEN: usize = 32;
 const VAULT_NONCE_LEN: usize = 12;
+const PROFILE_MIGRATION_LOCK_WAIT: Duration = Duration::from_secs(10);
+const PROFILE_MIGRATION_LOCK_POLL: Duration = Duration::from_millis(50);
+const PROFILE_OPERATION_LOCK_WAIT: Duration = Duration::from_secs(10);
+const PROFILE_OPERATION_LOCK_POLL: Duration = Duration::from_millis(50);
 /// Foreground-opened, non-starred mail is useful offline, but it must never
 /// grow into a second unbounded mail store. Starred mail has its own durable,
 /// authoritative cache and is intentionally not counted here.
@@ -41,6 +55,13 @@ const MESSAGE_CONTENT_CACHE_RECENT_WINDOW_DAYS: i64 = 30;
 /// parameters.
 const ATTACHMENT_PRESENTATION_CACHE_VERSION: &str = "3";
 const ATTACHMENT_PRESENTATION_VERSION: i64 = 3;
+/// Monotonic profile schema revision understood by this binary.
+///
+/// Older profiles without this marker still follow the historical column
+/// discovery migrations below. A newer marker must fail before any migration
+/// statement runs so this build cannot rewrite a profile created by a newer
+/// release. Already-published binaries need separate downgrade acceptance.
+const PROFILE_SCHEMA_VERSION: u32 = 3;
 /// Classification policy is versioned independently from the bundled model.
 /// A policy change must re-run model-owned classifications while preserving
 /// categories the user chose explicitly.
@@ -60,6 +81,77 @@ const MAILBOX_SNAPSHOT_REPLACEMENT_PUBLISH_BATCH_SIZE: i64 = 100;
 /// discard claims left by the previous process during migration.
 static MESSAGE_CONTENT_FETCH_OWNER: OnceLock<String> = OnceLock::new();
 
+#[cfg(test)]
+#[derive(Clone)]
+struct StoreOpenPreflightRaceHook {
+    database_path: PathBuf,
+    after_absent_lookup: Arc<tokio::sync::Barrier>,
+    continue_to_preflight: Arc<tokio::sync::Barrier>,
+}
+
+#[cfg(test)]
+static STORE_OPEN_PREFLIGHT_RACE_HOOK: OnceLock<
+    std::sync::Mutex<Option<StoreOpenPreflightRaceHook>>,
+> = OnceLock::new();
+
+#[cfg(test)]
+struct StoreOpenPreflightRaceHookGuard;
+
+#[cfg(test)]
+impl Drop for StoreOpenPreflightRaceHookGuard {
+    fn drop(&mut self) {
+        if let Some(hook) = STORE_OPEN_PREFLIGHT_RACE_HOOK.get() {
+            *hook.lock().expect("store-open race hook mutex poisoned") = None;
+        }
+    }
+}
+
+#[cfg(test)]
+fn install_store_open_preflight_race_hook(
+    database_path: PathBuf,
+) -> (
+    StoreOpenPreflightRaceHookGuard,
+    Arc<tokio::sync::Barrier>,
+    Arc<tokio::sync::Barrier>,
+) {
+    let after_absent_lookup = Arc::new(tokio::sync::Barrier::new(2));
+    let continue_to_preflight = Arc::new(tokio::sync::Barrier::new(2));
+    let hook = StoreOpenPreflightRaceHook {
+        database_path,
+        after_absent_lookup: after_absent_lookup.clone(),
+        continue_to_preflight: continue_to_preflight.clone(),
+    };
+    let slot = STORE_OPEN_PREFLIGHT_RACE_HOOK.get_or_init(|| std::sync::Mutex::new(None));
+    let mut slot = slot.lock().expect("store-open race hook mutex poisoned");
+    assert!(
+        slot.is_none(),
+        "a store-open race hook is already installed"
+    );
+    *slot = Some(hook);
+    drop(slot);
+    (
+        StoreOpenPreflightRaceHookGuard,
+        after_absent_lookup,
+        continue_to_preflight,
+    )
+}
+
+#[cfg(test)]
+async fn pause_after_absent_profile_lock_lookup(database_path: &Path) {
+    let hook = STORE_OPEN_PREFLIGHT_RACE_HOOK
+        .get()
+        .and_then(|slot| {
+            slot.lock()
+                .expect("store-open race hook mutex poisoned")
+                .clone()
+        })
+        .filter(|hook| hook.database_path == database_path);
+    if let Some(hook) = hook {
+        hook.after_absent_lookup.wait().await;
+        hook.continue_to_preflight.wait().await;
+    }
+}
+
 fn message_content_fetch_owner() -> &'static str {
     MESSAGE_CONTENT_FETCH_OWNER
         .get_or_init(|| uuid::Uuid::new_v4().to_string())
@@ -70,6 +162,11 @@ fn message_content_fetch_owner() -> &'static str {
 pub struct Store {
     pool: SqlitePool,
     vault_key: Arc<[u8; VAULT_KEY_LEN]>,
+    /// `open` resolves this once through any database symlinks. Long-running
+    /// profile operations use the stable sibling inode rather than a caller's
+    /// spelling of the profile path. In-memory stores intentionally have no
+    /// filesystem coordinator.
+    database_path: Option<Arc<PathBuf>>,
 }
 
 #[derive(Clone, Copy)]
@@ -83,6 +180,45 @@ enum SnapshotReplacementPublication<'a> {
     None,
     InMemory(&'a [MailSummary]),
     Staged,
+    StagedIncremental,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum SnapshotPublicationDetail {
+    DeletedOnly,
+    Exact,
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static SNAPSHOT_PUBLICATION_STAT_QUERIES: std::cell::Cell<u64>;
+}
+
+fn note_snapshot_publication_stat_query() {
+    #[cfg(test)]
+    let _ = SNAPSHOT_PUBLICATION_STAT_QUERIES.try_with(|count| count.set(count.get() + 1));
+}
+
+/// Exact catalogue effects committed by one authoritative mailbox publication.
+///
+/// Realtime uses this private outcome to avoid waking the frontend for a
+/// successful no-op poll. The established public finalization methods keep
+/// returning only `deleted`, preserving their existing contract.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct MailboxSnapshotPublication {
+    pub(crate) metadata_published: u64,
+    pub(crate) flags_changed: u64,
+    pub(crate) deleted: u64,
+    pub(crate) namespace_replaced: bool,
+}
+
+impl MailboxSnapshotPublication {
+    pub(crate) const fn catalogue_changed(self) -> bool {
+        self.metadata_published > 0
+            || self.flags_changed > 0
+            || self.deleted > 0
+            || self.namespace_replaced
+    }
 }
 
 /// The remote identity captured when a full mailbox inventory begins.
@@ -130,11 +266,17 @@ type MailboxSnapshotGenerationState = (String, i64, i64, Option<i64>, Option<Str
 /// owning future schedules claim release so later readers do not wait for a
 /// process restart.
 pub struct MessageContentFetchClaim {
+    cleanup: Option<MessageContentFetchCleanup>,
+    renewal: tokio::task::JoinHandle<()>,
+}
+
+struct MessageContentFetchCleanup {
     store: Store,
     message_id: String,
     owner: String,
-    renewal: tokio::task::JoinHandle<()>,
     released: bool,
+    #[cfg(test)]
+    drop_release_observer: Option<tokio::sync::oneshot::Sender<Result<()>>>,
 }
 
 /// Outcome of attempting to own one provider body fetch.
@@ -151,28 +293,55 @@ pub enum MessageContentFetchAcquire {
 impl MessageContentFetchClaim {
     pub async fn release(mut self) -> Result<()> {
         self.renewal.abort();
+        self.cleanup
+            .take()
+            .expect("content-fetch claim cleanup owner is missing")
+            .release()
+            .await
+    }
+}
+
+impl Drop for MessageContentFetchClaim {
+    fn drop(&mut self) {
+        self.renewal.abort();
+    }
+}
+
+impl MessageContentFetchCleanup {
+    async fn release(mut self) -> Result<()> {
         self.store
             .release_message_content_fetch_for_owner(&self.message_id, &self.owner)
             .await?;
         self.released = true;
         Ok(())
     }
+
+    fn disarm(mut self) {
+        self.released = true;
+    }
 }
 
-impl Drop for MessageContentFetchClaim {
+impl Drop for MessageContentFetchCleanup {
     fn drop(&mut self) {
         if self.released {
             return;
         }
-        self.renewal.abort();
         let store = self.store.clone();
         let message_id = self.message_id.clone();
         let owner = self.owner.clone();
+        #[cfg(test)]
+        let drop_release_observer = self.drop_release_observer.take();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
-                let _ = store
+                let release = store
                     .release_message_content_fetch_for_owner(&message_id, &owner)
                     .await;
+                #[cfg(test)]
+                if let Some(observer) = drop_release_observer {
+                    let _ = observer.send(release);
+                }
+                #[cfg(not(test))]
+                let _ = release;
             });
         }
     }
@@ -194,7 +363,18 @@ pub struct MailSummary {
     pub account_id: String,
     pub mailbox: String,
     pub uid: i64,
+    /// The current IMAP UIDVALIDITY epoch for this message's mailbox. The
+    /// stable local message ID deliberately excludes the epoch, so callers
+    /// must carry this value when they later mutate a mailbox/UID locator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[sqlx(default)]
+    pub mailbox_uid_validity: Option<i64>,
     pub message_id: Option<String>,
+    /// Gmail's opaque provider identity. It is only used inside the core
+    /// storage pipeline and is deliberately excluded from IPC serialization.
+    #[serde(skip)]
+    #[sqlx(default)]
+    pub gmail_message_id: Option<String>,
     pub in_reply_to: Option<String>,
     pub reference_ids: Option<String>,
     pub thread_id: String,
@@ -231,6 +411,99 @@ pub struct MailSummary {
     pub attachments: Vec<AttachmentData>,
 }
 
+#[derive(Serialize, Deserialize)]
+struct StagedSnapshotMessage {
+    message: MailSummary,
+    #[serde(default)]
+    gmail_message_id: Option<String>,
+    // A missing X-GM-MSGID has meaning only when the enclosing FETCH asked
+    // Gmail for it. Older staged JSON and non-Gmail fetches default to false
+    // so finalization preserves any existing association for that locator.
+    #[serde(default)]
+    gmail_identity_was_requested: bool,
+}
+
+impl StagedSnapshotMessage {
+    fn from_message(
+        message: &MailSummary,
+        provider_identity_policy: ProviderIdentityPolicy,
+    ) -> Self {
+        Self {
+            message: message.clone(),
+            gmail_message_id: message.gmail_message_id.clone(),
+            gmail_identity_was_requested: matches!(
+                provider_identity_policy,
+                ProviderIdentityPolicy::Observed
+            ),
+        }
+    }
+
+    fn into_message(mut self) -> (MailSummary, ProviderIdentityPolicy) {
+        self.message.gmail_message_id = self.gmail_message_id;
+        let policy = if self.gmail_identity_was_requested {
+            ProviderIdentityPolicy::Observed
+        } else {
+            ProviderIdentityPolicy::PreserveAbsent
+        };
+        (self.message, policy)
+    }
+}
+
+/// The destination identity supplied by an IMAP `COPYUID` response after an
+/// atomic `UID MOVE`. A destination UID is meaningful only with this epoch
+/// and remote mailbox name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MailboxMoveDestination {
+    pub remote_mailbox: String,
+    pub uid_validity: i64,
+    pub uid: u32,
+}
+
+/// A confirmed source mutation and any destination identity the provider
+/// returned. `destination: None` means no destination is safely addressable:
+/// the source can still be removed locally, then a sync projects the remote
+/// destination without guessing its UID.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MailboxMoveReceipt {
+    pub destination: Option<MailboxMoveDestination>,
+}
+
+/// Local projection result for a completed remote move. A false destination
+/// result requires reconciliation, but the source remains safely tombstoned
+/// so stale fetches cannot revive it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MailboxMovePublication {
+    pub source_published: bool,
+    pub destination_mapped: bool,
+}
+
+/// SQL projection shared by user-facing message reads. UIDVALIDITY is kept in
+/// the mailbox catalogue rather than the message row because a mailbox epoch
+/// changes as one authoritative replacement. The correlated scalar lookup is
+/// part of the same SQLite statement as the message read, so callers never
+/// combine a message from one snapshot with an epoch from another query.
+fn mail_summary_projection(
+    alias: &str,
+    body_text: &str,
+    body_html: &str,
+    classification_signals: &str,
+) -> String {
+    format!(
+        "{alias}.id, {alias}.account_id, {alias}.mailbox, {alias}.uid, \
+         (SELECT epoch.uid_validity FROM mailbox_catalog_state epoch \
+          WHERE epoch.account_id = {alias}.account_id AND epoch.mailbox = {alias}.mailbox) \
+          AS mailbox_uid_validity, \
+         {alias}.message_id, {alias}.in_reply_to, {alias}.reference_ids, {alias}.thread_id, \
+         {alias}.subject, {alias}.from_name, {alias}.from_address, {alias}.to_addresses, \
+         {alias}.cc_addresses, {alias}.bcc_addresses, {alias}.reply_to_addresses, \
+         {alias}.received_at, {alias}.snippet, {body_text} AS body_text, {body_html} AS body_html, \
+         {alias}.content_state, {alias}.unsubscribe_kind, {alias}.unsubscribe_url, \
+         {alias}.is_read, {alias}.is_flagged, {alias}.has_attachments, {alias}.category, \
+         {alias}.classification_confidence, {alias}.classification_source, \
+         {classification_signals} AS classification_signals"
+    )
+}
+
 /// Local flags observed before a remote catalogue fetch. They form the
 /// compare-and-swap precondition when the delayed fetch is published.
 #[derive(Debug, Clone, PartialEq, Eq, FromRow)]
@@ -246,6 +519,11 @@ pub struct ExpectedMessageFlags {
 pub struct MailboxSyncState {
     pub initialized: bool,
     pub highest_uid: Option<u32>,
+    /// A completed, identity-matching empty catalogue is the one safe case
+    /// where an initialized mailbox has no numeric watermark but later UIDs
+    /// are arrivals. A missing watermark alone is ambiguous after imports,
+    /// interrupted migrations, or an unknown historical baseline.
+    pub empty_baseline: bool,
     pub uid_validity: Option<u64>,
     /// The selected mailbox is a new UID namespace and needs a replacement
     /// catalogue, not an incremental UID sync.
@@ -370,6 +648,11 @@ pub struct Attachment {
     pub filename: String,
     pub mime_type: String,
     pub size_bytes: i64,
+    /// What `size_bytes` measures. IMAP BODYSTRUCTURE reports transport
+    /// octets, while a complete MIME download lets us report decoded bytes.
+    /// Legacy rows intentionally remain unknown rather than guessing.
+    #[serde(default)]
+    pub size_kind: AttachmentSizeKind,
     pub is_inline: bool,
     /// Whether this part is used by the selected rendered HTML, is available
     /// for download, or both. `Unknown` is only accepted while reading legacy
@@ -377,6 +660,21 @@ pub struct Attachment {
     #[serde(default)]
     pub presentation: AttachmentPresentation,
     pub is_potentially_unsafe: bool,
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, sqlx::Type,
+)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "TEXT", rename_all = "snake_case")]
+pub enum AttachmentSizeKind {
+    /// The complete MIME part was decoded and its byte length is known.
+    Decoded,
+    /// IMAP BODYSTRUCTURE's RFC 9051 transport-octet count.
+    Encoded,
+    /// Existing metadata predates an explicit size meaning.
+    #[default]
+    Unknown,
 }
 
 #[derive(
@@ -424,6 +722,10 @@ pub struct CachedMessageContent {
 #[derive(Debug, Clone)]
 pub struct ModelClassificationUpdate {
     id: String,
+    expected_account_id: String,
+    expected_mailbox: String,
+    expected_uid: i64,
+    expected_mailbox_uid_validity: Option<i64>,
     category: String,
     confidence: Option<f64>,
     expected_from_name: Option<String>,
@@ -449,6 +751,10 @@ impl ModelClassificationUpdate {
     ) -> Self {
         Self {
             id: message.id.clone(),
+            expected_account_id: message.account_id.clone(),
+            expected_mailbox: message.mailbox.clone(),
+            expected_uid: message.uid,
+            expected_mailbox_uid_validity: message.mailbox_uid_validity,
             category,
             confidence,
             expected_from_name: message.from_name.clone(),
@@ -584,12 +890,522 @@ fn legacy_created_at(value: &str) -> DateTime<Utc> {
         .unwrap_or_else(|_| Utc::now())
 }
 
+async fn validate_send_attempts_schema(pool: &SqlitePool, allow_missing: bool) -> Result<()> {
+    let schema_object_type: Option<String> = sqlx::query_scalar(
+        "SELECT type FROM sqlite_master WHERE name = 'send_attempts' COLLATE NOCASE AND type IN ('table', 'view', 'index') ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+    match schema_object_type.as_deref() {
+        None if allow_missing => return Ok(()),
+        Some("table") | None => {}
+        Some(_) => {
+            return Err(anyhow!(
+                "profile schema validation failed: send_attempts conflicts with a non-table schema object"
+            ));
+        }
+    }
+
+    let send_attempt_columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
+        sqlx::query_as("PRAGMA table_info(send_attempts)")
+            .fetch_all(pool)
+            .await?;
+    for required in [
+        "account_id",
+        "attempt_id",
+        "payload_hash",
+        "status",
+        "created_at",
+        "updated_at",
+    ] {
+        if !send_attempt_columns
+            .iter()
+            .any(|column| column.1 == required)
+        {
+            return Err(anyhow!(
+                "profile schema validation failed: send_attempts.{required} is missing"
+            ));
+        }
+    }
+    for required in [
+        "account_id",
+        "attempt_id",
+        "payload_hash",
+        "status",
+        "created_at",
+        "updated_at",
+    ] {
+        let column = send_attempt_columns
+            .iter()
+            .find(|column| column.1 == required)
+            .expect("required send-attempt column was checked above");
+        if column.3 != 1 {
+            return Err(anyhow!(
+                "profile schema validation failed: send_attempts.{required} must be NOT NULL"
+            ));
+        }
+    }
+    let primary_key = send_attempt_columns
+        .iter()
+        .filter(|column| column.5 > 0)
+        .map(|column| (column.5, column.1.as_str()))
+        .collect::<Vec<_>>();
+    if primary_key != vec![(1, "account_id"), (2, "attempt_id")] {
+        return Err(anyhow!(
+            "profile schema validation failed: send_attempts must have PRIMARY KEY(account_id, attempt_id)"
+        ));
+    }
+    type ForeignKeyRow = (i64, i64, String, String, String, String, String, String);
+    let foreign_keys: Vec<ForeignKeyRow> = sqlx::query_as("PRAGMA foreign_key_list(send_attempts)")
+        .fetch_all(pool)
+        .await?;
+    if !foreign_keys.iter().any(|foreign_key| {
+        foreign_key.2 == "accounts"
+            && foreign_key.3 == "account_id"
+            && foreign_key.4 == "id"
+            && foreign_key.6.eq_ignore_ascii_case("CASCADE")
+    }) {
+        return Err(anyhow!(
+            "profile schema validation failed: send_attempts.account_id must reference accounts(id) ON DELETE CASCADE"
+        ));
+    }
+    let table_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'send_attempts' COLLATE NOCASE",
+    )
+    .fetch_one(pool)
+    .await?;
+    let normalized_sql = table_sql
+        .chars()
+        .filter(|character| {
+            !character.is_ascii_whitespace() && *character != '"' && *character != '`'
+        })
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    if !normalized_sql
+        .contains("check(statusin('pending','submitted','delivery_uncertain','sent_copy_failed'))")
+    {
+        return Err(anyhow!(
+            "profile schema validation failed: send_attempts.status must enforce supported states"
+        ));
+    }
+    Ok(())
+}
+
+async fn validate_send_recovery_payloads_schema(
+    pool: &SqlitePool,
+    allow_missing: bool,
+) -> Result<()> {
+    let schema_object_type: Option<String> = sqlx::query_scalar(
+        "SELECT type FROM sqlite_master WHERE name = 'send_recovery_payloads' COLLATE NOCASE AND type IN ('table', 'view', 'index') ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+    match schema_object_type.as_deref() {
+        None if allow_missing => return Ok(()),
+        Some("table") | None => {}
+        Some(_) => {
+            return Err(anyhow!(
+                "profile schema validation failed: send_recovery_payloads conflicts with a non-table schema object"
+            ));
+        }
+    }
+
+    let columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
+        sqlx::query_as("PRAGMA table_info(send_recovery_payloads)")
+            .fetch_all(pool)
+            .await?;
+    for required in [
+        "account_id",
+        "attempt_id",
+        "payload_hash",
+        "payload_json",
+        "subject",
+        "retryable",
+        "created_at",
+        "updated_at",
+    ] {
+        if !columns.iter().any(|column| column.1 == required) {
+            return Err(anyhow!(
+                "profile schema validation failed: send_recovery_payloads.{required} is missing"
+            ));
+        }
+    }
+    for required in [
+        "account_id",
+        "attempt_id",
+        "payload_hash",
+        "payload_json",
+        "subject",
+        "retryable",
+        "created_at",
+        "updated_at",
+    ] {
+        let column = columns
+            .iter()
+            .find(|column| column.1 == required)
+            .expect("required send-recovery column was checked above");
+        if column.3 != 1 {
+            return Err(anyhow!(
+                "profile schema validation failed: send_recovery_payloads.{required} must be NOT NULL"
+            ));
+        }
+    }
+    let primary_key = columns
+        .iter()
+        .filter(|column| column.5 > 0)
+        .map(|column| (column.5, column.1.as_str()))
+        .collect::<Vec<_>>();
+    if primary_key != vec![(1, "account_id"), (2, "attempt_id")] {
+        return Err(anyhow!(
+            "profile schema validation failed: send_recovery_payloads must have PRIMARY KEY(account_id, attempt_id)"
+        ));
+    }
+    type ForeignKeyRow = (i64, i64, String, String, String, String, String, String);
+    let foreign_keys: Vec<ForeignKeyRow> =
+        sqlx::query_as("PRAGMA foreign_key_list(send_recovery_payloads)")
+            .fetch_all(pool)
+            .await?;
+    if !foreign_keys.iter().any(|foreign_key| {
+        foreign_key.2 == "accounts"
+            && foreign_key.3 == "account_id"
+            && foreign_key.4 == "id"
+            && foreign_key.6.eq_ignore_ascii_case("CASCADE")
+    }) {
+        return Err(anyhow!(
+            "profile schema validation failed: send_recovery_payloads.account_id must reference accounts(id) ON DELETE CASCADE"
+        ));
+    }
+    let table_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'send_recovery_payloads' COLLATE NOCASE",
+    )
+    .fetch_one(pool)
+    .await?;
+    let normalized_sql = table_sql
+        .chars()
+        .filter(|character| {
+            !character.is_ascii_whitespace() && *character != '"' && *character != '`'
+        })
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    if !normalized_sql.contains("check(retryablein(0,1))") {
+        return Err(anyhow!(
+            "profile schema validation failed: send_recovery_payloads.retryable must enforce 0 or 1"
+        ));
+    }
+    if !normalized_sql.contains("check(length(cast(subjectasblob))<=4096)") {
+        return Err(anyhow!(
+            "profile schema validation failed: send_recovery_payloads.subject must enforce the display safety limit"
+        ));
+    }
+    Ok(())
+}
+
+struct ProfileMigrationLock {
+    file: File,
+}
+
+impl Drop for ProfileMigrationLock {
+    fn drop(&mut self) {
+        if let Err(error) = File::unlock(&self.file) {
+            tracing::warn!(error = %error, "could not release profile migration lock");
+        }
+    }
+}
+
+/// Exclusive, profile-wide coordination across supported processes for a
+/// long-running operation such as changing an account's provider namespace.
+/// It is not a database transaction and deliberately does not make direct
+/// database writers safe. Dropping it releases the advisory lock, including
+/// when the task holding it is cancelled or its process exits.
+pub struct ProfileOperationGuard {
+    file: Option<File>,
+}
+
+impl Drop for ProfileOperationGuard {
+    fn drop(&mut self) {
+        let Some(file) = self.file.as_ref() else {
+            return;
+        };
+        if let Err(error) = File::unlock(file) {
+            tracing::warn!(error = %error, "could not release profile operation lock");
+        }
+    }
+}
+
+fn canonical_database_lock_identity(database_path: &Path) -> Result<PathBuf> {
+    let mut candidate = database_path.to_path_buf();
+    let mut visited_symlinks = HashSet::new();
+    loop {
+        match std::fs::canonicalize(&candidate) {
+            Ok(path) => return Ok(path),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| "resolve profile database for migration lock");
+            }
+        }
+
+        let parent = candidate
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let metadata = match std::fs::symlink_metadata(&candidate) {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error).with_context(|| "inspect profile database for migration lock");
+            }
+        };
+        if metadata.is_some_and(|metadata| metadata.file_type().is_symlink()) {
+            let canonical_parent = std::fs::canonicalize(parent)
+                .with_context(|| "resolve profile directory for migration lock")?;
+            let file_name = candidate
+                .file_name()
+                .ok_or_else(|| anyhow!("profile database path has no file name"))?;
+            let symlink_identity = canonical_parent.join(file_name);
+            if !visited_symlinks.insert(symlink_identity) {
+                return Err(anyhow!("profile database symlink loop detected"));
+            }
+            let target = std::fs::read_link(&candidate)
+                .with_context(|| "resolve profile database symlink for migration lock")?;
+            candidate = if target.is_absolute() {
+                target
+            } else {
+                parent.join(target)
+            };
+            continue;
+        }
+
+        let canonical_parent = std::fs::canonicalize(parent)
+            .with_context(|| "resolve profile directory for migration lock")?;
+        let file_name = candidate
+            .file_name()
+            .ok_or_else(|| anyhow!("profile database path has no file name"))?;
+        return Ok(canonical_parent.join(file_name));
+    }
+}
+
+fn profile_migration_lock_path(database_path: &Path) -> Result<PathBuf> {
+    let canonical_database = canonical_database_lock_identity(database_path)?;
+    let file_name = canonical_database
+        .file_name()
+        .ok_or_else(|| anyhow!("profile database path has no file name"))?
+        .to_string_lossy();
+    Ok(canonical_database.with_file_name(format!(".{file_name}.migration.lock")))
+}
+
+fn profile_operation_lock_path_from_canonical_database(
+    canonical_database: &Path,
+) -> Result<PathBuf> {
+    let file_name = canonical_database
+        .file_name()
+        .ok_or_else(|| anyhow!("profile database path has no file name"))?
+        .to_string_lossy();
+    Ok(canonical_database.with_file_name(format!(".{file_name}.operations.lock")))
+}
+
+#[cfg(test)]
+fn profile_operation_lock_path(database_path: &Path) -> Result<PathBuf> {
+    profile_operation_lock_path_from_canonical_database(&canonical_database_lock_identity(
+        database_path,
+    )?)
+}
+
+fn open_profile_migration_lock_file(database_path: &Path, create: bool) -> Result<Option<File>> {
+    let lock_path = match profile_migration_lock_path(database_path) {
+        Ok(path) => path,
+        Err(error)
+            if !create
+                && error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == ErrorKind::NotFound) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(create);
+    #[cfg(unix)]
+    options
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    let file = match options.open(&lock_path) {
+        Ok(file) => file,
+        Err(error) if !create && error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| "open profile migration lock"),
+    };
+    let metadata = file
+        .metadata()
+        .with_context(|| "inspect profile migration lock")?;
+    if !metadata.file_type().is_file() {
+        return Err(anyhow!("profile migration lock is not a regular file"));
+    }
+    #[cfg(unix)]
+    {
+        let effective_user = unsafe { libc::geteuid() };
+        if metadata.uid() != effective_user {
+            return Err(anyhow!(
+                "profile migration lock is not owned by the current user"
+            ));
+        }
+        if metadata.mode() & 0o777 != 0o600 {
+            return Err(anyhow!(
+                "profile migration lock permissions must be owner read/write only"
+            ));
+        }
+    }
+    Ok(Some(file))
+}
+
+fn open_profile_migration_lock(database_path: &Path) -> Result<File> {
+    open_profile_migration_lock_file(database_path, true)?
+        .ok_or_else(|| anyhow!("profile migration lock was not created"))
+}
+
+fn open_profile_operation_lock_file(canonical_database: &Path) -> Result<File> {
+    let lock_path = profile_operation_lock_path_from_canonical_database(canonical_database)?;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    options
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    let file = options
+        .open(&lock_path)
+        .with_context(|| "open profile operation lock")?;
+    let metadata = file
+        .metadata()
+        .with_context(|| "inspect profile operation lock")?;
+    if !metadata.file_type().is_file() {
+        return Err(anyhow!("profile operation lock is not a regular file"));
+    }
+    #[cfg(unix)]
+    {
+        let effective_user = unsafe { libc::geteuid() };
+        if metadata.uid() != effective_user {
+            return Err(anyhow!(
+                "profile operation lock is not owned by the current user"
+            ));
+        }
+        if metadata.mode() & 0o777 != 0o600 {
+            return Err(anyhow!(
+                "profile operation lock permissions must be owner read/write only"
+            ));
+        }
+        if metadata.nlink() != 1 {
+            return Err(anyhow!("profile operation lock must not have hard links"));
+        }
+    }
+    Ok(file)
+}
+
+async fn acquire_profile_migration_lock_file_until(
+    file: File,
+    deadline: Instant,
+) -> Result<ProfileMigrationLock> {
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(ProfileMigrationLock { file }),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                tokio::time::sleep(PROFILE_MIGRATION_LOCK_POLL).await;
+            }
+            Err(TryLockError::WouldBlock) => {
+                return Err(anyhow!(
+                    "timed out waiting for another Dakia process to finish profile migration"
+                ));
+            }
+            Err(TryLockError::Error(error)) => {
+                return Err(error).with_context(|| "acquire profile migration lock");
+            }
+        }
+    }
+}
+
+async fn acquire_profile_operation_lock_file_until(
+    file: File,
+    deadline: Instant,
+) -> Result<ProfileOperationGuard> {
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(ProfileOperationGuard { file: Some(file) }),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                tokio::time::sleep(PROFILE_OPERATION_LOCK_POLL).await;
+            }
+            Err(TryLockError::WouldBlock) => {
+                return Err(anyhow!(
+                    "timed out waiting for another Dakia process to finish a profile operation"
+                ));
+            }
+            Err(TryLockError::Error(error)) => {
+                return Err(error).with_context(|| "acquire profile operation lock");
+            }
+        }
+    }
+}
+
+async fn acquire_profile_migration_lock_until(
+    database_path: &Path,
+    deadline: Instant,
+) -> Result<ProfileMigrationLock> {
+    acquire_profile_migration_lock_file_until(open_profile_migration_lock(database_path)?, deadline)
+        .await
+}
+
+async fn acquire_existing_profile_migration_lock_until(
+    database_path: &Path,
+    deadline: Instant,
+) -> Result<Option<ProfileMigrationLock>> {
+    let Some(file) = open_profile_migration_lock_file(database_path, false)? else {
+        return Ok(None);
+    };
+    acquire_profile_migration_lock_file_until(file, deadline)
+        .await
+        .map(Some)
+}
+
 impl Store {
     pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
+        let migration_deadline = Instant::now() + PROFILE_MIGRATION_LOCK_WAIT;
+        let mut migration_lock =
+            acquire_existing_profile_migration_lock_until(path, migration_deadline).await?;
+        #[cfg(test)]
+        if migration_lock.is_none() {
+            pause_after_absent_profile_lock_lookup(path).await;
+        }
+        if let Err(initial_error) = reject_unsupported_profile_version_at_path(path).await {
+            if migration_lock.is_some() {
+                return Err(initial_error);
+            }
+            // A current Dakia process may have created the coordinator after
+            // this opener checked for it and entered writable migration before
+            // the read-only preflight connected. Wait for that exact existing
+            // lock, then inspect the settled schema. Invalid profiles without
+            // a coordinator still fail without creating any profile state.
+            migration_lock =
+                acquire_existing_profile_migration_lock_until(path, migration_deadline).await?;
+            if migration_lock.is_some() {
+                reject_unsupported_profile_version_at_path(path).await?;
+            } else {
+                return Err(initial_error);
+            }
+        }
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
+        // SQLite schema changes include an FTS drop/rebuild and VACUUM, so a
+        // transaction around only the first DDL statements is insufficient.
+        // Serialize the complete writable migration across desktop and CLI
+        // processes. The persistent lock inode is never replaced or removed;
+        // the OS releases its advisory lock if this task or process stops.
+        let migration_lock = match migration_lock {
+            Some(lock) => lock,
+            None => acquire_profile_migration_lock_until(path, migration_deadline).await?,
+        };
+        // Another process may have completed or changed the profile while this
+        // opener waited. Recheck with the read-only path before creating a
+        // vault key, enabling WAL, or running any migration statement.
+        reject_unsupported_profile_version_at_path(path).await?;
         let key_dir = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -625,8 +1441,18 @@ impl Store {
                 Err(error) => return Err(error.into()),
             }
         };
-        let store = Self { pool, vault_key };
+        // Cache the settled physical database identity only after SQLite has
+        // created the file and migration has finished. A later caller cannot
+        // make this Store coordinate a different profile by changing a path
+        // alias underneath it.
+        let canonical_database_path = Arc::new(canonical_database_lock_identity(path)?);
+        let store = Self {
+            pool,
+            vault_key,
+            database_path: Some(canonical_database_path),
+        };
         store.migrate_with_busy_retry().await?;
+        drop(migration_lock);
         Ok(store)
     }
 
@@ -635,9 +1461,29 @@ impl Store {
         let store = Self {
             pool,
             vault_key: Arc::new(random_bytes()?),
+            database_path: None,
         };
         store.migrate_with_busy_retry().await?;
         Ok(store)
+    }
+
+    /// Coordinates one supported, long-running profile operation across
+    /// desktop and CLI processes. It has no effect for in-memory stores.
+    ///
+    /// Callers must hold the returned guard around the complete operation,
+    /// including provider I/O and durable account publication. Store methods
+    /// do not acquire it themselves because doing so could deadlock a caller
+    /// that correctly holds it already.
+    pub async fn acquire_profile_operation_guard(&self) -> Result<ProfileOperationGuard> {
+        let Some(canonical_database) = self.database_path.as_deref() else {
+            return Ok(ProfileOperationGuard { file: None });
+        };
+        let file = open_profile_operation_lock_file(canonical_database)?;
+        acquire_profile_operation_lock_file_until(
+            file,
+            Instant::now() + PROFILE_OPERATION_LOCK_WAIT,
+        )
+        .await
     }
 
     async fn migrate_with_busy_retry(&self) -> Result<()> {
@@ -657,7 +1503,23 @@ impl Store {
     }
 
     async fn migrate(&self) -> Result<()> {
+        self.reject_unsupported_profile_version().await?;
         let migrated_legacy_profile = self.prepare_legacy_desktop_profile().await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+        )
+        .execute(&self.pool)
+        .await?;
+        // Reject conflicting current-schema objects before recording a
+        // migration target. A profile must not be marked as partially
+        // migrated merely because a damaged or hostile schema blocks this
+        // release's recovery migration.
+        validate_send_attempts_schema(&self.pool, true).await?;
+        validate_send_recovery_payloads_schema(&self.pool, true).await?;
+        sqlx::query("INSERT INTO app_meta(key, value) VALUES ('profile_schema_migration_target', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+            .bind(PROFILE_SCHEMA_VERSION.to_string())
+            .execute(&self.pool)
+            .await?;
         let sync_state_exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'mailbox_sync_state')",
         )
@@ -665,8 +1527,14 @@ impl Store {
         .await?;
         for statement in [
             "CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, data TEXT NOT NULL, created_at TEXT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS send_attempts (account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, payload_hash TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending', 'submitted', 'delivery_uncertain', 'sent_copy_failed')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, attempt_id))",
+            "CREATE TABLE IF NOT EXISTS send_recovery_payloads (account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, payload_hash TEXT NOT NULL, payload_json BLOB NOT NULL, subject TEXT NOT NULL CHECK(length(CAST(subject AS BLOB)) <= 4096), retryable INTEGER NOT NULL DEFAULT 0 CHECK(retryable IN (0, 1)), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(account_id, attempt_id))",
             "CREATE TABLE IF NOT EXISTS credentials (name TEXT PRIMARY KEY, nonce BLOB NOT NULL, ciphertext BLOB NOT NULL, updated_at TEXT NOT NULL)",
             "CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, account_id TEXT NOT NULL, mailbox TEXT NOT NULL, uid INTEGER NOT NULL, message_id TEXT, in_reply_to TEXT, reference_ids TEXT, thread_id TEXT NOT NULL, threading_scanned INTEGER NOT NULL DEFAULT 1, recipient_headers_scanned INTEGER NOT NULL DEFAULT 1, subject TEXT NOT NULL, from_name TEXT, from_address TEXT NOT NULL, to_addresses TEXT NOT NULL, cc_addresses TEXT NOT NULL DEFAULT '', bcc_addresses TEXT NOT NULL DEFAULT '', reply_to_addresses TEXT NOT NULL DEFAULT '', received_at TEXT NOT NULL, snippet TEXT NOT NULL, body_text TEXT NOT NULL, unsubscribe_kind TEXT, unsubscribe_url TEXT, unsubscribe_scanned INTEGER NOT NULL DEFAULT 0, is_read INTEGER NOT NULL DEFAULT 0, is_flagged INTEGER NOT NULL DEFAULT 0, has_attachments INTEGER NOT NULL DEFAULT 0, category TEXT, classification_confidence REAL, classification_source TEXT, classification_signals TEXT NOT NULL DEFAULT '', UNIQUE(account_id, mailbox, uid))",
+            "CREATE TABLE IF NOT EXISTS message_provider_identities (message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, provider TEXT NOT NULL CHECK(provider = 'gmail'), provider_message_id TEXT NOT NULL CHECK(length(provider_message_id) BETWEEN 1 AND 20))",
+            "CREATE TABLE IF NOT EXISTS message_provider_identity_observations (message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, provider TEXT NOT NULL CHECK(provider = 'gmail'))",
+            "CREATE INDEX IF NOT EXISTS message_provider_identities_lookup ON message_provider_identities(account_id, provider, provider_message_id)",
+            "CREATE INDEX IF NOT EXISTS message_provider_identity_observations_account ON message_provider_identity_observations(account_id)",
             "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(subject, from_name, from_address, to_addresses, body_text, content='messages', content_rowid='rowid')",
             "CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN INSERT INTO messages_fts(rowid, subject, from_name, from_address, to_addresses, body_text) VALUES (new.rowid, new.subject, new.from_name, new.from_address, new.to_addresses, new.body_text); END",
             "CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN INSERT INTO messages_fts(messages_fts, rowid, subject, from_name, from_address, to_addresses, body_text) VALUES ('delete', old.rowid, old.subject, old.from_name, old.from_address, old.to_addresses, old.body_text); END",
@@ -674,10 +1542,10 @@ impl Store {
             "CREATE INDEX IF NOT EXISTS messages_account_mailbox_date ON messages(account_id, mailbox, received_at DESC)",
             "CREATE TABLE IF NOT EXISTS mailbox_sync_state (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, initialized_at TEXT NOT NULL, highest_uid INTEGER, uid_validity INTEGER, PRIMARY KEY(account_id, mailbox))",
             "CREATE TABLE IF NOT EXISTS mailbox_action_tombstones (account_id TEXT NOT NULL, mailbox TEXT NOT NULL, uid INTEGER NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(account_id, mailbox, uid))",
-            "CREATE TABLE IF NOT EXISTS attachments (id TEXT PRIMARY KEY, message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, filename TEXT NOT NULL, mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, is_inline INTEGER NOT NULL DEFAULT 0, presentation TEXT NOT NULL DEFAULT 'unknown', is_potentially_unsafe INTEGER NOT NULL DEFAULT 0, data BLOB NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS attachments (id TEXT PRIMARY KEY, message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, filename TEXT NOT NULL, mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, size_kind TEXT NOT NULL DEFAULT 'unknown', is_inline INTEGER NOT NULL DEFAULT 0, presentation TEXT NOT NULL DEFAULT 'unknown', is_potentially_unsafe INTEGER NOT NULL DEFAULT 0, data BLOB NOT NULL)",
             "CREATE INDEX IF NOT EXISTS attachments_message_id ON attachments(message_id)",
             "CREATE TABLE IF NOT EXISTS starred_message_bodies (message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, body_text TEXT NOT NULL, body_html TEXT, attachment_presentation_version INTEGER NOT NULL DEFAULT 0, cached_at TEXT NOT NULL)",
-            "CREATE TABLE IF NOT EXISTS starred_attachment_metadata (id TEXT PRIMARY KEY, message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, filename TEXT NOT NULL, mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, is_inline INTEGER NOT NULL DEFAULT 0, presentation TEXT NOT NULL DEFAULT 'unknown', is_potentially_unsafe INTEGER NOT NULL DEFAULT 0)",
+            "CREATE TABLE IF NOT EXISTS starred_attachment_metadata (id TEXT PRIMARY KEY, message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, filename TEXT NOT NULL, mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, size_kind TEXT NOT NULL DEFAULT 'unknown', is_inline INTEGER NOT NULL DEFAULT 0, presentation TEXT NOT NULL DEFAULT 'unknown', is_potentially_unsafe INTEGER NOT NULL DEFAULT 0)",
             "CREATE TABLE IF NOT EXISTS message_content_cache (message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, content_state TEXT NOT NULL CHECK(content_state = 'complete'), body_text TEXT NOT NULL, body_html TEXT, unsubscribe_kind TEXT, attachments_json TEXT NOT NULL, byte_size INTEGER NOT NULL CHECK(byte_size >= 0), last_accessed INTEGER NOT NULL)",
             "CREATE INDEX IF NOT EXISTS message_content_cache_lru ON message_content_cache(last_accessed, message_id)",
             "CREATE TABLE IF NOT EXISTS message_content_fetches (message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE ON UPDATE CASCADE, claimed_at TEXT NOT NULL, claim_owner TEXT NOT NULL DEFAULT '')",
@@ -697,6 +1565,13 @@ impl Store {
                 .execute(&self.pool)
                 .await
                 .with_context(|| format!("storage migration statement failed: {statement}"))?;
+        }
+        #[cfg(test)]
+        if std::env::var_os("DAKIA_TEST_ABORT_MIGRATION_AFTER_BASE_SCHEMA").is_some() {
+            // Test binaries use this checkpoint from an isolated child
+            // process. It is absent from production builds and deliberately
+            // terminates before later repair steps and the schema marker.
+            std::process::exit(86);
         }
         let fetch_claim_columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
             sqlx::query_as("PRAGMA table_info(message_content_fetches)")
@@ -835,9 +1710,6 @@ impl Store {
                 .execute(&self.pool)
                 .await?;
         }
-        sqlx::query("UPDATE mailbox_sync_state SET highest_uid = (SELECT MAX(uid) FROM messages WHERE messages.account_id = mailbox_sync_state.account_id AND messages.mailbox = mailbox_sync_state.mailbox) WHERE highest_uid IS NULL")
-            .execute(&self.pool)
-            .await?;
         if !columns.iter().any(|column| column.1 == "in_reply_to") {
             sqlx::query("ALTER TABLE messages ADD COLUMN in_reply_to TEXT")
                 .execute(&self.pool)
@@ -941,6 +1813,49 @@ impl Store {
                     .await?;
             for account_id in account_ids {
                 self.rebuild_threads_for_account(&account_id).await?;
+            }
+        }
+        self.validate_profile_schema().await?;
+        let mut completion = self.pool.begin().await?;
+        sqlx::query("INSERT INTO app_meta(key, value) VALUES ('profile_schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+            .bind(PROFILE_SCHEMA_VERSION.to_string())
+            .execute(&mut *completion)
+            .await?;
+        sqlx::query("DELETE FROM app_meta WHERE key = 'profile_schema_migration_target'")
+            .execute(&mut *completion)
+            .await?;
+        completion.commit().await?;
+        Ok(())
+    }
+
+    async fn validate_profile_schema(&self) -> Result<()> {
+        validate_send_attempts_schema(&self.pool, false).await?;
+        validate_send_recovery_payloads_schema(&self.pool, false).await
+    }
+
+    async fn reject_unsupported_profile_version(&self) -> Result<()> {
+        let app_meta_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'app_meta')",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        if !app_meta_exists {
+            return Ok(());
+        }
+
+        let versions: Vec<(String, String)> = sqlx::query_as(
+            "SELECT key, value FROM app_meta WHERE key IN ('profile_schema_version', 'profile_schema_migration_target')",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        for (key, version) in versions {
+            let parsed = version
+                .parse::<u32>()
+                .with_context(|| format!("stored {key} is invalid: {version:?}"))?;
+            if parsed > PROFILE_SCHEMA_VERSION {
+                return Err(anyhow!(
+                    "profile schema version {parsed} is newer than this Dakia build supports ({PROFILE_SCHEMA_VERSION})"
+                ));
             }
         }
         Ok(())
@@ -1114,6 +2029,17 @@ impl Store {
                 .execute(&self.pool)
                 .await?;
             }
+            if !columns.iter().any(|column| column.1 == "size_kind") {
+                // BODYSTRUCTURE-derived and legacy cached values had no
+                // durable indication of whether the value was encoded or
+                // decoded. Preserve them as unknown until the next complete
+                // fetch replaces the metadata.
+                sqlx::query(&format!(
+                    "ALTER TABLE {table} ADD COLUMN size_kind TEXT NOT NULL DEFAULT 'unknown'"
+                ))
+                .execute(&self.pool)
+                .await?;
+            }
         }
         let starred_body_columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
             sqlx::query_as("PRAGMA table_info(starred_message_bodies)")
@@ -1205,6 +2131,21 @@ impl Store {
     /// creating any current-schema indexes.  This keeps an existing desktop
     /// install searchable instead of failing on `messages.account_id`.
     async fn prepare_legacy_desktop_profile(&self) -> Result<bool> {
+        let prepared_tables = ["legacy_accounts", "legacy_mailboxes", "legacy_messages"];
+        let mut prepared_exists = Vec::with_capacity(prepared_tables.len());
+        for table in prepared_tables {
+            prepared_exists.push(self.table_exists(table).await?);
+        }
+        if prepared_exists.iter().any(|exists| *exists) {
+            self.reject_unsupported_legacy_state().await?;
+            if prepared_exists.iter().all(|exists| *exists) {
+                return Ok(true);
+            }
+            return Err(anyhow!(
+                "legacy desktop profile migration is incomplete; original data was preserved"
+            ));
+        }
+
         let accounts_exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'accounts')",
         )
@@ -1235,6 +2176,7 @@ impl Store {
         if !message_columns.iter().any(|column| column.1 == "accountId") {
             return Ok(false);
         }
+        self.reject_unsupported_legacy_state().await?;
 
         let mut tx = self.pool.begin().await?;
         for statement in [
@@ -1274,12 +2216,47 @@ impl Store {
         Ok(true)
     }
 
+    async fn table_exists(&self, table: &str) -> Result<bool> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)",
+        )
+        .bind(table)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    async fn reject_unsupported_legacy_state(&self) -> Result<()> {
+        for table in [
+            "message_bodies",
+            "local_drafts",
+            "operation_queue",
+            "legacy_message_bodies",
+            "legacy_local_drafts",
+            "legacy_operation_queue",
+        ] {
+            if !self.table_exists(table).await? {
+                continue;
+            }
+            let has_rows: bool =
+                sqlx::query_scalar(&format!("SELECT EXISTS(SELECT 1 FROM {table} LIMIT 1)"))
+                    .fetch_one(&self.pool)
+                    .await?;
+            if has_rows {
+                return Err(anyhow!(
+                    "legacy desktop profile contains cached message bodies, local drafts, or queued operations that this Dakia version cannot safely migrate; original data was preserved"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     async fn restore_legacy_desktop_profile(&self) -> Result<()> {
         let accounts: Vec<LegacyAccountRow> = sqlx::query_as(
             "SELECT id, email, displayName AS display_name, host, port, tls, username, providerCapabilities AS provider_capabilities, createdAt AS created_at FROM legacy_accounts ORDER BY createdAt",
         )
         .fetch_all(&self.pool)
         .await?;
+        let mut restored_accounts = Vec::with_capacity(accounts.len());
         for legacy in accounts {
             let id = uuid::Uuid::parse_str(&legacy.id)
                 .with_context(|| format!("legacy account {} has an invalid ID", legacy.email))?;
@@ -1320,7 +2297,7 @@ impl Store {
                 enabled: true,
                 created_at: legacy_created_at(&legacy.created_at),
             };
-            self.save_account(&account).await?;
+            restored_accounts.push(account);
         }
 
         let states: Vec<LegacyMailboxRow> = sqlx::query_as(
@@ -1328,6 +2305,16 @@ impl Store {
         )
         .fetch_all(&self.pool)
         .await?;
+        let messages: Vec<LegacyMessageRow> = sqlx::query_as(
+            "SELECT m.id, m.accountId AS account_id, mb.path AS mailbox, m.uid, m.messageId AS message_id, m.inReplyTo AS in_reply_to, m.referencesJson AS reference_ids, m.threadId AS thread_id, m.subject, m.fromAddress AS from_address, m.toAddresses AS to_addresses, m.date, m.flags, m.snippet FROM legacy_messages m JOIN legacy_mailboxes mb ON mb.id = m.mailboxId",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut transaction = self.pool.begin().await?;
+        for account in &restored_accounts {
+            save_account_in_transaction(&mut transaction, account).await?;
+        }
         for state in states {
             let Some(uid_validity) = state.uid_validity else {
                 continue;
@@ -1338,23 +2325,17 @@ impl Store {
                 .bind(&state.remote_name)
                 .bind(uid_validity)
                 .bind(Utc::now())
-                .execute(&self.pool)
+                .execute(&mut *transaction)
                 .await?;
             sqlx::query("INSERT OR REPLACE INTO mailbox_sync_state(account_id, mailbox, initialized_at, highest_uid, uid_validity) VALUES (?, ?, ?, NULL, ?)")
                 .bind(&state.account_id)
                 .bind(&state.mailbox)
                 .bind(Utc::now())
                 .bind(uid_validity)
-                .execute(&self.pool)
+                .execute(&mut *transaction)
                 .await?;
         }
 
-        let messages: Vec<LegacyMessageRow> = sqlx::query_as(
-            "SELECT m.id, m.accountId AS account_id, mb.path AS mailbox, m.uid, m.messageId AS message_id, m.inReplyTo AS in_reply_to, m.referencesJson AS reference_ids, m.threadId AS thread_id, m.subject, m.fromAddress AS from_address, m.toAddresses AS to_addresses, m.date, m.flags, m.snippet FROM legacy_messages m JOIN legacy_mailboxes mb ON mb.id = m.mailboxId",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        let mut transaction = self.pool.begin().await?;
         for legacy in messages {
             let received_at = legacy_received_at(legacy.date.as_deref());
             let flags = legacy.flags.to_ascii_lowercase();
@@ -1377,8 +2358,6 @@ impl Store {
                 .execute(&mut *transaction)
                 .await?;
         }
-        transaction.commit().await?;
-
         for table in [
             "legacy_message_bodies",
             "legacy_thread_messages",
@@ -1392,12 +2371,13 @@ impl Store {
             "legacy_accounts",
         ] {
             sqlx::query(&format!("DROP TABLE IF EXISTS {table}"))
-                .execute(&self.pool)
+                .execute(&mut *transaction)
                 .await?;
         }
         sqlx::query("INSERT INTO app_meta(key, value) VALUES ('legacy_desktop_profile_migrated', '1') ON CONFLICT(key) DO UPDATE SET value=excluded.value")
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await?;
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -1579,17 +2559,25 @@ impl Store {
         Ok(())
     }
 
-    /// Stores refreshed OAuth credentials only while the durable account still
-    /// uses OAuth. A stale watcher cannot overwrite a newly saved app password.
-    pub async fn set_oauth_secret_if_current(
+    /// Publishes refreshed OAuth credentials only when the durable account and
+    /// encrypted credential still match the state that started the refresh.
+    ///
+    /// A concurrent refresh that loses the race receives the winning OAuth
+    /// credential. Account removal or conversion to an app password returns
+    /// `None`, so neither transition can be overwritten by a stale watcher.
+    pub async fn compare_and_set_oauth_secret_if_current(
         &self,
         account_id: AccountId,
         secret_name: &str,
-        secret: &str,
-    ) -> Result<bool> {
+        expected_secret: &str,
+        refreshed_secret: &str,
+    ) -> Result<Option<String>> {
         let nonce = random_bytes::<VAULT_NONCE_LEN>()?;
-        let ciphertext = encrypt_secret(&self.vault_key, nonce, secret_name, secret)?;
-        let mut tx = self.pool.begin().await?;
+        let ciphertext = encrypt_secret(&self.vault_key, nonce, secret_name, refreshed_secret)?;
+        // Serialize the read-and-compare with other credential publications.
+        // A deferred transaction could let two refreshes both read the old
+        // value before either writer acquires SQLite's write lock.
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let data: Option<String> = sqlx::query_scalar("SELECT data FROM accounts WHERE id = ?")
             .bind(account_id.to_string())
             .fetch_optional(&mut *tx)
@@ -1601,17 +2589,38 @@ impl Store {
             .is_some_and(|account| matches!(account.auth, AccountAuth::OAuth2 { .. }));
         if !still_oauth {
             tx.rollback().await?;
-            return Ok(false);
+            return Ok(None);
         }
-        sqlx::query("INSERT INTO credentials(name, nonce, ciphertext, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET nonce=excluded.nonce, ciphertext=excluded.ciphertext, updated_at=excluded.updated_at")
-            .bind(secret_name)
-            .bind(nonce.as_slice())
-            .bind(ciphertext)
-            .bind(Utc::now())
-            .execute(&mut *tx)
-            .await?;
+        let current: Option<(Vec<u8>, Vec<u8>)> =
+            sqlx::query_as("SELECT nonce, ciphertext FROM credentials WHERE name = ?")
+                .bind(secret_name)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some((current_nonce, current_ciphertext)) = current else {
+            tx.rollback().await?;
+            return Err(anyhow!("OAuth credentials are missing"));
+        };
+        let current_secret = decrypt_secret(
+            &self.vault_key,
+            &current_nonce,
+            secret_name,
+            current_ciphertext,
+        )?;
+        if current_secret != expected_secret {
+            tx.rollback().await?;
+            return Ok(Some(current_secret));
+        }
+        sqlx::query(
+            "UPDATE credentials SET nonce = ?, ciphertext = ?, updated_at = ? WHERE name = ?",
+        )
+        .bind(nonce.as_slice())
+        .bind(ciphertext)
+        .bind(Utc::now())
+        .bind(secret_name)
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
-        Ok(true)
+        Ok(Some(refreshed_secret.to_owned()))
     }
 
     pub async fn accounts(&self) -> Result<Vec<Account>> {
@@ -1665,13 +2674,51 @@ impl Store {
         Ok(())
     }
 
-    pub async fn delete_account(&self, id: AccountId) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+    /// Deletes an account, all account-owned mail state, and its encrypted
+    /// credential in one commit.
+    ///
+    /// The credential key is derived from the persisted account inside the
+    /// same transaction. A process crash or storage failure therefore cannot
+    /// leave a visible account whose password or OAuth token was already
+    /// removed.
+    pub async fn delete_account_with_credential(&self, id: AccountId) -> Result<()> {
+        // Use an immediate transaction so credential removal cannot race a
+        // concurrent credential replacement after this account has been read.
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let account_data: Option<String> =
+            sqlx::query_scalar("SELECT data FROM accounts WHERE id = ?")
+                .bind(id.to_string())
+                .fetch_optional(&mut *tx)
+                .await?;
+        let credential_name = account_data
+            .as_deref()
+            .map(deserialize_account)
+            .transpose()?
+            .map(|account| {
+                if account.id != id {
+                    return Err(anyhow!(
+                        "stored account identity does not match its account row"
+                    ));
+                }
+                Ok(format!(
+                    "dev.dakia.mail:{}:{}",
+                    account.id,
+                    account.auth.username()
+                ))
+            })
+            .transpose()?;
+
         sqlx::query("INSERT INTO deleted_account_tombstones(account_id, deleted_at) VALUES (?, ?) ON CONFLICT(account_id) DO UPDATE SET deleted_at=excluded.deleted_at")
             .bind(id.to_string())
             .bind(Utc::now())
             .execute(&mut *tx)
             .await?;
+        if let Some(credential_name) = credential_name {
+            sqlx::query("DELETE FROM credentials WHERE name = ?")
+                .bind(credential_name)
+                .execute(&mut *tx)
+                .await?;
+        }
         sqlx::query("DELETE FROM mail_rebuild_jobs WHERE account_id = ?")
             .bind(id.to_string())
             .execute(&mut *tx)
@@ -1712,6 +2759,12 @@ impl Store {
         Ok(())
     }
 
+    /// Backwards-compatible account removal entry point. Account deletion
+    /// always includes its credential so no caller can create a split state.
+    pub async fn delete_account(&self, id: AccountId) -> Result<()> {
+        self.delete_account_with_credential(id).await
+    }
+
     /// Deletes only provider-derived local mail state for an account. Account
     /// configuration and encrypted credentials remain intact so a subsequent
     /// full catalogue sync can rebuild from the authoritative provider.
@@ -1742,11 +2795,85 @@ impl Store {
     pub async fn upsert_messages(&self, messages: &[MailSummary]) -> Result<()> {
         let mut tx = self.pool.begin().await?;
         for message in messages {
-            persist_message(&mut tx, message).await?;
+            persist_message(&mut tx, message, ProviderIdentityPolicy::PreserveAbsent).await?;
         }
         tx.commit().await?;
         self.rebuild_threads_for_messages(messages).await?;
         Ok(())
+    }
+
+    /// Publishes a hydrated message only if its immutable locator and captured
+    /// UIDVALIDITY still identify the same durable row. `false` means a
+    /// concurrent sync replaced the mailbox generation, so no fetched body,
+    /// attachment metadata, or cache state was written.
+    pub async fn upsert_message_at_epoch(
+        &self,
+        target: &MailSummary,
+        fetched: &MailSummary,
+    ) -> Result<bool> {
+        self.upsert_message_at_epoch_with_provider_identity_observation(target, fetched, false)
+            .await
+    }
+
+    /// A content projection read from SQLite deliberately has no private
+    /// provider metadata. Preserve a known identity unless the mail transport
+    /// explicitly reports that it requested X-GM-MSGID for this fetch.
+    pub(crate) async fn upsert_message_at_epoch_with_provider_identity_observation(
+        &self,
+        target: &MailSummary,
+        fetched: &MailSummary,
+        gmail_identity_was_requested: bool,
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        if !epoch_target_is_current(&mut tx, target, fetched).await? {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        persist_message_with_flag_policy(
+            &mut tx,
+            fetched,
+            FlagUpdatePolicy::CompareAndSwap(Some((target.is_read, target.is_flagged))),
+            if gmail_identity_was_requested {
+                ProviderIdentityPolicy::Observed
+            } else {
+                ProviderIdentityPolicy::PreserveAbsent
+            },
+        )
+        .await?;
+        let is_flagged: bool = sqlx::query_scalar("SELECT is_flagged FROM messages WHERE id = ?")
+            .bind(&target.id)
+            .fetch_one(&mut *tx)
+            .await?;
+        Self::cache_message_content_in_transaction(
+            &mut tx,
+            &target.id,
+            is_flagged,
+            CachedMessageContent {
+                body_text: fetched.body_text.clone(),
+                body_html: fetched.body_html.clone(),
+                unsubscribe_kind: fetched.unsubscribe_kind.clone(),
+                attachments: fetched
+                    .attachments
+                    .iter()
+                    .map(|attachment| attachment.attachment.clone())
+                    .collect(),
+            },
+            MESSAGE_CONTENT_CACHE_MAX_BYTES,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// The content-specific alias makes callers state their intent while
+    /// preserving the same transaction boundary for body, attachment and
+    /// starred-content persistence.
+    pub async fn publish_message_content_at_epoch(
+        &self,
+        target: &MailSummary,
+        fetched: &MailSummary,
+    ) -> Result<bool> {
+        self.upsert_message_at_epoch(target, fetched).await
     }
 
     /// Catalogue sync already assigns a deterministic provisional thread id
@@ -1755,8 +2882,83 @@ impl Store {
     /// authoritative rebuild after the historical pass completes.
     pub async fn upsert_catalog_messages(&self, messages: &[MailSummary]) -> Result<()> {
         let mut tx = self.pool.begin().await?;
+        let mut gmail_accounts = HashMap::new();
         for message in messages {
-            persist_message(&mut tx, message).await?;
+            if !gmail_accounts.contains_key(&message.account_id) {
+                let gmail_account =
+                    account_uses_gmail_provider(&mut tx, &message.account_id).await?;
+                if gmail_account == Some(false) {
+                    clear_provider_identity_for_non_gmail_account(&mut tx, &message.account_id)
+                        .await?;
+                }
+                gmail_accounts.insert(message.account_id.clone(), gmail_account);
+            }
+            persist_message_with_flag_policy_and_account_provider(
+                &mut tx,
+                message,
+                FlagUpdatePolicy::ProviderAuthoritative,
+                ProviderIdentityPolicy::Observed,
+                gmail_accounts[&message.account_id],
+                gmail_accounts[&message.account_id] == Some(false),
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Publishes an online-only metadata batch only while the mailbox epoch
+    /// selected before the fetch remains the current durable namespace.
+    pub async fn upsert_catalog_messages_at_epoch(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        expected_uid_validity: i64,
+        messages: &[MailSummary],
+    ) -> Result<()> {
+        self.upsert_catalog_messages_at_epoch_with_provider_identity_observation(
+            account_id,
+            mailbox,
+            expected_uid_validity,
+            messages,
+            true,
+        )
+        .await
+    }
+
+    pub(crate) async fn upsert_catalog_messages_at_epoch_with_provider_identity_observation(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        expected_uid_validity: i64,
+        messages: &[MailSummary],
+        gmail_identity_was_requested: bool,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        let matched = sqlx::query("UPDATE mailbox_catalog_state SET updated_at = updated_at WHERE account_id = ? AND mailbox = ? AND uid_validity = ?")
+            .bind(account_id.to_string())
+            .bind(mailbox)
+            .bind(expected_uid_validity)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected() == 1;
+        if !matched {
+            tx.rollback().await?;
+            return Err(anyhow!(
+                "mailbox identity changed before metadata publication"
+            ));
+        }
+        for message in messages {
+            persist_message(
+                &mut tx,
+                message,
+                if gmail_identity_was_requested {
+                    ProviderIdentityPolicy::Observed
+                } else {
+                    ProviderIdentityPolicy::PreserveAbsent
+                },
+            )
+            .await?;
         }
         tx.commit().await?;
         Ok(())
@@ -1840,6 +3042,106 @@ impl Store {
                         ))
                         .copied(),
                 ),
+                ProviderIdentityPolicy::Observed,
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Atomically publishes a delayed recent refresh only when the catalogue
+    /// still has the UIDVALIDITY observed before the remote fetch. This is a
+    /// cross-process fence for desktop and CLI sharing one SQLite profile.
+    // This mirrors the one mailbox-catalogue publication record. Keeping the
+    // values explicit makes its account/mailbox/epoch fence visible at each
+    // call site; grouping them would hide the safety preconditions.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn publish_recent_catalog_messages_at_epoch(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        remote_name: &str,
+        expected_uid_validity: i64,
+        remote_total: usize,
+        historical_complete: bool,
+        messages: &[MailSummary],
+        expected_flags: &[ExpectedMessageFlags],
+    ) -> Result<()> {
+        self.publish_recent_catalog_messages_at_epoch_with_provider_identity_observation(
+            account_id,
+            mailbox,
+            remote_name,
+            expected_uid_validity,
+            remote_total,
+            historical_complete,
+            messages,
+            expected_flags,
+            true,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn publish_recent_catalog_messages_at_epoch_with_provider_identity_observation(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        remote_name: &str,
+        expected_uid_validity: i64,
+        remote_total: usize,
+        historical_complete: bool,
+        messages: &[MailSummary],
+        expected_flags: &[ExpectedMessageFlags],
+        gmail_identity_was_requested: bool,
+    ) -> Result<()> {
+        let expected_by_locator: HashMap<(&str, &str, i64), (bool, bool)> = expected_flags
+            .iter()
+            .map(|expected| {
+                (
+                    (
+                        expected.account_id.as_str(),
+                        expected.mailbox.as_str(),
+                        expected.uid,
+                    ),
+                    (expected.is_read, expected.is_flagged),
+                )
+            })
+            .collect();
+        let mut tx = self.pool.begin().await?;
+        let fenced = sqlx::query("UPDATE mailbox_catalog_state SET remote_name = ?, remote_total = ?, historical_complete = ?, updated_at = ? WHERE account_id = ? AND mailbox = ? AND uid_validity = ?")
+            .bind(remote_name)
+            .bind(remote_total as i64)
+            .bind(historical_complete)
+            .bind(Utc::now())
+            .bind(account_id.to_string())
+            .bind(mailbox)
+            .bind(expected_uid_validity)
+            .execute(&mut *tx)
+            .await?;
+        if fenced.rows_affected() != 1 {
+            return Err(anyhow!(
+                "mailbox identity changed; sync the account before refreshing recent mail"
+            ));
+        }
+        for message in messages {
+            persist_message_with_flag_policy(
+                &mut tx,
+                message,
+                FlagUpdatePolicy::CompareAndSwap(
+                    expected_by_locator
+                        .get(&(
+                            message.account_id.as_str(),
+                            message.mailbox.as_str(),
+                            message.uid,
+                        ))
+                        .copied(),
+                ),
+                if gmail_identity_was_requested {
+                    ProviderIdentityPolicy::Observed
+                } else {
+                    ProviderIdentityPolicy::PreserveAbsent
+                },
             )
             .await?;
         }
@@ -1876,6 +3178,76 @@ impl Store {
         mailbox: &str,
         messages: &[MailSummary],
         watermark: Option<u32>,
+    ) -> Result<Vec<MailSummary>> {
+        self.save_synced_messages_through_with_epoch(
+            account_id,
+            mailbox,
+            messages,
+            watermark,
+            None,
+            ProviderIdentityPolicy::Observed,
+        )
+        .await
+    }
+
+    /// Persists a partial realtime success only while the mailbox namespace
+    /// observed during that fetch remains current. This preserves successful
+    /// later UIDs across a retryable gap without allowing an old generation to
+    /// write into a replacement namespace.
+    pub async fn save_synced_messages_through_at_epoch(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        messages: &[MailSummary],
+        watermark: Option<u32>,
+        expected_uid_validity: i64,
+    ) -> Result<Vec<MailSummary>> {
+        self.save_synced_messages_through_with_epoch(
+            account_id,
+            mailbox,
+            messages,
+            watermark,
+            Some(expected_uid_validity),
+            ProviderIdentityPolicy::Observed,
+        )
+        .await
+    }
+
+    /// The caller records whether this partial realtime fetch actually asked
+    /// Gmail for X-GM-MSGID. An unsupported capability cannot turn a known
+    /// identity into a terminal missing observation.
+    pub(crate) async fn save_synced_messages_through_at_epoch_with_provider_identity_observation(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        messages: &[MailSummary],
+        watermark: Option<u32>,
+        expected_uid_validity: i64,
+        gmail_identity_was_requested: bool,
+    ) -> Result<Vec<MailSummary>> {
+        self.save_synced_messages_through_with_epoch(
+            account_id,
+            mailbox,
+            messages,
+            watermark,
+            Some(expected_uid_validity),
+            if gmail_identity_was_requested {
+                ProviderIdentityPolicy::Observed
+            } else {
+                ProviderIdentityPolicy::PreserveAbsent
+            },
+        )
+        .await
+    }
+
+    async fn save_synced_messages_through_with_epoch(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        messages: &[MailSummary],
+        watermark: Option<u32>,
+        expected_uid_validity: Option<i64>,
+        provider_identity_policy: ProviderIdentityPolicy,
     ) -> Result<Vec<MailSummary>> {
         let account_id = account_id.to_string();
         if messages
@@ -1914,6 +3286,25 @@ impl Store {
             tx.rollback().await?;
             return Err(anyhow!("account does not exist"));
         }
+        if let Some(expected_uid_validity) = expected_uid_validity {
+            let matched: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ? AND uid_validity = ?) OR (NOT EXISTS(SELECT 1 FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ?) AND EXISTS(SELECT 1 FROM mailbox_sync_state WHERE account_id = ? AND mailbox = ? AND uid_validity = ?))")
+                .bind(&account_id)
+                .bind(mailbox)
+                .bind(expected_uid_validity)
+                .bind(&account_id)
+                .bind(mailbox)
+                .bind(&account_id)
+                .bind(mailbox)
+                .bind(expected_uid_validity)
+                .fetch_one(&mut *tx)
+                .await?;
+            if !matched {
+                tx.rollback().await?;
+                return Err(anyhow!(
+                    "mailbox identity changed before partial realtime publication"
+                ));
+            }
+        }
         let initialized: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM mailbox_sync_state WHERE account_id = ? AND mailbox = ?)",
         )
@@ -1930,7 +3321,7 @@ impl Store {
                 .into_iter()
                 .collect();
         for message in messages {
-            persist_message(&mut tx, message).await?;
+            persist_message(&mut tx, message, provider_identity_policy).await?;
         }
         sqlx::query("INSERT INTO mailbox_sync_state(account_id, mailbox, initialized_at, highest_uid) VALUES (?, ?, ?, ?) ON CONFLICT(account_id, mailbox) DO UPDATE SET initialized_at=excluded.initialized_at, highest_uid=MAX(COALESCE(mailbox_sync_state.highest_uid, 0), COALESCE(excluded.highest_uid, 0))")
             .bind(&account_id)
@@ -2095,13 +3486,26 @@ impl Store {
         account_id: AccountId,
         remote_name: &str,
     ) -> Result<Vec<MailboxCatalogState>> {
-        Ok(sqlx::query_as::<_, MailboxCatalogState>(
-            "SELECT account_id, mailbox, remote_name, uid_validity, remote_total, historical_complete, uid_next, highest_modseq FROM mailbox_catalog_state WHERE account_id = ? AND LOWER(remote_name) = LOWER(?) ORDER BY CASE mailbox WHEN 'INBOX' THEN 0 WHEN 'Archive' THEN 1 WHEN 'Spam' THEN 2 ELSE 3 END, mailbox",
-        )
-        .bind(account_id.to_string())
-        .bind(remote_name)
-        .fetch_all(&self.pool)
-        .await?)
+        let account_id = account_id.to_string();
+        let rows = if remote_name.eq_ignore_ascii_case("INBOX") {
+            // RFC 3501 reserves INBOX as case-insensitive. Every other remote
+            // name is exact wire identity, including modified UTF-7 base64.
+            sqlx::query_as::<_, MailboxCatalogState>(
+                "SELECT account_id, mailbox, remote_name, uid_validity, remote_total, historical_complete, uid_next, highest_modseq FROM mailbox_catalog_state WHERE account_id = ? AND remote_name = 'INBOX' COLLATE NOCASE ORDER BY CASE mailbox WHEN 'INBOX' THEN 0 WHEN 'Archive' THEN 1 WHEN 'Spam' THEN 2 ELSE 3 END, mailbox",
+            )
+            .bind(&account_id)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, MailboxCatalogState>(
+                "SELECT account_id, mailbox, remote_name, uid_validity, remote_total, historical_complete, uid_next, highest_modseq FROM mailbox_catalog_state WHERE account_id = ? AND remote_name = ? ORDER BY CASE mailbox WHEN 'INBOX' THEN 0 WHEN 'Archive' THEN 1 WHEN 'Spam' THEN 2 ELSE 3 END, mailbox",
+            )
+            .bind(&account_id)
+            .bind(remote_name)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        Ok(rows)
     }
 
     pub async fn save_mailbox_catalog_state(
@@ -2293,14 +3697,14 @@ impl Store {
         .bind(mailbox)
         .fetch_optional(&self.pool)
         .await?;
-        let catalog_uid_validity: Option<i64> = sqlx::query_scalar(
-            "SELECT uid_validity FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ?",
+        let catalog: Option<(i64, i64, bool)> = sqlx::query_as(
+            "SELECT uid_validity, remote_total, historical_complete FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ?",
         )
         .bind(&account_id)
         .bind(mailbox)
         .fetch_optional(&self.pool)
-        .await?
-        .flatten();
+        .await?;
+        let catalog_uid_validity = catalog.map(|(uid_validity, _, _)| uid_validity);
         let stored_uid_validity = row
             .as_ref()
             .and_then(|(_, _, stored)| *stored)
@@ -2364,6 +3768,7 @@ impl Store {
             return Ok(MailboxSyncState {
                 initialized: false,
                 highest_uid: None,
+                empty_baseline: false,
                 uid_validity,
                 uid_validity_changed: true,
             });
@@ -2376,12 +3781,32 @@ impl Store {
                 .execute(&self.pool)
                 .await?;
         }
+        let stored_highest_uid = row.as_ref().and_then(|(_, highest_uid, _)| *highest_uid);
+        let highest_uid = stored_highest_uid
+            .map(|uid| u32::try_from(uid).context("stored mailbox watermark UID is invalid"))
+            .transpose()?;
+        let expected_uid_validity = uid_validity.and_then(|value| i64::try_from(value).ok());
+        let no_local_messages: bool = sqlx::query_scalar(
+            "SELECT NOT EXISTS(SELECT 1 FROM messages WHERE account_id = ? AND mailbox = ?)",
+        )
+        .bind(&account_id)
+        .bind(mailbox)
+        .fetch_one(&self.pool)
+        .await?;
+        let empty_baseline = row.is_some()
+            && stored_highest_uid.is_none()
+            && no_local_messages
+            && catalog.is_some_and(
+                |(catalog_uid_validity, remote_total, historical_complete)| {
+                    historical_complete
+                        && remote_total == 0
+                        && Some(catalog_uid_validity) == expected_uid_validity
+                },
+            );
         Ok(MailboxSyncState {
             initialized: row.is_some(),
-            highest_uid: row
-                .as_ref()
-                .and_then(|(_, uid, _)| *uid)
-                .and_then(|uid| u32::try_from(uid).ok()),
+            highest_uid,
+            empty_baseline,
             uid_validity,
             uid_validity_changed: false,
         })
@@ -2425,8 +3850,16 @@ impl Store {
     }
 
     pub async fn message(&self, id: &str) -> Result<Option<MailSummary>> {
-        const SQL: &str = "SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE id = ?";
-        let mut message = sqlx::query_as::<_, MailSummary>(SQL)
+        let sql = format!(
+            "SELECT {} FROM messages m WHERE m.id = ?",
+            mail_summary_projection(
+                "m",
+                "m.body_text",
+                "m.body_html",
+                "m.classification_signals"
+            )
+        );
+        let mut message = sqlx::query_as::<_, MailSummary>(&sql)
             .bind(id)
             .fetch_optional(&self.pool)
             .await?;
@@ -2473,6 +3906,44 @@ impl Store {
         Ok(())
     }
 
+    /// Applies a completed remote flag mutation only while `target` still
+    /// identifies the same mailbox UID namespace. A mailbox UID can be
+    /// recycled after UIDVALIDITY changes, so the message id alone is never a
+    /// sufficient post-network publication guard.
+    pub async fn set_message_flagged_at_epoch(
+        &self,
+        target: &MailSummary,
+        flagged: bool,
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        if !epoch_message_target_is_current(&mut tx, target).await? {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        sqlx::query("UPDATE messages SET is_flagged = ? WHERE id = ?")
+            .bind(flagged)
+            .bind(&target.id)
+            .execute(&mut *tx)
+            .await?;
+        if flagged {
+            sqlx::query("DELETE FROM message_content_cache WHERE message_id = ?")
+                .bind(&target.id)
+                .execute(&mut *tx)
+                .await?;
+        } else {
+            sqlx::query("DELETE FROM starred_message_bodies WHERE message_id = ?")
+                .bind(&target.id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM starred_attachment_metadata WHERE message_id = ?")
+                .bind(&target.id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+
     pub async fn set_message_read(&self, id: &str, read: bool) -> Result<()> {
         sqlx::query("UPDATE messages SET is_read = ? WHERE id = ?")
             .bind(read)
@@ -2482,8 +3953,29 @@ impl Store {
         Ok(())
     }
 
+    /// Publishes a completed remote read-state mutation with the immutable
+    /// mailbox identity captured before the network operation.
+    pub async fn set_message_read_at_epoch(
+        &self,
+        target: &MailSummary,
+        read: bool,
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        if !epoch_message_target_is_current(&mut tx, target).await? {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        sqlx::query("UPDATE messages SET is_read = ? WHERE id = ?")
+            .bind(read)
+            .bind(&target.id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
     pub async fn starred_attachment_metadata(&self, message_id: &str) -> Result<Vec<Attachment>> {
-        Ok(sqlx::query_as::<_, Attachment>("SELECT id, message_id, filename, mime_type, size_bytes, is_inline, presentation, is_potentially_unsafe FROM starred_attachment_metadata WHERE message_id = ? AND presentation IN ('downloadable', 'both') ORDER BY filename, id")
+        Ok(sqlx::query_as::<_, Attachment>("SELECT id, message_id, filename, mime_type, size_bytes, size_kind, is_inline, presentation, is_potentially_unsafe FROM starred_attachment_metadata WHERE message_id = ? AND presentation IN ('downloadable', 'both') ORDER BY filename, id")
             .bind(message_id)
             .fetch_all(&self.pool)
             .await?)
@@ -2554,12 +4046,13 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         for attachment in attachments {
-            sqlx::query("INSERT INTO starred_attachment_metadata(id, message_id, filename, mime_type, size_bytes, is_inline, presentation, is_potentially_unsafe) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+            sqlx::query("INSERT INTO starred_attachment_metadata(id, message_id, filename, mime_type, size_bytes, size_kind, is_inline, presentation, is_potentially_unsafe) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
                 .bind(&attachment.id)
                 .bind(message_id)
                 .bind(&attachment.filename)
                 .bind(&attachment.mime_type)
                 .bind(attachment.size_bytes)
+                .bind(attachment.size_kind)
                 .bind(attachment.is_inline)
                 .bind(attachment.presentation)
                 .bind(attachment.is_potentially_unsafe)
@@ -2732,6 +4225,59 @@ impl Store {
         Ok(())
     }
 
+    async fn cache_message_content_in_transaction(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        message_id: &str,
+        is_flagged: bool,
+        content: CachedMessageContent,
+        max_bytes: i64,
+    ) -> Result<()> {
+        let mut attachments = content.attachments;
+        for attachment in &mut attachments {
+            attachment.message_id = message_id.to_owned();
+        }
+        attachments.retain(|attachment| attachment.presentation.is_downloadable());
+        let attachments_json = serde_json::to_string(&attachments)?;
+        let byte_size = cache_entry_byte_size(
+            &content.body_text,
+            content.body_html.as_deref(),
+            content.unsubscribe_kind.as_deref(),
+            &attachments_json,
+        )?;
+        if byte_size > max_bytes {
+            sqlx::query("DELETE FROM message_content_cache WHERE message_id = ?")
+                .bind(message_id)
+                .execute(&mut **tx)
+                .await?;
+            return Ok(());
+        }
+        let stored = sqlx::query("INSERT INTO message_content_cache(message_id, content_state, body_text, body_html, unsubscribe_kind, attachments_json, byte_size, last_accessed) SELECT ?, 'complete', ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(last_accessed), 0) + 1 FROM message_content_cache) WHERE ? = 0 AND EXISTS (SELECT 1 FROM messages WHERE id = ? AND is_flagged = 0) ON CONFLICT(message_id) DO UPDATE SET content_state=excluded.content_state, body_text=excluded.body_text, body_html=excluded.body_html, unsubscribe_kind=excluded.unsubscribe_kind, attachments_json=excluded.attachments_json, byte_size=excluded.byte_size, last_accessed=excluded.last_accessed")
+        .bind(message_id).bind(&content.body_text).bind(&content.body_html)
+        .bind(&content.unsubscribe_kind).bind(&attachments_json).bind(byte_size)
+        .bind(is_flagged).bind(message_id).execute(&mut **tx).await?.rows_affected();
+        if stored == 0 {
+            sqlx::query("DELETE FROM message_content_cache WHERE message_id = ?")
+                .bind(message_id)
+                .execute(&mut **tx)
+                .await?;
+            return Ok(());
+        }
+        let recent_cutoff =
+            Utc::now() - chrono::Duration::days(MESSAGE_CONTENT_CACHE_RECENT_WINDOW_DAYS);
+        loop {
+            let used: i64 =
+                sqlx::query_scalar("SELECT COALESCE(SUM(byte_size), 0) FROM message_content_cache")
+                    .fetch_one(&mut **tx)
+                    .await?;
+            if used <= max_bytes {
+                break;
+            }
+            if sqlx::query("DELETE FROM message_content_cache WHERE message_id = (SELECT message_id FROM (SELECT c.message_id FROM message_content_cache c JOIN messages m ON m.id = c.message_id ORDER BY CASE WHEN m.mailbox IN ('INBOX', 'Sent', 'Archive') AND m.received_at >= ? THEN 1 ELSE 0 END, c.last_accessed, c.message_id LIMIT 1))")
+            .bind(recent_cutoff).execute(&mut **tx).await?.rows_affected() == 0 { break; }
+        }
+        Ok(())
+    }
+
     /// Returns recent primary-folder messages that still need their body in
     /// the cache appropriate to their current flag state. Exact, non-empty
     /// stored Message-IDs are deduplicated in SQL; malformed or variant IDs
@@ -2756,7 +4302,7 @@ impl Store {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<MailSummary>> {
-        const SQL: &str = "WITH uncached AS (SELECT m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, m.body_text, m.body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, m.classification_signals, ROW_NUMBER() OVER (PARTITION BY CASE WHEN m.message_id IS NULL OR trim(m.message_id) = '' THEN m.id ELSE m.message_id END ORDER BY m.received_at DESC, m.id DESC) AS duplicate_rank FROM messages m LEFT JOIN message_content_cache c ON c.message_id = m.id LEFT JOIN starred_message_bodies b ON b.message_id = m.id AND b.attachment_presentation_version = ? WHERE m.account_id = ? AND m.mailbox IN ('INBOX', 'Sent', 'Archive') AND m.received_at >= ? AND ((m.is_flagged = 0 AND c.message_id IS NULL) OR (m.is_flagged = 1 AND b.message_id IS NULL))) SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM uncached WHERE duplicate_rank = 1 ORDER BY received_at DESC, id DESC LIMIT ? OFFSET ?";
+        const SQL: &str = "WITH uncached AS (SELECT m.id, m.account_id, m.mailbox, m.uid, (SELECT epoch.uid_validity FROM mailbox_catalog_state epoch WHERE epoch.account_id = m.account_id AND epoch.mailbox = m.mailbox) AS mailbox_uid_validity, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, m.body_text, m.body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, m.classification_signals, ROW_NUMBER() OVER (PARTITION BY CASE WHEN identity.provider_message_id IS NOT NULL THEN 'gmail:' || identity.provider_message_id WHEN m.message_id IS NULL OR trim(m.message_id) = '' THEN m.id ELSE m.message_id END ORDER BY m.received_at DESC, m.id DESC) AS duplicate_rank FROM messages m LEFT JOIN message_provider_identities identity ON identity.message_id = m.id AND identity.account_id = m.account_id AND identity.provider = 'gmail' LEFT JOIN message_content_cache c ON c.message_id = m.id LEFT JOIN starred_message_bodies b ON b.message_id = m.id AND b.attachment_presentation_version = ? WHERE m.account_id = ? AND m.mailbox IN ('INBOX', 'Sent', 'Archive') AND m.received_at >= ? AND ((m.is_flagged = 0 AND c.message_id IS NULL) OR (m.is_flagged = 1 AND b.message_id IS NULL))) SELECT id, account_id, mailbox, uid, mailbox_uid_validity, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM uncached WHERE duplicate_rank = 1 ORDER BY received_at DESC, id DESC LIMIT ? OFFSET ?";
         Ok(sqlx::query_as::<_, MailSummary>(SQL)
             .bind(ATTACHMENT_PRESENTATION_VERSION)
             .bind(account_id.to_string())
@@ -2781,6 +4327,22 @@ impl Store {
         message_id: &str,
         owner: &str,
     ) -> Result<bool> {
+        self.claim_message_content_fetch_for_owner_after_checkout(message_id, owner, || async {})
+            .await
+    }
+
+    async fn claim_message_content_fetch_for_owner_after_checkout<F, Fut>(
+        &self,
+        message_id: &str,
+        owner: &str,
+        after_checkout: F,
+    ) -> Result<bool>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        let mut connection = self.pool.acquire().await?;
+        after_checkout().await;
         Ok(sqlx::query(
             "INSERT INTO message_content_fetches(message_id, claimed_at, claim_owner) SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM messages WHERE id = ?) ON CONFLICT(message_id) DO UPDATE SET claimed_at = excluded.claimed_at, claim_owner = excluded.claim_owner WHERE message_content_fetches.claimed_at <= ?",
         )
@@ -2789,7 +4351,7 @@ impl Store {
         .bind(owner)
         .bind(message_id)
         .bind(Utc::now() - chrono::Duration::seconds(MESSAGE_CONTENT_FETCH_LEASE_SECONDS))
-        .execute(&self.pool)
+        .execute(&mut *connection)
         .await?
         .rows_affected()
             == 1)
@@ -2799,42 +4361,126 @@ impl Store {
         &self,
         message_id: &str,
     ) -> Result<Option<MessageContentFetchClaim>> {
+        self.acquire_message_content_fetch_after_checkout(
+            message_id,
+            || async {},
+            #[cfg(test)]
+            None,
+            #[cfg(test)]
+            false,
+        )
+        .await
+    }
+
+    async fn acquire_message_content_fetch_after_checkout<F, Fut>(
+        &self,
+        message_id: &str,
+        after_checkout: F,
+        #[cfg(test)] drop_release_observer: Option<tokio::sync::oneshot::Sender<Result<()>>>,
+        #[cfg(test)] fail_after_execute: bool,
+    ) -> Result<Option<MessageContentFetchClaim>>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let store = self.clone();
+        let message_id = message_id.to_owned();
         let owner = uuid::Uuid::new_v4().to_string();
-        if !self
-            .claim_message_content_fetch_for_owner(message_id, &owner)
-            .await?
-        {
-            return Ok(None);
-        }
-        let renewal_store = self.clone();
-        let renewal_message_id = message_id.to_owned();
-        let renewal_owner = owner.clone();
-        let renewal = tokio::spawn(async move {
-            let interval = Duration::from_secs(
-                u64::try_from(MESSAGE_CONTENT_FETCH_LEASE_SECONDS / 3).unwrap_or(30),
-            );
-            loop {
-                tokio::time::sleep(interval).await;
-                let renewed = sqlx::query(
-                    "UPDATE message_content_fetches SET claimed_at = ? WHERE message_id = ? AND claim_owner = ?",
+        // SQLite can finish a write after the awaiting caller is cancelled.
+        // Own the full write-to-RAII transition in a task so cancellation can
+        // detach the task, but can never leave a committed row without a claim
+        // object whose Drop schedules its deletion.
+        let acquisition = tokio::spawn(async move {
+            let cleanup = MessageContentFetchCleanup {
+                store: store.clone(),
+                message_id: message_id.clone(),
+                owner: owner.clone(),
+                released: false,
+                #[cfg(test)]
+                drop_release_observer,
+            };
+            let claimed = store
+                .claim_message_content_fetch_for_owner_after_checkout(
+                    &message_id,
+                    &owner,
+                    after_checkout,
                 )
-                .bind(Utc::now())
-                .bind(&renewal_message_id)
-                .bind(&renewal_owner)
-                .execute(&renewal_store.pool)
-                .await;
-                if !matches!(renewed, Ok(result) if result.rows_affected() == 1) {
-                    break;
-                }
+                .await?;
+            if !claimed {
+                cleanup.disarm();
+                return Ok(None);
             }
+            #[cfg(test)]
+            if fail_after_execute {
+                return Err(anyhow!(
+                    "injected error after committed content-fetch claim"
+                ));
+            }
+            let renewal_store = store.clone();
+            let renewal_message_id = message_id.clone();
+            let renewal_owner = owner.clone();
+            let renewal = tokio::spawn(async move {
+                let interval = Duration::from_secs(
+                    u64::try_from(MESSAGE_CONTENT_FETCH_LEASE_SECONDS / 3).unwrap_or(30),
+                );
+                loop {
+                    tokio::time::sleep(interval).await;
+                    let renewed = sqlx::query(
+                        "UPDATE message_content_fetches SET claimed_at = ? WHERE message_id = ? AND claim_owner = ?",
+                    )
+                    .bind(Utc::now())
+                    .bind(&renewal_message_id)
+                    .bind(&renewal_owner)
+                    .execute(&renewal_store.pool)
+                    .await;
+                    if !matches!(renewed, Ok(result) if result.rows_affected() == 1) {
+                        break;
+                    }
+                }
+            });
+            Ok::<_, anyhow::Error>(Some(MessageContentFetchClaim {
+                cleanup: Some(cleanup),
+                renewal,
+            }))
         });
-        Ok(Some(MessageContentFetchClaim {
-            store: self.clone(),
-            message_id: message_id.to_owned(),
-            owner,
-            renewal,
-            released: false,
-        }))
+        acquisition
+            .await
+            .map_err(|error| anyhow!("content-fetch claim task failed: {error}"))?
+    }
+
+    #[cfg(test)]
+    async fn acquire_message_content_fetch_with_checkout_barrier(
+        &self,
+        message_id: &str,
+        checked_out: tokio::sync::oneshot::Sender<()>,
+        resume: tokio::sync::oneshot::Receiver<()>,
+        drop_release_observer: tokio::sync::oneshot::Sender<Result<()>>,
+    ) -> Result<Option<MessageContentFetchClaim>> {
+        self.acquire_message_content_fetch_after_checkout(
+            message_id,
+            move || async move {
+                let _ = checked_out.send(());
+                let _ = resume.await;
+            },
+            Some(drop_release_observer),
+            false,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    async fn acquire_message_content_fetch_with_post_execute_error(
+        &self,
+        message_id: &str,
+        drop_release_observer: tokio::sync::oneshot::Sender<Result<()>>,
+    ) -> Result<Option<MessageContentFetchClaim>> {
+        self.acquire_message_content_fetch_after_checkout(
+            message_id,
+            || async {},
+            Some(drop_release_observer),
+            true,
+        )
+        .await
     }
 
     /// Acquires a fetch claim while preserving why it was unavailable.
@@ -2899,8 +4545,11 @@ impl Store {
         account_id: AccountId,
         limit: u32,
     ) -> Result<Vec<MailSummary>> {
-        const SQL: &str = "SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE account_id = ? AND mailbox = 'INBOX' AND content_state != 'complete' ORDER BY received_at DESC LIMIT ?";
-        Ok(sqlx::query_as::<_, MailSummary>(SQL)
+        let sql = format!(
+            "SELECT {} FROM messages m WHERE m.account_id = ? AND m.mailbox = 'INBOX' AND m.content_state != 'complete' ORDER BY m.received_at DESC LIMIT ?",
+            mail_summary_projection("m", "m.body_text", "m.body_html", "m.classification_signals")
+        );
+        Ok(sqlx::query_as::<_, MailSummary>(&sql)
             .bind(account_id.to_string())
             .bind(i64::from(limit))
             .fetch_all(&self.pool)
@@ -2912,7 +4561,7 @@ impl Store {
         account_id: AccountId,
         limit: u32,
     ) -> Result<Vec<MailSummary>> {
-        const SQL: &str = "SELECT m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, m.body_text, m.body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, m.classification_signals FROM messages m LEFT JOIN starred_message_bodies b ON b.message_id = m.id WHERE m.account_id = ? AND m.is_flagged = 1 AND (b.message_id IS NULL OR b.attachment_presentation_version != ?) ORDER BY m.received_at DESC LIMIT ?";
+        const SQL: &str = "SELECT m.id, m.account_id, m.mailbox, m.uid, (SELECT epoch.uid_validity FROM mailbox_catalog_state epoch WHERE epoch.account_id = m.account_id AND epoch.mailbox = m.mailbox) AS mailbox_uid_validity, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, m.body_text, m.body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, m.classification_signals FROM messages m LEFT JOIN starred_message_bodies b ON b.message_id = m.id WHERE m.account_id = ? AND m.is_flagged = 1 AND (b.message_id IS NULL OR b.attachment_presentation_version != ?) ORDER BY m.received_at DESC LIMIT ?";
         Ok(sqlx::query_as::<_, MailSummary>(SQL)
             .bind(account_id.to_string())
             .bind(ATTACHMENT_PRESENTATION_VERSION)
@@ -2983,6 +4632,43 @@ impl Store {
             .into_iter()
             .filter_map(|(uid,)| u32::try_from(uid).ok())
             .collect())
+    }
+
+    /// Returns a bounded repair batch for Gmail rows written before provider
+    /// identity persistence existed. The caller must fetch the actual Gmail
+    /// metadata and publish it through the normal epoch-fenced path.
+    pub async fn gmail_provider_identity_backfill_uids(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        limit: u32,
+    ) -> Result<Vec<u32>> {
+        let rows: Vec<(i64,)> = sqlx::query_as(
+            "SELECT m.uid FROM messages AS m LEFT JOIN message_provider_identity_observations AS observation ON observation.message_id = m.id AND observation.account_id = m.account_id AND observation.provider = 'gmail' WHERE m.account_id = ? AND m.mailbox = ? AND observation.message_id IS NULL ORDER BY m.received_at DESC, m.uid DESC LIMIT ?",
+        )
+        .bind(account_id.to_string())
+        .bind(mailbox)
+        .bind(limit.clamp(1, 100) as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(uid,)| u32::try_from(uid).ok())
+            .collect())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn gmail_provider_identity_for_message(
+        &self,
+        message_id: &str,
+    ) -> Result<Option<String>> {
+        sqlx::query_scalar(
+            "SELECT provider_message_id FROM message_provider_identities WHERE message_id = ? AND provider = 'gmail'",
+        )
+        .bind(message_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Into::into)
     }
 
     pub async fn save_recipient_headers(
@@ -3115,79 +4801,73 @@ impl Store {
     ) -> Result<()> {
         let account_key = account_id.to_string();
         let mut tx = self.pool.begin().await?;
-        // A realtime fetch may have read this UID immediately before the
-        // provider completed the move. Record the successful action in the
-        // same transaction as the local move so that late sync publication
-        // cannot resurrect a locator that no longer exists remotely.
-        sqlx::query("INSERT OR REPLACE INTO mailbox_action_tombstones(account_id, mailbox, uid, created_at) VALUES (?, ?, ?, ?)")
-            .bind(&account_key)
-            .bind(source_mailbox)
-            .bind(source_uid)
-            .bind(Utc::now())
-            .execute(&mut *tx)
-            .await?;
-        let Some(destination_uid) = destination_uid else {
-            sqlx::query("DELETE FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?")
-                .bind(&account_key)
-                .bind(source_mailbox)
-                .bind(source_uid)
-                .execute(&mut *tx)
-                .await?;
-            tx.commit().await?;
-            return Ok(());
-        };
-        sqlx::query("DELETE FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?")
-            .bind(&account_key)
-            .bind(destination_mailbox)
-            .bind(destination_uid)
-            .execute(&mut *tx)
-            .await?;
-        // Attachment identifiers encode the message locator. Invalidate the
-        // source cache instead of cascading it to the destination locator.
-        sqlx::query("DELETE FROM message_content_cache WHERE message_id IN (SELECT id FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?)")
-            .bind(&account_key)
-            .bind(source_mailbox)
-            .bind(source_uid)
-            .execute(&mut *tx)
-            .await?;
-        // Starred attachment metadata uses the same opaque IDs as the
-        // foreground cache. Do not cascade those IDs to the new locator:
-        // a later targeted download would resolve the old message prefix
-        // against the destination's MIME structure. Removing the durable
-        // starred body also makes the destination eligible for an
-        // authoritative refetch.
-        sqlx::query("DELETE FROM starred_attachment_metadata WHERE message_id IN (SELECT id FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?)")
-            .bind(&account_key)
-            .bind(source_mailbox)
-            .bind(source_uid)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("DELETE FROM starred_message_bodies WHERE message_id IN (SELECT id FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?)")
-            .bind(&account_key)
-            .bind(source_mailbox)
-            .bind(source_uid)
-            .execute(&mut *tx)
-            .await?;
-        // In-flight fetch ownership is tied to the old locator. Revoke it
-        // before the message ID update instead of allowing the FK cascade to
-        // move a claim that its owner can only release by the old ID.
-        sqlx::query("DELETE FROM message_content_fetches WHERE message_id IN (SELECT id FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?)")
-            .bind(&account_key)
-            .bind(source_mailbox)
-            .bind(source_uid)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("UPDATE messages SET id = ?, mailbox = ?, uid = ? WHERE account_id = ? AND mailbox = ? AND uid = ?")
-            .bind(stable_message_id(account_id, destination_mailbox, destination_uid))
-            .bind(destination_mailbox)
-            .bind(destination_uid)
-            .bind(&account_key)
-            .bind(source_mailbox)
-            .bind(source_uid)
-            .execute(&mut *tx)
-            .await?;
+        move_message_in_transaction(
+            &mut tx,
+            account_id,
+            &account_key,
+            source_mailbox,
+            source_uid,
+            destination_mailbox,
+            destination_uid,
+        )
+        .await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Publishes a completed remote move only if the source locator still
+    /// belongs to the UIDVALIDITY generation that was selected remotely.
+    /// A destination is remapped only when its COPYUID epoch and remote
+    /// mailbox still match the local destination catalogue.
+    pub async fn move_message_at_epoch(
+        &self,
+        target: &MailSummary,
+        destination_mailbox: &str,
+        receipt: &MailboxMoveReceipt,
+    ) -> Result<MailboxMovePublication> {
+        let account_id =
+            uuid::Uuid::parse_str(&target.account_id).context("message account id is invalid")?;
+        let source_uid = u32::try_from(target.uid).context("message uid is invalid")?;
+        let mut tx = self.pool.begin().await?;
+        if !epoch_message_target_is_current(&mut tx, target).await? {
+            tx.rollback().await?;
+            return Ok(MailboxMovePublication {
+                source_published: false,
+                destination_mapped: false,
+            });
+        }
+        // The transaction already owns SQLite's writer lock via the source
+        // identity update, so this lookup and later destination deletion
+        // cannot be separated by another process's catalogue rollover.
+        let destination_uid = if let Some(destination) = &receipt.destination {
+            let matched = sqlx::query("UPDATE mailbox_catalog_state SET remote_name = remote_name WHERE account_id = ? AND mailbox = ? AND remote_name = ? AND uid_validity = ?")
+                .bind(&target.account_id)
+                .bind(destination_mailbox)
+                .bind(&destination.remote_mailbox)
+                .bind(destination.uid_validity)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected() == 1;
+            matched.then_some(destination.uid)
+        } else {
+            None
+        };
+        let destination_mapped = receipt.destination.is_some() && destination_uid.is_some();
+        move_message_in_transaction(
+            &mut tx,
+            account_id,
+            &target.account_id,
+            &target.mailbox,
+            source_uid,
+            destination_mailbox,
+            destination_uid,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(MailboxMovePublication {
+            source_published: true,
+            destination_mapped,
+        })
     }
 
     /// Reconciles one provider move that represented several local catalogue
@@ -3310,7 +4990,12 @@ impl Store {
     pub async fn search(&self, query: &SearchQuery) -> Result<Vec<MailSummary>> {
         self.search_with_projection(
             query,
-            "m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, m.body_text, m.body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, m.classification_signals",
+            &mail_summary_projection(
+                "m",
+                "m.body_text",
+                "m.body_html",
+                "m.classification_signals",
+            ),
         )
         .await
     }
@@ -3458,7 +5143,11 @@ impl Store {
             .as_deref()
             .and_then(normalize_message_id)
         {
-            let candidates = sqlx::query_as::<_, MailSummary>("SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE account_id = ? AND LOWER(TRIM(message_id)) = ?")
+            let candidate_sql = format!(
+                "SELECT {} FROM messages m WHERE m.account_id = ? AND LOWER(TRIM(m.message_id)) = ?",
+                mail_summary_projection("m", "m.body_text", "m.body_html", "m.classification_signals")
+            );
+            let candidates = sqlx::query_as::<_, MailSummary>(&candidate_sql)
                 .bind(&account_id)
                 .bind(format!("<{rfc_message_id}>"))
                 .fetch_all(&self.pool)
@@ -3496,7 +5185,11 @@ impl Store {
             .as_deref()
             .filter(|thread_id| !thread_id.trim().is_empty())
         {
-            let exists = sqlx::query_as::<_, MailSummary>("SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE account_id = ? AND thread_id = ? ORDER BY received_at, id")
+            let exists_sql = format!(
+                "SELECT {} FROM messages m WHERE m.account_id = ? AND m.thread_id = ? ORDER BY m.received_at, m.id",
+                mail_summary_projection("m", "m.body_text", "m.body_html", "m.classification_signals")
+            );
+            let exists = sqlx::query_as::<_, MailSummary>(&exists_sql)
                 .bind(&account_id)
                 .bind(thread_id)
                 .fetch_all(&self.pool)
@@ -3519,7 +5212,11 @@ impl Store {
         thread_id: &str,
         mailbox: Option<&str>,
     ) -> Result<Option<MailConversation>> {
-        let mut source_messages = sqlx::query_as::<_, MailSummary>("SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, '' AS body_text, NULL AS body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, '' AS classification_signals FROM messages WHERE account_id = ? AND thread_id = ? ORDER BY received_at, id")
+        let sql = format!(
+            "SELECT {} FROM messages m WHERE m.account_id = ? AND m.thread_id = ? ORDER BY m.received_at, m.id",
+            mail_summary_projection("m", "''", "NULL", "''")
+        );
+        let mut source_messages = sqlx::query_as::<_, MailSummary>(&sql)
             .bind(account_id)
             .bind(thread_id)
             .fetch_all(&self.pool)
@@ -3531,11 +5228,15 @@ impl Store {
             source_messages
                 .retain(|message| !matches!(mailbox_family(&message.mailbox), "Spam" | "Trash"));
         }
+        let provider_identities = self
+            .provider_identities_for_messages(&source_messages)
+            .await?;
         Ok(mail_conversation_from_sources(
             account_id.to_owned(),
             thread_id.to_owned(),
             source_messages,
             mailbox,
+            &provider_identities,
         ))
     }
 
@@ -3589,7 +5290,10 @@ impl Store {
         // one hydration query per conversation.
         for chunk in keys.chunks(300) {
             let predicates = vec!["(account_id = ? AND thread_id = ?)"; chunk.len()].join(" OR ");
-            let sql = format!("SELECT m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, '' AS body_text, NULL AS body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, '' AS classification_signals FROM messages m WHERE ({predicates}) ORDER BY m.received_at, m.id");
+            let sql = format!(
+                "SELECT {} FROM messages m WHERE ({predicates}) ORDER BY m.received_at, m.id",
+                mail_summary_projection("m", "''", "NULL", "''")
+            );
             let mut statement = sqlx::query_as::<_, MailSummary>(&sql);
             for (account_id, thread_id) in chunk {
                 statement = statement.bind(account_id).bind(thread_id);
@@ -3604,6 +5308,7 @@ impl Store {
                 .retain(|message| !matches!(mailbox_family(&message.mailbox), "Spam" | "Trash"));
         }
 
+        let provider_identities = self.provider_identities_for_messages(&hydrated).await?;
         let mut grouped: HashMap<(String, String), Vec<MailSummary>> = HashMap::new();
         for message in hydrated {
             grouped
@@ -3619,6 +5324,7 @@ impl Store {
                     thread_id,
                     source_messages,
                     query.mailbox.as_deref(),
+                    &provider_identities,
                 )
             })
             .collect::<Vec<_>>();
@@ -3693,10 +5399,10 @@ impl Store {
             ), sectioned AS (
                 SELECT 'starred' AS section_id, id, account_id, thread_id, received_at FROM representatives WHERE any_flagged = 1
                 UNION ALL
-                SELECT category AS section_id, id, account_id, thread_id, received_at FROM representatives
-                    WHERE any_flagged = 0 AND any_unread = 1 AND category IN ('people', 'transactions', 'notifications', 'newsletters', 'other')
+                SELECT COALESCE(category, 'other') AS section_id, id, account_id, thread_id, received_at FROM representatives
+                    WHERE any_flagged = 0 AND any_unread = 1 AND (category IS NULL OR category IN ('people', 'transactions', 'notifications', 'newsletters', 'other'))
                 UNION ALL
-                SELECT 'seen' AS section_id, id, account_id, thread_id, received_at FROM representatives WHERE any_unread = 0
+                SELECT 'seen' AS section_id, id, account_id, thread_id, received_at FROM representatives WHERE any_unread = 0 AND any_flagged = 0
             ), ranked AS (
                 SELECT section_id, id, account_id, thread_id, received_at,
                     ROW_NUMBER() OVER (PARTITION BY section_id ORDER BY received_at DESC, id DESC) AS section_rank
@@ -3784,7 +5490,10 @@ impl Store {
         let mut hydrated = Vec::new();
         for chunk in keys.chunks(300) {
             let predicates = vec!["(account_id = ? AND thread_id = ?)"; chunk.len()].join(" OR ");
-            let sql = format!("SELECT m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, '' AS body_text, NULL AS body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, '' AS classification_signals FROM messages m WHERE ({predicates}) ORDER BY m.received_at, m.id");
+            let sql = format!(
+                "SELECT {} FROM messages m WHERE ({predicates}) ORDER BY m.received_at, m.id",
+                mail_summary_projection("m", "''", "NULL", "''")
+            );
             let mut statement = sqlx::query_as::<_, MailSummary>(&sql);
             for (account_id, thread_id) in chunk {
                 statement = statement.bind(account_id).bind(thread_id);
@@ -3792,6 +5501,7 @@ impl Store {
             hydrated.extend(statement.fetch_all(&self.pool).await?);
         }
         hydrated.retain(|message| !matches!(mailbox_family(&message.mailbox), "Spam" | "Trash"));
+        let provider_identities = self.provider_identities_for_messages(&hydrated).await?;
         let mut grouped: HashMap<(String, String), Vec<MailSummary>> = HashMap::new();
         for message in hydrated {
             grouped
@@ -3802,8 +5512,11 @@ impl Store {
         Ok(grouped
             .into_iter()
             .filter_map(|((account_id, thread_id), source_messages)| {
-                let messages =
-                    deduplicate_message_copies(source_messages.clone(), preferred_mailbox);
+                let messages = deduplicate_message_copies(
+                    source_messages.clone(),
+                    preferred_mailbox,
+                    &provider_identities,
+                );
                 let latest = messages.last()?.clone();
                 let mut participants = source_messages
                     .iter()
@@ -3838,20 +5551,51 @@ impl Store {
             .collect())
     }
 
+    async fn provider_identities_for_messages(
+        &self,
+        messages: &[MailSummary],
+    ) -> Result<HashMap<String, String>> {
+        let mut identities = HashMap::new();
+        for chunk in messages.chunks(500) {
+            if chunk.is_empty() {
+                continue;
+            }
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT message_id, provider_message_id FROM message_provider_identities WHERE provider = 'gmail' AND message_id IN ({placeholders})"
+            );
+            let mut statement = sqlx::query_as::<_, (String, String)>(&sql);
+            for message in chunk {
+                statement = statement.bind(&message.id);
+            }
+            identities.extend(statement.fetch_all(&self.pool).await?);
+        }
+        Ok(identities)
+    }
+
     async fn search_conversation_matches(&self, query: &SearchQuery) -> Result<Vec<MailSummary>> {
         // Conversation pages request one look-ahead candidate, so this
         // internal query intentionally accepts 501 while the public page size
         // remains capped at 500.
         let limit = query.limit.unwrap_or(100).clamp(1, 501) as i64;
-        let projection = "m.id, m.account_id, m.mailbox, m.uid, m.message_id, m.in_reply_to, m.reference_ids, m.thread_id, m.subject, m.from_name, m.from_address, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to_addresses, m.received_at, m.snippet, '' AS body_text, NULL AS body_html, m.content_state, m.unsubscribe_kind, m.unsubscribe_url, m.is_read, m.is_flagged, m.has_attachments, m.category, m.classification_confidence, m.classification_source, '' AS classification_signals";
-        let mut sql = format!("WITH matching AS (SELECT {projection}, ROW_NUMBER() OVER (PARTITION BY m.account_id, m.thread_id ORDER BY m.received_at DESC, m.id DESC) AS thread_rank FROM messages m");
-        if !query.text.trim().is_empty() {
-            sql.push_str(" JOIN messages_fts f ON f.rowid=m.rowid");
-        }
+        let projection = mail_summary_projection("m", "''", "NULL", "''");
+        let has_text = !query.text.trim().is_empty();
+        // SQLite may otherwise choose the account/mailbox index as the outer
+        // loop, then repeatedly probe the FTS table while evaluating the
+        // window. On a large cached mailbox that can leave an exact search
+        // pending behind a full table walk. Materializing the FTS rowids first
+        // fixes the join order without limiting candidates: the window still
+        // chooses the newest matching message for every conversation.
+        let mut sql = if has_text {
+            format!(
+                "WITH fts_matches AS MATERIALIZED (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?), matching AS (SELECT {projection}, ROW_NUMBER() OVER (PARTITION BY m.account_id, m.thread_id ORDER BY m.received_at DESC, m.id DESC) AS thread_rank FROM fts_matches f JOIN messages m ON m.rowid = f.rowid"
+            )
+        } else {
+            format!(
+                "WITH matching AS (SELECT {projection}, ROW_NUMBER() OVER (PARTITION BY m.account_id, m.thread_id ORDER BY m.received_at DESC, m.id DESC) AS thread_rank FROM messages m"
+            )
+        };
         sql.push_str(" WHERE 1=1");
-        if !query.text.trim().is_empty() {
-            sql.push_str(" AND messages_fts MATCH ?");
-        }
         if !query.account_ids.is_empty() {
             sql.push_str(" AND m.account_id IN (");
             sql.push_str(&vec!["?"; query.account_ids.len()].join(","));
@@ -3923,7 +5667,7 @@ impl Store {
         sql.push_str(" ORDER BY received_at DESC, id DESC LIMIT ?");
 
         let mut statement = sqlx::query_as::<_, MailSummary>(&sql);
-        if !query.text.trim().is_empty() {
+        if has_text {
             statement = statement.bind(fts_query(&query.text));
         }
         for account_id in &query.account_ids {
@@ -3963,7 +5707,15 @@ impl Store {
             return Ok(Vec::new());
         }
         let placeholders = vec!["?"; ids.len()].join(",");
-        let sql = format!("SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE id IN ({placeholders}) ORDER BY received_at");
+        let sql = format!(
+            "SELECT {} FROM messages m WHERE m.id IN ({placeholders}) ORDER BY m.received_at",
+            mail_summary_projection(
+                "m",
+                "m.body_text",
+                "m.body_html",
+                "m.classification_signals"
+            )
+        );
         let mut query = sqlx::query_as::<_, MailSummary>(&sql);
         for id in ids {
             query = query.bind(id);
@@ -3977,7 +5729,16 @@ impl Store {
         mailbox: &str,
         uid: u32,
     ) -> Result<Option<MailSummary>> {
-        Ok(sqlx::query_as::<_, MailSummary>("SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?")
+        let sql = format!(
+            "SELECT {} FROM messages m WHERE m.account_id = ? AND m.mailbox = ? AND m.uid = ?",
+            mail_summary_projection(
+                "m",
+                "m.body_text",
+                "m.body_html",
+                "m.classification_signals"
+            )
+        );
+        Ok(sqlx::query_as::<_, MailSummary>(&sql)
             .bind(account_id.to_string())
             .bind(mailbox)
             .bind(uid)
@@ -4000,10 +5761,40 @@ impl Store {
         Ok(())
     }
 
+    /// Publishes a user-selected category only while its captured mailbox
+    /// namespace still owns this immutable message target.
+    pub async fn set_message_category_at_epoch(
+        &self,
+        target: &MailSummary,
+        category: &str,
+    ) -> Result<bool> {
+        if !matches!(
+            category,
+            "people" | "transactions" | "notifications" | "newsletters" | "other"
+        ) {
+            return Err(anyhow!("unknown mail category"));
+        }
+        let mut tx = self.pool.begin().await?;
+        if !epoch_message_target_is_current(&mut tx, target).await? {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        sqlx::query("UPDATE messages SET category = ?, classification_confidence = 1, classification_source = 'user' WHERE id = ?")
+            .bind(category)
+            .bind(&target.id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
     /// Newly synced messages that have not yet been classified.
     pub async fn messages_for_model_classification(&self) -> Result<Vec<MailSummary>> {
-        const SQL: &str = "SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE classification_source IS NULL AND content_state = 'complete' ORDER BY received_at DESC";
-        Ok(sqlx::query_as::<_, MailSummary>(SQL)
+        let sql = format!(
+            "SELECT {} FROM messages m WHERE m.classification_source IS NULL AND m.content_state = 'complete' ORDER BY m.received_at DESC",
+            mail_summary_projection("m", "m.body_text", "m.body_html", "m.classification_signals")
+        );
+        Ok(sqlx::query_as::<_, MailSummary>(&sql)
             .fetch_all(&self.pool)
             .await?)
     }
@@ -4015,8 +5806,11 @@ impl Store {
         &self,
         limit: usize,
     ) -> Result<Vec<MailSummary>> {
-        const SQL: &str = "SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE classification_source IS NULL AND content_state = 'complete' ORDER BY received_at DESC, id DESC LIMIT ?";
-        Ok(sqlx::query_as::<_, MailSummary>(SQL)
+        let sql = format!(
+            "SELECT {} FROM messages m WHERE m.classification_source IS NULL AND m.content_state = 'complete' ORDER BY m.received_at DESC, m.id DESC LIMIT ?",
+            mail_summary_projection("m", "m.body_text", "m.body_html", "m.classification_signals")
+        );
+        Ok(sqlx::query_as::<_, MailSummary>(&sql)
             .bind(limit.clamp(1, 1_000) as i64)
             .fetch_all(&self.pool)
             .await?)
@@ -4046,8 +5840,11 @@ impl Store {
     /// Messages eligible for an explicitly requested model reclassification.
     /// User-selected categories are deliberately excluded.
     pub async fn messages_for_model_reclassification(&self) -> Result<Vec<MailSummary>> {
-        const SQL: &str = "SELECT id, account_id, mailbox, uid, message_id, in_reply_to, reference_ids, thread_id, subject, from_name, from_address, to_addresses, cc_addresses, bcc_addresses, reply_to_addresses, received_at, snippet, body_text, body_html, content_state, unsubscribe_kind, unsubscribe_url, is_read, is_flagged, has_attachments, category, classification_confidence, classification_source, classification_signals FROM messages WHERE content_state = 'complete' AND (classification_source IS NULL OR classification_source = 'model') ORDER BY received_at DESC";
-        Ok(sqlx::query_as::<_, MailSummary>(SQL)
+        let sql = format!(
+            "SELECT {} FROM messages m WHERE m.content_state = 'complete' AND (m.classification_source IS NULL OR m.classification_source = 'model') ORDER BY m.received_at DESC",
+            mail_summary_projection("m", "m.body_text", "m.body_html", "m.classification_signals")
+        );
+        Ok(sqlx::query_as::<_, MailSummary>(&sql)
             .fetch_all(&self.pool)
             .await?)
     }
@@ -4084,6 +5881,49 @@ impl Store {
         Ok(())
     }
 
+    /// Applies Gmail category evidence only if the mailbox epoch remains the
+    /// one selected from the provider. The condition and every message update
+    /// share a single SQLite transaction so another process cannot relabel a
+    /// recycled UID after a UIDVALIDITY rollover.
+    pub async fn update_classification_signals_at_epoch(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        expected_uid_validity: i64,
+        updates: &[(String, String)],
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        let fenced = sqlx::query("UPDATE mailbox_catalog_state SET updated_at = updated_at WHERE account_id = ? AND mailbox = ? AND uid_validity = ?")
+            .bind(account_id.to_string())
+            .bind(mailbox)
+            .bind(expected_uid_validity)
+            .execute(&mut *tx)
+            .await?;
+        if fenced.rows_affected() != 1 {
+            return Err(anyhow!(
+                "mailbox identity changed; sync the account before refreshing Gmail category metadata"
+            ));
+        }
+        for (id, signals) in updates {
+            let updated = sqlx::query("UPDATE messages SET classification_source = CASE WHEN classification_source = 'model' AND classification_signals != ? THEN NULL ELSE classification_source END, classification_confidence = CASE WHEN classification_source = 'model' AND classification_signals != ? THEN NULL ELSE classification_confidence END, classification_signals = ? WHERE id = ? AND account_id = ? AND mailbox = ?")
+                .bind(signals)
+                .bind(signals)
+                .bind(signals)
+                .bind(id)
+                .bind(account_id.to_string())
+                .bind(mailbox)
+                .execute(&mut *tx)
+                .await?;
+            if updated.rows_affected() != 1 {
+                return Err(anyhow!(
+                    "message changed during Gmail category metadata refresh; sync the account before trying again"
+                ));
+            }
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn apply_model_classifications(
         &self,
         classifications: &[ModelClassificationUpdate],
@@ -4099,16 +5939,21 @@ impl Store {
         .execute(&mut *tx)
         .await?;
         for update in classifications {
-            let result = sqlx::query("UPDATE messages SET category = ?, classification_confidence = ?, classification_source = 'model' WHERE id = ? AND from_name IS ? AND from_address = ? AND subject = ? AND snippet = ? AND body_text = ? AND classification_signals = ? AND EXISTS(SELECT 1 FROM sent_correspondents known WHERE known.account_id = messages.account_id AND known.address = messages.from_address) = ? AND EXISTS(SELECT 1 FROM app_meta WHERE key = 'classification_revision_owner' AND value = ?) AND EXISTS(SELECT 1 FROM app_meta WHERE key = 'classification_model_revision' AND value = ?) AND EXISTS(SELECT 1 FROM app_meta WHERE key = 'classification_policy_version' AND value = ?) AND (classification_source IS NULL OR classification_source = 'model')")
+            let result = sqlx::query("UPDATE messages SET category = ?, classification_confidence = ?, classification_source = 'model' WHERE id = ? AND account_id = ? AND mailbox = ? AND uid = ? AND from_name IS ? AND from_address = ? AND subject = ? AND snippet = ? AND body_text = ? AND classification_signals = ? AND ((? IS NULL AND NOT EXISTS(SELECT 1 FROM mailbox_catalog_state epoch WHERE epoch.account_id = messages.account_id AND epoch.mailbox = messages.mailbox)) OR EXISTS(SELECT 1 FROM mailbox_catalog_state epoch WHERE epoch.account_id = messages.account_id AND epoch.mailbox = messages.mailbox AND epoch.uid_validity = ?)) AND EXISTS(SELECT 1 FROM sent_correspondents known WHERE known.account_id = messages.account_id AND known.address = messages.from_address) = ? AND EXISTS(SELECT 1 FROM app_meta WHERE key = 'classification_revision_owner' AND value = ?) AND EXISTS(SELECT 1 FROM app_meta WHERE key = 'classification_model_revision' AND value = ?) AND EXISTS(SELECT 1 FROM app_meta WHERE key = 'classification_policy_version' AND value = ?) AND (classification_source IS NULL OR classification_source = 'model')")
                 .bind(&update.category)
                 .bind(update.confidence)
                 .bind(&update.id)
+                .bind(&update.expected_account_id)
+                .bind(&update.expected_mailbox)
+                .bind(update.expected_uid)
                 .bind(&update.expected_from_name)
                 .bind(&update.expected_from_address)
                 .bind(&update.expected_subject)
                 .bind(&update.expected_snippet)
                 .bind(&update.expected_body_text)
                 .bind(&update.expected_signals)
+                .bind(update.expected_mailbox_uid_validity)
+                .bind(update.expected_mailbox_uid_validity)
                 .bind(update.expected_known_correspondence)
                 .bind(&update.expected_owner)
                 .bind(&update.expected_model_revision)
@@ -4122,7 +5967,7 @@ impl Store {
     }
 
     pub async fn attachments(&self, message_id: &str) -> Result<Vec<Attachment>> {
-        sqlx::query_as::<_, Attachment>("SELECT id, message_id, filename, mime_type, size_bytes, is_inline, presentation, is_potentially_unsafe FROM attachments WHERE message_id = ? AND presentation IN ('downloadable', 'both') ORDER BY filename COLLATE NOCASE, id")
+        sqlx::query_as::<_, Attachment>("SELECT id, message_id, filename, mime_type, size_bytes, size_kind, is_inline, presentation, is_potentially_unsafe FROM attachments WHERE message_id = ? AND presentation IN ('downloadable', 'both') ORDER BY filename COLLATE NOCASE, id")
             .bind(message_id)
             .fetch_all(&self.pool)
             .await
@@ -4134,7 +5979,7 @@ impl Store {
         message_id: &str,
         attachment_id: &str,
     ) -> Result<AttachmentData> {
-        let row: (String, String, String, String, i64, bool, AttachmentPresentation, bool, Vec<u8>) = sqlx::query_as("SELECT id, message_id, filename, mime_type, size_bytes, is_inline, presentation, is_potentially_unsafe, data FROM attachments WHERE message_id = ? AND id = ? AND presentation IN ('downloadable', 'both')")
+        let row: (String, String, String, String, i64, AttachmentSizeKind, bool, AttachmentPresentation, bool, Vec<u8>) = sqlx::query_as("SELECT id, message_id, filename, mime_type, size_bytes, size_kind, is_inline, presentation, is_potentially_unsafe, data FROM attachments WHERE message_id = ? AND id = ? AND presentation IN ('downloadable', 'both')")
             .bind(message_id)
             .bind(attachment_id)
             .fetch_one(&self.pool)
@@ -4146,11 +5991,12 @@ impl Store {
                 filename: row.2,
                 mime_type: row.3,
                 size_bytes: row.4,
-                is_inline: row.5,
-                presentation: row.6,
-                is_potentially_unsafe: row.7,
+                size_kind: row.5,
+                is_inline: row.6,
+                presentation: row.7,
+                is_potentially_unsafe: row.8,
             },
-            bytes: row.8,
+            bytes: row.9,
         })
     }
 
@@ -4166,23 +6012,68 @@ impl Store {
     }
 
     async fn rebuild_threads_for_account(&self, account_id: &str) -> Result<()> {
-        let rows = sqlx::query_as::<_, ThreadRow>("SELECT id, thread_id, message_id, in_reply_to, reference_ids, subject, from_address, to_addresses, received_at FROM messages WHERE account_id = ? ORDER BY received_at, id")
+        // Reserve the write transaction before observing thread evidence.
+        // A UIDVALIDITY replacement can recycle the stable row ID while this
+        // graph is being computed; reading and publishing in separate
+        // transactions would then let old linkage update the replacement.
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE app_meta SET value = value WHERE key = 'classification_policy_version'",
+        )
+        .execute(&mut *tx)
+        .await?;
+        let rows = sqlx::query_as::<_, ThreadRow>("SELECT m.id, m.thread_id, m.message_id, m.in_reply_to, m.reference_ids, identity.provider_message_id, m.subject, m.from_address, m.to_addresses, m.received_at FROM messages AS m LEFT JOIN message_provider_identities AS identity ON identity.message_id = m.id AND identity.account_id = m.account_id AND identity.provider = 'gmail' WHERE m.account_id = ? ORDER BY m.received_at, m.id")
             .bind(account_id)
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *tx)
             .await?;
         if rows.is_empty() {
+            tx.commit().await?;
             return Ok(());
         }
 
         let mut groups = DisjointSet::new(rows.len());
-        let mut by_message_id: HashMap<String, usize> = HashMap::new();
+        let mut by_provider_identity: HashMap<String, usize> = HashMap::new();
         for (index, row) in rows.iter().enumerate() {
-            if let Some(message_id) = row.message_id.as_deref().and_then(normalize_message_id) {
-                if let Some(existing) = by_message_id.insert(message_id, index) {
+            if let Some(provider_message_id) = row.provider_message_id.as_deref() {
+                if let Some(existing) =
+                    by_provider_identity.insert(provider_message_id.to_owned(), index)
+                {
                     groups.union(index, existing);
                 }
             }
         }
+        // A malformed or duplicated RFC Message-ID must not collapse two
+        // Gmail messages when the provider assigned them different immutable
+        // identities. Rows without provider evidence retain the RFC behavior.
+        let mut by_message_id: HashMap<String, Vec<usize>> = HashMap::new();
+        for (index, row) in rows.iter().enumerate() {
+            if let Some(message_id) = row.message_id.as_deref().and_then(normalize_message_id) {
+                by_message_id.entry(message_id).or_default().push(index);
+            }
+        }
+        for candidates in by_message_id.values() {
+            let provider_ids = candidates
+                .iter()
+                .filter_map(|index| rows[*index].provider_message_id.as_deref())
+                .collect::<HashSet<_>>();
+            // Unknown provider metadata may join copies only when every
+            // observed Gmail identity agrees. Pairwise joining would let one
+            // unknown row bridge two different Gmail messages with a forged
+            // RFC Message-ID.
+            if provider_ids.len() <= 1 {
+                if let Some((first, rest)) = candidates.split_first() {
+                    for index in rest {
+                        groups.union(*first, *index);
+                    }
+                }
+            }
+        }
+        let linked_message_ids = by_message_id
+            .iter()
+            .filter_map(|(message_id, rows)| {
+                rows.first().copied().map(|row| (message_id.clone(), row))
+            })
+            .collect::<HashMap<_, _>>();
         let mut by_linked_id: HashMap<String, usize> = HashMap::new();
         for (index, row) in rows.iter().enumerate() {
             let linked_ids = row
@@ -4192,7 +6083,7 @@ impl Store {
                 .flat_map(|value| parse_message_ids(value))
                 .collect::<Vec<_>>();
             for linked_id in linked_ids {
-                if let Some(parent) = by_message_id.get(&linked_id) {
+                if let Some(parent) = linked_message_ids.get(&linked_id) {
                     groups.union(index, *parent);
                 }
                 if let Some(sibling) = by_linked_id.insert(linked_id, index) {
@@ -4232,6 +6123,11 @@ impl Store {
                     .as_deref()
                     .and_then(normalize_message_id)
                     .or_else(|| row.in_reply_to.as_deref().and_then(normalize_message_id))
+                    .or_else(|| {
+                        row.provider_message_id
+                            .as_deref()
+                            .map(|provider_message_id| format!("gmail:{provider_message_id}"))
+                    })
                     .or_else(|| row.message_id.as_deref().and_then(normalize_message_id))
                     .unwrap_or_else(|| row.id.clone())
             });
@@ -4244,9 +6140,9 @@ impl Store {
             }
         }
         if updates.is_empty() {
+            tx.commit().await?;
             return Ok(());
         }
-        let mut tx = self.pool.begin().await?;
         for (id, thread_id) in updates {
             sqlx::query("UPDATE messages SET thread_id = ? WHERE id = ?")
                 .bind(thread_id)
@@ -4257,6 +6153,57 @@ impl Store {
         tx.commit().await?;
         Ok(())
     }
+}
+
+async fn reject_unsupported_profile_version_at_path(path: &Path) -> Result<()> {
+    let Ok(metadata) = tokio::fs::metadata(path).await else {
+        return Ok(());
+    };
+    if metadata.len() == 0 {
+        return Ok(());
+    }
+    // Read-only mode prevents durable schema, journal-mode, and vault changes
+    // while still participating in SQLite locking and reading a live WAL.
+    // SQLite may reconstruct its transient `-shm` WAL index after a crash or
+    // backup. That recovery file is coordination state, not durable mail data.
+    // The immutable URI flag is unsafe here because another Dakia process may
+    // be writing this profile and SQLite would then ignore its WAL.
+    let options = SqliteConnectOptions::from_str(path.to_string_lossy().as_ref())?
+        .read_only(true)
+        .busy_timeout(Duration::from_secs(10));
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await?;
+    let validation = async {
+        let app_meta_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'app_meta')",
+        )
+        .fetch_one(&pool)
+        .await?;
+        if app_meta_exists {
+            let versions: Vec<(String, String)> = sqlx::query_as(
+                "SELECT key, value FROM app_meta WHERE key IN ('profile_schema_version', 'profile_schema_migration_target')",
+            )
+            .fetch_all(&pool)
+            .await?;
+            for (key, version) in versions {
+                let parsed = version
+                    .parse::<u32>()
+                    .with_context(|| format!("stored {key} is invalid: {version:?}"))?;
+                if parsed > PROFILE_SCHEMA_VERSION {
+                    return Err(anyhow!(
+                        "profile schema version {parsed} is newer than this Dakia build supports ({PROFILE_SCHEMA_VERSION})"
+                    ));
+                }
+            }
+        }
+        validate_send_attempts_schema(&pool, true).await?;
+        validate_send_recovery_payloads_schema(&pool, true).await
+    }
+    .await;
+    pool.close().await;
+    validation
 }
 
 fn target_allows_mailbox(message: &MailSummary, target: &ConversationTarget) -> bool {
@@ -4273,11 +6220,16 @@ fn mail_conversation_from_sources(
     thread_id: String,
     source_messages: Vec<MailSummary>,
     preferred_mailbox: Option<&str>,
+    provider_identities: &HashMap<String, String>,
 ) -> Option<MailConversation> {
     // Keep every durable locator for mutation fan-out. `messages` below is
     // only the mailbox-preferred reader/list projection, so it may
     // intentionally collapse logical Message-ID copies.
-    let messages = deduplicate_message_copies(source_messages.clone(), preferred_mailbox);
+    let messages = deduplicate_message_copies(
+        source_messages.clone(),
+        preferred_mailbox,
+        provider_identities,
+    );
     let latest = messages.last()?.clone();
     let mut participants = source_messages
         .iter()
@@ -4310,6 +6262,7 @@ fn mail_conversation_from_sources(
 fn deduplicate_message_copies(
     mut messages: Vec<MailSummary>,
     preferred_mailbox: Option<&str>,
+    provider_identities: &HashMap<String, String>,
 ) -> Vec<MailSummary> {
     messages.sort_by_key(|message| {
         (
@@ -4320,10 +6273,10 @@ fn deduplicate_message_copies(
     });
     let mut seen = HashSet::new();
     messages.retain(|message| {
-        let key = message
-            .message_id
-            .as_deref()
-            .and_then(normalize_message_id)
+        let key = provider_identities
+            .get(&message.id)
+            .map(|provider_message_id| format!("gmail:{provider_message_id}"))
+            .or_else(|| message.message_id.as_deref().and_then(normalize_message_id))
             .unwrap_or_else(|| message.id.clone());
         seen.insert(key)
     });
@@ -4352,6 +6305,7 @@ struct ThreadRow {
     message_id: Option<String>,
     in_reply_to: Option<String>,
     reference_ids: Option<String>,
+    provider_message_id: Option<String>,
     subject: String,
     from_address: String,
     to_addresses: String,
@@ -4449,11 +6403,148 @@ enum FlagUpdatePolicy {
     CompareAndSwap(Option<(bool, bool)>),
 }
 
+/// A summary read back from SQLite has no provider-wire metadata. Such a
+/// projection must not erase a known Gmail identity, whereas a fresh Gmail
+/// FETCH deliberately clears one when `X-GM-MSGID` is absent or malformed.
+#[derive(Clone, Copy)]
+enum ProviderIdentityPolicy {
+    PreserveAbsent,
+    Observed,
+}
+
+async fn epoch_target_is_current(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    target: &MailSummary,
+    fetched: &MailSummary,
+) -> Result<bool> {
+    let Some(epoch) = target.mailbox_uid_validity else {
+        return Ok(false);
+    };
+    if target.id != fetched.id
+        || target.account_id != fetched.account_id
+        || target.mailbox != fetched.mailbox
+        || target.uid != fetched.uid
+        || fetched.mailbox_uid_validity != Some(epoch)
+    {
+        return Ok(false);
+    }
+    let matched = sqlx::query("UPDATE messages SET id = id WHERE id = ? AND account_id = ? AND mailbox = ? AND uid = ? AND EXISTS (SELECT 1 FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ? AND uid_validity = ?)")
+        .bind(&target.id)
+        .bind(&target.account_id)
+        .bind(&target.mailbox)
+        .bind(target.uid)
+        .bind(&target.account_id)
+        .bind(&target.mailbox)
+        .bind(epoch)
+        .execute(&mut **tx)
+        .await?
+        .rows_affected();
+    Ok(matched == 1)
+}
+
+/// Validates the local side of a post-network mutation while holding the
+/// transaction that will publish it. The conditional write acquires SQLite's
+/// writer lock before any side effects, which closes the gap where a separate
+/// CLI process can replace a mailbox UID namespace between a read and write.
+async fn epoch_message_target_is_current(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    target: &MailSummary,
+) -> Result<bool> {
+    let Some(epoch) = target.mailbox_uid_validity else {
+        return Ok(false);
+    };
+    let matched = sqlx::query("UPDATE messages SET id = id WHERE id = ? AND account_id = ? AND mailbox = ? AND uid = ? AND EXISTS (SELECT 1 FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ? AND uid_validity = ?)")
+        .bind(&target.id)
+        .bind(&target.account_id)
+        .bind(&target.mailbox)
+        .bind(target.uid)
+        .bind(&target.account_id)
+        .bind(&target.mailbox)
+        .bind(epoch)
+        .execute(&mut **tx)
+        .await?
+        .rows_affected();
+    Ok(matched == 1)
+}
+
+/// Applies the local half of a confirmed remote move. Callers must establish
+/// any immutable target guard before this helper runs.
+async fn move_message_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    account_id: AccountId,
+    account_key: &str,
+    source_mailbox: &str,
+    source_uid: u32,
+    destination_mailbox: &str,
+    destination_uid: Option<u32>,
+) -> Result<()> {
+    // A realtime fetch may have read this UID immediately before the provider
+    // completed the move. Record the successful action in the same
+    // transaction so late sync publication cannot resurrect the old locator.
+    sqlx::query("INSERT OR REPLACE INTO mailbox_action_tombstones(account_id, mailbox, uid, created_at) VALUES (?, ?, ?, ?)")
+        .bind(account_key)
+        .bind(source_mailbox)
+        .bind(source_uid)
+        .bind(Utc::now())
+        .execute(&mut **tx)
+        .await?;
+    let Some(destination_uid) = destination_uid else {
+        sqlx::query("DELETE FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?")
+            .bind(account_key)
+            .bind(source_mailbox)
+            .bind(source_uid)
+            .execute(&mut **tx)
+            .await?;
+        return Ok(());
+    };
+    sqlx::query("DELETE FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?")
+        .bind(account_key)
+        .bind(destination_mailbox)
+        .bind(destination_uid)
+        .execute(&mut **tx)
+        .await?;
+    // Attachment IDs encode the locator. Remove state bound to the old
+    // locator rather than carrying it to the destination message.
+    for table in [
+        "message_content_cache",
+        "starred_attachment_metadata",
+        "starred_message_bodies",
+        "message_content_fetches",
+    ] {
+        let query = format!(
+            "DELETE FROM {table} WHERE message_id IN (SELECT id FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?)"
+        );
+        sqlx::query(&query)
+            .bind(account_key)
+            .bind(source_mailbox)
+            .bind(source_uid)
+            .execute(&mut **tx)
+            .await?;
+    }
+    sqlx::query("UPDATE messages SET id = ?, mailbox = ?, uid = ? WHERE account_id = ? AND mailbox = ? AND uid = ?")
+        .bind(stable_message_id(account_id, destination_mailbox, destination_uid))
+        .bind(destination_mailbox)
+        .bind(destination_uid)
+        .bind(account_key)
+        .bind(source_mailbox)
+        .bind(source_uid)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 async fn persist_message(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     message: &MailSummary,
+    provider_identity_policy: ProviderIdentityPolicy,
 ) -> Result<()> {
-    persist_message_with_flag_policy(tx, message, FlagUpdatePolicy::ProviderAuthoritative).await
+    persist_message_with_flag_policy(
+        tx,
+        message,
+        FlagUpdatePolicy::ProviderAuthoritative,
+        provider_identity_policy,
+    )
+    .await
 }
 
 async fn replace_uidvalidity_catalog_messages_in_transaction(
@@ -4495,7 +6586,7 @@ async fn replace_uidvalidity_catalog_messages_in_transaction(
             .bind(message.uid)
             .execute(&mut **tx)
             .await?;
-        persist_message(tx, message).await?;
+        persist_message(tx, message, ProviderIdentityPolicy::Observed).await?;
     }
     Ok(())
 }
@@ -4541,6 +6632,10 @@ async fn persist_staged_uidvalidity_replacement_messages_in_transaction(
     mailbox: &str,
     generation: &str,
 ) -> Result<()> {
+    let gmail_account = account_uses_gmail_provider(tx, account_id).await?;
+    if gmail_account == Some(false) {
+        clear_provider_identity_for_non_gmail_account(tx, account_id).await?;
+    }
     let mut after_uid: Option<i64> = None;
     loop {
         let rows: Vec<(i64, String)> = match after_uid {
@@ -4568,8 +6663,14 @@ async fn persist_staged_uidvalidity_replacement_messages_in_transaction(
             return Ok(());
         }
         for (uid, message_json) in &rows {
-            let message: MailSummary = serde_json::from_str(message_json)
-                .context("decode staged snapshot replacement message")?;
+            let (message, provider_identity_policy) =
+                serde_json::from_str::<StagedSnapshotMessage>(message_json)
+                    .map(StagedSnapshotMessage::into_message)
+                    .or_else(|_| {
+                        serde_json::from_str::<MailSummary>(message_json)
+                            .map(|message| (message, ProviderIdentityPolicy::PreserveAbsent))
+                    })
+                    .context("decode staged snapshot replacement message")?;
             if message.account_id != account_id || message.mailbox != mailbox || message.uid != *uid
             {
                 return Err(anyhow!(
@@ -4590,7 +6691,15 @@ async fn persist_staged_uidvalidity_replacement_messages_in_transaction(
                     "staged replacement message UID is absent from the finalized snapshot"
                 ));
             }
-            persist_message(tx, &message).await?;
+            persist_message_with_flag_policy_and_account_provider(
+                tx,
+                &message,
+                FlagUpdatePolicy::ProviderAuthoritative,
+                provider_identity_policy,
+                gmail_account,
+                gmail_account == Some(false),
+            )
+            .await?;
         }
         after_uid = rows.last().map(|(uid, _)| *uid);
     }
@@ -4600,7 +6709,59 @@ async fn persist_message_with_flag_policy(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     message: &MailSummary,
     flag_policy: FlagUpdatePolicy,
+    provider_identity_policy: ProviderIdentityPolicy,
 ) -> Result<()> {
+    persist_message_with_flag_policy_and_account_provider(
+        tx,
+        message,
+        flag_policy,
+        provider_identity_policy,
+        None,
+        false,
+    )
+    .await
+}
+
+async fn account_uses_gmail_provider(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    account_id: &str,
+) -> Result<Option<bool>> {
+    let Some(data) = sqlx::query_scalar::<_, String>("SELECT data FROM accounts WHERE id = ?")
+        .bind(account_id)
+        .fetch_optional(&mut **tx)
+        .await?
+    else {
+        return Ok(None);
+    };
+    Ok(deserialize_account(&data).ok().and_then(|account| {
+        (account.id.to_string() == account_id).then_some(account.provider_id == "gmail")
+    }))
+}
+
+async fn clear_provider_identity_for_non_gmail_account(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    account_id: &str,
+) -> Result<()> {
+    sqlx::query("DELETE FROM message_provider_identities WHERE account_id = ?")
+        .bind(account_id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM message_provider_identity_observations WHERE account_id = ?")
+        .bind(account_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn persist_message_with_flag_policy_and_account_provider(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    message: &MailSummary,
+    flag_policy: FlagUpdatePolicy,
+    provider_identity_policy: ProviderIdentityPolicy,
+    gmail_account: Option<bool>,
+    account_identity_cleanup_complete: bool,
+) -> Result<()> {
+    let provider_identity = message.gmail_message_id.as_deref();
     let suppressed: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM mailbox_action_tombstones WHERE account_id = ? AND mailbox = ? AND uid = ?)",
     )
@@ -4642,6 +6803,63 @@ async fn persist_message_with_flag_policy(
         .bind(expected_read)
         .bind(expected_flagged)
         .execute(&mut **tx).await?;
+    let gmail_account = match gmail_account {
+        Some(gmail_account) => gmail_account,
+        None => account_uses_gmail_provider(tx, &message.account_id)
+            .await?
+            .unwrap_or(false),
+    };
+    if gmail_account {
+        if let Some(provider_message_id) = provider_identity {
+            // Resolve the row by the immutable remote locator after the message
+            // upsert.  A caller-supplied local UUID must never publish identity
+            // metadata for another account or for a row that lost an ID race.
+            sqlx::query("INSERT INTO message_provider_identities(message_id, account_id, provider, provider_message_id) SELECT id, account_id, 'gmail', ? FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ? ON CONFLICT(message_id) DO UPDATE SET account_id = excluded.account_id, provider = excluded.provider, provider_message_id = excluded.provider_message_id")
+            .bind(provider_message_id)
+            .bind(&message.account_id)
+            .bind(&message.mailbox)
+            .bind(message.uid)
+            .execute(&mut **tx)
+            .await?;
+        } else if matches!(provider_identity_policy, ProviderIdentityPolicy::Observed) {
+            // A supported Gmail response that omits or malforms the field is
+            // terminal for this locator and must not inherit stale identity.
+            sqlx::query("DELETE FROM message_provider_identities WHERE message_id = (SELECT id FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?)")
+                .bind(&message.account_id)
+                .bind(&message.mailbox)
+                .bind(message.uid)
+                .execute(&mut **tx)
+                .await?;
+        }
+    } else if matches!(provider_identity_policy, ProviderIdentityPolicy::Observed)
+        && !account_identity_cleanup_complete
+    {
+        // A replacement row must never inherit an identity from a previous
+        // mailbox UID namespace or a provider configuration change. The
+        // corresponding observation is equally provider-scoped: retaining it
+        // would make a later Gmail reconfiguration believe this locator had
+        // already been backfilled.
+        sqlx::query("DELETE FROM message_provider_identities WHERE message_id = (SELECT id FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?)")
+            .bind(&message.account_id)
+            .bind(&message.mailbox)
+            .bind(message.uid)
+            .execute(&mut **tx)
+            .await?;
+        sqlx::query("DELETE FROM message_provider_identity_observations WHERE message_id = (SELECT id FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?)")
+            .bind(&message.account_id)
+            .bind(&message.mailbox)
+            .bind(message.uid)
+            .execute(&mut **tx)
+            .await?;
+    }
+    if gmail_account && matches!(provider_identity_policy, ProviderIdentityPolicy::Observed) {
+        sqlx::query("INSERT INTO message_provider_identity_observations(message_id, account_id, provider) SELECT id, account_id, 'gmail' FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ? ON CONFLICT(message_id) DO UPDATE SET account_id = excluded.account_id, provider = excluded.provider")
+            .bind(&message.account_id)
+            .bind(&message.mailbox)
+            .bind(message.uid)
+            .execute(&mut **tx)
+            .await?;
+    }
     if message.mailbox == "Sent" || message.mailbox.starts_with("Sent::") {
         let recipients = [
             &message.to_addresses,
@@ -4703,12 +6921,13 @@ async fn persist_message_with_flag_policy(
             .iter()
             .filter(|attachment| attachment.attachment.presentation.is_downloadable())
         {
-            sqlx::query("INSERT INTO starred_attachment_metadata(id, message_id, filename, mime_type, size_bytes, is_inline, presentation, is_potentially_unsafe) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+            sqlx::query("INSERT INTO starred_attachment_metadata(id, message_id, filename, mime_type, size_bytes, size_kind, is_inline, presentation, is_potentially_unsafe) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
                 .bind(&attachment.attachment.id)
                 .bind(&message.id)
                 .bind(&attachment.attachment.filename)
                 .bind(&attachment.attachment.mime_type)
                 .bind(attachment.attachment.size_bytes)
+                .bind(attachment.attachment.size_kind)
                 .bind(attachment.attachment.is_inline)
                 .bind(attachment.attachment.presentation)
                 .bind(attachment.attachment.is_potentially_unsafe)
@@ -5195,12 +7414,477 @@ pub fn stable_message_id(account_id: AccountId, mailbox: &str, uid: u32) -> Stri
 }
 
 #[cfg(test)]
+#[path = "storage_cancellation_tests.rs"]
+mod storage_cancellation_tests;
+#[cfg(test)]
+#[path = "storage_fault_tests.rs"]
+mod storage_fault_tests;
+#[cfg(test)]
+#[path = "storage_open_lock_tests.rs"]
+mod storage_open_lock_tests;
+#[cfg(test)]
+#[path = "storage_realtime_publication_tests.rs"]
+mod storage_realtime_publication_tests;
+#[cfg(test)]
+#[path = "storage_remote_identity_tests.rs"]
+mod storage_remote_identity_tests;
+#[cfg(test)]
+#[path = "storage_smart_inbox_visibility_tests.rs"]
+mod storage_smart_inbox_visibility_tests;
+#[cfg(test)]
+mod profile_operation_tests {
+    use super::*;
+    use std::{
+        future::pending,
+        process::Command,
+        thread,
+        time::{Duration, Instant},
+    };
+    use tempfile::tempdir;
+    use tokio::sync::oneshot;
+
+    const CHILD_MODE: &str = "DAKIA_PROFILE_OPERATION_COORDINATOR_CHILD";
+    const CHILD_DATABASE: &str = "DAKIA_PROFILE_OPERATION_COORDINATOR_DATABASE";
+    const CHILD_READY: &str = "DAKIA_PROFILE_OPERATION_COORDINATOR_READY";
+    const CHILD_RELEASE: &str = "DAKIA_PROFILE_OPERATION_COORDINATOR_RELEASE";
+    const CHILD_COMPLETED: &str = "DAKIA_PROFILE_OPERATION_COORDINATOR_COMPLETED";
+    const CHILD_NONCE: &str = "DAKIA_PROFILE_OPERATION_COORDINATOR_NONCE";
+
+    fn child_value(name: &str) -> String {
+        std::env::var(name).unwrap_or_else(|_| panic!("bounded child requires {name}"))
+    }
+
+    fn wait_for_child_file(
+        child: &mut std::process::Child,
+        path: &Path,
+        deadline: Instant,
+        label: &str,
+    ) {
+        loop {
+            if path.exists() {
+                return;
+            }
+            if let Some(status) = child.try_wait().expect("poll profile-operation child") {
+                panic!("profile-operation child exited before {label}: {status}");
+            }
+            if Instant::now() >= deadline {
+                child.kill().expect("stop stalled profile-operation child");
+                let _ = child.wait();
+                panic!("profile-operation child did not {label} before its bound");
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_operation_guard_coordinates_aliases_across_processes() {
+        use std::os::unix::fs::symlink;
+
+        if let Some(mode) = std::env::var_os(CHILD_MODE) {
+            assert!(
+                mode == "1" || mode == "kill-hold",
+                "the isolated child has one of two bounded valid modes"
+            );
+            let database = PathBuf::from(child_value(CHILD_DATABASE));
+            let ready = PathBuf::from(child_value(CHILD_READY));
+            let release = PathBuf::from(child_value(CHILD_RELEASE));
+            let completed = PathBuf::from(child_value(CHILD_COMPLETED));
+            let nonce = child_value(CHILD_NONCE);
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("create isolated profile-operation runtime")
+                .block_on(async move {
+                    let store = Store::open(&database)
+                        .await
+                        .expect("child opens the alias profile");
+                    let guard = store
+                        .acquire_profile_operation_guard()
+                        .await
+                        .expect("child acquires profile operation guard");
+                    std::fs::write(
+                        &ready,
+                        format!("dakia-profile-operation-guard-acquired-v1\n{nonce}\n"),
+                    )
+                    .expect("write child guard receipt");
+                    if mode == "kill-hold" {
+                        pending::<()>().await;
+                    }
+                    let deadline = Instant::now() + Duration::from_secs(30);
+                    while !release.exists() {
+                        assert!(
+                            Instant::now() < deadline,
+                            "parent did not release the bounded profile-operation child"
+                        );
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                    }
+                    drop(guard);
+                    std::fs::write(
+                        &completed,
+                        format!("dakia-profile-operation-coordinator-v1\n{nonce}\n"),
+                    )
+                    .expect("write child completion receipt");
+                });
+            return;
+        }
+
+        let temporary = tempdir().expect("create profile-operation watchdog directory");
+        let database = temporary.path().join("dakia.db");
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("initialize profile runtime")
+            .block_on(async {
+                drop(
+                    Store::open(&database)
+                        .await
+                        .expect("initialize real profile"),
+                );
+            });
+        let alias = temporary.path().join("dakia-alias.db");
+        symlink(&database, &alias).expect("create profile database alias");
+        let ready = temporary.path().join("child-ready");
+        let release = temporary.path().join("child-release");
+        let completed = temporary.path().join("child-completed");
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let mut child = Command::new(std::env::current_exe().expect("test executable"))
+            .arg("--exact")
+            .arg("storage::profile_operation_tests::profile_operation_guard_coordinates_aliases_across_processes")
+            .arg("--nocapture")
+            .env(CHILD_MODE, "1")
+            .env(CHILD_DATABASE, &alias)
+            .env(CHILD_READY, &ready)
+            .env(CHILD_RELEASE, &release)
+            .env(CHILD_COMPLETED, &completed)
+            .env(CHILD_NONCE, &nonce)
+            .spawn()
+            .expect("start isolated profile-operation child");
+        wait_for_child_file(
+            &mut child,
+            &ready,
+            Instant::now() + Duration::from_secs(30),
+            "acquire the alias profile guard",
+        );
+        assert_eq!(
+            std::fs::read_to_string(&ready).expect("read child acquisition receipt"),
+            format!("dakia-profile-operation-guard-acquired-v1\n{nonce}\n"),
+            "the child must acquire the guard before the parent accepts readiness"
+        );
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("create parent profile-operation runtime");
+        let parent_store = runtime
+            .block_on(Store::open(&database))
+            .expect("Store::open remains available while an operation is active");
+        let waiting_store = parent_store.clone();
+        let mut waiting_guard =
+            runtime.spawn(async move { waiting_store.acquire_profile_operation_guard().await });
+        assert!(
+            runtime
+                .block_on(async {
+                    tokio::time::timeout(Duration::from_millis(150), &mut waiting_guard).await
+                })
+                .is_err(),
+            "the real path must wait for the child holding the alias guard"
+        );
+
+        std::fs::write(&release, b"release\n").expect("release isolated child");
+        wait_for_child_file(
+            &mut child,
+            &completed,
+            Instant::now() + Duration::from_secs(30),
+            "write the nonce-bound completion receipt",
+        );
+        assert!(
+            child
+                .wait()
+                .expect("reap profile-operation child")
+                .success(),
+            "profile-operation child must exit successfully"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&completed).expect("read child completion receipt"),
+            format!("dakia-profile-operation-coordinator-v1\n{nonce}\n"),
+            "a renamed or early-exiting child cannot satisfy the parent"
+        );
+        drop(
+            runtime
+                .block_on(async {
+                    tokio::time::timeout(Duration::from_secs(5), &mut waiting_guard).await
+                })
+                .expect("real-path acquisition remained bounded")
+                .expect("real-path guard task completed")
+                .expect("real-path guard acquired after child release"),
+        );
+
+        let killed_ready = temporary.path().join("killed-child-ready");
+        let killed_release = temporary.path().join("killed-child-release");
+        let killed_completed = temporary.path().join("killed-child-completed");
+        let killed_nonce = uuid::Uuid::new_v4().to_string();
+        let mut killed_child = Command::new(std::env::current_exe().expect("test executable"))
+            .arg("--exact")
+            .arg("storage::profile_operation_tests::profile_operation_guard_coordinates_aliases_across_processes")
+            .arg("--nocapture")
+            .env(CHILD_MODE, "kill-hold")
+            .env(CHILD_DATABASE, &alias)
+            .env(CHILD_READY, &killed_ready)
+            .env(CHILD_RELEASE, &killed_release)
+            .env(CHILD_COMPLETED, &killed_completed)
+            .env(CHILD_NONCE, &killed_nonce)
+            .spawn()
+            .expect("start child retained only for parent-owned termination");
+        wait_for_child_file(
+            &mut killed_child,
+            &killed_ready,
+            Instant::now() + Duration::from_secs(30),
+            "acquire the guard before parent-owned termination",
+        );
+        assert_eq!(
+            std::fs::read_to_string(&killed_ready).expect("read terminated child receipt"),
+            format!("dakia-profile-operation-guard-acquired-v1\n{killed_nonce}\n"),
+            "the terminated child must have held the intended guard"
+        );
+        let killed_wait_store = parent_store;
+        let mut after_kill_guard =
+            runtime.spawn(async move { killed_wait_store.acquire_profile_operation_guard().await });
+        assert!(
+            runtime
+                .block_on(async {
+                    tokio::time::timeout(Duration::from_millis(150), &mut after_kill_guard).await
+                })
+                .is_err(),
+            "the parent must wait while the child process is alive"
+        );
+        killed_child
+            .kill()
+            .expect("terminate only the child process started by this test");
+        assert!(
+            !killed_child
+                .wait()
+                .expect("reap parent-owned terminated child")
+                .success(),
+            "the child must not write a normal completion receipt after termination"
+        );
+        assert!(
+            !killed_completed.exists(),
+            "termination is not a completed operation"
+        );
+        drop(
+            runtime
+                .block_on(async {
+                    tokio::time::timeout(Duration::from_secs(5), &mut after_kill_guard).await
+                })
+                .expect("OS release after child termination remained bounded")
+                .expect("post-termination acquisition task completed")
+                .expect("OS released the terminated child's operation guard"),
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_profile_operation_owner_releases_the_guard() {
+        let directory = tempdir().expect("create cancellable profile directory");
+        let database = directory.path().join("dakia.db");
+        let store = Store::open(&database).await.expect("initialize profile");
+        let owner_store = store.clone();
+        let (acquired_tx, acquired_rx) = oneshot::channel();
+        let owner = tokio::spawn(async move {
+            let _guard = owner_store
+                .acquire_profile_operation_guard()
+                .await
+                .expect("acquire cancellable profile-operation guard");
+            acquired_tx.send(()).expect("publish acquired guard");
+            pending::<()>().await;
+        });
+        acquired_rx.await.expect("owner acquired its guard");
+        owner.abort();
+        assert!(owner
+            .await
+            .expect_err("profile-operation owner must be cancelled")
+            .is_cancelled());
+        drop(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                store.acquire_profile_operation_guard(),
+            )
+            .await
+            .expect("cancelled guard release remained bounded")
+            .expect("cancelled guard release permits reacquisition"),
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_profile_operation_waiter_does_not_release_its_owner() {
+        let directory = tempdir().expect("create profile-operation waiter directory");
+        let database = directory.path().join("dakia.db");
+        let store = Store::open(&database).await.expect("initialize profile");
+        let owner = store
+            .acquire_profile_operation_guard()
+            .await
+            .expect("acquire owner guard");
+        let waiting_store = store.clone();
+        let mut waiting =
+            tokio::spawn(async move { waiting_store.acquire_profile_operation_guard().await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), &mut waiting)
+                .await
+                .is_err(),
+            "the second guard must wait behind its owner"
+        );
+        waiting.abort();
+        match waiting.await {
+            Ok(_) => panic!("waiting guard task must be cancelled"),
+            Err(error) => assert!(error.is_cancelled()),
+        }
+
+        let next_store = store.clone();
+        let mut next =
+            tokio::spawn(async move { next_store.acquire_profile_operation_guard().await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), &mut next)
+                .await
+                .is_err(),
+            "cancelling a waiter must not unlock the owner"
+        );
+        drop(owner);
+        drop(
+            tokio::time::timeout(Duration::from_secs(5), &mut next)
+                .await
+                .expect("post-owner acquisition remained bounded")
+                .expect("post-owner acquisition task completed")
+                .expect("owner release permits the next guard"),
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_operation_guards_do_not_cross_profiles_or_coordinate_in_memory_stores() {
+        let directory = tempdir().expect("create independent profile directories");
+        let first = Store::open(directory.path().join("first.db"))
+            .await
+            .expect("open first profile");
+        let second = Store::open(directory.path().join("second.db"))
+            .await
+            .expect("open second profile");
+        let first_guard = first
+            .acquire_profile_operation_guard()
+            .await
+            .expect("acquire first profile guard");
+        drop(
+            tokio::time::timeout(
+                Duration::from_millis(250),
+                second.acquire_profile_operation_guard(),
+            )
+            .await
+            .expect("different profile did not wait")
+            .expect("acquire second profile guard"),
+        );
+        drop(first_guard);
+
+        let in_memory = Store::in_memory().await.expect("open in-memory store");
+        let first_in_memory = in_memory
+            .acquire_profile_operation_guard()
+            .await
+            .expect("in-memory stores do not require an operation inode");
+        drop(
+            in_memory
+                .acquire_profile_operation_guard()
+                .await
+                .expect("in-memory operation guards do not contend"),
+        );
+        drop(first_in_memory);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn profile_operation_guard_reuses_its_single_owner_only_inode() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let directory = tempdir().expect("create persistent operation lock directory");
+        let database = directory.path().join("dakia.db");
+        let store = Store::open(&database).await.expect("initialize profile");
+        let lock_path = profile_operation_lock_path(&database).expect("operation lock path");
+        let first = store
+            .acquire_profile_operation_guard()
+            .await
+            .expect("create first operation lock");
+        let first_metadata = std::fs::metadata(&lock_path).expect("inspect first operation lock");
+        assert!(first_metadata.is_file());
+        assert_eq!(first_metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(first_metadata.uid(), unsafe { libc::geteuid() });
+        assert_eq!(first_metadata.nlink(), 1);
+        let first_inode = first_metadata.ino();
+        drop(first);
+        assert!(
+            lock_path.is_file(),
+            "operation lock inode must persist after unlock"
+        );
+
+        let second = store
+            .acquire_profile_operation_guard()
+            .await
+            .expect("reuse persistent operation lock");
+        assert_eq!(
+            std::fs::metadata(&lock_path)
+                .expect("inspect reused operation lock")
+                .ino(),
+            first_inode,
+            "operation guard never replaces its coordinating inode"
+        );
+        drop(second);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unsafe_profile_operation_lock_paths_fail_closed() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempdir().expect("create unsafe operation lock directory");
+        let database = directory.path().join("dakia.db");
+        let store = Store::open(&database).await.expect("initialize profile");
+        let lock_path = profile_operation_lock_path(&database).expect("operation lock path");
+        let target = directory.path().join("preserved-target");
+        std::fs::write(&target, b"preserve").expect("write preserved target");
+        symlink(&target, &lock_path).expect("substitute lock path with symlink");
+        let error = match store.acquire_profile_operation_guard().await {
+            Ok(_) => panic!("symlink operation lock must be refused"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("open profile operation lock"),
+            "{error:#}"
+        );
+        assert_eq!(
+            std::fs::read(&target).expect("read preserved target"),
+            b"preserve"
+        );
+
+        std::fs::remove_file(&lock_path).expect("remove unsafe symlink fixture");
+        std::fs::write(&lock_path, b"lock").expect("create lock hard-link source");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600))
+            .expect("restrict hard-link fixture permissions");
+        let hard_link = directory.path().join("operation-lock-hard-link");
+        std::fs::hard_link(&lock_path, &hard_link).expect("add lock hard link");
+        let error = match store.acquire_profile_operation_guard().await {
+            Ok(_) => panic!("hard-linked operation lock must be refused"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("must not have hard links"),
+            "{error:#}"
+        );
+    }
+}
+#[cfg(test)]
 // The snapshot implementation is intentionally kept beside the feature's
 // storage helpers below this long-standing test module. Keep this narrowly
 // scoped until the module is split into its own test file.
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+    use std::{path::PathBuf, process::Command, thread};
 
     #[test]
     fn sqlite_contention_helpers_classify_synthetic_error_chains() {
@@ -5243,7 +7927,6 @@ mod tests {
             .save_account_with_secret(&original, &secret_name, "legacy-token-json")
             .await
             .unwrap();
-
         let mut converted = original.clone();
         converted.auth = AccountAuth::Password {
             username: original.auth.username().into(),
@@ -5311,10 +7994,16 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!store
-            .set_oauth_secret_if_current(original.id, &secret_name, "stale-refreshed-token")
+        assert!(store
+            .compare_and_set_oauth_secret_if_current(
+                original.id,
+                &secret_name,
+                "legacy-token-json",
+                "stale-refreshed-token",
+            )
             .await
-            .unwrap());
+            .unwrap()
+            .is_none());
         assert_eq!(
             store.secret(&secret_name).await.unwrap().as_deref(),
             Some("new-app-password")
@@ -5379,7 +8068,9 @@ mod tests {
             account_id: uuid::Uuid::new_v4().to_string(),
             mailbox: "INBOX".into(),
             uid: 1,
+            mailbox_uid_validity: None,
             message_id: None,
+            gmail_message_id: None,
             in_reply_to: None,
             reference_ids: None,
             thread_id: uuid::Uuid::new_v4().to_string(),
@@ -5406,6 +8097,1312 @@ mod tests {
             classification_signals: String::new(),
             attachments: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn gmail_provider_identity_unifies_mixed_rfc_copies_after_reopen_and_never_crosses_accounts(
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("gmail-provider-identities.sqlite");
+        let account_id = uuid::Uuid::new_v4();
+        let mut account = account_with_id(account_id, "gmail-identity@example.test");
+        account.provider_id = "gmail".into();
+        let store = Store::open(&database).await.unwrap();
+        store.save_account(&account).await.unwrap();
+
+        let mut copies = [
+            message("Inbox copy", "preview"),
+            message("Sent copy", "preview"),
+            message("All Mail copy", "preview"),
+        ];
+        for (copy, (mailbox, uid, rfc_id)) in copies.iter_mut().zip([
+            ("INBOX", 4_i64, Some("<valid-copy@example.test>")),
+            ("Sent", 40_i64, None),
+            ("Archive", 400_i64, None),
+        ]) {
+            copy.id = stable_message_id(account_id, mailbox, uid as u32);
+            copy.account_id = account_id.to_string();
+            copy.mailbox = mailbox.into();
+            copy.uid = uid;
+            copy.message_id = rfc_id.map(str::to_owned);
+            copy.gmail_message_id = Some("9001".into());
+        }
+        let serialized = serde_json::to_string(&copies[0]).unwrap();
+        assert!(
+            !serialized.contains("gmail_message_id"),
+            "provider identity must not cross the serialized MailSummary boundary"
+        );
+        assert_eq!(
+            serde_json::from_str::<MailSummary>(&serialized)
+                .unwrap()
+                .gmail_message_id,
+            None,
+            "deserialization from IPC-shaped data must not accept a provider identity"
+        );
+        store.upsert_messages(&copies).await.unwrap();
+        assert!(store
+            .message_by_locator(account_id, "Sent", 40)
+            .await
+            .unwrap()
+            .unwrap()
+            .message_id
+            .is_none());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM message_provider_identities WHERE account_id = ? AND provider_message_id = '9001'",
+            )
+            .bind(account_id.to_string())
+            .fetch_one(&store.pool)
+            .await
+            .unwrap(),
+            3
+        );
+        drop(store);
+
+        let reopened = Store::open(&database).await.unwrap();
+        // A second durable write simulates a later catalogue pass after the
+        // profile has been reopened. It must retain the private identity.
+        reopened.upsert_messages(&copies).await.unwrap();
+        let conversations = reopened
+            .search_conversations(&SearchQuery {
+                account_ids: vec![account_id],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0].messages.len(), 1);
+        assert_eq!(conversations[0].source_messages.len(), 3);
+
+        let other_id = uuid::Uuid::new_v4();
+        let mut other = account_with_id(other_id, "other-gmail-identity@example.test");
+        other.provider_id = "gmail".into();
+        reopened.save_account(&other).await.unwrap();
+        let mut other_copy = copies[0].clone();
+        other_copy.id = stable_message_id(other_id, "INBOX", 4);
+        other_copy.account_id = other_id.to_string();
+        other_copy.gmail_message_id = Some("9001".into());
+        reopened.upsert_messages(&[other_copy]).await.unwrap();
+        let across_accounts = reopened
+            .search_conversations(&SearchQuery {
+                account_ids: vec![account_id, other_id],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(across_accounts.len(), 2);
+
+        let mut distinct = copies[0].clone();
+        distinct.id = stable_message_id(account_id, "INBOX", 5);
+        distinct.uid = 5;
+        distinct.message_id = Some("<valid-copy@example.test>".into());
+        distinct.gmail_message_id = Some("9002".into());
+        reopened.upsert_messages(&[distinct]).await.unwrap();
+        let mut unknown = copies[0].clone();
+        unknown.id = stable_message_id(account_id, "INBOX", 6);
+        unknown.uid = 6;
+        unknown.gmail_message_id = None;
+        reopened.upsert_messages(&[unknown]).await.unwrap();
+        let same_account = reopened
+            .search_conversations(&SearchQuery {
+                account_ids: vec![account_id],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            same_account.len(),
+            3,
+            "an identity-unknown row must not bridge distinct provider IDs"
+        );
+
+        let mut malformed_copy = copies[0].clone();
+        malformed_copy.id = stable_message_id(account_id, "INBOX", 7);
+        malformed_copy.uid = 7;
+        malformed_copy.message_id = Some("<malformed header>".into());
+        malformed_copy.gmail_message_id = Some("9011".into());
+        let mut malformed_sibling = malformed_copy.clone();
+        malformed_sibling.id = stable_message_id(account_id, "Sent", 70);
+        malformed_sibling.mailbox = "Sent".into();
+        malformed_sibling.uid = 70;
+        reopened
+            .upsert_messages(&[malformed_copy, malformed_sibling])
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .search_conversations(&SearchQuery {
+                    account_ids: vec![account_id],
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .len(),
+            4,
+            "the provider identity unifies copies even when the parser's accepted RFC projection is malformed"
+        );
+
+        let mut distinct_malformed_provider = copies[0].clone();
+        distinct_malformed_provider.id = stable_message_id(account_id, "INBOX", 8);
+        distinct_malformed_provider.uid = 8;
+        distinct_malformed_provider.message_id = Some("<malformed header>".into());
+        distinct_malformed_provider.gmail_message_id = Some("9012".into());
+        reopened
+            .upsert_messages(&[distinct_malformed_provider])
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .search_conversations(&SearchQuery {
+                    account_ids: vec![account_id],
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .len(),
+            5,
+            "matching accepted RFC text cannot merge distinct Gmail provider identities"
+        );
+
+        // A UIDVALIDITY replacement can recycle the stable local locator.
+        // Replacing that locator must replace, rather than inherit, the old
+        // provider identity.
+        let mut reused_uid = copies[0].clone();
+        reused_uid.message_id = None;
+        reused_uid.gmail_message_id = Some("9003".into());
+        reopened
+            .replace_uidvalidity_catalog_messages(&[reused_uid])
+            .await
+            .unwrap();
+        let replacement_identity: String = sqlx::query_scalar(
+            "SELECT provider_message_id FROM message_provider_identities WHERE message_id = ?",
+        )
+        .bind(stable_message_id(account_id, "INBOX", 4))
+        .fetch_one(&reopened.pool)
+        .await
+        .unwrap();
+        assert_eq!(replacement_identity, "9003");
+    }
+
+    #[tokio::test]
+    async fn gmail_provider_identity_staging_tombstones_and_account_deletion_are_fenced() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let mut account = account_with_id(account_id, "gmail-staging@example.test");
+        account.provider_id = "gmail".into();
+        store.save_account(&account).await.unwrap();
+
+        let mut staged = message("Staged Gmail copy", "preview");
+        staged.id = stable_message_id(account_id, "INBOX", 7);
+        staged.account_id = account_id.to_string();
+        staged.uid = 7;
+        staged.gmail_message_id = Some("9010".into());
+        let generation = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 11, 1, Some(8), None),
+            )
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(account_id, "INBOX", &generation, &[(7, false, false)])
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_message_page(
+                account_id,
+                "INBOX",
+                &generation,
+                std::slice::from_ref(&staged),
+            )
+            .await
+            .unwrap();
+        store
+            .finalize_mailbox_snapshot_with_staged_messages(account_id, "INBOX", &generation)
+            .await
+            .unwrap();
+        let staged_identity: String = sqlx::query_scalar(
+            "SELECT provider_message_id FROM message_provider_identities WHERE message_id = ?",
+        )
+        .bind(&staged.id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(staged_identity, "9010");
+
+        // Schema 2 staged plain MailSummary JSON. A forward upgrade must
+        // finish that recoverable work rather than rejecting it forever just
+        // because schema 3 writes a typed staging wrapper.
+        let mut legacy_staged = message("Legacy staged row", "preview");
+        legacy_staged.id = stable_message_id(account_id, "Archive", 10);
+        legacy_staged.account_id = account_id.to_string();
+        legacy_staged.mailbox = "Archive".into();
+        legacy_staged.uid = 10;
+        let legacy_generation = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "Archive",
+                MailboxSnapshotIdentity::new("Archive", 12, 1, Some(11), None),
+            )
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(
+                account_id,
+                "Archive",
+                &legacy_generation,
+                &[(10, false, false)],
+            )
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_message_page(
+                account_id,
+                "Archive",
+                &legacy_generation,
+                std::slice::from_ref(&legacy_staged),
+            )
+            .await
+            .unwrap();
+        sqlx::query("UPDATE mailbox_snapshot_messages SET message_json = ? WHERE account_id = ? AND mailbox = 'Archive' AND generation = ? AND uid = 10")
+            .bind(serde_json::to_string(&legacy_staged).unwrap())
+            .bind(account_id.to_string())
+            .bind(&legacy_generation)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store
+            .finalize_mailbox_snapshot_with_staged_messages(
+                account_id,
+                "Archive",
+                &legacy_generation,
+            )
+            .await
+            .unwrap();
+        assert!(store
+            .message_by_locator(account_id, "Archive", 10)
+            .await
+            .unwrap()
+            .is_some());
+
+        let mut suppressed = message("Suppressed Gmail copy", "preview");
+        suppressed.id = stable_message_id(account_id, "INBOX", 8);
+        suppressed.account_id = account_id.to_string();
+        suppressed.uid = 8;
+        suppressed.gmail_message_id = Some("9011".into());
+        sqlx::query("INSERT INTO mailbox_action_tombstones(account_id, mailbox, uid, created_at) VALUES (?, 'INBOX', 8, ?)")
+            .bind(account_id.to_string())
+            .bind(Utc::now())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store
+            .upsert_messages(std::slice::from_ref(&suppressed))
+            .await
+            .unwrap();
+        assert!(store
+            .message_by_locator(account_id, "INBOX", 8)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM message_provider_identities WHERE account_id = ? AND provider_message_id = '9011'",
+            )
+            .bind(account_id.to_string())
+            .fetch_one(&store.pool)
+            .await
+            .unwrap(),
+            0,
+            "a tombstone-suppressed row must not leave orphan provider identity"
+        );
+        sqlx::query("DELETE FROM mailbox_action_tombstones WHERE account_id = ? AND mailbox = 'INBOX' AND uid = 8")
+            .bind(account_id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store
+            .upsert_messages(std::slice::from_ref(&suppressed))
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT provider_message_id FROM message_provider_identities WHERE message_id = ?",
+            )
+            .bind(&suppressed.id)
+            .fetch_one(&store.pool)
+            .await
+            .unwrap(),
+            "9011"
+        );
+
+        let mut generic_refresh = suppressed.clone();
+        generic_refresh.gmail_message_id = None;
+        store
+            .upsert_messages(std::slice::from_ref(&generic_refresh))
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT provider_message_id FROM message_provider_identities WHERE message_id = ?",
+            )
+            .bind(&suppressed.id)
+            .fetch_one(&store.pool)
+            .await
+            .unwrap(),
+            "9011",
+            "a SQLite projection without private metadata must preserve a known identity"
+        );
+        store
+            .upsert_catalog_messages(std::slice::from_ref(&generic_refresh))
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM message_provider_identities WHERE message_id = ?",
+            )
+            .bind(&suppressed.id)
+            .fetch_one(&store.pool)
+            .await
+            .unwrap(),
+            0,
+            "a later observed absent or malformed provider identity must clear stale state"
+        );
+
+        store.delete_account(account_id).await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM message_provider_identities WHERE account_id = ?",
+            )
+            .bind(account_id.to_string())
+            .fetch_one(&store.pool)
+            .await
+            .unwrap(),
+            0
+        );
+        let error = store.upsert_messages(&[staged]).await.unwrap_err();
+        assert!(error.to_string().contains("account was removed"));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM message_provider_identities WHERE account_id = ?",
+            )
+            .bind(account_id.to_string())
+            .fetch_one(&store.pool)
+            .await
+            .unwrap(),
+            0,
+            "late work after account deletion must not republish identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn gmail_identity_backfill_is_bounded_and_preserves_cached_mail() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let mut account = account_with_id(account_id, "gmail-backfill@example.test");
+        account.provider_id = "gmail".into();
+        store.save_account(&account).await.unwrap();
+        let mut legacy = message("Legacy Gmail copy", "cached body");
+        legacy.id = stable_message_id(account_id, "INBOX", 9);
+        legacy.account_id = account_id.to_string();
+        legacy.uid = 9;
+        legacy.content_state = "complete".into();
+        legacy.is_read = true;
+        legacy.is_flagged = false;
+        // Ordinary local writes have no wire identity and must remain valid
+        // for rows created by schema 2.
+        store
+            .upsert_messages(std::slice::from_ref(&legacy))
+            .await
+            .unwrap();
+        store
+            .cache_message_content(&legacy.id, false, cached_content("cached body"))
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .gmail_provider_identity_backfill_uids(account_id, "INBOX", 1)
+                .await
+                .unwrap(),
+            vec![9]
+        );
+
+        let mut fetched = legacy.clone();
+        fetched.content_state = "headers_only".into();
+        fetched.body_text.clear();
+        fetched.gmail_message_id = Some("9020".into());
+        store
+            .upsert_catalog_messages(std::slice::from_ref(&fetched))
+            .await
+            .unwrap();
+        let stored = store
+            .message_by_locator(account_id, "INBOX", 9)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.is_read);
+        assert!(!stored.is_flagged);
+        assert_eq!(
+            store
+                .cached_message_content(&legacy.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .body_text,
+            "cached body"
+        );
+        assert!(store
+            .gmail_provider_identity_backfill_uids(account_id, "INBOX", 1)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn observed_missing_gmail_ids_do_not_starve_older_backfill_rows() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let mut account = account_with_id(account_id, "gmail-observation@example.test");
+        account.provider_id = "gmail".into();
+        store.save_account(&account).await.unwrap();
+        let mut rows = Vec::new();
+        for uid in 1..=101_i64 {
+            let mut row = message("Legacy Gmail row", "preview");
+            row.id = stable_message_id(account_id, "INBOX", uid as u32);
+            row.account_id = account_id.to_string();
+            row.uid = uid;
+            row.received_at = Utc::now() + chrono::Duration::seconds(uid);
+            rows.push(row);
+        }
+        store.upsert_messages(&rows).await.unwrap();
+        let page = store
+            .gmail_provider_identity_backfill_uids(account_id, "INBOX", 100)
+            .await
+            .unwrap();
+        assert_eq!(page.len(), 100);
+        assert_eq!(page[0], 101);
+        assert_eq!(page[99], 2);
+        // Each of the first page's Gmail FETCH responses was observed but
+        // omitted its optional provider ID. Record that terminal fact so the
+        // next bounded pass reaches UID 1 instead of retrying this page.
+        let observed = page
+            .iter()
+            .map(|uid| {
+                let mut row = rows[*uid as usize - 1].clone();
+                row.gmail_message_id = None;
+                row
+            })
+            .collect::<Vec<_>>();
+        store.upsert_catalog_messages(&observed).await.unwrap();
+        assert_eq!(
+            store
+                .gmail_provider_identity_backfill_uids(account_id, "INBOX", 100)
+                .await
+                .unwrap(),
+            vec![1]
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_change_clears_gmail_identity_observation_before_later_backfill() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let mut account = account_with_id(account_id, "provider-change@example.test");
+        account.provider_id = "gmail".into();
+        store.save_account(&account).await.unwrap();
+
+        let mut row = message("Provider change", "preview");
+        row.id = stable_message_id(account_id, "INBOX", 7);
+        row.account_id = account_id.to_string();
+        row.uid = 7;
+        // A supported Gmail fetch observed the absence, so this is terminal
+        // while the account is Gmail.
+        store
+            .upsert_catalog_messages(std::slice::from_ref(&row))
+            .await
+            .unwrap();
+        assert!(store
+            .gmail_provider_identity_backfill_uids(account_id, "INBOX", 10)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // A late old-provider publication reaches the same locator after the
+        // account was changed. It must not leave Gmail's terminal observation
+        // behind for a later Gmail reconfiguration.
+        account.provider_id = "fastmail".into();
+        store.save_account(&account).await.unwrap();
+        store
+            .upsert_catalog_messages(std::slice::from_ref(&row))
+            .await
+            .unwrap();
+        let observation_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_provider_identity_observations WHERE message_id = ?",
+        )
+        .bind(&row.id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(observation_count, 0);
+
+        account.provider_id = "gmail".into();
+        store.save_account(&account).await.unwrap();
+        assert_eq!(
+            store
+                .gmail_provider_identity_backfill_uids(account_id, "INBOX", 10)
+                .await
+                .unwrap(),
+            vec![7],
+            "the restored Gmail account must re-request this identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_batch_provider_lookup_preserves_cross_account_identity_boundaries() {
+        let store = Store::in_memory().await.unwrap();
+        let observation_delete_plan = sqlx::query_as::<_, (i64, i64, i64, String)>(
+            "EXPLAIN QUERY PLAN DELETE FROM message_provider_identity_observations WHERE account_id = ?",
+        )
+        .bind("query-plan@example.test")
+        .fetch_all(&store.pool)
+        .await
+        .unwrap();
+        assert!(
+            observation_delete_plan.iter().any(|(_, _, _, detail)| detail
+                .contains("message_provider_identity_observations_account")),
+            "account-wide provider observation cleanup must use its account index: {observation_delete_plan:?}"
+        );
+        let gmail_id = uuid::Uuid::new_v4();
+        let fastmail_id = uuid::Uuid::new_v4();
+        let mut gmail = account_with_id(gmail_id, "batch-gmail@example.test");
+        gmail.provider_id = "gmail".into();
+        let mut fastmail = account_with_id(fastmail_id, "batch-fastmail@example.test");
+        fastmail.provider_id = "gmail".into();
+        store.save_account(&gmail).await.unwrap();
+        store.save_account(&fastmail).await.unwrap();
+
+        let mut old_provider_row = message("Old provider row", "preview");
+        old_provider_row.id = stable_message_id(fastmail_id, "INBOX", 2);
+        old_provider_row.account_id = fastmail_id.to_string();
+        old_provider_row.uid = 2;
+        old_provider_row.gmail_message_id = Some("old-provider-id".into());
+        store
+            .upsert_catalog_messages(std::slice::from_ref(&old_provider_row))
+            .await
+            .unwrap();
+        fastmail.provider_id = "fastmail".into();
+        store.save_account(&fastmail).await.unwrap();
+
+        let mut gmail_row = message("Gmail batch row", "preview");
+        gmail_row.id = stable_message_id(gmail_id, "INBOX", 1);
+        gmail_row.account_id = gmail_id.to_string();
+        gmail_row.gmail_message_id = Some("batch-provider-id".into());
+        let mut fastmail_row = message("Fastmail batch row", "preview");
+        fastmail_row.id = stable_message_id(fastmail_id, "INBOX", 1);
+        fastmail_row.account_id = fastmail_id.to_string();
+        fastmail_row.gmail_message_id = Some("must-not-cross-provider".into());
+
+        store
+            .upsert_catalog_messages(&[gmail_row.clone(), fastmail_row.clone()])
+            .await
+            .unwrap();
+
+        let gmail_identity: Option<String> = sqlx::query_scalar(
+            "SELECT provider_message_id FROM message_provider_identities WHERE message_id = ?",
+        )
+        .bind(&gmail_row.id)
+        .fetch_optional(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(gmail_identity.as_deref(), Some("batch-provider-id"));
+        let fastmail_identity_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_provider_identities WHERE message_id = ?",
+        )
+        .bind(&fastmail_row.id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(fastmail_identity_count, 0);
+        let fastmail_observation_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_provider_identity_observations WHERE message_id = ?",
+        )
+        .bind(&fastmail_row.id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(fastmail_observation_count, 0);
+        let old_provider_identity_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_provider_identities WHERE message_id = ?",
+        )
+        .bind(&old_provider_row.id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            old_provider_identity_count, 0,
+            "a non-Gmail catalogue batch clears stale identities across that account"
+        );
+        let old_provider_observation_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_provider_identity_observations WHERE message_id = ?",
+        )
+        .bind(&old_provider_row.id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(old_provider_observation_count, 0);
+
+        fastmail.provider_id = "gmail".into();
+        store.save_account(&fastmail).await.unwrap();
+        let mut corrupt_untouched = old_provider_row.clone();
+        corrupt_untouched.id = stable_message_id(fastmail_id, "INBOX", 3);
+        corrupt_untouched.uid = 3;
+        corrupt_untouched.gmail_message_id = Some("corrupt-untouched-id".into());
+        let mut corrupt_touched = corrupt_untouched.clone();
+        corrupt_touched.id = stable_message_id(fastmail_id, "INBOX", 4);
+        corrupt_touched.uid = 4;
+        corrupt_touched.gmail_message_id = Some("corrupt-touched-id".into());
+        store
+            .upsert_catalog_messages(&[corrupt_untouched.clone(), corrupt_touched.clone()])
+            .await
+            .unwrap();
+        sqlx::query("UPDATE accounts SET data = 'invalid-json' WHERE id = ?")
+            .bind(fastmail_id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        corrupt_touched.gmail_message_id = None;
+        store
+            .upsert_catalog_messages(std::slice::from_ref(&corrupt_touched))
+            .await
+            .unwrap();
+        let corrupt_untouched_identity: Option<String> = sqlx::query_scalar(
+            "SELECT provider_message_id FROM message_provider_identities WHERE message_id = ?",
+        )
+        .bind(&corrupt_untouched.id)
+        .fetch_optional(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            corrupt_untouched_identity.as_deref(),
+            Some("corrupt-untouched-id"),
+            "unknown provider state must not authorize account-wide cleanup"
+        );
+        let corrupt_touched_identity_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_provider_identities WHERE message_id = ?",
+        )
+        .bind(&corrupt_touched.id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            corrupt_touched_identity_count, 0,
+            "unknown provider state retains the prior locator-scoped cleanup behavior"
+        );
+
+        fastmail.provider_id = "gmail".into();
+        store.save_account(&fastmail).await.unwrap();
+        let mut mismatched_untouched = corrupt_untouched.clone();
+        mismatched_untouched.id = stable_message_id(fastmail_id, "INBOX", 5);
+        mismatched_untouched.uid = 5;
+        mismatched_untouched.gmail_message_id = Some("mismatch-untouched".into());
+        let mut mismatched_touched = mismatched_untouched.clone();
+        mismatched_touched.id = stable_message_id(fastmail_id, "INBOX", 6);
+        mismatched_touched.uid = 6;
+        mismatched_touched.gmail_message_id = Some("mismatch-touched".into());
+        store
+            .upsert_catalog_messages(&[mismatched_untouched.clone(), mismatched_touched.clone()])
+            .await
+            .unwrap();
+        let mut wrong_identity = gmail.clone();
+        wrong_identity.provider_id = "fastmail".into();
+        sqlx::query("UPDATE accounts SET data = ? WHERE id = ?")
+            .bind(serde_json::to_string(&wrong_identity).unwrap())
+            .bind(fastmail_id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        mismatched_touched.gmail_message_id = None;
+        store
+            .upsert_catalog_messages(std::slice::from_ref(&mismatched_touched))
+            .await
+            .unwrap();
+        let mismatched_untouched_identity: Option<String> = sqlx::query_scalar(
+            "SELECT provider_message_id FROM message_provider_identities WHERE message_id = ?",
+        )
+        .bind(&mismatched_untouched.id)
+        .fetch_optional(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            mismatched_untouched_identity.as_deref(),
+            Some("mismatch-untouched"),
+            "a valid account payload with the wrong embedded ID must not authorize account-wide cleanup"
+        );
+        let mismatched_touched_identity_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_provider_identities WHERE message_id = ?",
+        )
+        .bind(&mismatched_touched.id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(mismatched_touched_identity_count, 0);
+    }
+
+    #[tokio::test]
+    async fn staged_snapshot_finalization_clears_stale_identity_after_provider_change() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let mut account = account_with_id(account_id, "staged-provider-change@example.test");
+        account.provider_id = "gmail".into();
+        store.save_account(&account).await.unwrap();
+
+        let mut archived = message("Stale archived Gmail identity", "preview");
+        archived.id = stable_message_id(account_id, "Archive", 9);
+        archived.account_id = account_id.to_string();
+        archived.mailbox = "Archive".into();
+        archived.uid = 9;
+        archived.gmail_message_id = Some("staged-old-id".into());
+        store
+            .upsert_catalog_messages(std::slice::from_ref(&archived))
+            .await
+            .unwrap();
+
+        account.provider_id = "fastmail".into();
+        store.save_account(&account).await.unwrap();
+        let mut replacement = message("Fastmail replacement", "preview");
+        replacement.id = stable_message_id(account_id, "INBOX", 1);
+        replacement.account_id = account_id.to_string();
+        replacement.uid = 1;
+        replacement.gmail_message_id = None;
+        let generation = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 77, 1, Some(2), None),
+            )
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(account_id, "INBOX", &generation, &[(1, false, false)])
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_message_page_with_provider_identity_observation(
+                account_id,
+                "INBOX",
+                &generation,
+                std::slice::from_ref(&replacement),
+                false,
+            )
+            .await
+            .unwrap();
+        store
+            .finalize_mailbox_snapshot_with_staged_messages(account_id, "INBOX", &generation)
+            .await
+            .unwrap();
+
+        let archived_identity_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_provider_identities WHERE message_id = ?",
+        )
+        .bind(&archived.id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            archived_identity_count, 0,
+            "production snapshot finalization must clear stale Gmail identity across the changed account"
+        );
+        assert!(store
+            .message_by_locator(account_id, "INBOX", 1)
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn unrequested_gmail_identity_preserves_known_rows_and_leaves_new_rows_backfillable() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let mut account = account_with_id(account_id, "gmail-capability@example.test");
+        account.provider_id = "gmail".into();
+        store.save_account(&account).await.unwrap();
+
+        let mut known = message("Known Gmail row", "preview");
+        known.id = stable_message_id(account_id, "INBOX", 1);
+        known.account_id = account_id.to_string();
+        known.uid = 1;
+        known.gmail_message_id = Some("9101".into());
+        store
+            .upsert_catalog_messages(std::slice::from_ref(&known))
+            .await
+            .unwrap();
+
+        let generation = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 77, 2, Some(3), None),
+            )
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(
+                account_id,
+                "INBOX",
+                &generation,
+                &[(1, false, false), (2, false, false)],
+            )
+            .await
+            .unwrap();
+        let mut unsupported_known = known.clone();
+        unsupported_known.gmail_message_id = None;
+        let mut unsupported_new = unsupported_known.clone();
+        unsupported_new.id = stable_message_id(account_id, "INBOX", 2);
+        unsupported_new.uid = 2;
+        store
+            .stage_mailbox_snapshot_message_page_with_provider_identity_observation(
+                account_id,
+                "INBOX",
+                &generation,
+                &[unsupported_known, unsupported_new],
+                false,
+            )
+            .await
+            .unwrap();
+        store
+            .finalize_mailbox_snapshot_with_staged_messages(account_id, "INBOX", &generation)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT provider_message_id FROM message_provider_identities WHERE message_id = ?",
+            )
+            .bind(stable_message_id(account_id, "INBOX", 1))
+            .fetch_one(&store.pool)
+            .await
+            .unwrap(),
+            "9101",
+            "a fetch without X-GM-MSGID must not clear a known association"
+        );
+        let target = store
+            .message_by_locator(account_id, "INBOX", 1)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut sqlite_projection = target.clone();
+        sqlite_projection.gmail_message_id = None;
+        sqlite_projection.content_state = "complete".into();
+        sqlite_projection.body_text = "reader content".into();
+        assert!(store
+            .publish_message_content_at_epoch(&target, &sqlite_projection)
+            .await
+            .unwrap());
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT provider_message_id FROM message_provider_identities WHERE message_id = ?",
+            )
+            .bind(stable_message_id(account_id, "INBOX", 1))
+            .fetch_one(&store.pool)
+            .await
+            .unwrap(),
+            "9101",
+            "a content publication without private wire metadata must preserve a known identity"
+        );
+        assert_eq!(
+            store
+                .gmail_provider_identity_backfill_uids(account_id, "INBOX", 100)
+                .await
+                .unwrap(),
+            vec![2],
+            "a newly published row remains eligible when the extension was unavailable"
+        );
+
+        let generation = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 77, 2, Some(3), None),
+            )
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(
+                account_id,
+                "INBOX",
+                &generation,
+                &[(1, false, false), (2, false, false)],
+            )
+            .await
+            .unwrap();
+        let mut supported_known = known;
+        supported_known.gmail_message_id = Some("9101".into());
+        let mut supported_new = supported_known.clone();
+        supported_new.id = stable_message_id(account_id, "INBOX", 2);
+        supported_new.uid = 2;
+        supported_new.gmail_message_id = Some("9102".into());
+        store
+            .stage_mailbox_snapshot_message_page_with_provider_identity_observation(
+                account_id,
+                "INBOX",
+                &generation,
+                &[supported_known, supported_new],
+                true,
+            )
+            .await
+            .unwrap();
+        store
+            .finalize_mailbox_snapshot_with_staged_messages(account_id, "INBOX", &generation)
+            .await
+            .unwrap();
+        assert!(store
+            .gmail_provider_identity_backfill_uids(account_id, "INBOX", 100)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT provider_message_id FROM message_provider_identities WHERE message_id = ?",
+            )
+            .bind(stable_message_id(account_id, "INBOX", 2))
+            .fetch_one(&store.pool)
+            .await
+            .unwrap(),
+            "9102"
+        );
+    }
+
+    #[tokio::test]
+    async fn epoch_fenced_recent_and_category_publication_reject_stale_cross_process_results() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let account = account_with_id(account_id, "epoch-fence@example.test");
+        store.save_account(&account).await.unwrap();
+        store
+            .save_mailbox_catalog_state(account_id, "INBOX", "INBOX", 78, 1, true)
+            .await
+            .unwrap();
+        let mut stale = message("stale", "old remote headers");
+        stale.id = stable_message_id(account_id, "INBOX", 42);
+        stale.account_id = account_id.to_string();
+        stale.uid = 42;
+        stale.mailbox_uid_validity = Some(77);
+
+        let error = store
+            .publish_recent_catalog_messages_at_epoch(
+                account_id,
+                "INBOX",
+                "INBOX",
+                77,
+                1,
+                true,
+                &[stale.clone()],
+                &[],
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("mailbox identity changed"));
+        assert!(store
+            .message_by_locator(account_id, "INBOX", 42)
+            .await
+            .unwrap()
+            .is_none());
+
+        store.upsert_messages(&[stale.clone()]).await.unwrap();
+        store
+            .cache_message_content(
+                &stale.id,
+                false,
+                CachedMessageContent {
+                    body_text: "current generation body".into(),
+                    body_html: None,
+                    unsubscribe_kind: None,
+                    attachments: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let mut fetched = stale.clone();
+        fetched.body_text = "old generation body".into();
+        fetched.content_state = "complete".into();
+        assert!(
+            !store
+                .publish_message_content_at_epoch(&stale, &fetched)
+                .await
+                .unwrap(),
+            "a stale content fetch must not attach its body or attachment metadata to a recycled stable id"
+        );
+        assert_eq!(
+            store
+                .cached_message_content(&stale.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .body_text,
+            "current generation body"
+        );
+        let error = store
+            .update_classification_signals_at_epoch(
+                account_id,
+                "INBOX",
+                77,
+                &[(stale.id.clone(), "Gmail category: Promotions".into())],
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("mailbox identity changed"));
+        assert!(store
+            .message(&stale.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .classification_signals
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn epoch_fenced_mutation_publication_preserves_recycled_uid_replacement() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let account = account_with_id(account_id, "mutation-epoch@example.test");
+        store.save_account(&account).await.unwrap();
+        store
+            .save_mailbox_catalog_state(account_id, "INBOX", "INBOX", 77, 1, true)
+            .await
+            .unwrap();
+        let mut original = message("old generation", "old body");
+        original.id = stable_message_id(account_id, "INBOX", 42);
+        original.account_id = account_id.to_string();
+        original.uid = 42;
+        store.upsert_messages(&[original]).await.unwrap();
+        let remote_confirmed_target = store
+            .message(&stable_message_id(account_id, "INBOX", 42))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(remote_confirmed_target.mailbox_uid_validity, Some(77));
+
+        // Another process completes a UIDVALIDITY replacement after the
+        // remote STORE/MOVE succeeds but before this process publishes it.
+        // The stable id is intentionally reused, which reproduces the unsafe
+        // historical id-only publication path.
+        sqlx::query("UPDATE mailbox_catalog_state SET uid_validity = 78 WHERE account_id = ? AND mailbox = 'INBOX'")
+            .bind(account_id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE messages SET subject = 'replacement', body_text = 'replacement body', is_read = 0, is_flagged = 1, category = 'newsletters', classification_source = 'model' WHERE id = ?")
+            .bind(&remote_confirmed_target.id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        assert!(!store
+            .set_message_read_at_epoch(&remote_confirmed_target, true)
+            .await
+            .unwrap());
+        assert!(!store
+            .set_message_flagged_at_epoch(&remote_confirmed_target, false)
+            .await
+            .unwrap());
+        assert!(!store
+            .set_message_category_at_epoch(&remote_confirmed_target, "people")
+            .await
+            .unwrap());
+        assert!(
+            !store
+                .move_message_at_epoch(
+                    &remote_confirmed_target,
+                    "Archive",
+                    &MailboxMoveReceipt::default(),
+                )
+                .await
+                .unwrap()
+                .source_published
+        );
+
+        let replacement = store
+            .message(&remote_confirmed_target.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(replacement.mailbox, "INBOX");
+        assert_eq!(replacement.uid, 42);
+        assert_eq!(replacement.mailbox_uid_validity, Some(78));
+        assert_eq!(replacement.subject, "replacement");
+        assert!(!replacement.is_read);
+        assert!(replacement.is_flagged);
+        assert_eq!(replacement.category.as_deref(), Some("newsletters"));
+        let tombstones: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM mailbox_action_tombstones WHERE account_id = ? AND mailbox = 'INBOX' AND uid = 42",
+        )
+        .bind(account_id.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(tombstones, 0);
+    }
+
+    #[tokio::test]
+    async fn move_receipt_requires_destination_mailbox_epoch_before_remapping() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        store
+            .save_account(&account_with_id(account_id, "move-receipt@example.test"))
+            .await
+            .unwrap();
+        store
+            .save_mailbox_catalog_state(account_id, "INBOX", "INBOX", 77, 1, true)
+            .await
+            .unwrap();
+        store
+            .save_mailbox_catalog_state(account_id, "Trash", "Trash", 88, 1, true)
+            .await
+            .unwrap();
+        let mut source = message("source", "source body");
+        source.id = stable_message_id(account_id, "INBOX", 42);
+        source.account_id = account_id.to_string();
+        source.uid = 42;
+        let mut replacement = message("unrelated destination", "keep this");
+        replacement.id = stable_message_id(account_id, "Trash", 9);
+        replacement.account_id = account_id.to_string();
+        replacement.mailbox = "Trash".into();
+        replacement.uid = 9;
+        store.upsert_messages(&[source, replacement]).await.unwrap();
+        let target = store
+            .message(&stable_message_id(account_id, "INBOX", 42))
+            .await
+            .unwrap()
+            .unwrap();
+        let stale_destination = MailboxMoveReceipt {
+            destination: Some(MailboxMoveDestination {
+                remote_mailbox: "Trash".into(),
+                uid_validity: 87,
+                uid: 9,
+            }),
+        };
+        let publication = store
+            .move_message_at_epoch(&target, "Trash", &stale_destination)
+            .await
+            .unwrap();
+        assert!(publication.source_published);
+        assert!(!publication.destination_mapped);
+        assert!(store.message(&target.id).await.unwrap().is_none());
+        assert_eq!(
+            store
+                .message(&stable_message_id(account_id, "Trash", 9))
+                .await
+                .unwrap()
+                .unwrap()
+                .subject,
+            "unrelated destination"
+        );
+
+        let mut matching_source = message("source with matching receipt", "source body");
+        matching_source.id = stable_message_id(account_id, "INBOX", 43);
+        matching_source.account_id = account_id.to_string();
+        matching_source.uid = 43;
+        store.upsert_messages(&[matching_source]).await.unwrap();
+        let matching_target = store
+            .message(&stable_message_id(account_id, "INBOX", 43))
+            .await
+            .unwrap()
+            .unwrap();
+        let matching_destination = MailboxMoveReceipt {
+            destination: Some(MailboxMoveDestination {
+                remote_mailbox: "Trash".into(),
+                uid_validity: 88,
+                uid: 9,
+            }),
+        };
+        let publication = store
+            .move_message_at_epoch(&matching_target, "Trash", &matching_destination)
+            .await
+            .unwrap();
+        assert_eq!(
+            publication,
+            MailboxMovePublication {
+                source_published: true,
+                destination_mapped: true,
+            }
+        );
+        assert_eq!(
+            store
+                .message(&stable_message_id(account_id, "Trash", 9))
+                .await
+                .unwrap()
+                .unwrap()
+                .subject,
+            "source with matching receipt"
+        );
+    }
+
+    #[tokio::test]
+    async fn staged_ordinary_snapshot_cannot_publish_after_another_process_rolls_epoch() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        store
+            .save_account(&account_with_id(account_id, "realtime-race@example.test"))
+            .await
+            .unwrap();
+        store
+            .save_mailbox_catalog_state(account_id, "INBOX", "INBOX", 77, 1, true)
+            .await
+            .unwrap();
+        let generation = store
+            .begin_mailbox_snapshot(
+                account_id,
+                "INBOX",
+                MailboxSnapshotIdentity::new("INBOX", 77, 1, None, None),
+            )
+            .await
+            .unwrap();
+        store
+            .stage_mailbox_snapshot_page(account_id, "INBOX", &generation, &[(42, false, false)])
+            .await
+            .unwrap();
+        let mut stale = message("epoch 77 header", "old");
+        stale.id = stable_message_id(account_id, "INBOX", 42);
+        stale.account_id = account_id.to_string();
+        stale.uid = 42;
+        store
+            .stage_mailbox_snapshot_message_page(account_id, "INBOX", &generation, &[stale])
+            .await
+            .unwrap();
+
+        // A second Store process finalizes a replacement before the first
+        // realtime cycle can publish its staged epoch-77 headers.
+        sqlx::query("UPDATE mailbox_catalog_state SET uid_validity = 78 WHERE account_id = ? AND mailbox = 'INBOX'")
+            .bind(account_id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let mut replacement = message("epoch 78 replacement", "new");
+        replacement.id = stable_message_id(account_id, "INBOX", 42);
+        replacement.account_id = account_id.to_string();
+        replacement.uid = 42;
+        store.upsert_messages(&[replacement]).await.unwrap();
+
+        let error = store
+            .finalize_mailbox_snapshot_with_staged_messages_and_watermark(
+                account_id,
+                "INBOX",
+                &generation,
+                Some(42),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("mailbox identity changed"));
+        assert_eq!(
+            store
+                .message(&stable_message_id(account_id, "INBOX", 42))
+                .await
+                .unwrap()
+                .unwrap()
+                .subject,
+            "epoch 78 replacement"
+        );
     }
 
     #[tokio::test]
@@ -5785,7 +9782,12 @@ mod tests {
             .claim_classification_revision("test-owner", "test-model")
             .await
             .unwrap();
-        let account_id = uuid::Uuid::new_v4().to_string();
+        let account_id = uuid::Uuid::new_v4();
+        store
+            .save_account(&account_with_id(account_id, "thread-graph@example.test"))
+            .await
+            .unwrap();
+        let account_id = account_id.to_string();
         let other_account_id = uuid::Uuid::new_v4().to_string();
         let mut incoming = message("Re: Project", "A real follow-up");
         incoming.id = "known-correspondence".into();
@@ -6022,6 +10024,7 @@ mod tests {
                 filename: "invoice.pdf".into(),
                 mime_type: "application/pdf".into(),
                 size_bytes: 42,
+                size_kind: AttachmentSizeKind::Decoded,
                 is_inline: false,
                 presentation: AttachmentPresentation::Downloadable,
                 is_potentially_unsafe: false,
@@ -6045,6 +10048,8 @@ mod tests {
         assert_eq!(cached.unsubscribe_kind.as_deref(), Some("one_click"));
         assert_eq!(cached.attachments.len(), 1);
         assert_eq!(cached.attachments[0].message_id, id);
+        assert_eq!(cached.attachments[0].size_bytes, 42);
+        assert_eq!(cached.attachments[0].size_kind, AttachmentSizeKind::Decoded);
         let after: i64 = sqlx::query_scalar(
             "SELECT last_accessed FROM message_content_cache WHERE message_id = ?",
         )
@@ -6058,6 +10063,98 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(attachment_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn reopening_legacy_attachment_metadata_marks_size_meaning_unknown() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("dakia.db");
+        let store = Store::open(&database).await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let mut message = message("Legacy attachment size", "preview");
+        message.account_id = account_id.to_string();
+        let message_id = message.id.clone();
+        store.upsert_messages(&[message]).await.unwrap();
+        sqlx::query("INSERT INTO attachments(id, message_id, filename, mime_type, size_bytes, size_kind, is_inline, presentation, is_potentially_unsafe, data) VALUES (?, ?, 'legacy.pdf', 'application/pdf', 4096, 'decoded', 0, 'downloadable', 0, X'010203')")
+            .bind("legacy-size")
+            .bind(&message_id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO starred_attachment_metadata(id, message_id, filename, mime_type, size_bytes, size_kind, is_inline, presentation, is_potentially_unsafe) VALUES ('legacy-starred-size', ?, 'legacy-starred.pdf', 'application/pdf', 2048, 'decoded', 0, 'downloadable', 0)")
+            .bind(&message_id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        // Simulate the attachment table produced before size-kind metadata
+        // existed. SQLite retains the stored number but no longer knows what
+        // that number measured.
+        sqlx::query("ALTER TABLE attachments DROP COLUMN size_kind")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("ALTER TABLE starred_attachment_metadata DROP COLUMN size_kind")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        // This migration is independent from the older presentation cleanup.
+        // Keep its completed marker so reopening exercises only the newly
+        // absent column and must preserve the metadata row.
+        sqlx::query("INSERT INTO app_meta(key, value) VALUES ('attachment_presentation_cache_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+            .bind(ATTACHMENT_PRESENTATION_CACHE_VERSION)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store.pool.close().await;
+        drop(store);
+
+        let reopened = Store::open(&database).await.unwrap();
+        let attachments = reopened.attachments(&message_id).await.unwrap();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].size_bytes, 4096);
+        assert_eq!(attachments[0].size_kind, AttachmentSizeKind::Unknown);
+        assert_eq!(
+            reopened
+                .attachment_data(&message_id, "legacy-size")
+                .await
+                .unwrap()
+                .bytes,
+            vec![1, 2, 3]
+        );
+        let starred = reopened
+            .starred_attachment_metadata(&message_id)
+            .await
+            .unwrap();
+        assert_eq!(starred.len(), 1);
+        assert_eq!(starred[0].size_bytes, 2048);
+        assert_eq!(starred[0].size_kind, AttachmentSizeKind::Unknown);
+    }
+
+    #[tokio::test]
+    async fn cached_attachment_json_without_a_size_kind_is_unknown_not_decoded() {
+        let store = Store::in_memory().await.unwrap();
+        let message = message("Legacy cache", "preview");
+        let message_id = message.id.clone();
+        store.upsert_messages(&[message]).await.unwrap();
+        let attachments_json = r#"[{"id":"legacy-json","message_id":"ignored","filename":"legacy.pdf","mime_type":"application/pdf","size_bytes":4096,"is_inline":false,"presentation":"downloadable","is_potentially_unsafe":false}]"#;
+        sqlx::query("INSERT INTO message_content_cache(message_id, content_state, body_text, body_html, unsubscribe_kind, attachments_json, byte_size, last_accessed) VALUES (?, 'complete', '', NULL, NULL, ?, ?, 1)")
+            .bind(&message_id)
+            .bind(attachments_json)
+            .bind(attachments_json.len() as i64)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        let cached = store
+            .cached_message_content(&message_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cached.attachments.len(), 1);
+        assert_eq!(cached.attachments[0].size_bytes, 4096);
+        assert_eq!(cached.attachments[0].size_kind, AttachmentSizeKind::Unknown);
     }
 
     #[tokio::test]
@@ -6085,6 +10182,7 @@ mod tests {
                         filename: "=UTF-8QPr=C3=BCgimaja_plaan.pdf=".into(),
                         mime_type: "application/pdf".into(),
                         size_bytes: 42,
+                        size_kind: AttachmentSizeKind::Decoded,
                         is_inline: false,
                         presentation: AttachmentPresentation::Downloadable,
                         is_potentially_unsafe: false,
@@ -6115,6 +10213,7 @@ mod tests {
                         filename: "=UTF-8QPr=C3=BCgimaja_plaan.pdf=".into(),
                         mime_type: "application/pdf".into(),
                         size_bytes: 42,
+                        size_kind: AttachmentSizeKind::Decoded,
                         is_inline: false,
                         presentation: AttachmentPresentation::Downloadable,
                         is_potentially_unsafe: false,
@@ -6209,6 +10308,7 @@ mod tests {
                 filename: "claim.pdf".into(),
                 mime_type: "application/pdf".into(),
                 size_bytes: 3,
+                size_kind: AttachmentSizeKind::Decoded,
                 is_inline: false,
                 presentation: AttachmentPresentation::Downloadable,
                 is_potentially_unsafe: false,
@@ -6324,6 +10424,7 @@ mod tests {
                 filename: "claim.pdf".into(),
                 mime_type: "application/pdf".into(),
                 size_bytes: 3,
+                size_kind: AttachmentSizeKind::Decoded,
                 is_inline: false,
                 presentation: AttachmentPresentation::Downloadable,
                 is_potentially_unsafe: false,
@@ -6890,6 +10991,7 @@ mod tests {
                         filename: "claim.pdf".into(),
                         mime_type: "application/pdf".into(),
                         size_bytes: 3,
+                        size_kind: AttachmentSizeKind::Decoded,
                         is_inline: false,
                         presentation: AttachmentPresentation::Downloadable,
                         is_potentially_unsafe: false,
@@ -7113,6 +11215,7 @@ mod tests {
             filename: "invoice.pdf".into(),
             mime_type: "application/pdf".into(),
             size_bytes: 42,
+            size_kind: AttachmentSizeKind::Decoded,
             is_inline: false,
             presentation: AttachmentPresentation::Downloadable,
             is_potentially_unsafe: false,
@@ -7351,6 +11454,198 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn large_fts_conversation_search_finishes_in_a_bounded_child_process() {
+        if let Some(child) = std::env::var_os("DAKIA_STORAGE_SEARCH_SCALE_CHILD") {
+            assert_eq!(
+                child,
+                std::ffi::OsString::from("1"),
+                "the isolated large-search worker has one valid mode"
+            );
+            let ready = PathBuf::from(
+                std::env::var_os("DAKIA_STORAGE_SEARCH_SCALE_READY")
+                    .expect("the bounded parent supplies a fixture-ready signal"),
+            );
+            let completed = PathBuf::from(
+                std::env::var_os("DAKIA_STORAGE_SEARCH_SCALE_COMPLETED")
+                    .expect("the bounded parent supplies a search-completed signal"),
+            );
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("create isolated large-search runtime")
+                .block_on(large_fts_conversation_search_worker(ready, completed));
+            return;
+        }
+
+        let temporary = tempfile::tempdir().expect("create large-search watchdog directory");
+        let ready = temporary.path().join("fixture-ready");
+        let completed = temporary.path().join("search-completed");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(
+                "storage::tests::large_fts_conversation_search_finishes_in_a_bounded_child_process",
+            )
+            .arg("--nocapture")
+            .env("DAKIA_STORAGE_SEARCH_SCALE_CHILD", "1")
+            .env("DAKIA_STORAGE_SEARCH_SCALE_READY", &ready)
+            .env("DAKIA_STORAGE_SEARCH_SCALE_COMPLETED", &completed)
+            .spawn()
+            .expect("start isolated large-search worker");
+        let setup_deadline = Instant::now() + Duration::from_secs(90);
+        let mut search_deadline = None;
+        loop {
+            if let Some(status) = child.try_wait().expect("poll large-search worker") {
+                assert!(status.success(), "large-search worker failed: {status}");
+                assert!(
+                    ready.exists(),
+                    "large-search worker exited before fixture setup"
+                );
+                assert!(
+                    completed.exists(),
+                    "large-search worker exited before completing both search assertions"
+                );
+                return;
+            }
+            if search_deadline.is_none() && ready.exists() {
+                search_deadline = Some(Instant::now() + Duration::from_secs(30));
+            }
+            let deadline = search_deadline.unwrap_or(setup_deadline);
+            if Instant::now() >= deadline {
+                child.kill().expect("stop stalled large-search worker");
+                let _ = child.wait();
+                if search_deadline.is_some() {
+                    panic!("30k local conversation search exceeded the 30-second bound");
+                }
+                panic!("30k local conversation fixture setup exceeded the 90-second bound");
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    async fn large_fts_conversation_search_worker(ready: PathBuf, completed: PathBuf) {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        let newest = Utc::now();
+        let mut messages = (0..30_000)
+            .map(|index| {
+                let mut item = message(
+                    &format!("Fictional large mailbox {index}"),
+                    "Fictional large mailbox background body",
+                );
+                item.id = format!("large-search-{index}");
+                item.thread_id = format!("large-search-thread-{index}");
+                item.account_id = account_id.to_string();
+                item.uid = index + 1;
+                item.received_at = newest - chrono::Duration::seconds(index);
+                item
+            })
+            .collect::<Vec<_>>();
+        let retained = messages
+            .get_mut(1)
+            .expect("the 30k fixture contains the retained message");
+        retained.subject = "Fictional retained multipart Reader message".into();
+        retained.snippet = "Fictional retained multipart text.".into();
+        store.upsert_messages(&messages).await.unwrap();
+        std::fs::write(ready, b"fixture-ready").expect("signal completed large-search setup");
+
+        let popular = store
+            .search_conversation_page(&SearchQuery {
+                text: "Fictional".into(),
+                account_ids: vec![account_id],
+                mailbox: Some("INBOX".into()),
+                limit: Some(1),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(popular.conversations.len(), 1);
+        assert_eq!(popular.conversations[0].latest.id, "large-search-0");
+        assert!(popular.next_cursor.is_some());
+
+        let full_phrase = store
+            .search_conversation_page(&SearchQuery {
+                text: "Fictional retained multipart Reader message".into(),
+                account_ids: vec![account_id],
+                mailbox: Some("INBOX".into()),
+                limit: Some(1),
+                cursor: Some(MailCursor {
+                    received_at: newest,
+                    id: "large-search-0".into(),
+                }),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(full_phrase.conversations.len(), 1);
+        assert_eq!(full_phrase.conversations[0].latest.id, "large-search-1");
+        assert!(full_phrase.next_cursor.is_none());
+        std::fs::write(completed, b"search-completed")
+            .expect("signal completed large-search assertions");
+    }
+
+    #[tokio::test]
+    async fn unicode_search_escapes_fts_and_keeps_account_mailbox_scope() {
+        let store = Store::in_memory().await.unwrap();
+        let selected_account = uuid::Uuid::new_v4();
+        let other_account = uuid::Uuid::new_v4();
+
+        let scoped_message = |id: &str, account_id: uuid::Uuid, mailbox: &str, uid: i64| {
+            let mut item = message("雪 töö tag", "literal Unicode and punctuation");
+            item.id = id.into();
+            item.thread_id = id.into();
+            item.account_id = account_id.to_string();
+            item.mailbox = mailbox.into();
+            item.uid = uid;
+            item
+        };
+        store
+            .upsert_messages(&[
+                scoped_message("selected-inbox", selected_account, "INBOX", 1),
+                scoped_message("selected-archive", selected_account, "Archive", 1),
+                scoped_message("selected-trash", selected_account, "Trash::Deleted", 1),
+                scoped_message("other-inbox", other_account, "INBOX", 1),
+            ])
+            .await
+            .unwrap();
+
+        let inbox = store
+            .search(&SearchQuery {
+                text: "雪 \"töö\" +tag".into(),
+                account_ids: vec![selected_account],
+                mailbox: Some("INBOX".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            inbox
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            ["selected-inbox"]
+        );
+
+        let all_safe_mail = store
+            .search(&SearchQuery {
+                text: "雪 \"töö\" +tag".into(),
+                account_ids: vec![selected_account],
+                mailbox: None,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let ids = all_safe_mail
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(ids, HashSet::from(["selected-inbox", "selected-archive"]));
+        assert!(all_safe_mail
+            .iter()
+            .all(|message| message.account_id == selected_account.to_string()));
     }
 
     #[test]
@@ -9080,6 +13375,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cyclic_and_malformed_thread_headers_remain_flat_bounded_and_durable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("hostile-thread-graph.sqlite");
+        let store = Store::open(&path).await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        store
+            .save_account(&account_with_id(account_id, "thread-graph@example.test"))
+            .await
+            .unwrap();
+        let account_id = account_id.to_string();
+
+        let mut first = message("Re: Cyclic thread", "first");
+        first.id = "cycle-first".into();
+        first.account_id = account_id.clone();
+        first.uid = 1;
+        first.message_id = Some("<cycle-first@example.test>".into());
+        first.in_reply_to = Some("<cycle-second@example.test>".into());
+        first.reference_ids = Some("<cycle-first@example.test> <cycle-second@example.test>".into());
+        first.thread_id = first.id.clone();
+
+        let mut second = message("Re: Cyclic thread", "second");
+        second.id = "cycle-second".into();
+        second.account_id = account_id.clone();
+        second.uid = 2;
+        second.message_id = Some("<cycle-second@example.test>".into());
+        second.in_reply_to = Some("<cycle-first@example.test>".into());
+        second.reference_ids =
+            Some("<cycle-second@example.test> <cycle-first@example.test>".into());
+        second.thread_id = second.id.clone();
+
+        let mut self_reference = message("Re: Self reference", "self");
+        self_reference.id = "self-reference".into();
+        self_reference.account_id = account_id.clone();
+        self_reference.uid = 3;
+        self_reference.message_id = Some("<self@example.test>".into());
+        self_reference.in_reply_to = Some("<self@example.test>".into());
+        self_reference.reference_ids = Some("<self@example.test>".into());
+        self_reference.thread_id = self_reference.id.clone();
+
+        let mut malformed = message("Re: Malformed references", "malformed");
+        malformed.id = "malformed-reference".into();
+        malformed.account_id = account_id;
+        malformed.uid = 4;
+        malformed.message_id = Some("<malformed@example.test>".into());
+        malformed.in_reply_to = Some("missing-angle-brackets".into());
+        malformed.reference_ids = Some("<unterminated@example.test".into());
+        malformed.thread_id = malformed.id.clone();
+
+        store
+            .upsert_messages(&[
+                second.clone(),
+                malformed.clone(),
+                first.clone(),
+                self_reference.clone(),
+            ])
+            .await
+            .unwrap();
+        let first_read = store.search(&SearchQuery::default()).await.unwrap();
+        assert_eq!(first_read.len(), 4, "hostile references must not lose rows");
+        let thread_for = |id: &str| {
+            first_read
+                .iter()
+                .find(|message| message.id == id)
+                .unwrap()
+                .thread_id
+                .clone()
+        };
+        assert_eq!(thread_for(&first.id), thread_for(&second.id));
+        assert_eq!(thread_for(&self_reference.id), "self@example.test");
+        assert_eq!(thread_for(&malformed.id), "malformed@example.test");
+
+        store.pool.close().await;
+        let reopened = Store::open(&path).await.unwrap();
+        let second_read = reopened.search(&SearchQuery::default()).await.unwrap();
+        assert_eq!(second_read.len(), 4);
+        for original in first_read {
+            let restored = second_read
+                .iter()
+                .find(|message| message.id == original.id)
+                .expect("every hostile graph row survives restart");
+            assert_eq!(restored.thread_id, original.thread_id);
+        }
+    }
+
+    #[tokio::test]
     async fn fixed_seed_thread_graphs_are_invariant_to_insert_and_chunk_order_across_accounts() {
         let first_account = uuid::Uuid::from_u128(0x4f40_2cf7_237a_4c70_8d52_6af4_6fd1_0101);
         let second_account = uuid::Uuid::from_u128(0x4f40_2cf7_237a_4c70_8d52_6af4_6fd1_0102);
@@ -9373,6 +13753,20 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(state.uid_validity, 42);
+        assert!(
+            !state.historical_complete,
+            "a restored desktop profile is an unknown historical catalogue, not a verified empty baseline"
+        );
+        let sync = store
+            .prepare_mailbox_sync(account_id, "INBOX", Some(42))
+            .await
+            .unwrap();
+        assert!(sync.initialized);
+        assert_eq!(sync.highest_uid, None);
+        assert!(
+            !sync.empty_baseline,
+            "legacy rows with no durable watermark must catch up silently"
+        );
         store.pool.close().await;
     }
 
@@ -9388,6 +13782,7 @@ mod tests {
                 filename: "invoice.pdf".into(),
                 mime_type: "application/pdf".into(),
                 size_bytes: 3,
+                size_kind: AttachmentSizeKind::Decoded,
                 is_inline: false,
                 presentation: AttachmentPresentation::Downloadable,
                 is_potentially_unsafe: false,
@@ -9767,6 +14162,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_durable_watermarks_fail_closed_instead_of_becoming_empty_baselines() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        save_test_account(&store, account_id).await;
+        store
+            .save_mailbox_catalog_state(account_id, "INBOX", "INBOX", 77, 0, true)
+            .await
+            .unwrap();
+        store
+            .save_synced_messages(account_id, "INBOX", &[])
+            .await
+            .unwrap();
+
+        for invalid_watermark in [-1_i64, i64::from(u32::MAX) + 1] {
+            sqlx::query(
+                "UPDATE mailbox_sync_state SET highest_uid = ? WHERE account_id = ? AND mailbox = 'INBOX'",
+            )
+            .bind(invalid_watermark)
+            .bind(account_id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+            let error = store
+                .prepare_mailbox_sync(account_id, "INBOX", Some(77))
+                .await
+                .expect_err("invalid durable watermark must not look like an empty baseline");
+            assert!(error.to_string().contains("watermark UID is invalid"));
+        }
+    }
+
+    #[tokio::test]
     async fn catalogue_state_reconciles_deletions_flags_and_uidvalidity() {
         let store = Store::in_memory().await.unwrap();
         let account_id = uuid::Uuid::new_v4();
@@ -9826,7 +14252,9 @@ mod tests {
             if uid == 49_999 {
                 row.subject = "Needle in a large catalogue".into();
             }
-            persist_message(&mut tx, &row).await.unwrap();
+            persist_message(&mut tx, &row, ProviderIdentityPolicy::PreserveAbsent)
+                .await
+                .unwrap();
         }
         tx.commit().await.unwrap();
 
@@ -9911,6 +14339,7 @@ mod tests {
                 filename: "attachment".into(),
                 mime_type: "text/plain".into(),
                 size_bytes: 10,
+                size_kind: AttachmentSizeKind::Decoded,
                 is_inline: true,
                 presentation: AttachmentPresentation::Unknown,
                 is_potentially_unsafe: false,
@@ -10500,6 +14929,7 @@ mod tests {
                 filename: "notes.pdf".into(),
                 mime_type: "application/pdf".into(),
                 size_bytes: 4,
+                size_kind: AttachmentSizeKind::Decoded,
                 is_inline: false,
                 presentation: AttachmentPresentation::Downloadable,
                 is_potentially_unsafe: false,
@@ -10611,7 +15041,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn looks_up_all_catalogue_states_by_provider_mailbox_case_insensitively() {
+    async fn looks_up_all_catalogue_states_by_exact_provider_mailbox_wire_name() {
         let store = Store::in_memory().await.unwrap();
         let account_id = uuid::Uuid::new_v4();
         store
@@ -10624,7 +15054,7 @@ mod tests {
             .unwrap();
 
         let states = store
-            .mailbox_catalog_states_for_remote(account_id, "[gmail]/all mail")
+            .mailbox_catalog_states_for_remote(account_id, "[Gmail]/All Mail")
             .await
             .unwrap();
         assert_eq!(
@@ -10635,6 +15065,14 @@ mod tests {
             vec!["INBOX", "Archive"]
         );
         assert!(states.iter().all(|state| state.uid_validity == 7));
+        assert!(
+            store
+                .mailbox_catalog_states_for_remote(account_id, "[gmail]/all mail")
+                .await
+                .unwrap()
+                .is_empty(),
+            "provider mailbox wire identity is case-sensitive outside literal INBOX"
+        );
         assert!(store
             .mailbox_catalog_states_for_remote(account_id, "Projects")
             .await
@@ -10719,6 +15157,10 @@ mod tests {
             .unwrap();
         assert!(!reset.initialized);
         assert_eq!(reset.highest_uid, None);
+        assert!(
+            !reset.empty_baseline,
+            "a UIDVALIDITY replacement must establish its catalogue silently"
+        );
         assert_eq!(reset.uid_validity, Some(11));
         assert!(reset.uid_validity_changed);
         let old_catalogue = store
@@ -10746,6 +15188,7 @@ mod tests {
             .unwrap();
         assert!(!retry.initialized);
         assert_eq!(retry.highest_uid, None);
+        assert!(!retry.empty_baseline);
         assert!(retry.uid_validity_changed);
         assert_eq!(
             reopened
@@ -11553,7 +15996,11 @@ mod tests {
             .await
             .unwrap();
         store
-            .finalize_mailbox_snapshot(account_id, "INBOX", &generation)
+            // A new UIDVALIDITY namespace must use the explicit replacement
+            // publication path. An empty replacement list is sufficient here:
+            // this fixture exercises the namespace/tombstone transition, not
+            // metadata decoding.
+            .finalize_mailbox_snapshot_with_replacements(account_id, "INBOX", &generation, &[])
             .await
             .unwrap();
 
@@ -12473,6 +16920,165 @@ mod tests {
             Some("old-secret")
         );
     }
+
+    #[tokio::test]
+    async fn account_deletion_keeps_credential_and_mail_when_the_transaction_aborts() {
+        let store = Store::in_memory().await.unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        let account = account_with_id(account_id, "atomic-removal@example.test");
+        let credential_name = format!("dev.dakia.mail:{}:{}", account.id, account.auth.username());
+        store
+            .save_account_with_secret(&account, &credential_name, "fictional-password")
+            .await
+            .unwrap();
+        // Accounts can share an IMAP username, but the credential contract
+        // includes the immutable account UUID. Removing one must leave the
+        // other account and its separately keyed secret untouched.
+        let mut sibling = account.clone();
+        sibling.id = uuid::Uuid::new_v4();
+        sibling.email = "atomic-removal-sibling@example.test".into();
+        let sibling_credential_name =
+            format!("dev.dakia.mail:{}:{}", sibling.id, sibling.auth.username());
+        assert_ne!(credential_name, sibling_credential_name);
+        store
+            .save_account_with_secret(&sibling, &sibling_credential_name, "sibling-password")
+            .await
+            .unwrap();
+
+        let mut cached_message = message("keep cached mail", "rollback must retain this body");
+        cached_message.id = "atomic-account-removal-message".into();
+        cached_message.account_id = account_id.to_string();
+        store
+            .upsert_messages(&[cached_message.clone()])
+            .await
+            .unwrap();
+        store
+            .save_mailbox_catalog_state(account_id, "INBOX", "INBOX", 7, 1, true)
+            .await
+            .unwrap();
+
+        // This fires after the account credential and child rows would have
+        // been deleted in a split implementation. The transaction must roll
+        // all of those writes back together.
+        let reject_account_removal_trigger = format!(
+            "CREATE TRIGGER reject_atomic_account_removal BEFORE DELETE ON accounts WHEN OLD.id = '{account_id}' BEGIN SELECT RAISE(ABORT, 'forced account removal failure'); END",
+        );
+        sqlx::query(&reject_account_removal_trigger)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let error = store
+            .delete_account_with_credential(account_id)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("forced account removal failure"));
+        assert_eq!(
+            store.account(account_id).await.unwrap().unwrap().email,
+            "atomic-removal@example.test"
+        );
+        assert_eq!(
+            store.secret(&credential_name).await.unwrap().as_deref(),
+            Some("fictional-password")
+        );
+        assert_eq!(
+            store
+                .message(&cached_message.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .subject,
+            "keep cached mail"
+        );
+        assert!(store
+            .mailbox_catalog_state(account_id, "INBOX")
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            store
+                .secret(&sibling_credential_name)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("sibling-password")
+        );
+        assert_eq!(
+            store.account(sibling.id).await.unwrap().unwrap().email,
+            "atomic-removal-sibling@example.test"
+        );
+
+        sqlx::query("DROP TRIGGER reject_atomic_account_removal")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store
+            .delete_account_with_credential(account_id)
+            .await
+            .unwrap();
+        assert!(store.account(account_id).await.unwrap().is_none());
+        assert!(store.secret(&credential_name).await.unwrap().is_none());
+        assert!(store.message(&cached_message.id).await.unwrap().is_none());
+        assert!(store
+            .mailbox_catalog_state(account_id, "INBOX")
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            store
+                .secret(&sibling_credential_name)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("sibling-password")
+        );
+        assert!(store.account(sibling.id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn account_deletion_refuses_a_row_with_another_accounts_identity() {
+        let store = Store::in_memory().await.unwrap();
+        let first = account_with_id(uuid::Uuid::new_v4(), "first-corrupt-row@example.test");
+        let second = account_with_id(uuid::Uuid::new_v4(), "second-corrupt-row@example.test");
+        let first_secret = format!("dev.dakia.mail:{}:{}", first.id, first.auth.username());
+        let second_secret = format!("dev.dakia.mail:{}:{}", second.id, second.auth.username());
+        store
+            .save_account_with_secret(&first, &first_secret, "first-secret")
+            .await
+            .unwrap();
+        store
+            .save_account_with_secret(&second, &second_secret, "second-secret")
+            .await
+            .unwrap();
+
+        sqlx::query("UPDATE accounts SET data = ? WHERE id = ?")
+            .bind(serde_json::to_string(&second).unwrap())
+            .bind(first.id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let error = store
+            .delete_account_with_credential(first.id)
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("stored account identity does not match"));
+        let first_row_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM accounts WHERE id = ?)")
+                .bind(first.id.to_string())
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert!(first_row_exists);
+        assert_eq!(
+            store.secret(&first_secret).await.unwrap().as_deref(),
+            Some("first-secret")
+        );
+        assert_eq!(
+            store.secret(&second_secret).await.unwrap().as_deref(),
+            Some("second-secret")
+        );
+    }
 }
 impl Store {
     /// Starts or resumes an incomplete mailbox inventory. Matching mailbox
@@ -12545,7 +17151,9 @@ impl Store {
                     .await?;
                 // A resumed full inventory must replace its old UID list.
                 // Metadata and outcomes survive, then reattach only when the
-                // current bounded inventory restages their UID.
+                // current bounded inventory restages their UID. Finalization
+                // separately fences its staged cardinality so this reset can
+                // never publish an empty or partial inventory.
                 sqlx::query("DELETE FROM mailbox_snapshot_items WHERE account_id = ? AND mailbox = ? AND generation = ?")
                     .bind(&account_id)
                     .bind(mailbox)
@@ -12644,6 +17252,28 @@ impl Store {
         generation: &str,
         messages: &[MailSummary],
     ) -> Result<()> {
+        self.stage_mailbox_snapshot_message_page_with_provider_identity_observation(
+            account_id, mailbox, generation, messages, true,
+        )
+        .await
+    }
+
+    /// Records whether this metadata page actually requested Gmail's
+    /// X-GM-MSGID field. A missing field from a generic fetch must not clear
+    /// an already-known provider identity or suppress future backfill.
+    pub(crate) async fn stage_mailbox_snapshot_message_page_with_provider_identity_observation(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        generation: &str,
+        messages: &[MailSummary],
+        gmail_identity_was_requested: bool,
+    ) -> Result<()> {
+        let provider_identity_policy = if gmail_identity_was_requested {
+            ProviderIdentityPolicy::Observed
+        } else {
+            ProviderIdentityPolicy::PreserveAbsent
+        };
         let account_id = account_id.to_string();
         if messages
             .iter()
@@ -12688,7 +17318,13 @@ impl Store {
                 .bind(mailbox)
                 .bind(generation)
                 .bind(message.uid)
-                .bind(serde_json::to_string(message).context("serialize snapshot replacement message")?)
+                .bind(
+                    serde_json::to_string(&StagedSnapshotMessage::from_message(
+                        message,
+                        provider_identity_policy,
+                    ))
+                    .context("serialize snapshot replacement message")?,
+                )
                 .bind(now)
                 .bind(now)
                 .execute(&mut *tx)
@@ -12882,8 +17518,10 @@ impl Store {
             generation,
             SnapshotReplacementPublication::None,
             SnapshotFinalizeWatermark::StagedMaximum,
+            SnapshotPublicationDetail::DeletedOnly,
         )
         .await
+        .map(|publication| publication.deleted)
     }
 
     /// Atomically publishes a completed snapshot and any metadata decoded in
@@ -12902,8 +17540,10 @@ impl Store {
             generation,
             SnapshotReplacementPublication::InMemory(replacements),
             SnapshotFinalizeWatermark::StagedMaximum,
+            SnapshotPublicationDetail::DeletedOnly,
         )
         .await
+        .map(|publication| publication.deleted)
     }
 
     /// Finalizes a snapshot using the caller-proven contiguous realtime
@@ -12923,8 +17563,10 @@ impl Store {
             generation,
             SnapshotReplacementPublication::InMemory(replacements),
             SnapshotFinalizeWatermark::Explicit(watermark),
+            SnapshotPublicationDetail::DeletedOnly,
         )
         .await
+        .map(|publication| publication.deleted)
     }
 
     /// Atomically publishes a replacement namespace from durable, paged
@@ -12941,8 +17583,52 @@ impl Store {
             generation,
             SnapshotReplacementPublication::Staged,
             SnapshotFinalizeWatermark::StagedMaximum,
+            SnapshotPublicationDetail::DeletedOnly,
         )
         .await
+        .map(|publication| publication.deleted)
+    }
+
+    /// Finalizes a stable ordinary snapshot with metadata staged during the
+    /// fetch. Unlike a UIDVALIDITY replacement, existing rows are retained
+    /// until the snapshot's normal reconciliation rules apply.
+    pub async fn finalize_mailbox_snapshot_with_staged_messages(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        generation: &str,
+    ) -> Result<u64> {
+        self.finalize_mailbox_snapshot_inner(
+            account_id,
+            mailbox,
+            generation,
+            SnapshotReplacementPublication::StagedIncremental,
+            SnapshotFinalizeWatermark::StagedMaximum,
+            SnapshotPublicationDetail::DeletedOnly,
+        )
+        .await
+        .map(|publication| publication.deleted)
+    }
+
+    /// Realtime equivalent of staged ordinary finalization. The watermark is
+    /// committed with the same generation fence as headers and flags.
+    pub async fn finalize_mailbox_snapshot_with_staged_messages_and_watermark(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        generation: &str,
+        watermark: Option<u32>,
+    ) -> Result<u64> {
+        self.finalize_mailbox_snapshot_inner(
+            account_id,
+            mailbox,
+            generation,
+            SnapshotReplacementPublication::StagedIncremental,
+            SnapshotFinalizeWatermark::Explicit(watermark),
+            SnapshotPublicationDetail::DeletedOnly,
+        )
+        .await
+        .map(|publication| publication.deleted)
     }
 
     /// Realtime replacement finalization with a caller-proven contiguous
@@ -12960,8 +17646,10 @@ impl Store {
             generation,
             SnapshotReplacementPublication::Staged,
             SnapshotFinalizeWatermark::Explicit(watermark),
+            SnapshotPublicationDetail::DeletedOnly,
         )
         .await
+        .map(|publication| publication.deleted)
     }
 
     /// Realtime callers without replacement metadata can use an explicit
@@ -12979,6 +17667,48 @@ impl Store {
             generation,
             SnapshotReplacementPublication::None,
             SnapshotFinalizeWatermark::Explicit(watermark),
+            SnapshotPublicationDetail::DeletedOnly,
+        )
+        .await
+        .map(|publication| publication.deleted)
+    }
+
+    /// Publishes a realtime snapshot and reports the exact committed catalogue
+    /// effects without changing the established public deletion-count API.
+    pub(crate) async fn finalize_realtime_mailbox_snapshot_with_staged_messages(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        generation: &str,
+        watermark: Option<u32>,
+    ) -> Result<MailboxSnapshotPublication> {
+        self.finalize_mailbox_snapshot_inner(
+            account_id,
+            mailbox,
+            generation,
+            SnapshotReplacementPublication::StagedIncremental,
+            SnapshotFinalizeWatermark::Explicit(watermark),
+            SnapshotPublicationDetail::Exact,
+        )
+        .await
+    }
+
+    /// Publishes a realtime UIDVALIDITY replacement and reports its committed
+    /// effects, including an empty namespace rollover.
+    pub(crate) async fn finalize_realtime_mailbox_snapshot_with_staged_replacements(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        generation: &str,
+        watermark: Option<u32>,
+    ) -> Result<MailboxSnapshotPublication> {
+        self.finalize_mailbox_snapshot_inner(
+            account_id,
+            mailbox,
+            generation,
+            SnapshotReplacementPublication::Staged,
+            SnapshotFinalizeWatermark::Explicit(watermark),
+            SnapshotPublicationDetail::Exact,
         )
         .await
     }
@@ -12990,7 +17720,8 @@ impl Store {
         generation: &str,
         replacement_publication: SnapshotReplacementPublication<'_>,
         watermark: SnapshotFinalizeWatermark,
-    ) -> Result<u64> {
+        publication_detail: SnapshotPublicationDetail,
+    ) -> Result<MailboxSnapshotPublication> {
         let account_id = account_id.to_string();
         if let SnapshotReplacementPublication::InMemory(replacements) = replacement_publication {
             if replacements
@@ -13027,6 +17758,20 @@ impl Store {
             tx.rollback().await?;
             return Err(anyhow!("mailbox snapshot generation is not active"));
         };
+        let staged_inventory_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM mailbox_snapshot_items WHERE account_id = ? AND mailbox = ? AND generation = ?",
+        )
+        .bind(&account_id)
+        .bind(mailbox)
+        .bind(generation)
+        .fetch_one(&mut *tx)
+        .await?;
+        if staged_inventory_count != initial_exists {
+            tx.rollback().await?;
+            return Err(anyhow!(
+                "mailbox snapshot inventory is incomplete and cannot be published"
+            ));
+        }
         let prior_uid_validities: Vec<i64> = sqlx::query_scalar(
             "SELECT uid_validity FROM mailbox_catalog_state WHERE account_id = ? AND mailbox = ? UNION SELECT uid_validity FROM mailbox_sync_state WHERE account_id = ? AND mailbox = ? AND uid_validity IS NOT NULL",
         )
@@ -13039,7 +17784,18 @@ impl Store {
         let replacement_namespace = !matches!(
             replacement_publication,
             SnapshotReplacementPublication::None
+                | SnapshotReplacementPublication::StagedIncremental
         );
+        if !replacement_namespace
+            && prior_uid_validities
+                .iter()
+                .any(|previous| *previous != uid_validity)
+        {
+            tx.rollback().await?;
+            return Err(anyhow!(
+                "mailbox identity changed before snapshot publication"
+            ));
+        }
         if let SnapshotReplacementPublication::InMemory(replacements) = replacement_publication {
             for replacement in replacements {
                 let staged: bool = sqlx::query_scalar(
@@ -13059,6 +17815,57 @@ impl Store {
                 }
             }
         }
+        let flags_changed = if replacement_namespace
+            || publication_detail == SnapshotPublicationDetail::DeletedOnly
+        {
+            0
+        } else {
+            note_snapshot_publication_stat_query();
+            let changed: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM messages AS message JOIN mailbox_snapshot_items AS staged ON staged.account_id = message.account_id AND staged.mailbox = message.mailbox AND staged.uid = message.uid WHERE staged.account_id = ? AND staged.mailbox = ? AND staged.generation = ? AND (message.is_read IS NOT staged.is_read OR message.is_flagged IS NOT staged.is_flagged)",
+            )
+            .bind(&account_id)
+            .bind(mailbox)
+            .bind(generation)
+            .fetch_one(&mut *tx)
+            .await?;
+            u64::try_from(changed).context("changed snapshot flag count is invalid")?
+        };
+        let metadata_published = if publication_detail == SnapshotPublicationDetail::DeletedOnly {
+            0
+        } else {
+            match replacement_publication {
+                SnapshotReplacementPublication::None => 0,
+                SnapshotReplacementPublication::InMemory(replacements) => {
+                    u64::try_from(replacements.len())
+                        .context("replacement message count is invalid")?
+                }
+                SnapshotReplacementPublication::Staged => {
+                    note_snapshot_publication_stat_query();
+                    let staged: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM mailbox_snapshot_messages AS message JOIN mailbox_snapshot_items AS item ON item.account_id = message.account_id AND item.mailbox = message.mailbox AND item.generation = message.generation AND item.uid = message.uid WHERE message.account_id = ? AND message.mailbox = ? AND message.generation = ?",
+                )
+                .bind(&account_id)
+                .bind(mailbox)
+                .bind(generation)
+                .fetch_one(&mut *tx)
+                .await?;
+                    u64::try_from(staged).context("staged replacement message count is invalid")?
+                }
+                SnapshotReplacementPublication::StagedIncremental => {
+                    note_snapshot_publication_stat_query();
+                    let staged: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM mailbox_snapshot_messages AS message JOIN mailbox_snapshot_items AS item ON item.account_id = message.account_id AND item.mailbox = message.mailbox AND item.generation = message.generation AND item.uid = message.uid LEFT JOIN mailbox_action_tombstones AS tombstone ON tombstone.account_id = message.account_id AND tombstone.mailbox = message.mailbox AND tombstone.uid = message.uid WHERE message.account_id = ? AND message.mailbox = ? AND message.generation = ? AND tombstone.uid IS NULL",
+                )
+                .bind(&account_id)
+                .bind(mailbox)
+                .bind(generation)
+                .fetch_one(&mut *tx)
+                .await?;
+                    u64::try_from(staged).context("staged incremental message count is invalid")?
+                }
+            }
+        };
         if matches!(
             replacement_publication,
             SnapshotReplacementPublication::Staged
@@ -13094,10 +17901,19 @@ impl Store {
             SnapshotReplacementPublication::None => {}
             SnapshotReplacementPublication::InMemory(replacements) => {
                 for replacement in replacements {
-                    persist_message(&mut tx, replacement).await?;
+                    persist_message(&mut tx, replacement, ProviderIdentityPolicy::Observed).await?;
                 }
             }
             SnapshotReplacementPublication::Staged => {
+                persist_staged_uidvalidity_replacement_messages_in_transaction(
+                    &mut tx,
+                    &account_id,
+                    mailbox,
+                    generation,
+                )
+                .await?;
+            }
+            SnapshotReplacementPublication::StagedIncremental => {
                 persist_staged_uidvalidity_replacement_messages_in_transaction(
                     &mut tx,
                     &account_id,
@@ -13200,7 +18016,12 @@ impl Store {
         if deleted > 0 || replacement_namespace {
             self.rebuild_threads_for_account(&account_id).await?;
         }
-        Ok(deleted)
+        Ok(MailboxSnapshotPublication {
+            metadata_published,
+            flags_changed,
+            deleted,
+            namespace_replaced: replacement_namespace,
+        })
     }
 
     /// Discards an incomplete or invalidated snapshot without touching the
@@ -13319,6 +18140,29 @@ impl Store {
         mailbox: &str,
         changed_since: MailboxChangedSinceFlags<'_>,
     ) -> Result<()> {
+        self.apply_complete_mailbox_changed_since_flags_inner(account_id, mailbox, changed_since)
+            .await
+            .map(|_| ())
+    }
+
+    /// Applies one complete realtime CHANGEDSINCE result and returns the
+    /// number of local rows whose visible flags actually changed.
+    pub(crate) async fn apply_realtime_mailbox_changed_since_flags(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        changed_since: MailboxChangedSinceFlags<'_>,
+    ) -> Result<u64> {
+        self.apply_complete_mailbox_changed_since_flags_inner(account_id, mailbox, changed_since)
+            .await
+    }
+
+    async fn apply_complete_mailbox_changed_since_flags_inner(
+        &self,
+        account_id: AccountId,
+        mailbox: &str,
+        changed_since: MailboxChangedSinceFlags<'_>,
+    ) -> Result<u64> {
         let MailboxChangedSinceFlags {
             identity:
                 MailboxSnapshotIdentity {
@@ -13351,15 +18195,23 @@ impl Store {
                 "cannot apply CHANGEDSINCE delta without a stable mailbox catalogue"
             ));
         }
+        let mut flags_changed = 0;
         for (uid, is_read, is_flagged) in flags {
-            sqlx::query("UPDATE messages SET is_read = ?, is_flagged = ? WHERE account_id = ? AND mailbox = ? AND uid = ?")
+            let changed = sqlx::query("UPDATE messages SET is_read = ?, is_flagged = ? WHERE account_id = ? AND mailbox = ? AND uid = ? AND (is_read IS NOT ? OR is_flagged IS NOT ?)")
                 .bind(is_read)
                 .bind(is_flagged)
                 .bind(&account_id)
                 .bind(mailbox)
                 .bind(i64::from(*uid))
+                .bind(is_read)
+                .bind(is_flagged)
                 .execute(&mut *tx)
-                .await?;
+                .await?
+                .rows_affected();
+            flags_changed += changed;
+            if changed == 0 {
+                continue;
+            }
             if *is_flagged {
                 sqlx::query("DELETE FROM message_content_cache WHERE message_id IN (SELECT id FROM messages WHERE account_id = ? AND mailbox = ? AND uid = ?)")
                     .bind(&account_id)
@@ -13397,6 +18249,6 @@ impl Store {
             ));
         }
         tx.commit().await?;
-        Ok(())
+        Ok(flags_changed)
     }
 }

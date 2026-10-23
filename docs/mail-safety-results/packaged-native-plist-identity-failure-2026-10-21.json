@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T16:07:03.774921+00:00",
+  "lane": "packaged-native-provider-reader",
+  "status": "failed-before-launch",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "f6c8094e26fc9982144aebf7e368d149926001835fa848b94c4445bc87bcfd27",
+    "fileCount": 933
+  },
+  "harnessRoot": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.rmzFqM",
+  "exitCode": 1,
+  "appLaunched": false,
+  "uiAccessed": false,
+  "failure": {
+    "kind": "identity-guard-raw-plist-formatting",
+    "message": "Structured plist fields match the approved exact identity, but the guard requires adjacent key/string XML text and rejects normal Tauri whitespace.",
+    "structuredIdentifier": "dev.dakia.fictional-provider-reader.run-OTAMH2",
+    "structuredName": "Dakia Fictional Provider Reader"
+  },
+  "packagedCompile": "passed",
+  "candidateAdHocSignature": "passed before identity guard",
+  "originalApprovedIdentity": "retained at approved path; candidate swap did not begin",
+  "rawLog": {
+    "path": "/private/tmp/dakia-final-packaged-provider-reader-f6-20261021.log",
+    "sha256": "3da061406b541ca512504c81d2b737b0524822bd995fe0013a436742d71767a0",
+    "bytes": 4581
+  },
+  "limitations": [
+    "This is failed native harness evidence, not a WebKit or upgrade acceptance pass.",
+    "Do not bypass identity validation or launch the unapproved run-root candidate.",
+    "Structured plist parsing and faithful regression cases are being repaired before another guarded run."
+  ]
+}

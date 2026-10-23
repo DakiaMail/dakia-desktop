@@ -1,0 +1,236 @@
+{
+  "schemaVersion": 1,
+  "status": "accepted-rust-and-composed-frontend-evidence-with-partial-baseline-comparison",
+  "governedSource": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "aa25a3503c12a6c7387610b1a59028b4e287c64b3fb001355e85e1ff599b92e8",
+    "fileCount": 1032
+  },
+  "governedSourceAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "aa25a3503c12a6c7387610b1a59028b4e287c64b3fb001355e85e1ff599b92e8",
+    "fileCount": 1032
+  },
+  "fullRustTrackedSourceManifestSha256": "b198b7255c89bd5ac5ced8e2c62c95156de426396fcf86ff2b32d081e681def6",
+  "rustInstrumentedTests": "all workspace suites passed; core779passed15ignored, desktop227passed",
+  "rustNormalization": {
+    "version": 1,
+    "sourceDigest": "90e98c502d301bef1b5e985672ad73cec4aaaceddeaa0f491448554c0f8c5226",
+    "profileSha256": "b91457e47c555d216f1db828162e4585640e33fafa99ec939ef6831d97a66453",
+    "input": {
+      "sourceManifestSha256": "b198b7255c89bd5ac5ced8e2c62c95156de426396fcf86ff2b32d081e681def6",
+      "lineBranchLcovSha256": "a85ae054919518c73b097f38e09afbc6f108891829f0f7d30d27354f007aa69f",
+      "lineBranchReceiptSha256": "2c02def8b7ba4d98d4e42e397dab1baab2ddab2c70e525b685545e3698684789",
+      "functionsJsonSha256": "af212f101cb9017b6bad67cd3212602c51b8bc4cf9d8b35a73ee7066362bd0c5",
+      "functionsReceiptSha256": "3afe053af2c892df7d1f25e7adf71a30f60c8253857fe8437283e12ec451162a",
+      "objectSetSha256": "0fd67dc17dceeb7dd5bec314fb08258dd4ff372709db6ce4d8a30eb7f51922f9",
+      "sourceFileCount": 28
+    },
+    "output": {
+      "lcovSha256": "b87c46dee8a79ab4f4605125e414109add57b236cdc7cb44f5190a713e7c42c6"
+    },
+    "linesBranches": {
+      "producer": "llvm-cov lcov with skip-functions",
+      "lines": {
+        "found": 49661,
+        "hit": 43095
+      },
+      "branches": {
+        "found": 4954,
+        "hit": 3314
+      },
+      "unchangedFromInput": true
+    },
+    "functions": {
+      "producer": "llvm-cov json",
+      "metric": "llvm-instrumentation-instantiations",
+      "instantiations": {
+        "found": 11760,
+        "hit": 5547
+      },
+      "distinctFunctionDefinitions": {
+        "count": 4535,
+        "covered": 3753,
+        "percent": 82.75633958103639
+      },
+      "unavailableFunctionMappings": [
+        {
+          "name": "_RNCNvXs1x_NtCskkxt5qoxrCu_10dakia_core4mailNtB8_32NativeMailSafetyOneClickResolverNtB8_16OneClickResolver6lookup0Ba_",
+          "filename": "/Users/arsalan/code/codex-worktrees/5625/dakia-desktop/crates/dakia-core/src/mail.rs",
+          "invocationCount": 0,
+          "branchRecordCount": 2
+        },
+        {
+          "name": "_RNCNvXs1z_NtCskkxt5qoxrCu_10dakia_core4mailNtB8_21ReqwestOneClickSenderNtB8_14OneClickSender4post0Ba_",
+          "filename": "/Users/arsalan/code/codex-worktrees/5625/dakia-desktop/crates/dakia-core/src/mail.rs",
+          "invocationCount": 0,
+          "branchRecordCount": 1
+        },
+        {
+          "name": "_RNCNvXs1x_NtCsiZYULJpihcU_10dakia_core4mailNtB8_32NativeMailSafetyOneClickResolverNtB8_16OneClickResolver6lookup0Ba_",
+          "filename": "/Users/arsalan/code/codex-worktrees/5625/dakia-desktop/crates/dakia-core/src/mail.rs",
+          "invocationCount": 0,
+          "branchRecordCount": 0
+        },
+        {
+          "name": "_RNCNvXs1z_NtCsiZYULJpihcU_10dakia_core4mailNtB8_21ReqwestOneClickSenderNtB8_14OneClickSender4post0Ba_",
+          "filename": "/Users/arsalan/code/codex-worktrees/5625/dakia-desktop/crates/dakia-core/src/mail.rs",
+          "invocationCount": 0,
+          "branchRecordCount": 1
+        }
+      ],
+      "outsideLineBranchSourceFileRecords": 2096
+    },
+    "referenceOnlyReceiptException": false,
+    "limitations": [
+      "The JSON distinct-function total is reported separately and is not substituted for LCOV instrumentation instantiations.",
+      "Function records without regions are reported as unavailable mappings; their official DA and BRDA observations remain in the line-and-branch LCOV input.",
+      "Only functions whose sole source filename is present in the official line-and-branch LCOV report are emitted."
+    ]
+  },
+  "candidate": {
+    "version": 1,
+    "components": {
+      "rust": {
+        "lines": {
+          "found": 49661,
+          "hit": 43095
+        },
+        "branches": {
+          "found": 4954,
+          "hit": 3314
+        },
+        "functions": {
+          "found": 11760,
+          "hit": 5547
+        }
+      },
+      "frontend": {
+        "lines": {
+          "found": 5468,
+          "hit": 4603
+        },
+        "branches": {
+          "found": 4287,
+          "hit": 3268
+        },
+        "functions": {
+          "found": 1739,
+          "hit": 1340
+        }
+      }
+    },
+    "metricKinds": {
+      "rust": {
+        "lines": "lcov-lines",
+        "branches": "lcov-branches",
+        "functions": "llvm-instrumentation-instantiations"
+      },
+      "frontend": {
+        "lines": "lcov-lines",
+        "branches": "lcov-branches",
+        "functions": "lcov-functions"
+      }
+    },
+    "rustCoverageProvenance": {
+      "normalizationSummarySha256": "2751b847bf6435177d5886ca59c9f6b44140980870c3dd2286f33d329feb625d",
+      "sourceDigest": "90e98c502d301bef1b5e985672ad73cec4aaaceddeaa0f491448554c0f8c5226",
+      "profileSha256": "b91457e47c555d216f1db828162e4585640e33fafa99ec939ef6831d97a66453",
+      "objectSetSha256": "0fd67dc17dceeb7dd5bec314fb08258dd4ff372709db6ce4d8a30eb7f51922f9",
+      "unavailableFunctionMappings": [
+        {
+          "name": "_RNCNvXs1x_NtCskkxt5qoxrCu_10dakia_core4mailNtB8_32NativeMailSafetyOneClickResolverNtB8_16OneClickResolver6lookup0Ba_",
+          "filename": "/Users/arsalan/code/codex-worktrees/5625/dakia-desktop/crates/dakia-core/src/mail.rs",
+          "invocationCount": 0,
+          "branchRecordCount": 2
+        },
+        {
+          "name": "_RNCNvXs1z_NtCskkxt5qoxrCu_10dakia_core4mailNtB8_21ReqwestOneClickSenderNtB8_14OneClickSender4post0Ba_",
+          "filename": "/Users/arsalan/code/codex-worktrees/5625/dakia-desktop/crates/dakia-core/src/mail.rs",
+          "invocationCount": 0,
+          "branchRecordCount": 1
+        },
+        {
+          "name": "_RNCNvXs1x_NtCsiZYULJpihcU_10dakia_core4mailNtB8_32NativeMailSafetyOneClickResolverNtB8_16OneClickResolver6lookup0Ba_",
+          "filename": "/Users/arsalan/code/codex-worktrees/5625/dakia-desktop/crates/dakia-core/src/mail.rs",
+          "invocationCount": 0,
+          "branchRecordCount": 0
+        },
+        {
+          "name": "_RNCNvXs1z_NtCsiZYULJpihcU_10dakia_core4mailNtB8_21ReqwestOneClickSenderNtB8_14OneClickSender4post0Ba_",
+          "filename": "/Users/arsalan/code/codex-worktrees/5625/dakia-desktop/crates/dakia-core/src/mail.rs",
+          "invocationCount": 0,
+          "branchRecordCount": 1
+        }
+      ]
+    },
+    "observations": {
+      "rust": {
+        "lines": {
+          "status": "observed"
+        },
+        "branches": {
+          "status": "observed"
+        },
+        "functions": {
+          "status": "observed"
+        }
+      },
+      "frontend": {
+        "lines": {
+          "status": "observed"
+        },
+        "branches": {
+          "status": "observed"
+        },
+        "functions": {
+          "status": "observed"
+        }
+      }
+    },
+    "comparisonAvailability": [
+      {
+        "component": "rust",
+        "metric": "branches",
+        "baselineKind": "lcov-branches",
+        "candidateKind": "lcov-branches",
+        "reason": "baseline reported no observable items for this metric"
+      },
+      {
+        "component": "rust",
+        "metric": "functions",
+        "baselineKind": "lcov-functions",
+        "candidateKind": "llvm-instrumentation-instantiations",
+        "reason": "metric kinds differ and cannot be ratio-compared"
+      }
+    ]
+  },
+  "frontend": {
+    "passedTests": 660,
+    "skippedTests": 2,
+    "passedFiles": 66,
+    "skippedFiles": 3,
+    "lcovPath": "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/frontend-coverage-repaired/lcov.info",
+    "lcovSha256": "4ba0e9de69bb394ea75afa66e11ada9f6488904efc9913cb546eff738274b22c",
+    "scope": "Separate recovered V8 run after restoring locked root dependencies and isolating a lock-matched provider. Frontend source bytes are unchanged.",
+    "isolatedProviderLockSha256": "4815654b38f35c4d5209c1c6347a08198f65b54c173b360e320b1f1c35bbf4d4"
+  },
+  "workflowFailureRetained": {
+    "path": "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/coverage-platform.log",
+    "sha256": "a81254064280621b2457c59cab56b4397ac30068489e82dc1cb07e701cdf1d54",
+    "reason": "Root legacy-peer coverage install removed required testing DOM peer; no frontend tests executed in that attempt."
+  },
+  "fixedWorkflow": "Checked-in isolated provider package/lock, npm ci in RUNNER_TEMP, root tree unchanged, exact versions and archive checks; contract12/12 and independent review passed. New tool lock audit0.",
+  "privateRunnerSha256": "b3892a7e712007803ed4394335e645f4eebdfd1b1be66363f33e9b9681d54792",
+  "baseline": {
+    "path": "testdata/coverage/baseline.json",
+    "sha256": "8cc99d5b08a73af76be5e66307349250e3c06ab48eb880d8aa11e1a7e58aab1f",
+    "reset": false
+  },
+  "limitations": [
+    "This is composed lane evidence, not a claim that the earlier whole shell workflow passed.",
+    "Rust branch baseline has no observations; Rust function metric differs from the old baseline. Neither unavailable comparison is a pass.",
+    "Four unavailable function mappings and all official line/branch observations remain preserved.",
+    "This report does not establish native WebKit, provider, performance or release acceptance."
+  ]
+}

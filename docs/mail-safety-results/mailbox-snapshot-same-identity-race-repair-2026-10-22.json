@@ -1,0 +1,73 @@
+{
+  "report": "mailbox snapshot same-identity finalization repair",
+  "date": "2026-10-22",
+  "scope": {
+    "production_function": "Store::finalize_mailbox_snapshot_inner",
+    "production_change": "The finalization transaction counts staged mailbox_snapshot_items for the exact account, mailbox, and generation. It must equal the generation's captured initial_exists count before any flags, message deletion, catalogue, watermark, or staging mutation. A mismatch rolls back with a bounded incomplete-inventory error.",
+    "preserved_behavior": "Matching-identity snapshot resumes still clear and rebuild staging. The finalization fence prevents a concurrently cleared or partial staging set from being published. A legitimate empty authoritative snapshot remains valid because zero staged UIDs equals zero expected UIDs.",
+    "public_api_change": "none"
+  },
+  "observed_fictional_native_diagnostic": {
+    "result": "retained failed evidence, no retry",
+    "failure": "A fictional full-fetch runner reported that its mailbox snapshot generation was not active after one fictional SMTP submission.",
+    "durable_projection": "The affected fictional account retained a complete catalogue watermark but had no message rows, while a separate account remained intact.",
+    "mechanism_reproduced": "A second Store resumed the same snapshot identity and cleared its staging rows before the first Store finalized. Before this repair, the first finalizer could treat the empty staging set as authoritative and delete committed rows.",
+    "limitation": "This receipt does not make a new native, provider, SMTP, IMAP, profile, or UI claim. The failed native root and its no-retry journal remain preserved."
+  },
+  "deterministic_regression": {
+    "test": "storage::storage_realtime_publication_tests::same_identity_resume_from_a_second_store_cannot_publish_an_emptied_inventory",
+    "fixture": "Two independently opened Stores share one file-backed SQLite database. Store A stages a complete two-UID snapshot. A deterministic barrier lets Store B resume the same identity and clear staging before Store A finalizes.",
+    "rejected_empty_inventory": "Store A receives the incomplete-inventory error; committed UIDs [1, 2], catalogue remote_total 2, UIDNEXT None, and high watermark 2 remain unchanged.",
+    "rejected_partial_inventory": "The resumed generation stages only UID 1 of 2 and is rejected with the same preserved committed projection and catalogue/watermark assertions.",
+    "recovery": "The same resumed generation stages UID 2, finalizes with flags_changed 2 and deleted 0, and retains UIDs [1, 2].",
+    "convergence": "A fresh complete snapshot of the recovered state returns MailboxSnapshotPublication::default()."
+  },
+  "sensitivity": {
+    "method": "Temporarily inverted only the staged-count predicate from != to ==, then restored it.",
+    "command": "cargo test --locked -p dakia-core --lib storage::storage_realtime_publication_tests::same_identity_resume_from_a_second_store_cannot_publish_an_emptied_inventory -- --exact",
+    "result": "failed as expected before restoration",
+    "assertion": "called Result::unwrap_err() on an Ok value: MailboxSnapshotPublication { metadata_published: 0, flags_changed: 0, deleted: 2, namespace_replaced: false }",
+    "restoration": "The correct != predicate was restored before all positive verification."
+  },
+  "verification": [
+    {
+      "command": "cargo fmt --check",
+      "result": "passed"
+    },
+    {
+      "command": "cargo test --locked -p dakia-core --lib storage::storage_realtime_publication_tests:: -- --nocapture",
+      "result": "passed: 10 passed, 0 failed"
+    },
+    {
+      "command": "cargo test --locked -p dakia-core --lib storage::tests::matching_snapshot_identity_resumes_large_partial_replacement_outcomes -- --exact",
+      "result": "passed: 1 passed, 0 failed"
+    },
+    {
+      "command": "cargo test --locked -p dakia-core --lib storage::tests::uidnext_absent_resume_rebuilds_inventory_and_keeps_current_outcomes -- --exact",
+      "result": "passed: 1 passed, 0 failed"
+    },
+    {
+      "command": "cargo clippy --locked -p dakia-core --lib --tests -- -D warnings",
+      "result": "passed"
+    },
+    {
+      "command": "git diff --check -- crates/dakia-core/src/storage.rs crates/dakia-core/src/storage_realtime_publication_tests.rs",
+      "result": "passed"
+    }
+  ],
+  "review": {
+    "reviewer": "/root/backend_privacy/snapshot_race_review",
+    "result": "GO after implementation and after the partial-restage/recovery/convergence extension",
+    "findings": "The fence is inside BEGIN IMMEDIATE and precedes every committed-projection mutation. The test matches the two-Store interleaving and is sensitive to the prior false publication."
+  },
+  "source_provenance": {
+    "storage_rs_sha256_at_report_time": "42f72c84e1733e37074cac8ef3f6ae083bef3ce50b3573d51a75f4041e5ee790",
+    "storage_realtime_publication_tests_rs_sha256_at_report_time": "6640cd7ac23080553589c4b360a1ba97c3a872478fa11da152f29f62a51fb132",
+    "note": "The full storage.rs hash includes concurrent owners' edits. The scoped repair is the staged inventory count fence in finalize_mailbox_snapshot_inner."
+  },
+  "remaining_acceptance": {
+    "ownership": "This is a fail-closed integrity fence, not a cross-process generation lease. Concurrent actors can still cause bounded rejected finalizations and retries.",
+    "performance": "The indexed COUNT(*) is O(n) at finalization and should be measured in the 100,000 and 200,000-message performance lanes.",
+    "native": "A fresh fictional native replay is required before the retained G013 failure can be superseded."
+  }
+}

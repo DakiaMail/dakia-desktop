@@ -1,4 +1,5 @@
 import type { MailSummary, MailThread } from "./types";
+import { compareMailTimestamps } from "./mailTimestamp";
 
 export function groupMessages(messages: MailSummary[]): MailThread[] {
   const grouped = new Map<string, MailSummary[]>();
@@ -71,8 +72,10 @@ function compareMessagesByReceivedAt(
   left: MailSummary,
   right: MailSummary,
 ): number {
-  const receivedAtComparison =
-    receivedAtMilliseconds(left) - receivedAtMilliseconds(right);
+  const receivedAtComparison = compareMailTimestamps(
+    left.received_at,
+    right.received_at,
+  );
   if (receivedAtComparison) return receivedAtComparison;
 
   const messageIdComparison = compareStrings(
@@ -80,11 +83,6 @@ function compareMessagesByReceivedAt(
     right.message_id?.toLowerCase() ?? "",
   );
   return messageIdComparison || compareStrings(left.id, right.id);
-}
-
-function receivedAtMilliseconds(message: MailSummary): number {
-  const value = new Date(message.received_at).getTime();
-  return Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY;
 }
 
 function compareStrings(left: string, right: string): number {

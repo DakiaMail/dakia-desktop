@@ -1,5 +1,12 @@
 import { Loader } from "@mantine/core";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useTranslation } from "react-i18next";
 import {
   api,
@@ -21,9 +28,12 @@ import { showNativeMessage } from "./nativeFeedback";
 import { onNativeMenuAction } from "./nativeWindows";
 import {
   closeReaderWindow,
+  notifyReaderWindowReady,
   notifyReaderWindowMutated,
   notifyReaderWindowFailed,
   onReaderTarget,
+  hasNativeReaderSeedHandoff,
+  rememberReaderSeed,
   readReaderSeed,
   type ReaderWindowMutation,
   type ReaderWindowSeed,
@@ -55,6 +65,12 @@ function normalizeSenderAddress(address: string) {
   return address
     .trim()
     .replace(/[A-Z]/g, (character) => character.toLowerCase());
+}
+
+function unsubscribeTargetKey(
+  message: Pick<MailSummary, "account_id" | "id" | "mailbox_uid_validity">,
+) {
+  return `${message.account_id}\u0000${message.id}\u0000${message.mailbox_uid_validity ?? "none"}`;
 }
 
 function isSenderCleanupMessage(
@@ -101,26 +117,62 @@ export function ReaderWindowApp() {
   const [seed, setSeed] = useState<ReaderWindowSeed | undefined>(
     readReaderSeed,
   );
+  const [databaseSeedPending, setDatabaseSeedPending] = useState(
+    hasNativeReaderSeedHandoff,
+  );
   const [thread, setThread] = useState<MailThread>();
   const [accountEmail, setAccountEmail] = useState<string>();
-  const [loading, setLoading] = useState(Boolean(seed));
+  const [loading, setLoading] = useState(Boolean(seed) || databaseSeedPending);
   const [actionBusy, setActionBusy] = useState(false);
-  const [unsubscribeLoading, setUnsubscribeLoading] = useState(false);
+  const [unsubscribeLoadingTargets, setUnsubscribeLoadingTargets] = useState<
+    string[]
+  >([]);
   const [senderCleanupLoading, setSenderCleanupLoading] = useState(false);
   const [actionStatus, setActionStatus] = useState<ActionStatusState>();
   const [aiLoading, setAiLoading] = useState(false);
   const [aiResult, setAiResult] = useState<string>();
   const [aiConnected, setAiConnected] = useState(false);
   const loadGeneration = useRef(0);
+  const seedGeneration = useRef(0);
   const statusId = useRef(0);
   const senderCleanupInFlightRef = useRef(false);
+  const nativeHandoffFailed = useRef(false);
+  const nativeHandoffTimeout = useRef<number | undefined>(undefined);
+  const unsubscribeInFlightRef = useRef(new Map<string, number>());
   const actionBusyRef = useRef(false);
   const threadRef = useRef<MailThread | undefined>(undefined);
+  const focusedMessageRef = useRef<MailSummary | undefined>(undefined);
   const translate = useRef(t);
   translate.current = t;
   const aiSettings = useMemo(() => readAiSettings(), []);
   actionBusyRef.current = actionBusy;
   threadRef.current = thread;
+
+  const failNativeHandoff = () => {
+    if (nativeHandoffFailed.current) return;
+    nativeHandoffFailed.current = true;
+    if (nativeHandoffTimeout.current !== undefined) {
+      window.clearTimeout(nativeHandoffTimeout.current);
+      nativeHandoffTimeout.current = undefined;
+    }
+    void (async () => {
+      try {
+        await showNativeMessage(
+          translate.current("errors.generic"),
+          translate.current("reader.emptyBody"),
+          "warning",
+        );
+      } catch {
+        // Feedback failure must not strand an untrusted blank Reader window.
+      } finally {
+        try {
+          await closeReaderWindow();
+        } catch {
+          // The window may already be closing.
+        }
+      }
+    })();
+  };
 
   const loadThread = useCallback(async (nextSeed: ReaderWindowSeed) => {
     const generation = ++loadGeneration.current;
@@ -134,13 +186,24 @@ export function ReaderWindowApp() {
         readerApi.conversationForTarget(nextSeed.target),
       ]);
       if (generation !== loadGeneration.current) return;
-      setAccountEmail(
-        accounts.find((account) => account.id === nextSeed.target.accountId)
-          ?.email,
+      const account = accounts.find(
+        (item) => item.id === nextSeed.target.accountId,
       );
-      setThread(conversation ?? undefined);
-      if (conversation) document.title = conversation.latest.subject || "Dakia";
-      if (!conversation) {
+      const scopedConversation =
+        account &&
+        conversation &&
+        concreteThreadMessages(conversation).length > 0 &&
+        concreteThreadMessages(conversation).every(
+          (message) => message.account_id === nextSeed.target.accountId,
+        )
+          ? conversation
+          : undefined;
+      setAccountEmail(account?.email);
+      setThread(scopedConversation);
+      if (scopedConversation) {
+        document.title = scopedConversation.latest.subject || "Dakia";
+      }
+      if (!scopedConversation) {
         await showNativeMessage(
           translate.current("errors.generic"),
           translate.current("reader.emptyBody"),
@@ -156,12 +219,18 @@ export function ReaderWindowApp() {
           await closeReaderWindow();
         }
       } else {
-        const unread = concreteThreadMessages(conversation).filter(
+        const unread = concreteThreadMessages(scopedConversation).filter(
           (message) => !message.is_read,
         );
         if (unread.length) {
           void Promise.allSettled(
-            unread.map((message) => readerApi.setRead(message.id, true)),
+            unread.map((message) =>
+              readerApi.setRead(
+                message.id,
+                true,
+                message.mailbox_uid_validity ?? null,
+              ),
+            ),
           )
             .then(async (results) => {
               const succeeded = unread.filter(
@@ -188,7 +257,8 @@ export function ReaderWindowApp() {
               await notifyReaderWindowMutated({
                 accountId: nextSeed.target.accountId,
                 threadId:
-                  conversation.threadId ?? conversation.latest.thread_id,
+                  scopedConversation.threadId ??
+                  scopedConversation.latest.thread_id,
                 messageIds: succeeded.map((message) => message.id),
                 mutation: "read",
               });
@@ -227,17 +297,46 @@ export function ReaderWindowApp() {
     let dispose: () => void = () => undefined;
     let disposed = false;
     void onReaderTarget((nextSeed) => {
+      seedGeneration.current += 1;
       loadGeneration.current += 1;
+      focusedMessageRef.current = undefined;
       setActionStatus(undefined);
+      setDatabaseSeedPending(false);
+      rememberReaderSeed(nextSeed);
       setSeed(nextSeed);
-    }).then((unlisten) => {
-      if (disposed) unlisten();
-      else dispose = unlisten;
-    });
+    })
+      .then((unlisten) => {
+        if (disposed) {
+          unlisten();
+        } else {
+          dispose = unlisten;
+          if (hasNativeReaderSeedHandoff()) {
+            void notifyReaderWindowReady().catch(failNativeHandoff);
+          }
+        }
+      })
+      .catch(() => {
+        if (!disposed) failNativeHandoff();
+      });
     return () => {
       disposed = true;
       loadGeneration.current += 1;
       dispose();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!hasNativeReaderSeedHandoff()) return;
+    const timeout = window.setTimeout(() => {
+      if (!hasNativeReaderSeedHandoff()) return;
+      failNativeHandoff();
+    }, 5_000);
+    nativeHandoffTimeout.current = timeout;
+    return () => {
+      window.clearTimeout(timeout);
+      if (nativeHandoffTimeout.current === timeout) {
+        nativeHandoffTimeout.current = undefined;
+      }
     };
   }, []);
 
@@ -257,6 +356,13 @@ export function ReaderWindowApp() {
   const focusedMessage =
     messages.find((message) => message.id === seed?.focusedMessageId) ??
     messages.at(-1);
+  useLayoutEffect(() => {
+    focusedMessageRef.current = focusedMessage;
+  }, [focusedMessage]);
+  const unsubscribeLoading = Boolean(
+    focusedMessage &&
+    unsubscribeLoadingTargets.includes(unsubscribeTargetKey(focusedMessage)),
+  );
 
   const notifyMutation = useCallback(
     async (
@@ -296,6 +402,8 @@ export function ReaderWindowApp() {
             message.mailbox,
             message.uid,
             mutation,
+            message.id,
+            message.mailbox_uid_validity ?? null,
           ),
         ),
       );
@@ -336,7 +444,13 @@ export function ReaderWindowApp() {
     setActionBusy(true);
     try {
       const results = await Promise.allSettled(
-        changes.map((message) => readerApi.setRead(message.id, read)),
+        changes.map((message) =>
+          readerApi.setRead(
+            message.id,
+            read,
+            message.mailbox_uid_validity ?? null,
+          ),
+        ),
       );
       const succeeded = changes.filter(
         (_message, index) => results[index].status === "fulfilled",
@@ -376,6 +490,8 @@ export function ReaderWindowApp() {
         message.mailbox,
         message.uid,
         "delete",
+        message.id,
+        message.mailbox_uid_validity ?? null,
       );
       const remaining = removeConcreteMessage(thread, message);
       setThread(remaining);
@@ -392,7 +508,11 @@ export function ReaderWindowApp() {
     if (actionBusy) return;
     setActionBusy(true);
     try {
-      const updated = await readerApi.setStarred(message.id, starred);
+      const updated = await readerApi.setStarred(
+        message.id,
+        starred,
+        message.mailbox_uid_validity ?? null,
+      );
       setThread((current) =>
         current
           ? updateThread(current, (item) =>
@@ -417,7 +537,10 @@ export function ReaderWindowApp() {
       setAiResult(
         await readerApi.summarize(
           aiSettings,
-          messages.map((message) => message.id),
+          messages.map((message) => ({
+            messageId: message.id,
+            expectedUidValidity: message.mailbox_uid_validity ?? null,
+          })),
         ),
       );
     } catch (error) {
@@ -445,7 +568,10 @@ export function ReaderWindowApp() {
     );
     if (!recipients) return;
     try {
-      const content = await readerApi.content(message.id);
+      const content = await readerApi.content(
+        message.id,
+        message.mailbox_uid_validity ?? null,
+      );
       const history = formatReplyHistory({
         message,
         bodyText: content.body_text,
@@ -468,6 +594,10 @@ export function ReaderWindowApp() {
           .filter(Boolean)
           .join(" "),
         contextMessageIds: messages.map((item) => item.id),
+        contextMessageTargets: messages.map((item) => ({
+          messageId: item.id,
+          expectedUidValidity: item.mailbox_uid_validity ?? null,
+        })),
       });
     } catch (error) {
       showError(error, t("reader.replyErrorTitle"));
@@ -476,7 +606,10 @@ export function ReaderWindowApp() {
 
   const forward = async (message: MailSummary) => {
     try {
-      const content = await readerApi.content(message.id);
+      const content = await readerApi.content(
+        message.id,
+        message.mailbox_uid_validity ?? null,
+      );
       const history = formatForwardHistory(message, content, {
         originalMessage: t("reader.originalMessage"),
         from: t("composer.from"),
@@ -494,7 +627,18 @@ export function ReaderWindowApp() {
         )
           ? message.id
           : undefined,
+        forwardMessageUidValidity: content.attachments.some(
+          (attachment) => attachment.presentation !== "embedded",
+        )
+          ? (message.mailbox_uid_validity ?? null)
+          : undefined,
         contextMessageIds: [message.id],
+        contextMessageTargets: [
+          {
+            messageId: message.id,
+            expectedUidValidity: message.mailbox_uid_validity ?? null,
+          },
+        ],
       });
     } catch (error) {
       showError(error, t("reader.forwardErrorTitle"));
@@ -503,7 +647,10 @@ export function ReaderWindowApp() {
 
   const sendAgain = async (message: MailSummary) => {
     try {
-      const content = await readerApi.content(message.id);
+      const content = await readerApi.content(
+        message.id,
+        message.mailbox_uid_validity ?? null,
+      );
       openComposeWindow({
         accountId: message.account_id,
         to: message.to_addresses,
@@ -516,6 +663,11 @@ export function ReaderWindowApp() {
           (attachment) => attachment.presentation !== "embedded",
         )
           ? message.id
+          : undefined,
+        forwardMessageUidValidity: content.attachments.some(
+          (attachment) => attachment.presentation !== "embedded",
+        )
+          ? (message.mailbox_uid_validity ?? null)
           : undefined,
       });
     } catch (error) {
@@ -549,7 +701,11 @@ export function ReaderWindowApp() {
     if (!refreshed) await closeReaderWindow();
   };
 
-  const trashMessagesFromSender = async (target: SenderCleanupTarget) => {
+  const trashMessagesFromSender = async (
+    target: SenderCleanupTarget,
+    expectedGeneration: number,
+  ) => {
+    if (loadGeneration.current !== expectedGeneration) return;
     const currentThread = threadRef.current;
     if (
       senderCleanupInFlightRef.current ||
@@ -618,16 +774,28 @@ export function ReaderWindowApp() {
   };
 
   const unsubscribe = async (message: MailSummary) => {
-    if (unsubscribeLoading) return;
-    setUnsubscribeLoading(true);
+    const requestGeneration = loadGeneration.current;
+    const target = unsubscribeTargetKey(message);
+    const isCurrentTarget = () =>
+      focusedMessageRef.current !== undefined &&
+      unsubscribeTargetKey(focusedMessageRef.current) === target;
+    if (unsubscribeInFlightRef.current.has(target)) return;
+    unsubscribeInFlightRef.current.set(target, requestGeneration);
+    setUnsubscribeLoadingTargets((current) =>
+      current.includes(target) ? current : [...current, target],
+    );
     try {
       let result: Awaited<ReturnType<typeof readerApi.unsubscribe>>;
       try {
-        result = await readerApi.unsubscribe(message.id);
+        result = await readerApi.unsubscribe(
+          message.id,
+          message.mailbox_uid_validity ?? null,
+        );
       } catch (error) {
-        showError(error);
+        if (isCurrentTarget()) showError(error);
         return;
       }
+      if (!isCurrentTarget()) return;
       try {
         await notifyMutation("unsubscribe", [message.id]);
       } catch (error) {
@@ -636,6 +804,8 @@ export function ReaderWindowApp() {
           error,
         );
       }
+      if (!isCurrentTarget()) return;
+      const completionGeneration = loadGeneration.current;
       showStatus(
         t(
           result.kind === "opened_web"
@@ -647,13 +817,21 @@ export function ReaderWindowApp() {
           ? {
               label: t("feedback.unsubscribeCleanupAction"),
               onAction: () =>
-                void trashMessagesFromSender(result.cleanupTarget!),
+                void trashMessagesFromSender(
+                  result.cleanupTarget!,
+                  completionGeneration,
+                ),
               disabled: senderCleanupLoading,
             }
           : undefined,
       );
     } finally {
-      setUnsubscribeLoading(false);
+      if (unsubscribeInFlightRef.current.get(target) === requestGeneration) {
+        unsubscribeInFlightRef.current.delete(target);
+        setUnsubscribeLoadingTargets((current) =>
+          current.filter((currentTarget) => currentTarget !== target),
+        );
+      }
     }
   };
 

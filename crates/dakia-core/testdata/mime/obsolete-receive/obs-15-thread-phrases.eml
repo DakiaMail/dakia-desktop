@@ -1,0 +1,13 @@
+X-Dakia-Corpus-Case: obs-15-thread-phrases
+X-Dakia-Corpus-Source: RFC 5322 section 4.5.4; fictional
+Date: Tue, 28 Jul 2026 12:01:00 +0000
+From: Sender <sender@example.test>
+To: Reader <reader@example.test>
+Subject: Fictional obsolete syntax
+Message-ID: <obs-obs-15-thread-phrases@example.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+In-Reply-To : old discussion <parent@example.test>
+References	: intro <root@example.test> trailing <parent@example.test>
+
+Fictional body obs-15-thread-phrases.

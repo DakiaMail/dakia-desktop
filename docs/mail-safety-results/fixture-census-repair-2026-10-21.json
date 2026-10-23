@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T15:18:34.297103+00:00",
+  "lane": "fixture-governance-script-regression",
+  "status": "passed-focused",
+  "change": "Relative to the immediately preceding 14081b6c dirty-worktree snapshot, the census repair changed the two stale count assertions from 32 total/28 EML to 80 total/76 EML. Four HTML fixtures and all other test bytes were unchanged by this repair. The broader programme diff from committed HEAD includes earlier fixture test changes.",
+  "priorFailure": "docs/mail-safety-results/remaining-gap-closure-source-fixture-census-failure-2026-10-21.json",
+  "results": {
+    "scriptTestsPassed": 239,
+    "failed": 0,
+    "skipped": 0,
+    "log": {
+      "path": "/private/tmp/dakia-final-complete-node-suites-20261021.log",
+      "sha256": "e719d035da74484fcd65945dd93b140b8ce70d693c5a6c17bbfc101945da2238",
+      "bytes": 50716
+    }
+  },
+  "limitations": [
+    "This focused complete script suite is separate from the new three-run unchanged-source baseline."
+  ],
+  "workingTree": "modified",
+  "focusedSourceDigest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+  "inputs": {
+    "scripts/validate-realistic-fixtures.node-test.mjs": "cc7f087a1094d8b55f710073edc6e2a83ff0e30c58950d91f820f1fd214c172e",
+    "scripts/validate-realistic-fixtures.mjs": "91786e38d7feedc507cc61cc7340f835d8ad9ffd6fda2f67ac827bb230db8c6f"
+  }
+}

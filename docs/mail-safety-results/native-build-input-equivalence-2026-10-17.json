@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "nativeSourceManifest": "ad502e348cd774298b68d7a00f0816cc8914b41a592acca0f54641d23abf6130",
+  "scope": "All recorded source inputs except the explicitly identified frontend test file. No production source or build configuration changed.",
+  "excludedNonBuildInput": "apps/desktop/src/ComposeApp.test.tsx",
+  "exclusionReason": "Vitest test file is not imported by the native frontend application entry point.",
+  "algorithm": "sha256-path-and-content-manifest",
+  "fileCount": 663,
+  "before": "43ee65f7d4450ca2cd4d543105e48c44782fb45fb4bbcb2d4caea541f1551325",
+  "after": "43ee65f7d4450ca2cd4d543105e48c44782fb45fb4bbcb2d4caea541f1551325",
+  "identical": true,
+  "testFileBeforeSha256": "6a455b63b765c487d8f0b8097d0d7a250697e5bc880417873bda2a72d34684ec",
+  "testFileAfterSha256": "3f63ff4460f5c2ee86f05493f36909542a2131e92e6542cfbcdf330a6468311c",
+  "nativeExecutableSha256": "9fd8c432d1bc78b89229689f391641416c0b5d9c771be21b8fd9e544b444100a",
+  "afterSourceManifest": "6777974a12f401ab5d8fbb727d4fdf3c993e9ebeb1839848571ea44ab2066ea0",
+  "deepSourceManifest": "ad502e348cd774298b68d7a00f0816cc8914b41a592acca0f54641d23abf6130",
+  "testCorrection": "Wait for the editor body initialization effect before checking restored text. Production editor behavior is unchanged."
+}

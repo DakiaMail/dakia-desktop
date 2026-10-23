@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const root = resolve(new URL("..", import.meta.url).pathname);
+const root = fileURLToPath(new URL("..", import.meta.url));
 
 export function nextPatch(version) {
   const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
@@ -125,7 +126,10 @@ export function parseCliArgs(args) {
   return { base: positional[0], dryRun };
 }
 
-if (process.argv[1] === new URL(import.meta.url).pathname) {
+if (
+  process.argv[1] &&
+  realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))
+) {
   const { base, dryRun } = parseCliArgs(process.argv.slice(2));
   const currentVersion = JSON.parse(
     readFileSync(resolve(root, "package.json"), "utf8"),

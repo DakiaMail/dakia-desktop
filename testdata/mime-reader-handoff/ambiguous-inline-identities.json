@@ -1,0 +1,35 @@
+{
+  "fixtureId": "ambiguous-inline-identities",
+  "readerMessage": {
+    "subject": "Synthetic ambiguous inline identities",
+    "snippet": "Fictional resources",
+    "hasAttachments": true
+  },
+  "messageContent": {
+    "body_text": "Fictional resources\n",
+    "body_html": "<p>Fictional resources</p><img src=\"cid:shared@example.test\"><img src=\"assets/shared.png\">",
+    "unsubscribe_kind": null,
+    "attachments": [
+      {
+        "id": "11111111-1111-4111-8111-111111111111:INBOX:42:mime-v1:2",
+        "message_id": "11111111-1111-4111-8111-111111111111:INBOX:42",
+        "filename": "logo.png",
+        "mime_type": "image/png",
+        "size_bytes": 5,
+        "is_inline": true,
+        "presentation": "downloadable",
+        "is_potentially_unsafe": false
+      },
+      {
+        "id": "11111111-1111-4111-8111-111111111111:INBOX:42:mime-v1:3",
+        "message_id": "11111111-1111-4111-8111-111111111111:INBOX:42",
+        "filename": "source.pdf",
+        "mime_type": "application/pdf",
+        "size_bytes": 3,
+        "is_inline": false,
+        "presentation": "downloadable",
+        "is_potentially_unsafe": false
+      }
+    ]
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T14:54:06Z",
+  "status": "passed-focused-source-native-replay-pending",
+  "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "scope": "Frontend display, reply and forward citations, and deterministic thread ordering for core-validated RFC 3339 received_at values. This report does not mutate stored timestamps or establish native WebKit evidence.",
+  "beforeFix": {
+    "command": "npm exec vitest run apps/desktop/src/components/Reader.test.tsx apps/desktop/src/components/MailList.test.tsx",
+    "exitCode": 1,
+    "result": "91 passed, 4 failed",
+    "observed": [
+      "Mounted Reader with 2016-12-31T23:59:60+00:00 threw RangeError: Invalid time value.",
+      "Mounted MailList with the same value threw RangeError: Invalid time value.",
+      "Mounted Reader and MailList also threw RangeError: Invalid time value for malformed 2016-02-30T23:59:60+00:00."
+    ],
+    "rawLog": {
+      "status": "not-retained",
+      "reason": "The pre-fix focused result was captured in the active task transcript before the source edit; no standalone file or hash was created. This record preserves the exact command, exit status, counts, failing test boundaries, and exception text rather than inventing a retrospective raw-log hash."
+    }
+  },
+  "behavior": [
+    "Accept only strict RFC 3339 shape, calendar fields, offset fields, a UTC field round trip, and a :60 that maps to the final second of an end-of-month UTC day before displaying a timestamp.",
+    "Map a valid :60 leap second to the final JavaScript-representable millisecond of that minute for display only.",
+    "Keep received_at unchanged in message, reply, forward, and thread data.",
+    "Display malformed or missing timestamps as Unknown date without crashing Reader or MailList.",
+    "Order ordinary 23:59:59.999 before 23:59:60 before fractional :60 values before the following minute, even though every leap-second display representation is 23:59:59.999.",
+    "Keep malformed timestamp rows in the pre-existing lower bucket and resolve their order through the existing Message-ID then local-ID tie policy."
+  ],
+  "verification": [
+    {
+      "command": "npm exec vitest run apps/desktop/src/mailTimestamp.test.ts apps/desktop/src/replyHistory.test.ts apps/desktop/src/forward.test.ts apps/desktop/src/threads.test.ts apps/desktop/src/threadsProperties.test.ts apps/desktop/src/components/Reader.test.tsx apps/desktop/src/components/MailList.test.tsx",
+      "result": "7 files, 115 passed, 0 failed"
+    },
+    {
+      "command": "npm run typecheck",
+      "result": "passed"
+    },
+    {
+      "command": "npx prettier --check [scoped timestamp files] && git diff --check -- [scoped timestamp files]",
+      "result": "passed"
+    }
+  ],
+  "positiveControls": [
+    "2016-12-31T23:59:60+00:00 displays from 2016-12-31T23:59:59.999Z.",
+    "2017-01-01T00:59:60+01:00 crosses its offset boundary and maps to the same valid UTC leap-second position.",
+    "2026-03-31T23:59:60+00:00 is accepted as a structurally valid end-of-month UTC leap-second position.",
+    "2026-04-10T12:34:60Z is rejected because it is not an end-of-month UTC leap-second position.",
+    "2024-02-29T12:34:56.789+05:30 preserves its ordinary offset semantics.",
+    "3001-01-01T00:00:00+00:00 remains a valid ordinary timestamp."
+  ],
+  "independentReview": {
+    "reviewer": "native_fixes_review",
+    "status": "approved",
+    "scope": "Strict parsing, end-of-month leap-second positioning, fractional ordering, malformed-date bucket semantics, raw-field preservation, and test sensitivity",
+    "remainingMaterialFinding": "none in the frontend source slice"
+  },
+  "files": [
+    "apps/desktop/src/mailTimestamp.ts",
+    "apps/desktop/src/mailTimestamp.test.ts",
+    "apps/desktop/src/components/Reader.tsx",
+    "apps/desktop/src/components/Reader.test.tsx",
+    "apps/desktop/src/components/MailList.tsx",
+    "apps/desktop/src/components/MailList.test.tsx",
+    "apps/desktop/src/replyHistory.ts",
+    "apps/desktop/src/replyHistory.test.ts",
+    "apps/desktop/src/forward.ts",
+    "apps/desktop/src/forward.test.ts",
+    "apps/desktop/src/threads.ts",
+    "apps/desktop/src/threads.test.ts"
+  ],
+  "limitations": [
+    "The parser validates RFC 3339 syntax, calendar/offset consistency, and an end-of-month UTC position. It does not maintain a historical or future IERS leap-second schedule.",
+    "Native WebKit rendering of the fictional SMTP leap-second fixture is pending the parent native sequence after G013 UID 5 and Compose UID 6.",
+    "This focused source evidence does not replace the coordinated full baseline, provider, packaged-app, or native acceptance lanes."
+  ]
+}

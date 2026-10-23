@@ -1,0 +1,464 @@
+{
+  "schemaVersion": 1,
+  "recordedOn": "2026-10-21",
+  "lane": "focused source, fictional localhost TLS/SMTP and SQLite; no native or provider acceptance",
+  "commit": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "workingTree": "Modified; relevant execution source is identified by before/after snapshot hashes, not commit alone.",
+  "environment": {
+    "platform": "Darwin",
+    "architecture": "arm64",
+    "rustc": "rustc 1.89.0 (29483883e 2025-08-04)"
+  },
+  "scope": {
+    "rfc": "https://www.rfc-editor.org/rfc/rfc5322.html#section-4",
+    "requirementId": "MSR-5322-obsolete-input",
+    "rfcSyntaxFamilies": 19,
+    "fixtureCount": 48,
+    "testCount": 51,
+    "includesAdditionalControls": "Seven route-boundary cases and one modern quoted-local identity case are controls around the finite RFC family corpus.",
+    "fixtureIndex": "crates/dakia-core/testdata/mime/obsolete-receive/cases.json",
+    "fixtureManifest": "testdata/realistic-fixtures.manifest.json",
+    "governance": "All 80 registered realistic fixtures validated."
+  },
+  "execution": [
+    {
+      "mode": "Verified unique empty target, actual mail-parser and dakia-core compilation",
+      "passed": 49,
+      "failed": 2,
+      "ignored": 0,
+      "sourceSnapshotUnchanged": true,
+      "sourceSnapshotSha256": "ca255468ff503d7d7dbf97bbbf468c4369a8337554f6dc61643e8a2435989bb4",
+      "logSha256": "368eb473e4cd8459dc04bafdad2d4633abd829006a39ae360046fe1089a84d44",
+      "failureMeaning": "Two strict route controls exposed bare-versus-angle serialization policy mismatch; no identity loss. A reviewed core-only angle-preservation fix followed.",
+      "privateEvidenceDirectory": "/private/tmp/dakia-obsolete-acceptance-q5sugf6x"
+    },
+    {
+      "mode": "Warm reuse after reviewed core-only representation fix; dakia-core recompiled, vendored sources matched preceding actual fresh compilation",
+      "passed": 51,
+      "failed": 0,
+      "ignored": 0,
+      "sourceSnapshotUnchanged": true,
+      "sourceSnapshotSha256": "6d28b4008597ba2e3206632378309adc69215ff253479f12f7af303fda365815",
+      "logSha256": "e24de00e98d7e37593bccfe1b2879efc92514d4323c7f236ba706cc9eda79c03",
+      "vendoredSourcesMatchPriorActualFreshCompile": true,
+      "privateEvidenceDirectory": "/private/tmp/dakia-obsolete-acceptance-q5sugf6x/warm-acceptance-1"
+    }
+  ],
+  "sourceHashesAtPassingRun": {
+    "Cargo.toml": "a101a1b7d6ef9e1015f15d93fc722a927f38a60cf5fe85c0fc494d41d95561eb",
+    "Cargo.lock": "78e7136d6ff7a477e2317feb99a976a75376b1283a331babaca26b83c27f58b2",
+    "crates/dakia-core/src/mail.rs": "1e8a7af304403ca03bb2bfec28db035708bdf8e96109507fd88e11974b97598a",
+    "crates/dakia-core/src/mail/tests/obsolete_receive_conformance_tests.rs": "47fcefbe9b71eb9e5d55ef1303428b37644abab9857e483bc8e617ecb0311999",
+    "crates/dakia-core/testdata/mime/obsolete-receive/cases.json": "b3cdfec0b36a7dd23e6e4f988e95b12f011f37f90d039a10b71a67a61d7985a8",
+    "vendor/mail-parser/src/parsers/fields/address.rs": "1057af5125e263c8c8447d2ef437dc0dab1a15d4009e3d7668f015f8f62e657b",
+    "vendor/mail-parser/src/parsers/fields/date.rs": "875ceea21fd390b9aa26d06803970ae409ef3a63b8876911ab6fde93639daba4",
+    "vendor/mail-parser/src/parsers/fields/id.rs": "b2f6dbb0c6d7f452dfee46ae2ce91a90ec8a4b81d5743ecf048ae02261156dbd"
+  },
+  "assertedBoundaries": [
+    "Complete, header and catalogue production parsing with independent semantic expectations and conflicting provider INTERNALDATE control.",
+    "File-backed Store commit, close/reopen and exact cached core message projection.",
+    "MailService raw export over actual loopback TLS retains all 48 sources byte-for-byte.",
+    "Production MIME builder emits modern reply headers from selected parsed identities; raw Date tokens require four-digit year and numeric zone.",
+    "Exact CTL-domain recipient rejected by the production builder; public send returns NotSubmitted and opens no SMTP socket. Same endpoint and trust configuration passes auth-only EHLO/AUTH/QUIT positive control."
+  ],
+  "intentionalTolerances": [
+    "Literal CTL-bearing source text is preserved in core metadata/body/cache without prescribing visible glyphs or UI normalization.",
+    "Military A uses the existing -0000-equivalent UTC instant; unknown-offset provenance is not represented in MailSummary.",
+    "Ambiguous quoted-local source routes remain literal instead of risking identity changes. These cases prove preservation only, not their own modern-send refusal. The exact send-refusal test uses the CTL-bearing domain."
+  ],
+  "caseIndex": [
+    {
+      "id": "obs-01-comment-qtext",
+      "family": "OBS-01",
+      "rfcSection": "4.1",
+      "test": "obsolete_receive_obs_01_comment_qtext",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Intentional core/source-text preservation tolerance. Exact control-bearing text survives parsing and Store/cache reopen; this does not prescribe visible control glyphs or prove frontend/Tauri/WebKit/clipboard/search rendering. Actionable CTL-bearing addresses must be rejected before SMTP rather than cleaned into another identity."
+    },
+    {
+      "id": "obs-01-unstructured",
+      "family": "OBS-01",
+      "rfcSection": "4.1",
+      "test": "obsolete_receive_obs_01_unstructured",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Intentional core/source-text preservation tolerance. Exact control-bearing text survives parsing and Store/cache reopen; this does not prescribe visible control glyphs or prove frontend/Tauri/WebKit/clipboard/search rendering. Actionable CTL-bearing addresses must be rejected before SMTP rather than cleaned into another identity."
+    },
+    {
+      "id": "obs-02-body-controls",
+      "family": "OBS-02",
+      "rfcSection": "4.1",
+      "test": "obsolete_receive_obs_02_body_controls",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Intentional core/source-text preservation tolerance. Exact control-bearing text survives parsing and Store/cache reopen; this does not prescribe visible control glyphs or prove frontend/Tauri/WebKit/clipboard/search rendering. Actionable CTL-bearing addresses must be rejected before SMTP rather than cleaned into another identity."
+    },
+    {
+      "id": "obs-02-mixed-header-separators",
+      "family": "OBS-02",
+      "rfcSection": "4.1",
+      "test": "obsolete_receive_obs_02_mixed_header_separators",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Intentional core/source-text preservation tolerance. Exact control-bearing text survives parsing and Store/cache reopen; this does not prescribe visible control glyphs or prove frontend/Tauri/WebKit/clipboard/search rendering. Actionable CTL-bearing addresses must be rejected before SMTP rather than cleaned into another identity."
+    },
+    {
+      "id": "obs-03-dotted-display",
+      "family": "OBS-03",
+      "rfcSection": "4.1",
+      "test": "obsolete_receive_obs_03_dotted_display",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Sender address stays exact and display tokens do not become addr-spec segments."
+    },
+    {
+      "id": "obs-03-keyword-nulls",
+      "family": "OBS-03",
+      "rfcSection": "4.1",
+      "test": "obsolete_receive_obs_03_keyword_nulls",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Mail body remains readable and original header remains retrievable. No invented Keywords UI is required."
+    },
+    {
+      "id": "obs-04-whitespace-only-fold",
+      "family": "OBS-04",
+      "rfcSection": "4.2",
+      "test": "obsolete_priority_obs_04_whitespace_only_fold",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Header does not end at the whitespace-only continuation; subject contains alpha then omega without exposing continuation as body."
+    },
+    {
+      "id": "obs-05-year-thresholds-00",
+      "family": "OBS-05",
+      "rfcSection": "4.3",
+      "test": "obsolete_priority_obs_05_year_thresholds_00",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Each Date yields its listed year at midnight UTC in all metadata/complete paths; a supplied conflicting IMAP INTERNALDATE must not hide incorrect Date interpretation."
+    },
+    {
+      "id": "obs-05-year-thresholds-49",
+      "family": "OBS-05",
+      "rfcSection": "4.3",
+      "test": "obsolete_priority_obs_05_year_thresholds_49",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Each Date yields its listed year at midnight UTC in all metadata/complete paths; a supplied conflicting IMAP INTERNALDATE must not hide incorrect Date interpretation."
+    },
+    {
+      "id": "obs-05-year-thresholds-50",
+      "family": "OBS-05",
+      "rfcSection": "4.3",
+      "test": "obsolete_priority_obs_05_year_thresholds_50",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Each Date yields its listed year at midnight UTC in all metadata/complete paths; a supplied conflicting IMAP INTERNALDATE must not hide incorrect Date interpretation."
+    },
+    {
+      "id": "obs-05-year-thresholds-99",
+      "family": "OBS-05",
+      "rfcSection": "4.3",
+      "test": "obsolete_priority_obs_05_year_thresholds_99",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Each Date yields its listed year at midnight UTC in all metadata/complete paths; a supplied conflicting IMAP INTERNALDATE must not hide incorrect Date interpretation."
+    },
+    {
+      "id": "obs-05-year-thresholds-123",
+      "family": "OBS-05",
+      "rfcSection": "4.3",
+      "test": "obsolete_priority_obs_05_year_thresholds_123",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Each Date yields its listed year at midnight UTC in all metadata/complete paths; a supplied conflicting IMAP INTERNALDATE must not hide incorrect Date interpretation."
+    },
+    {
+      "id": "obs-05-date-token-comments",
+      "family": "OBS-05",
+      "rfcSection": "4.3",
+      "test": "obsolete_receive_obs_05_date_token_comments",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Interpret the intended 2026-01-01T00:00:00Z rather than silently using receipt time."
+    },
+    {
+      "id": "obs-06-zone-matrix-ut",
+      "family": "OBS-06",
+      "rfcSection": "4.3",
+      "test": "obsolete_receive_obs_06_zone_matrix_ut",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed."
+    },
+    {
+      "id": "obs-06-zone-matrix-gmt",
+      "family": "OBS-06",
+      "rfcSection": "4.3",
+      "test": "obsolete_receive_obs_06_zone_matrix_gmt",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed."
+    },
+    {
+      "id": "obs-06-zone-matrix-est",
+      "family": "OBS-06",
+      "rfcSection": "4.3",
+      "test": "obsolete_receive_obs_06_zone_matrix_est",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed."
+    },
+    {
+      "id": "obs-06-zone-matrix-edt",
+      "family": "OBS-06",
+      "rfcSection": "4.3",
+      "test": "obsolete_receive_obs_06_zone_matrix_edt",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed."
+    },
+    {
+      "id": "obs-06-zone-matrix-cst",
+      "family": "OBS-06",
+      "rfcSection": "4.3",
+      "test": "obsolete_receive_obs_06_zone_matrix_cst",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed."
+    },
+    {
+      "id": "obs-06-zone-matrix-cdt",
+      "family": "OBS-06",
+      "rfcSection": "4.3",
+      "test": "obsolete_receive_obs_06_zone_matrix_cdt",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed."
+    },
+    {
+      "id": "obs-06-zone-matrix-mst",
+      "family": "OBS-06",
+      "rfcSection": "4.3",
+      "test": "obsolete_receive_obs_06_zone_matrix_mst",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed."
+    },
+    {
+      "id": "obs-06-zone-matrix-mdt",
+      "family": "OBS-06",
+      "rfcSection": "4.3",
+      "test": "obsolete_receive_obs_06_zone_matrix_mdt",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed."
+    },
+    {
+      "id": "obs-06-zone-matrix-pst",
+      "family": "OBS-06",
+      "rfcSection": "4.3",
+      "test": "obsolete_receive_obs_06_zone_matrix_pst",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed."
+    },
+    {
+      "id": "obs-06-zone-matrix-pdt",
+      "family": "OBS-06",
+      "rfcSection": "4.3",
+      "test": "obsolete_receive_obs_06_zone_matrix_pdt",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed."
+    },
+    {
+      "id": "obs-06-zone-matrix-a",
+      "family": "OBS-06",
+      "rfcSection": "4.3",
+      "test": "obsolete_receive_obs_06_zone_matrix_a",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Assert listed UTC instants; A uses unknown-local-offset semantics, not the historic +0100 assumption. Preserve the distinction if any local-zone label is displayed."
+    },
+    {
+      "id": "obs-07-direct-route",
+      "family": "OBS-07",
+      "rfcSection": "4.4",
+      "test": "obsolete_priority_obs_07_direct_route",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "The terminal sender/reader mailboxes remain exact; route domains are not recipients, identities or destinations. Reply preparation must not reintroduce route syntax."
+    },
+    {
+      "id": "obs-08-cfws-dot",
+      "family": "OBS-08",
+      "rfcSection": "4.4",
+      "test": "obsolete_receive_obs_08_cfws_dot",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Interpret sender.part@example.test without changing meaningful local-part bytes; no encoded-word decoding inside identity."
+    },
+    {
+      "id": "obs-08-quoted-word-dot",
+      "family": "OBS-08",
+      "rfcSection": "4.4",
+      "test": "obsolete_receive_obs_08_quoted_word_dot",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Preserve the literal quoted local-part identity and produce a valid reply target; never collapse it into another mailbox. Exact serialization oracle must account for meaningful quoted whitespace."
+    },
+    {
+      "id": "obs-09-null-recipients",
+      "family": "OBS-09",
+      "rfcSection": "4.4",
+      "test": "obsolete_receive_obs_09_null_recipients",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Keep exactly the two real To mailboxes and an empty group; no phantom recipient or parse failure. Reader Reply All retains the real recipients only."
+    },
+    {
+      "id": "obs-10-domain-escape",
+      "family": "OBS-10",
+      "rfcSection": "4.4",
+      "test": "obsolete_receive_obs_10_domain_escape",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Keep the domain-literal address distinct and literal; do not reinterpret it as an application URL, local-file path or command."
+    },
+    {
+      "id": "obs-10-domain-control",
+      "family": "OBS-10",
+      "rfcSection": "4.4",
+      "test": "obsolete_receive_obs_10_domain_control",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Intentional core/source-text preservation tolerance. Exact control-bearing text survives parsing and Store/cache reopen; this does not prescribe visible control glyphs or prove frontend/Tauri/WebKit/clipboard/search rendering. Actionable CTL-bearing addresses must be rejected before SMTP rather than cleaned into another identity."
+    },
+    {
+      "id": "obs-11-reorder-and-wsp",
+      "family": "OBS-11",
+      "rfcSection": "4.5",
+      "test": "obsolete_receive_obs_11_reorder_and_wsp",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Same exposed metadata/body across full/header/catalogue and reopen despite order and whitespace. Singleton ambiguity uses the documented deterministic policy."
+    },
+    {
+      "id": "obs-12-date-wsp",
+      "family": "OBS-12",
+      "rfcSection": "4.5.1",
+      "test": "obsolete_receive_obs_12_date_wsp",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Use the valid historical message date, even with a conflicting provider INTERNALDATE; no invented now()."
+    },
+    {
+      "id": "obs-13-originator-fields",
+      "family": "OBS-13",
+      "rfcSection": "4.5.2",
+      "test": "obsolete_receive_obs_13_originator_fields",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Expose original sender and explicit Reply-To correctly. Sender/delegate must not replace From or silently retarget reply. Raw unknown fields remain retrievable."
+    },
+    {
+      "id": "obs-14-repeat-destinations",
+      "family": "OBS-14",
+      "rfcSection": "4.5.3",
+      "test": "obsolete_priority_obs_14_repeat_destinations",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Preserve both To and both Cc mailboxes in order for Reader/Reply All; empty Bcc members add nobody. If deviating from the concatenation recommendation, document and test the deviation explicitly."
+    },
+    {
+      "id": "obs-15-thread-phrases",
+      "family": "OBS-15",
+      "rfcSection": "4.5.4",
+      "test": "obsolete_priority_obs_15_thread_phrases",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Only the two real identifiers contribute to threading; words are ignored, with account isolation and no cycles."
+    },
+    {
+      "id": "obs-15-thread-cfws",
+      "family": "OBS-15",
+      "rfcSection": "4.5.4",
+      "test": "obsolete_priority_obs_15_thread_cfws",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Compare the semantic ID left.part@example.test without treating comments as identity bytes. Preserve original source, and never apply encoded-word decoding while normalizing CFWS."
+    },
+    {
+      "id": "obs-16-info-wsp",
+      "family": "OBS-16",
+      "rfcSection": "4.5.5",
+      "test": "obsolete_receive_obs_16_info_wsp",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Reader displays the correct Subject/body; optional informational headers neither override identity nor trigger actions. Original fields remain available via raw fetch."
+    },
+    {
+      "id": "obs-17-resent-block",
+      "family": "OBS-17",
+      "rfcSection": "4.5.6",
+      "test": "obsolete_receive_obs_17_resent_block",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "A prepended resent block does not replace original From, Reply-To, Date or conversation identity; preserve original header source. No sending occurs merely because these fields exist."
+    },
+    {
+      "id": "obs-18-trace-wsp",
+      "family": "OBS-18",
+      "rfcSection": "4.5.7",
+      "test": "obsolete_receive_obs_18_trace_wsp",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Trace headers do not override Date/From or become reply destinations; body remains readable and raw trace bytes retrievable."
+    },
+    {
+      "id": "obs-19-optional-wsp",
+      "family": "OBS-19",
+      "rfcSection": "4.5.8",
+      "test": "obsolete_receive_obs_19_optional_wsp",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Unknown header does not reject the message, alter known identity or create a privileged action. Raw fetch/export retains the uninterpreted bytes."
+    },
+    {
+      "id": "quoted-local-encoded-looking-identity",
+      "family": "ADDR-QUOTED-LOCAL-ENCODED-LITERAL",
+      "rfcSection": "3.4.1",
+      "test": "obsolete_adjacent_quoted_local_identity_stays_literal",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Equivalent quoting or preserved CFWS must not decode or alter literal local-part bytes."
+    },
+    {
+      "id": "obs-route-control-group",
+      "family": "OBS-07-ROUTE-BOUNDARY",
+      "rfcSection": "4.4",
+      "test": "obsolete_route_control_group",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Strip only a proven valid direct route span; preserve surrounding group/address syntax and ambiguous/invalid terminal identity exactly. This is a bounded Dakia compatibility policy, not universal obsolete grammar conformance."
+    },
+    {
+      "id": "obs-route-control-null-relays",
+      "family": "OBS-07-ROUTE-BOUNDARY",
+      "rfcSection": "4.4",
+      "test": "obsolete_route_control_null_relays",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Strip only a proven valid direct route span; preserve surrounding group/address syntax and ambiguous/invalid terminal identity exactly. This is a bounded Dakia compatibility policy, not universal obsolete grammar conformance."
+    },
+    {
+      "id": "obs-route-control-invalid-domain",
+      "family": "OBS-07-ROUTE-BOUNDARY",
+      "rfcSection": "4.4",
+      "test": "obsolete_route_control_invalid_domain",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Strip only a proven valid direct route span; preserve surrounding group/address syntax and ambiguous/invalid terminal identity exactly. This is a bounded Dakia compatibility policy, not universal obsolete grammar conformance."
+    },
+    {
+      "id": "obs-route-control-colon-lookalike",
+      "family": "OBS-07-ROUTE-BOUNDARY",
+      "rfcSection": "4.4",
+      "test": "obsolete_route_control_colon_lookalike",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Strip only a proven valid direct route span; preserve surrounding group/address syntax and ambiguous/invalid terminal identity exactly. This is a bounded Dakia compatibility policy, not universal obsolete grammar conformance."
+    },
+    {
+      "id": "obs-route-control-quoted-local",
+      "family": "OBS-07-ROUTE-BOUNDARY",
+      "rfcSection": "4.4",
+      "test": "obsolete_route_control_quoted_local",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Strip only a proven valid direct route span; preserve surrounding group/address syntax and ambiguous/invalid terminal identity exactly. This is a bounded Dakia compatibility policy, not universal obsolete grammar conformance."
+    },
+    {
+      "id": "obs-route-control-comments",
+      "family": "OBS-07-ROUTE-BOUNDARY",
+      "rfcSection": "4.4",
+      "test": "obsolete_route_control_comments",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Strip only a proven valid direct route span; preserve surrounding group/address syntax and ambiguous/invalid terminal identity exactly. This is a bounded Dakia compatibility policy, not universal obsolete grammar conformance."
+    },
+    {
+      "id": "obs-route-control-encoded-local",
+      "family": "OBS-07-ROUTE-BOUNDARY",
+      "rfcSection": "4.4",
+      "test": "obsolete_route_control_encoded_local",
+      "evidenceStatus": "passing finite source assertion",
+      "policy": "Strip only a proven valid direct route span; preserve surrounding group/address syntax and ambiguous/invalid terminal identity exactly. This is a bounded Dakia compatibility policy, not universal obsolete grammar conformance."
+    }
+  ],
+  "declarationIntegrityLimit": "The standards matrix indexes direct assertion-bearing tests. The Rust declaration scanner does not follow the awaited corpus helpers; those wrappers are backed by the governed case index, actual 51-test execution and independent review, not falsely indexed helper assertions.",
+  "independentReview": "Finite corpus/oracles, exact control policies, generator guard, SMTP action/positive control and final unchanged-source warm evidence approved. Product owners separately approved vendor grammar and final narrow core representation hunk.",
+  "limits": [
+    "Not exhaustive RFC grammar, all grammar combinations or a standards certificate.",
+    "Core/cache projection is not frontend Reader or Tauri execution.",
+    "No WebKit/native glyph, escaping, layout, clipboard, search or provider acceptance.",
+    "One focused passing run is not the separate three-consecutive-full-source baseline.",
+    "Original programme and composite catalogue gaps remain separate from finite standards entries."
+  ]
+}

@@ -1,0 +1,106 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T17:07:11.750134+00:00",
+  "lane": "native-packaged-preflight",
+  "status": "ready-awaiting-full-source-baseline",
+  "sourceTree": {
+    "digest": "cedc3777c2fe96cd54160fd661521751ab688da6bf2aab7a4a486be23a3de0da",
+    "fileCount": 937
+  },
+  "appIdentity": {
+    "displayName": "Dakia Fictional Provider Reader",
+    "bundleIdentifier": "dev.dakia.fictional-provider-reader.run-OTAMH2",
+    "appPath": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/Dakia Fictional Provider Reader.app",
+    "mode": "reuse-approved-identity; guarded candidate swap and original restoration"
+  },
+  "review": "Final independent GO for registration preflight before process-global notifier initialization, fail-closed delivery, platform-specific IPC permissions, exact harness LaunchServices registration and owned Swift cache.",
+  "artifacts": [
+    {
+      "path": "scripts/native-provider-reader-acceptance.sh",
+      "sha256": "2d543a203f94aff48e4c696e4c1bd6a60e6afa3db2b282a871251fa9f0935ab7",
+      "bytes": 101028,
+      "mode": "0o700"
+    },
+    {
+      "path": "scripts/native-provider-reader-fixture.node-test.mjs",
+      "sha256": "bfa4e4a876915bd7e655ad5ff0246ca9e82e13c6e482f70045f48e2f26b2bbde",
+      "bytes": 77921,
+      "mode": "0o644"
+    },
+    {
+      "path": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-registration-safe.json",
+      "sha256": "fff69f063ee5cae7638d851d5b048d78a2a2bdd8b20329be5082a03febca0b51",
+      "bytes": 195605,
+      "mode": "0o600"
+    },
+    {
+      "path": "/private/tmp/dakia-l013-native-resource-runner-registration-safe.mjs",
+      "sha256": "546ecd4fff3f3f134bca48a96c29734878c3dbca3a2b9229e688a84ffdb76f32",
+      "bytes": 24288,
+      "mode": "0o700"
+    },
+    {
+      "path": "/private/tmp/dakia-l013-native-resource-runner-registration-safe-receipt.json",
+      "sha256": "7b705f0b04a4078d184ba5a3156d661534550dd7f763d6be72950fffe66f3ef1",
+      "bytes": 2356,
+      "mode": "0o600"
+    },
+    {
+      "path": "/private/tmp/dakia-g013-fullfetch-runner/final-build-provenance-registration-safe.json",
+      "sha256": "75a853bb28a52eb81284dfe14bd646dbe695ddb5696788db8692802444a5db03",
+      "bytes": 3823,
+      "mode": "0o600"
+    },
+    {
+      "path": "/private/tmp/dakia-g013-fullfetch-runner/final-execution-binding-registration-safe.json",
+      "sha256": "b0baabe47525b3bc8c5371ddd7a8d82dcf7a95c09a6efe249360c117b8b0ade9",
+      "bytes": 4595,
+      "mode": "0o600"
+    },
+    {
+      "path": "/private/tmp/dakia-h016-provider-reader-adapter.mjs",
+      "sha256": "965c3f774e5561c106212896f735fe89cd51d4c87f76914072b1933c2e0a1813",
+      "bytes": 14751,
+      "mode": "0o700"
+    },
+    {
+      "path": "/private/tmp/dakia-h016-faithful-upgrade-provider-reader.mjs",
+      "sha256": "d06ec3717c2ef726e7adf7e2915e33e4bc394257b92bd7689ac98e8a2efb09fd",
+      "bytes": 57428,
+      "mode": "0o700"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/lib.rs",
+      "sha256": "c5bec752891dbbed9ec4a31e187446e6d47a9eb2f15aea00823ad024f0a10197",
+      "bytes": 281773,
+      "mode": "0o644"
+    },
+    {
+      "path": "testdata/mail-safety-catalogue.json",
+      "sha256": "66a9e22386aa441e70ab8b07f29ec10d02b8c31ffa1bf97b1ab2264a1716c518",
+      "bytes": 357863,
+      "mode": "0o644"
+    },
+    {
+      "path": "/private/tmp/dakia-native-leap-arrival-registration-safe.py",
+      "sha256": "ba9491fbef8392bb910d6be417eaf407e5fe964aa96887d95e0167d7fd6ded66",
+      "bytes": 13665,
+      "mode": "0o700"
+    },
+    {
+      "path": "/private/tmp/test-dakia-native-leap-arrival-registration-safe.py",
+      "sha256": "accaec9d3eca0be13ba074b4cd7fb1c56ad032d7f2d92b384efcbfaea9feaff0",
+      "bytes": 13308,
+      "mode": "0o700"
+    }
+  ],
+  "sourceBaseline": "Three unchanged full source runs in progress outside sandbox; no native launch before they pass.",
+  "historicalFailure": "XQVKjR failed SIGABRT6 before ACL/UI; retained separately, original restored.",
+  "limitations": [
+    "No candidate compile, launch, ACL, WebKit, attachment, resource or upgrade pass is established by this preflight.",
+    "G013 runner reuses byte-identical compiled inputs; no rebuild claim.",
+    "The H016 helper receives fresh candidate hashes and source digest from the actual post-exit handoff.",
+    "Ad-hoc fictional arm64 debug candidate only; no Developer ID signing, notarization or release publication.",
+    "A narrow external LaunchServices race remains between the production preflight and dependency lookup. Fully eliminating it requires dependency repair."
+  ]
+}

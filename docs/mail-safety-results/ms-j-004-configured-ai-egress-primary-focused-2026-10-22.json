@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-22",
+  "kind": "ms-j-004-configured-ai-egress-primary-focused",
+  "status": "passed-focused-primary",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "9a9951887997397535d1c607836b69c3a19b2bc4880236a40c24e6f5d400cee2",
+    "fileCount": 961
+  },
+  "application": {
+    "basis": {
+      "digest": "b14fca648f7d0862f439fbb08890cef8085d025687e35d75322814d2f8dcca0e",
+      "fileCount": 961
+    },
+    "journal": "/private/tmp/dakia-ai-egress-primary-application-20261022/application-journal.json",
+    "journalSha256": "b392c93bbd2d97c019e5942f13e8d9312bec142ccaadd0a5e6a6d35a12dd2b27",
+    "patch": "/private/tmp/dakia-ai-configured-egress-candidate-b14-20261022-bounded-harness.patch",
+    "patchSha256": "7f5b10b77e96973eca9275c33b3ed4ce8cd477c0af6d7fd6750ecdc9d3289996",
+    "changedFile": {
+      "path": "crates/dakia-core/tests/ai_privacy.rs",
+      "sha256": "ff05a305befaa23198354765923f060e96000d25c0f7c6f2f87747c5b7775fc9"
+    },
+    "productionAiRs": {
+      "path": "crates/dakia-core/src/ai.rs",
+      "sha256": "eee90648c6da5fc2ae76ba05a234dde9cddbc78c107ea2f6a6a9368df019be1f",
+      "changed": false
+    }
+  },
+  "scope": {
+    "supportedSurface": "Core AiService OpenAI-compatible provider with an explicitly configured endpoint and explicit draft action.",
+    "test": "configured_openai_action_stays_quiet_until_draft_then_posts_exact_payload",
+    "fixture": "Controlled loopback HTTP listener and fictional message content only.",
+    "assertions": [
+      "AiService construction produced no connection during a 150 ms startup observation window.",
+      "An explicit draft used only the configured /configured/chat/completions route.",
+      "The POST body contained the exact model, temperature, system instruction, and fictional user context.",
+      "The request carried its configured authorization header but no Cookie, Referer, Origin, or API key in the JSON body.",
+      "The harness capped one request at 64 KiB and shared a five-second action deadline across draft and server completion.",
+      "Draft or server timeout paths abort and await the request task."
+    ]
+  },
+  "verification": {
+    "primaryFocused": {
+      "session": "42857",
+      "log": "/private/tmp/dakia-ai-egress-primary-application-20261022/focused.log",
+      "logSha256": "09ebc71f75b87c0741cdf0d993984445076b6afa5c7172833685f4e1c2308f84",
+      "result": "5 passed, 0 failed"
+    },
+    "format": {
+      "command": "cargo fmt -p dakia-core --check",
+      "result": "passed"
+    },
+    "privateCandidate": {
+      "clippy": "cargo clippy --locked -p dakia-core --tests -- -D warnings passed",
+      "independentReview": "staged_mime_review approved the bounded harness"
+    },
+    "sensitivity": {
+      "mutation": "Private candidate changed the OpenAI route to unexpected/chat/completions, then restored it.",
+      "log": "/private/tmp/dakia-ai-configured-egress-endpoint-mutant-20261022.log",
+      "logSha256": "6ad2b51ab1c5a4288f53bfe3f541bad0b0b84751b487ea9aa29fafa8050991d1",
+      "result": "The configured route assertion failed with exit code 101.",
+      "qualification": "This route sensitivity run predates the final harness-bound additions, but exercises the unchanged exact route assertion."
+    }
+  },
+  "relatedExistingEvidence": {
+    "core": [
+      "AiService request construction uses a redirect policy that does not follow redirects.",
+      "Existing core tests cover the total request deadline and redirect/error handling."
+    ],
+    "desktop": "Native AI commands are disabled by AI_FEATURES_ENABLED=false and have dedicated guard-before-endpoint/process tests."
+  },
+  "limitations": [
+    "The 150 ms check establishes only that construction did not connect during that observation window. It does not prove a lifetime absence of network activity.",
+    "This receipt covers the core configured OpenAI-compatible action boundary. It does not establish a native UI, packaged build, real provider, or full-source result.",
+    "A LocalCommand provider runs a user-configured executable without an operating-system network sandbox. This receipt makes no local-command egress-isolation claim.",
+    "No credentials, .env values, production email, or external AI service were used."
+  ]
+}

@@ -1,0 +1,174 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-22T05:37:02.126Z",
+  "status": "component-inputs-match-with-explicit-exclusions",
+  "scope": "Read-only path-and-content comparison from measured 04b deep, performance, and dependency-audit inputs to the applied a6 candidate.",
+  "sourceManifests": {
+    "measured04b": {
+      "digest": "04b1368f7a758b2ad77d95442a2d5a0d3b7ce74f1f100bb59967aeef8b9ad471",
+      "fileCount": 952,
+      "path": "/private/tmp/dakia-04b136-g013-preparation-20261022/frozen-04b136-source/_mail-safety-source-manifest.json",
+      "sha256": "4028c01725dc2a6f13cb29127be4cefa19aafff59c6a854f319adf52f1144bc9"
+    },
+    "candidateA6": {
+      "digest": "a6ccaa7579e1a8014a4e8a0a26accd28da811cf54fed06a8112d9efb9f4bbd84",
+      "fileCount": 952,
+      "path": "/private/tmp/dakia-final-expanded-evidence-v3-20261022.AITcN4/dakia-final-expanded-source-manifest-20261022.json",
+      "sha256": "57c109a9e88e3e89124e6a54a0af879d331cb15318b593d0483e41d1931df9fd"
+    },
+    "delta": {
+      "path": "/private/tmp/dakia-final-expanded-evidence-v3-20261022.AITcN4/base-to-final-delta.json",
+      "sha256": "6f0d219af769e316fcb75a74049faa023e9526b5ba9bbae00f6f4207bc08304b",
+      "changedFileCount": 8,
+      "unchangedGovernedBackendPaths": 697
+    }
+  },
+  "measuredEvidence": {
+    "deep": {
+      "receipt": "docs/mail-safety-results/staged-logout-full-list-deep-2026-10-22.json",
+      "receiptSha256": "8b2bbf5e66efc42faeaa5cf1179e6f13fe8a837897e8c13cdbd2c1e460e9096b",
+      "measuredSourceDigest": "04b1368f7a758b2ad77d95442a2d5a0d3b7ce74f1f100bb59967aeef8b9ad471",
+      "status": "passed-at-04b"
+    },
+    "performance": {
+      "receipt": "docs/mail-safety-results/staged-logout-full-list-performance-2026-10-22.json",
+      "receiptSha256": "98327a3ae63cefdd1e4851754df389fa9daf300fbcef50c2e360553d4ae86e5b",
+      "measuredSourceDigest": "04b1368f7a758b2ad77d95442a2d5a0d3b7ce74f1f100bb59967aeef8b9ad471",
+      "status": "passed-at-04b"
+    },
+    "dependencyAudit": {
+      "receipt": "docs/mail-safety-results/staged-logout-full-list-dependency-input-equivalence-2026-10-22.json",
+      "receiptSha256": "16f265ebd5d3a7c30d481d1c1be7ae17e08628a1d199571f5ae9da907596ca0e",
+      "measuredSourceDigest": "04b1368f7a758b2ad77d95442a2d5a0d3b7ce74f1f100bb59967aeef8b9ad471",
+      "status": "previously-observed-inputs-unchanged"
+    }
+  },
+  "componentInputComparisons": [
+    {
+      "name": "production-core-and-cli",
+      "before": {
+        "fileCount": 21,
+        "pathStateContentSha256": "71844e5d185394fe091088cdad0f629541b89f862b29cff3303ef9f0ccc7f7ad"
+      },
+      "after": {
+        "fileCount": 21,
+        "pathStateContentSha256": "71844e5d185394fe091088cdad0f629541b89f862b29cff3303ef9f0ccc7f7ad"
+      },
+      "matches": true,
+      "changedPaths": []
+    },
+    {
+      "name": "deep-fuzz-vendor-and-fixtures",
+      "before": {
+        "fileCount": 604,
+        "pathStateContentSha256": "8be17c88b70e0a6f50aefa375f04001f411c7cae6ca6bebf90076a0751e234d9"
+      },
+      "after": {
+        "fileCount": 604,
+        "pathStateContentSha256": "8be17c88b70e0a6f50aefa375f04001f411c7cae6ca6bebf90076a0751e234d9"
+      },
+      "matches": true,
+      "changedPaths": []
+    },
+    {
+      "name": "performance-runner-and-snapshot-tests",
+      "before": {
+        "fileCount": 3,
+        "pathStateContentSha256": "06cff4692cc5f5d36c899c3dbeb44694fded0d20e58bddc2c9bbe89e90b2932f"
+      },
+      "after": {
+        "fileCount": 3,
+        "pathStateContentSha256": "06cff4692cc5f5d36c899c3dbeb44694fded0d20e58bddc2c9bbe89e90b2932f"
+      },
+      "matches": true,
+      "changedPaths": []
+    },
+    {
+      "name": "dependency-audit-inputs",
+      "before": {
+        "fileCount": 14,
+        "pathStateContentSha256": "fb3b4158062e9f411971f1ffc10630883db8c18e20b1227ee3d5134c609d8675"
+      },
+      "after": {
+        "fileCount": 14,
+        "pathStateContentSha256": "fb3b4158062e9f411971f1ffc10630883db8c18e20b1227ee3d5134c609d8675"
+      },
+      "matches": true,
+      "changedPaths": []
+    }
+  ],
+  "changedPaths": [
+    {
+      "path": "apps/desktop/src/App.test.tsx",
+      "beforeSha256": "d8dedbca8018aa788576215aa84f9a6817a6f27016f6e7be7ca807db99d7435f",
+      "afterSha256": "6cc135d493894cc972522ca1eccb4684d647db382d54afcdbcc76cd1c0dbe4da",
+      "beforeBytes": 176021,
+      "afterBytes": 176097
+    },
+    {
+      "path": "apps/desktop/src/App.tsx",
+      "beforeSha256": "a03849f5f3593127bbb063d6d1ec86930d42094e6c52c256a45b1863ab190e1a",
+      "afterSha256": "bf31b30bbc2fb960115619844b22eacfb5a7bcb0a96f123a2dd0b17dc51863db",
+      "beforeBytes": 125234,
+      "afterBytes": 125306
+    },
+    {
+      "path": "apps/desktop/src/ComposeApp.test.tsx",
+      "beforeSha256": "4b1d3927e866a913c932f98045350aa8f7b980821f0cde5debf3be124fdda4b3",
+      "afterSha256": "3a2a50f18b65dd71002b2f8c20dab98b096caad707e0e2dba9f21110b04f907c",
+      "beforeBytes": 28270,
+      "afterBytes": 28239
+    },
+    {
+      "path": "apps/desktop/src/components/MailboxNav.test.tsx",
+      "beforeSha256": "0f0938c5480af87ffbf393f0359fc4ffd6dda353600d72473a10fa0b41492fcb",
+      "afterSha256": "1fca3d3086000853729ad9ce183f2932b7fd4ee942af8a2edbb45ad17ba71c0e",
+      "beforeBytes": 3406,
+      "afterBytes": 5180
+    },
+    {
+      "path": "apps/desktop/src/components/MailboxNav.tsx",
+      "beforeSha256": "19bf16798d19829984d647a49a091de6e96853d619d0ae8273dc92adb6cbbb67",
+      "afterSha256": "67ca69645f2d0f44b1e1cf53ede8994ae3a629acb4c006ae9cffc060a679b582",
+      "beforeBytes": 5282,
+      "afterBytes": 5669
+    },
+    {
+      "path": "apps/desktop/src/locales/en.test.ts",
+      "beforeSha256": "14ed456b60518c8bfb25c4f077466b115dfe79fef74a9388c0201ded22c09dd6",
+      "afterSha256": "8d7755fd1bae68a4eccd46dfb9967c17a002b947c49cb0232bdb6b634d357755",
+      "beforeBytes": 2476,
+      "afterBytes": 2840
+    },
+    {
+      "path": "apps/desktop/src/locales/en.ts",
+      "beforeSha256": "d75871d4f28c7712ec1ff07ce83e40d357e31be4ce90a76624c3025546a58840",
+      "afterSha256": "d239bf571268809e0a51cf02900ef0268c491b67e87c3876f65421512b6a83b3",
+      "beforeBytes": 25754,
+      "afterBytes": 25871
+    },
+    {
+      "path": "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs",
+      "beforeSha256": "799bec8112fcf51e29e751ef9c78de3c45b6b82cc442aeff0d8d3854b822f6db",
+      "afterSha256": "866f4cd8e2fa5161a068c8b783e59016e0ffbb40fe59544ea65bf0a2ce0bbe54",
+      "beforeBytes": 141050,
+      "afterBytes": 145893
+    }
+  ],
+  "interpretation": {
+    "allowed": [
+      "The 04b deep, performance, and recorded dependency-audit input groups above have identical path, state, content hash, and byte count at a6.",
+      "The delta receipt independently records 697 unchanged governed backend paths."
+    ],
+    "excluded": [
+      "Seven desktop application, component, locale, and test paths changed. No frontend, bridge, packaged-app, native-WebKit, provider, or whole-source result carries forward.",
+      "crates/dakia-core/src/mail/tests/mime_reader_handoff_tests.rs changed only in a test module. It adds focused malformed-part-graph coverage, but changes a Rust test compilation input and is not a fresh deep or performance execution.",
+      "This receipt does not record a new deep, fuzz, performance, dependency audit, source, provider, native, release, or UI run.",
+      "A6 full-source cycle one completed all 17 gates when this receipt was prepared; cycles two and three were still pending, so this receipt does not call the source lane passed."
+    ]
+  },
+  "limitations": [
+    "Path-and-content equality does not establish equivalent compilation, cache state, timing, host load, runtime behavior, or external-service behavior.",
+    "The comparison is deliberately limited to the named deep, performance, and dependency-audit input groups. It is not a whole-tree equivalence claim."
+  ]
+}

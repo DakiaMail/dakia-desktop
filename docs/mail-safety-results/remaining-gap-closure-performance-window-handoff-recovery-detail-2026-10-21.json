@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "lane": "manual-mailbox-performance-detail",
+  "status": "regressed",
+  "sourceReport": {
+    "path": "docs/mail-safety-results/remaining-gap-closure-performance-window-handoff-recovery-2026-10-21.json",
+    "sha256": "8de443644dd4b5b38811c2e4776d0d2fc8dd101dad33ffe4a9fc5b7f9503cac2"
+  },
+  "sourceTree": {
+    "digest": "c56d2d806d8623dd14c858c8a8362729655496036405ad8c24162fce02a9a85b",
+    "fileCount": 939,
+    "unchangedBeforeAfter": true
+  },
+  "rawLog": {
+    "path": "/private/tmp/dakia-performance-window-handoff-recovery-20261021.log",
+    "sha256": "a6403456b832998c3ec904f08335a788e22dc5ec048018b8248b53c4624b0ce5",
+    "bytes": 6403
+  },
+  "snapshotTests": {
+    "status": "passed",
+    "completed": 12,
+    "repeatCount": 3,
+    "scales": [2000, 30000, 100000, 200000],
+    "measurementsMilliseconds": {
+      "2000": [711, 878, 695],
+      "30000": [9017, 8298, 9416],
+      "100000": [30045, 28861, 31480],
+      "200000": [66376, 59309, 57806]
+    }
+  },
+  "comparison": {
+    "thresholdPercent": 20,
+    "status": "regressed",
+    "scales": [
+      {
+        "messageCount": 2000,
+        "baselineMedianMilliseconds": 560,
+        "currentMedianMilliseconds": 711,
+        "changePercent": 26.96428571428571,
+        "status": "regressed"
+      },
+      {
+        "messageCount": 30000,
+        "baselineMedianMilliseconds": 7660,
+        "currentMedianMilliseconds": 9017,
+        "changePercent": 17.715404699738905,
+        "status": "passed"
+      },
+      {
+        "messageCount": 100000,
+        "baselineMedianMilliseconds": 25662,
+        "currentMedianMilliseconds": 30045,
+        "changePercent": 17.07972878185644,
+        "status": "passed"
+      },
+      {
+        "messageCount": 200000,
+        "baselineMedianMilliseconds": 52573,
+        "currentMedianMilliseconds": 59309,
+        "changePercent": 12.812660491126623,
+        "status": "passed"
+      }
+    ],
+    "acceptance": "The 2,000-message median exceeded the 20% threshold. The overall performance lane is not accepted."
+  },
+  "resourceSoak": {
+    "status": "passed",
+    "reconnectCycles": 200,
+    "storeOpenCycles": 100,
+    "elapsedMilliseconds": 1624,
+    "fileDescriptors": {
+      "before": 10,
+      "after": 10
+    },
+    "residentBytes": {
+      "before": 27377664,
+      "after": 28704768,
+      "growth": 1327104,
+      "limit": 67108864
+    }
+  },
+  "environmentObservation": {
+    "path": "/private/tmp/dakia-performance-environment-observation-20261021.json",
+    "sha256": "bf9bff87180925591388653ab4ac1c75bf8d32382c399ab9bde156c62fb30ceb",
+    "observedTestProcessCpuPercent": 95.3,
+    "observedOtherProcessesCpuPercent": [56.3, 49.4, 20.4, 19.1, 9.2],
+    "thermalQuery": "unavailable",
+    "interpretation": "One CPU snapshot and unavailable thermal data do not establish why the 2,000-message median regressed."
+  },
+  "nextCondition": "Retain this failed comparison and investigate under controlled idle and observable thermal conditions before treating a repeat as acceptance evidence.",
+  "limitations": [
+    "The loopback scripted IMAP workload measures Dakia protocol and SQLite paths, not provider latency.",
+    "This result does not establish native WebKit responsiveness or sustained process memory behavior.",
+    "No retry was used to convert this regression into a pass."
+  ]
+}

@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-21T15:50:58Z",
+  "lane": "final-native-config-source-input-equivalence",
+  "status": "passed",
+  "scope": "read-only exact-input equivalence for the previously measured core, deep, performance, and storage lanes",
+  "priorSource": {
+    "digest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+    "fileCount": 933,
+    "manifestPath": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-c47c2de0.json",
+    "manifestSha256": "43060add67b37337eec6820d93c0d8dfe00db7fc0123fa188b58b452778bc3d2"
+  },
+  "finalSource": {
+    "digest": "f6c8094e26fc9982144aebf7e368d149926001835fa848b94c4445bc87bcfd27",
+    "fileCount": 933,
+    "manifestPath": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-f6c8094e.json",
+    "manifestSha256": "493df9b39cfc8283ecf9875701b26102be7538d58cc311f7ae979c74ecd06a64",
+    "liveFilesVerified": 933,
+    "liveMismatches": 0
+  },
+  "comparison": {
+    "pathSetUnchanged": true,
+    "changedSourceFileCount": 3,
+    "changedSourceFiles": [
+      {
+        "path": "apps/desktop/src-tauri/src/lib.rs",
+        "beforeSha256": "8acbc2887a088bb2f33caaf10baf3ae621148742898eba7c851620b207a3f05b",
+        "afterSha256": "9cfd6d212aad7205fb7714a7dd91b5d37600c9913041eecf39a7a19c20dbb914"
+      },
+      {
+        "path": "scripts/native-provider-reader-acceptance.sh",
+        "beforeSha256": "50419da17ac70e8bf2a497758c5bcaab147413834fe6662d096d7c2e3bb0745b",
+        "afterSha256": "9df4e4d1a86599a521b28d228d863fa0a6488b6ba4def0f6b9461c8d84a526f6"
+      },
+      {
+        "path": "scripts/native-provider-reader-fixture.node-test.mjs",
+        "beforeSha256": "1b63b7b33d03dc79b84341cb3e0cfcd589ffb37c6a5602523063cc3fedfc60f3",
+        "afterSha256": "051acb54b5ec911fc6a01ba7d30f9692610d37b59ac8258d590691685a0653e5"
+      }
+    ],
+    "privateVerificationArtifact": "/private/tmp/dakia-final-native-config-source-input-equivalence-2026-10-21.json",
+    "privateVerificationArtifactSha256": "5bcd056276377e33408d68cc983130aec36bb8cbbbcb561296c5c4dff9b70486"
+  },
+  "coreInputEquivalence": {
+    "status": "passed",
+    "referenceSourceReport": "docs/mail-safety-results/remaining-gap-closure-three-run-source-2026-10-21.json",
+    "referenceSourceReportSha256": "0b0d137906a3845ba87e23f18613d5768d2643c3d1fabe4311ce3b0f2252e6f9",
+    "referenceSourceDigest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+    "oracle": "The complete c47 to f6 manifest diff contains no root Cargo, dakia-core, fuzz, mail-parser, lettre, or core test-data path.",
+    "conclusion": "The Rust core and vendored parser/SMTP inputs exercised by the c47 source run are byte-identical in f6. This does not carry forward the c47 native desktop checks because apps/desktop/src-tauri/src/lib.rs changed."
+  },
+  "deepInputEquivalence": {
+    "status": "passed",
+    "referenceSourceReport": "docs/mail-safety-results/remaining-gap-closure-deep-current-source-2026-10-21.json",
+    "referenceSourceReportSha256": "3fcc68edc2aa7f378c194e64cdcec4d24faba880609c93917aa8aa729ced174f",
+    "referenceDetailReport": "docs/mail-safety-results/remaining-gap-closure-deep-current-detail-2026-10-21.json",
+    "referenceDetailReportSha256": "d97b02f5fd85f8a5e41e7f1a4bd8545180fb58b15e71ad199fa4bb921630cfd6",
+    "referenceSourceDigest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+    "entrypointHashes": {
+      "scripts/run-mail-safety.mjs": "263bb2d30aa7c81e35f046d80f6a5619f61695bc9a911d2feddfe0837d50ec0b",
+      "scripts/mail-safety-servers.sh": "67db72d6631db23d4896b77447a273ed0a40cdfdd2e7aff5863592d8dbc7c24a",
+      "scripts/run-mail-safety-fuzz.sh": "dab7c5caa313c2322111dd2ffc6775b2f9466fcb86d874a2e9bc9005d76c7d38",
+      "fuzz/Cargo.toml": "b02dfd24bab25267483d572c36da5e71af3b61a907d4912fb8c0e86cfb811eae",
+      "fuzz/Cargo.lock": "f07697a88633babbc07378ec41088987457527ec00f217566d6bb573411c71a3"
+    },
+    "oracle": "The deep lane invokes only mail-safety-servers.sh and run-mail-safety-fuzz.sh. Neither those entrypoints nor their core, fuzz, fixture, Cargo, or vendor inputs are among the three changed paths.",
+    "conclusion": "The recorded c47 independent-server and bounded fuzz inputs are byte-identical in f6. This is an input-equivalence result, not another fuzz or independent-server execution."
+  },
+  "performanceInputEquivalence": {
+    "status": "passed",
+    "referenceReport": "docs/mail-safety-results/remaining-gap-closure-performance-2026-10-21.json",
+    "referenceReportSha256": "6b5d4c28d6f95f3370c6fe6689a43aade155b5caf65b7796d61df837a7b85352",
+    "referenceSourceDigest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+    "runnerPath": "scripts/run-mail-resilience-performance.mjs",
+    "runnerSha256": "7a7997823931a48979c25458ab3ab36230d39c858e921de004fe83a61c72c97f",
+    "oracle": "The runner, root Cargo resolution, dakia-core implementation and manual resilience/performance tests are unchanged. All three changed files are outside this lane.",
+    "conclusion": "The prior c47 mailbox-scale and resource-soak measurements retain byte-equivalent production and runner inputs in f6. Matching inputs does not prove identical timing, code generation, system load, or incremental-cache state."
+  },
+  "storageCoverageInputEquivalence": {
+    "status": "passed",
+    "referenceReport": "docs/mail-safety-results/remaining-gap-closure-final-storage-branch-coverage-2026-10-21.json",
+    "referenceReportSha256": "0fb107639b55242dae6a360e43a408ec7bf145628bab7fa16f5fc88055705ea1",
+    "inputManifestPath": "/private/tmp/dakia-mail-safety-remaining-gap-final-storage-branch-coverage-2026-10-21/input-after.sha256",
+    "inputManifestSha256": "28fdc43ae6ca1266cf7624f8b41a4b748e53265e23331c8ba681d7c10063141d",
+    "inputFileCount": 538,
+    "currentMismatchCount": 0,
+    "conclusion": "Every root Cargo, dakia-core, mail-parser, and lettre input recorded for the three separate storage coverage cohorts remains byte-identical in f6."
+  },
+  "limitations": [
+    "This report performs path-and-content equivalence checks. It does not rerun source, core, deep, fuzz, performance, coverage, native, provider, or packaged-app lanes.",
+    "The f6 source snapshot is not wholly equivalent to c47. Native desktop lib.rs and two native fixture harness files changed, so prior native and whole-source claims are not carried forward here.",
+    "The deep result retains the recorded bounded fuzz limits and their temporal-safety limitation. It does not establish the absence of all parser failures.",
+    "The performance result remains tied to its recorded hardware, build profile, and load conditions.",
+    "The storage result remains three separate focused cohorts. Branch observations are not aggregated into product or workspace coverage."
+  ]
+}

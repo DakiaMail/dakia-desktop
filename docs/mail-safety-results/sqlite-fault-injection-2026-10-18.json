@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "lane": "manual-sqlite-fault-injection",
+  "revision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "workingTree": "modified shared checkout; sourceTree digest binds exact tested contents",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "998a2cc6b0c2a423e1c8864153d3291d14134c093cd12f93f3edc01b8f275806",
+    "fileCount": 695
+  },
+  "sourceTreeAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "998a2cc6b0c2a423e1c8864153d3291d14134c093cd12f93f3edc01b8f275806",
+    "fileCount": 695
+  },
+  "environment": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "node": "v22.23.2"
+  },
+  "status": "passed",
+  "runs": [
+    {
+      "iteration": 1,
+      "status": "passed",
+      "command": "bash scripts/run-sqlite-fault-injection.sh",
+      "stdoutPath": "/private/tmp/dakia-h013-manual-run-9.log",
+      "stdoutSha256": "2e45a8add19c91caae2cc9a9884925d9b0a4bcf9d039bc3721d324820cc0c128"
+    },
+    {
+      "iteration": 2,
+      "status": "passed",
+      "command": "bash scripts/run-sqlite-fault-injection.sh",
+      "stdoutPath": "/private/tmp/dakia-h013-manual-run-10.log",
+      "stdoutSha256": "3a6ad0563260d41267e15f25413ad6be09c4928dde82b5e6a124bf32df5cf666"
+    },
+    {
+      "iteration": 3,
+      "status": "passed",
+      "command": "bash scripts/run-sqlite-fault-injection.sh",
+      "stdoutPath": "/private/tmp/dakia-h013-manual-run-11.log",
+      "stdoutSha256": "3a6ad0563260d41267e15f25413ad6be09c4928dde82b5e6a124bf32df5cf666"
+    }
+  ],
+  "runnerContract": {
+    "status": "passed",
+    "tests": 2,
+    "stdoutPath": "/private/tmp/dakia-h013-runner-contract.log",
+    "stdoutSha256": "3e375759423b901691aee3f33ffe245e6cc97d74cdac54eefec35647d8b981b6"
+  },
+  "sensitivity": {
+    "status": "expected-failure-observed",
+    "mutation": "In a temporary source copy only, preserve the final WAL length instead of truncating 13 bytes.",
+    "expectedFailure": "The torn-WAL verifier found Existing(Pending) where atomic absence and Claimed were required.",
+    "exitCode": 101,
+    "stdoutPath": "/private/tmp/dakia-h013-sensitivity-no-tear.log",
+    "stdoutSha256": "89b9c1cc9ac74da8e51340bf9e86bac0865f1a34b8f8f7c1c60e6077cb57918e"
+  },
+  "setupFailures": [
+    {
+      "stdoutPath": "/private/tmp/dakia-h013-manual-run.log",
+      "result": "link failure: broad SQLITE_TEST enabled unavailable Tcl FTS3 test hooks; runner now disables only FTS3 in the dedicated build"
+    },
+    {
+      "stdoutPath": "/private/tmp/dakia-h013-manual-run-2.log",
+      "result": "fixture precondition failure: seed WAL was not explicitly checkpointed; harness now checkpoints and verifies it before copies"
+    }
+  ],
+  "guarantees": [
+    "Exact post-call SQLITE_IOERR_WRITE and SQLITE_IOERR_FSYNC are observed through bundled SQLite default VFS hooks.",
+    "Previously committed fictional mail, encrypted secret, and pending send attempt survive reopen.",
+    "An ambiguous failed send-attempt insert recovers as either a complete matching pending row or atomic absence that can be claimed safely.",
+    "An intact WAL control contains the final candidate transaction; manually truncating the matching copied WAL discards that transaction while earlier state remains readable."
+  ],
+  "limitations": [
+    "Does not simulate a physical partial write, disk exhaustion, fsync failure before durability, or process termination during commit.",
+    "Dedicated build disables FTS3 to exclude SQLite Tcl-only test hooks; Dakia storage uses FTS5.",
+    "This manual opt-in lane is not ordinary pull-request evidence."
+  ]
+}

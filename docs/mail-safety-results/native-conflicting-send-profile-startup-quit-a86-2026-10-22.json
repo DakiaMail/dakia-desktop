@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "status": "passed",
+  "recordedAtUtc": "2026-10-22T04:00:27.110615+00:00",
+  "case": "conflicting-send-attempts",
+  "sourceDigest": "a86feeae88ffe172c8697a84f1d29afa123856661ee3765ca3307562c410193c",
+  "sourceFileCount": 940,
+  "exitCode": 1,
+  "signal": null,
+  "durableFilesUnchanged": true,
+  "humanConfirmedExpectedRecoveryText": true,
+  "humanConfirmedNoInbox": true,
+  "humanClickedQuitDakia": true,
+  "evidenceRoot": "/private/tmp/dakia-startup-exit1.33c02ae4-046b-48a3-b897-3c2c965b4b2e",
+  "artifacts": [
+    {
+      "path": "/private/tmp/dakia-startup-exit1.33c02ae4-046b-48a3-b897-3c2c965b4b2e/human-observation.json",
+      "sha256": "b08196b814f74fe0ae5820e0f490af509df192ddc63dae085d2e1f873d76474a"
+    },
+    {
+      "path": "/private/tmp/dakia-startup-exit1.33c02ae4-046b-48a3-b897-3c2c965b4b2e/process-result.json",
+      "sha256": "4380015f9bd749de232647f4c34ee78f95a7049e2f3d29a603820b5ed0ff23ff"
+    },
+    {
+      "path": "/private/tmp/dakia-startup-exit1.33c02ae4-046b-48a3-b897-3c2c965b4b2e/post-exit-boundary.json",
+      "sha256": "0265f002f3f83cfaa836d86c1ff77825bf0c77cbb67e23333f0c317fadb171b9"
+    },
+    {
+      "path": "/private/tmp/dakia-startup-exit1.33c02ae4-046b-48a3-b897-3c2c965b4b2e/profile-before.json",
+      "sha256": "87b1267a80154c00ad3080e2f5516ff13b1b8b828ee41d35d73b54da88961eb7"
+    },
+    {
+      "path": "/private/tmp/dakia-startup-exit1.33c02ae4-046b-48a3-b897-3c2c965b4b2e/profile-after.json",
+      "sha256": "87b1267a80154c00ad3080e2f5516ff13b1b8b828ee41d35d73b54da88961eb7"
+    }
+  ],
+  "outerHarness": "Timed out waiting for release sentinel while the human dialog was open. Transaction retained and recovered explicitly after this accepted exit.",
+  "identityRecovery": {
+    "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.8VRoLm/approved-identity-swap-5231efbb-45cf-4fe7-b890-320137fe668e-recovered.json",
+    "sha256": "77bc68d364234a91555cc496dd00e7edd9456767a03b04f659207838c643ac53",
+    "stage": "recovered",
+    "exactSealedOriginalRestored": true
+  },
+  "limits": [
+    "System-owned dialog content was reported by the user; no UI bypass was used.",
+    "This is the historical a86 startup case, not schema-v2/final04b native acceptance.",
+    "Old-a86 corrupt-profile case was deferred, not passed."
+  ]
+}

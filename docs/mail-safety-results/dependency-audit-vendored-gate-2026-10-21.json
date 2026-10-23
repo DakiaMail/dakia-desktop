@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-21",
+  "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "scope": "Vendored crates provenance and dependency audit evidence. This is not a whole-product security claim.",
+  "inputs": {
+    "Cargo.lock": "78e7136d6ff7a477e2317feb99a976a75376b1283a331babaca26b83c27f58b2",
+    "fuzz/Cargo.lock": "f07697a88633babbc07378ec41088987457527ec00f217566d6bb573411c71a3",
+    "package-lock.json": "ec85e8d77a670963d49224d083cc9133b30763f048e8b520360f9c51c4bb5e1b",
+    ".cargo/audit.toml": "0a31dab852dead3b6c393c395475001792fde4cb008bad2c478d6776d0e52cc0",
+    "scripts/audit-dependencies.sh": "78a1949129f8863be0f70e4e54651552c537781aab07f3da7dce8ace5fe9503b",
+    "scripts/verify-vendored-crates.mjs": "1b5edfd506b5cd15fb96b8a1ce702fbf01791ff1c105815a2a8984dae4ad504c",
+    "testdata/vendored-crates/tauri-plugin-updater.json": "b1eca38b3ce7e43c84929ddeafb53ceed67b79f6106f8108f19d520f90ee3815",
+    "testdata/vendored-crates/mail-parser.json": "dfc72e54f97bc13481c1080373c68297c2c2c5b42f81b6f1cfc1c9eddd099945",
+    "testdata/vendored-crates/lettre.json": "e83a4564682f3d2d6619068efafb1af2c9854d1e941fab6fc0393319850ff50e",
+    "scripts/verify-vendored-crates.node-test.mjs": "435ab5f1501a77bcbfe0743e14530a8494f34a9012c24adeaf3d057ffdd02545",
+    "scripts/change-classifier.mjs": "974347a2d899596d15d0ba82a835679ff65792e5a238764693125e10e0304bb3",
+    "scripts/change-classifier.node-test.mjs": "3f72217db89ab405f386b121917c67b1d5db64ab50336912ec170f9eeb5d2107"
+  },
+  "rustsec": {
+    "tool": "cargo-audit 0.22.2",
+    "databaseCommit": "4b587f00996ebe5c05a73eaef105ef241e876414",
+    "databaseCommitTimestamp": "2026-10-21T08:20:38+02:00",
+    "note": "The local advisory-db directory mtime is retained separately because Git checkout mtimes are not a freshness signal.",
+    "commands": [
+      "DAKIA_AUDIT_OFFLINE=true DAKIA_CARGO_AUDIT_BIN=/private/tmp/dakia-mail-safety-tools/bin/cargo-audit scripts/audit-dependencies.sh",
+      "/private/tmp/dakia-mail-safety-tools/bin/cargo-audit audit --file fuzz/Cargo.lock --no-fetch --no-yanked"
+    ],
+    "root": {
+      "vulnerabilities": 0,
+      "allowedWarnings": 10,
+      "reportSha256": "24696f27a1c0609ef0493d6749382adc78efbfa72d5ef76606402792b0fb351e"
+    },
+    "fuzz": {
+      "vulnerabilities": 0,
+      "allowedWarnings": 1,
+      "reportSha256": "b1868759b0e3398db1bb224f7fd0424fcf5d6b9e1c3002dc3dd93066aebfe142"
+    }
+  },
+  "npm": {
+    "command": "npm audit --package-lock-only --ignore-scripts --audit-level=low --registry=https://registry.npmjs.org --json",
+    "registryDisclosure": "Approved for this audit.",
+    "vulnerabilities": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 0,
+      "critical": 0,
+      "total": 0
+    },
+    "reportSha256": "174bb74a357686185db7eafad9445b875ba42bae8c3b7e07dfd7b5f54b1108be"
+  },
+  "provenanceGate": {
+    "command": "node scripts/verify-vendored-crates.mjs",
+    "result": "passed for tauri-plugin-updater@2.10.1, mail-parser@0.11.5, and lettre@0.11.22 in the root workspace, and mail-parser@0.11.5 plus lettre@0.11.22 in fuzz/Cargo.toml.",
+    "sensitivity": "A copied mail-parser vendor tree with one appended date.rs canary was rejected because its approved patched SHA-256 no longer matched.",
+    "workspaceDiscovery": "Every non-vendor project Cargo.toml is scanned for [patch.*] tables. Each workspace with a path patch supplies separate locked offline metadata; an unmanifested fuzz-only patch and a competing registry package are sensitivity-tested failures."
+  }
+}

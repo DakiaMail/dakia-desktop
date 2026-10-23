@@ -1,0 +1,25 @@
+X-Dakia-Corpus-Case: standards-defaults-and-boundaries
+Date: Tue, 28 Jul 2026 10:20:00 +0000
+From: sender@example.test
+To: recipient@example.test
+Subject: =?UTF-8?Q?Adjacent?= 	 =?UTF-8?Q?_words?=
+MIME-Version: 1.0
+Content-Type: MuLtIpArT/X-Dakia-Unknown; BoUnDaRy="CaseSensitiveBoundary"
+
+--CaseSensitiveBoundary
+
+Default ASCII body with absent content headers.
+--CaseSensitiveBoundary
+CoNtEnT-TyPe: TeXt/PlAiN; ChArSeT=Us-AsCiI
+CoNtEnT-TrAnSfEr-EnCoDiNg: QuOtEd-PrInTaBlE
+
+Quoted printable soft=
+break=20keeps=20encoded=20spaces.   
+Hard line survives.
+--CaseSensitiveBoundary
+Content-Type: text/plain; charset=US-ASCII
+Content-Transfer-Encoding: BaSe64
+
+QmFzZTY0IGJv
+ dW5kYXJ5Lg==
+--CaseSensitiveBoundary--

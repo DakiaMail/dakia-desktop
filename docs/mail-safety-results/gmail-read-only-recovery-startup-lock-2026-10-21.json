@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "lane": "gmail-read-only-existing-message-recovery",
+  "status": "passed",
+  "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "423a76f16559b42900d57c57f6875a04f0d7b56be1da2af0b79393de7fcda228",
+    "fileCount": 758
+  },
+  "sourceTreeAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "423a76f16559b42900d57c57f6875a04f0d7b56be1da2af0b79393de7fcda228",
+    "fileCount": 758
+  },
+  "startedAt": "2026-10-21T08:03:34.569756+00:00",
+  "finishedAt": "2026-10-21T08:03:46.215099+00:00",
+  "executableSha256": "08b5f35eb801357529f39ab51e2425bc129a427aa842b693f312dd99761a9dce",
+  "provider": "gmail",
+  "authenticationMethod": "app_password",
+  "operations": [
+    "IMAP read-neutral authentication/discovery",
+    "SMTP authentication and QUIT",
+    "read-only exact INBOX UUID search and body observation"
+  ],
+  "remoteMutationRequested": false,
+  "newMessageSubmitted": false,
+  "roundtripId": "45bacd384f0c4a74893f14e4fea23d9a",
+  "roundtripObservation": "exact_message_verified",
+  "roundtripMessageLimit": 0,
+  "probeExit": 0,
+  "privateEvidence": {
+    "root": "/private/tmp/dakia-gmail-recovery-frozen-u4gw8ybs",
+    "providerReportSha256": "c5bee4b7ffac67a7535fc826e3d39fed05a73272217459d219700e410316c385"
+  },
+  "limitations": [
+    "Read-only recovery verified the existing test message in INBOX and its exact body; it did not submit new mail or inspect Sent through a new send.",
+    "Earlier frozen-source LOGIN timeouts remain retained and their cause is not established. This pass does not erase those failures.",
+    "No native Gmail Reader or new live-provider send round trip is established."
+  ]
+}

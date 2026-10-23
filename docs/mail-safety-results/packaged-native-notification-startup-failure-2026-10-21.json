@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T16:33:24.271289+00:00",
+  "lane": "packaged-native-provider-reader",
+  "status": "failed-at-startup",
+  "sourceTree": {
+    "digest": "f8209887faad2ed25f965c55ef7a3680f7663852bfa33674406dc02da5b6063c",
+    "fileCount": 935
+  },
+  "harnessRoot": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.XQVKjR",
+  "harnessExitCode": 1,
+  "appSignal": "SIGABRT (6)",
+  "appLaunched": true,
+  "uiAccessed": false,
+  "packagedCompile": "passed",
+  "candidateAdHocSignature": "passed",
+  "desktopSha256": "ad37ef20fe0ab92e017fb430f9719ef7792446213eec3b837b1df3fde3c6b6ef",
+  "failure": {
+    "kind": "notification-application-setup-error",
+    "message": "Setup propagated notify_rust::set_application failure as fatal; Tauri setup panicked and aborted. Exact initialization ordering still under investigation."
+  },
+  "rawLog": {
+    "path": "/private/tmp/dakia-final-packaged-provider-reader-plist-safe-20261021.log",
+    "sha256": "b4b65b79de66bd089f5c3bbb396c356f27c2c1995563553c90afea3bd9d4a90e",
+    "bytes": 10676
+  },
+  "appLog": {
+    "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.XQVKjR/app.log",
+    "sha256": "489b0d96d223b199a553404d29881dfce3f2caa71ab1c880ef966f5560787861",
+    "bytes": 5161
+  },
+  "restorationReceipt": {
+    "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.XQVKjR/approved-identity-swap-2955274e-7038-4827-9942-6638ce27bb6d-restored.json",
+    "sha256": "24c4db266ef133bcba1f1eb3fc361ace11ce40d48ea966968873aa8513ba6c7d",
+    "bytes": 1457
+  },
+  "originalApprovedIdentity": "restored by guarded harness; tested candidate retained separately",
+  "limitations": [
+    "No native ACL acceptance receipt was produced.",
+    "No WebKit, provider-to-Reader, attachment or upgrade acceptance is established by this invocation.",
+    "Three clean source runs remain valid for f820, but did not detect this packaged startup failure."
+  ]
+}

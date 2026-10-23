@@ -11,6 +11,12 @@ build = "build.rs"
 name = "dakia_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# A deliberately non-default native acceptance build. It permits only an
+# explicit loopback CA and isolated app-data directory supplied by the test
+# runner; release and ordinary development builds do not compile this path.
+native-mail-safety-fixture = ["dakia-core/native-mail-safety-fixture"]
+
 [[bin]]
 name = "dakia-desktop"
 path = "src/main.rs"
@@ -50,5 +56,9 @@ uuid.workspace = true
 notify-rust = "4"
 
 [dev-dependencies]
+dakia-core = { path = "../../../crates/dakia-core", features = ["native-mail-safety-fixture"] }
+tauri = { version = "2", features = ["test"] }
 flate2 = "1"
+tar = "0.4"
 tempfile = "3"
+tokio-rustls.workspace = true

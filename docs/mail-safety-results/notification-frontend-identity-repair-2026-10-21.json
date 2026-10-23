@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T16:36:21.346435+00:00",
+  "lane": "focused-frontend",
+  "status": "passed",
+  "scope": "macOS Settings test notification uses the same native command as mail notifications, with count zero and no message target. Native failures propagate without plugin fallback. Other platforms retain the plugin path.",
+  "tests": {
+    "command": "npx vitest run apps/desktop/src/notifications.test.ts --maxWorkers=1",
+    "passed": 16,
+    "failed": 0
+  },
+  "regressionSensitivity": {
+    "method": "Temporarily restore original sendTestNotification implementation, run unchanged tests, restore fixed file in finally.",
+    "exitCode": 1,
+    "failed": 2,
+    "passed": 14
+  },
+  "artifacts": [
+    {
+      "path": "apps/desktop/src/notifications.ts",
+      "sha256": "8f40c15f4f6b61b7b5adf6bf64b6f7a3df0d2f44428f074c347780a753430c36",
+      "bytes": 5741
+    },
+    {
+      "path": "apps/desktop/src/notifications.test.ts",
+      "sha256": "7e5044563731e587ba0b0dbcee8fee58a6e82158d5dc0b4c73b551c5c384f380",
+      "bytes": 12341
+    },
+    {
+      "path": "/private/tmp/dakia-notification-frontend-before-fix-20261021.log",
+      "sha256": "1466c218e3082902c13503a27f6696edcd7a7b3d5bff0ff6052da58b0a2878e0",
+      "bytes": 1792
+    }
+  ],
+  "limitations": [
+    "Backend notification readiness and Settings command ACL are being repaired separately.",
+    "This focused result does not prove OS notification delivery, packaged startup or native WebKit behavior.",
+    "A new unchanged-source full baseline is required after all notification repairs."
+  ]
+}

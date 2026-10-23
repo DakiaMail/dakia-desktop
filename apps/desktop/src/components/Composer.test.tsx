@@ -119,6 +119,23 @@ afterEach(() => {
 });
 
 describe("Composer send feedback", () => {
+  it("does not substitute the first account when a handoff account was removed", () => {
+    render(
+      <Composer
+        {...props}
+        accounts={[account]}
+        seed={{ accountId: "removed-account", to: "recipient@example.test" }}
+        sendState="idle"
+      />,
+    );
+
+    expect(screen.getByLabelText("From")).toHaveValue("");
+    expect(screen.getByRole("button", { name: /^Send/ })).toBeDisabled();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Connect an account before composing.",
+    );
+  });
+
   it("keeps AI drafting hidden even when a provider is connected", () => {
     render(<Composer {...props} aiConnected sendState="idle" />);
 
@@ -155,6 +172,21 @@ describe("Composer send feedback", () => {
       screen.getByRole("button", { name: /Message sent/ }),
     ).toHaveAttribute("data-send-state", "sent");
   });
+
+  it.each([
+    ["delivery_uncertain", "Delivery status unknown"],
+    ["sent_copy_failed", "Message sent, but saving it to Sent failed"],
+  ] as const)(
+    "keeps the draft visible and disables ordinary resend after %s",
+    (sendState, label) => {
+      render(<Composer {...props} sendState={sendState} />);
+
+      expect(screen.getByLabelText("To")).toHaveValue("you@example.com");
+      expect(
+        screen.getByRole("button", { name: new RegExp(label) }),
+      ).toBeDisabled();
+    },
+  );
 
   it("preserves the draft when sending returns to idle after a failure", () => {
     const { rerender } = render(<Composer {...props} sendState="idle" />);
@@ -236,14 +268,14 @@ describe("Composer send feedback", () => {
     );
   });
 
-  it("renders and sends safe table and image layout in quoted rich email history", () => {
+  it("renders and sends quoted layout without loading remote images", () => {
     const onSend = vi.fn();
     const bodyHtml = [
       "<p><br></p>",
       '<div class="moz-cite-prefix">GitHub wrote:</div>',
       '<blockquote type="cite"><div data-dakia-quoted-email="true">',
       '<table width="600" style="width: 600px; background-color: rgb(255, 255, 255)"><tbody><tr>',
-      '<td align="center" style="padding: 24px"><img alt="GitHub" width="32" src="https://example.com/github.png">',
+      '<td align="center" style="padding: 24px"><img alt="GitHub" width="32" src="https://example.com/github.png"><img alt="Inline logo" width="16" src="data:image/png;base64,iVBORw0KGgo=">',
       '<a href="https://example.com/settings" style="display: inline-block; background-color: rgb(22, 136, 63); padding: 12px; color: white">Manage budgets</a></td>',
       "</tr></tbody></table></div></blockquote>",
     ].join("");
@@ -259,6 +291,10 @@ describe("Composer send feedback", () => {
     const editor = screen.getByLabelText("Write your message…");
     expect(editor.innerHTML).toContain('<table width="600"');
     expect(editor.innerHTML).toContain('<img alt="GitHub" width="32"');
+    expect(editor.innerHTML).not.toContain("example.com/github.png");
+    expect(editor.innerHTML).toContain(
+      'src="data:image/png;base64,iVBORw0KGgo="',
+    );
     expect(editor.innerHTML).toContain("background-color: rgb(255, 255, 255)");
     expect(editor.innerHTML).toContain("background-color: rgb(22, 136, 63)");
 
@@ -275,6 +311,37 @@ describe("Composer send feedback", () => {
       expect.objectContaining({
         body_text: expect.stringContaining("Manage budgets"),
       }),
+    );
+  });
+
+  it.each([
+    ["reply", "Re: Privacy boundary"],
+    ["forward", "Fwd: Privacy boundary"],
+  ])("blocks remote quoted images in a %s composer seed", (_kind, subject) => {
+    render(
+      <Composer
+        {...props}
+        seed={{
+          to: "sender@example.com",
+          subject,
+          bodyHtml: [
+            '<blockquote type="cite"><div data-dakia-quoted-email="true">',
+            "<p>Original message</p>",
+            '<img alt="Remote tracker" src="https://images.example.test/open.png">',
+            '<img alt="Inline seal" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==">',
+            "</div></blockquote>",
+          ].join(""),
+        }}
+        sendState="idle"
+      />,
+    );
+
+    const editor = screen.getByLabelText("Write your message…");
+    expect(editor.innerHTML).toContain("Original message");
+    expect(editor.innerHTML).toContain('alt="Remote tracker"');
+    expect(editor.innerHTML).not.toContain("images.example.test/open.png");
+    expect(editor.innerHTML).toContain(
+      "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==",
     );
   });
 

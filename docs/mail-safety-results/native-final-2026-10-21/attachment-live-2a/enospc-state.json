@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "root": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.dzkRZz",
+  "image": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.dzkRZz/attachment-enospc.dmg",
+  "mountPoint": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.dzkRZz/Downloads",
+  "savedDownloads": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.dzkRZz/Downloads.saved-before-enospc",
+  "device": "/dev/disk8s1",
+  "initialImageSha256": "924fbe85c6a2178ba16809af26d21a4062469998382a50d6932ab63b95e7573a",
+  "imageBytes": 67108864,
+  "imageFileDevice": "16777231",
+  "imageInode": "140710879",
+  "originalDownloadsDevice": "16777231",
+  "originalDownloadsInode": "140678449",
+  "originalDownloadsMode": "755",
+  "createdAt": "2026-10-21T11:34:16.661Z"
+}

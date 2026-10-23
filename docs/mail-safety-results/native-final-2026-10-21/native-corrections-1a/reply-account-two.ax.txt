@@ -1,0 +1,46 @@
+Window: "New message", App: Dakia Fictional Provider Reader.
+0 standard window New message, Secondary Actions: Raise
+	1 scroll area
+		2 HTML content Description: New message, URL: 127.0.0.1:1420/?view=compose&seedKey=d0468a79-e37c-42ee-83d8-2eb54ceb29d4
+			3 container
+				4 container New message
+					5 text To
+					6 text field (settable) To, Value: Fictional Provider <provider@example.test>
+					7 button (collapsed) Cc · Bcc, Secondary Actions: Expand
+					8 text From
+					9 pop up button From, Value: Fictional Reader Two <fictional-reader-two@localhost>
+					10 text Subject
+					11 text field (settable) Subject, Value: Re: Account two collision safety check
+				12 container Formatting
+					13 text entry area (settable) Write your message…, Value: 
+On 21/10/2026, 15:10:26, Fictional Provider <provider@example.test> wrote:
+> Only account two owns this distinct cached body and attachment.
+						14 text (settable) On 21/10/2026, 15:10:26, Fictional Provider <provider@example.test> wrote:
+						15 text (settable) Only account two owns this distinct cached body and attachment.
+					16 toolbar Formatting
+						17 button Bold
+						18 button Italic
+						19 button Underline
+						20 button Strikethrough
+						21 button Quote
+						22 button Code block
+						23 button Bulleted list
+						24 button Numbered list
+						25 button Add link
+						26 button Clear formatting
+				27 button Send ⌘↵
+				28 button Attach
+				29 text Rich text
+	30 close button
+	31 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	32 minimize button
+33 menu bar
+	34 Dakia Fictional Provider Reader
+	35 File
+	36 Edit
+	37 Mailbox
+	38 Message
+	39 Window
+	40 Help
+
+The focused UI element is 6 text field (settable) To, Value: Fictional Provider <provider@example.test>

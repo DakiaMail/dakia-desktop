@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -12,6 +15,8 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   compareCoverage,
+  compareCoverageWithAvailability,
+  coverageAvailability,
   parseArgs,
   summarizeLcov,
 } from "./coverage-ratchet.mjs";
@@ -84,13 +89,71 @@ test("coverage arguments require both implementation reports and an output path"
   );
 });
 
+test("zero-observation LCOV metrics are reported as unavailable and cannot hide an observed baseline", () => {
+  const observed = {
+    lines: { found: 1, hit: 1 },
+    branches: { found: 1, hit: 1 },
+    functions: { found: 1, hit: 1 },
+  };
+  const unavailable = {
+    lines: { found: 1, hit: 1 },
+    branches: { found: 0, hit: 0 },
+    functions: { found: 0, hit: 0 },
+  };
+  assert.deepEqual(coverageAvailability(unavailable), {
+    lines: { status: "observed" },
+    branches: {
+      status: "unavailable",
+      reason: "LCOV reported no observable items for this metric",
+    },
+    functions: {
+      status: "unavailable",
+      reason: "LCOV reported no observable items for this metric",
+    },
+  });
+  assert.match(
+    compareCoverage(
+      { components: { rust: unavailable, frontend: observed } },
+      { components: { rust: observed, frontend: observed } },
+    ).join("\n"),
+    /rust branches is unavailable in the candidate/,
+  );
+});
+
+test("ratchet records a zero-denominator baseline as unavailable even when the candidate observes branches", () => {
+  const observed = {
+    lines: { found: 1, hit: 1 },
+    branches: { found: 1, hit: 1 },
+    functions: { found: 1, hit: 1 },
+  };
+  const result = compareCoverageWithAvailability(
+    { components: { rust: observed, frontend: observed } },
+    {
+      components: {
+        rust: { ...observed, branches: { found: 0, hit: 0 } },
+        frontend: observed,
+      },
+    },
+  );
+  assert.deepEqual(result.failures, []);
+  assert.deepEqual(result.unavailable, [
+    {
+      component: "rust",
+      metric: "branches",
+      baselineKind: "lcov-branches",
+      candidateKind: "lcov-branches",
+      reason: "baseline reported no observable items for this metric",
+    },
+  ]);
+});
+
 test("coverage CLI emits a reviewable candidate and never creates a baseline", () => {
   const directory = mkdtempSync(join(tmpdir(), "dakia-coverage-ratchet-"));
   try {
     const lcov = join(directory, "coverage.lcov");
     const output = join(directory, "candidate.json");
     writeFileSync(lcov, "SF:src/a.rs\nDA:1,1\nend_of_record\n");
-    execFileSync(
+    const outputText = execFileSync(
       process.execPath,
       [
         "scripts/coverage-ratchet.mjs",
@@ -101,13 +164,118 @@ test("coverage CLI emits a reviewable candidate and never creates a baseline", (
         "--output",
         output,
       ],
-      { cwd: root, stdio: "pipe" },
+      { cwd: root, encoding: "utf8" },
+    );
+    assert.match(outputText, /unavailable evidence, not 100% coverage/);
+    assert.deepEqual(
+      JSON.parse(readFileSync(output, "utf8")).observations.rust.branches,
+      {
+        status: "unavailable",
+        reason: "LCOV reported no observable items for this metric",
+      },
     );
     assert.deepEqual(
       JSON.parse(readFileSync(output, "utf8")).components.rust.lines,
       { found: 1, hit: 1 },
     );
     assert.equal(existsSync(join(directory, "baseline.json")), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("coverage CLI accepts only a normalization summary bound to its Rust LCOV and preserves unavailable mappings", () => {
+  const directory = mkdtempSync(join(tmpdir(), "dakia-coverage-ratchet-"));
+  try {
+    const lcov = join(directory, "coverage.lcov");
+    const normalization = join(directory, "rust-normalization-summary.json");
+    const output = join(directory, "candidate.json");
+    writeFileSync(
+      lcov,
+      "SF:src/a.rs\nFN:1,a::run\nFNDA:2,a::run\nDA:1,1\nBRDA:1,0,0,1\nend_of_record\n",
+    );
+    writeFileSync(
+      normalization,
+      JSON.stringify({
+        version: 1,
+        sourceDigest: "a".repeat(64),
+        profileSha256: "b".repeat(64),
+        input: { objectSetSha256: "c".repeat(64) },
+        output: {
+          lcovSha256: createHash("sha256")
+            .update(readFileSync(lcov))
+            .digest("hex"),
+        },
+        linesBranches: {
+          lines: { found: 1, hit: 1 },
+          branches: { found: 1, hit: 1 },
+        },
+        functions: {
+          metric: "llvm-instrumentation-instantiations",
+          instantiations: { found: 1, hit: 1 },
+          unavailableFunctionMappings: [
+            {
+              name: "a::unmapped",
+              filename: "src/a.rs",
+              invocationCount: 0,
+              branchRecordCount: 1,
+            },
+          ],
+        },
+      }),
+    );
+    execFileSync(
+      process.execPath,
+      [
+        "scripts/coverage-ratchet.mjs",
+        "--rust-lcov",
+        lcov,
+        "--rust-normalization-summary",
+        normalization,
+        "--frontend-lcov",
+        lcov,
+        "--output",
+        output,
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+    assert.deepEqual(JSON.parse(readFileSync(output, "utf8")).components.rust, {
+      lines: { found: 1, hit: 1 },
+      branches: { found: 1, hit: 1 },
+      functions: { found: 1, hit: 1 },
+    });
+    assert.deepEqual(
+      JSON.parse(readFileSync(output, "utf8")).rustCoverageProvenance
+        .unavailableFunctionMappings,
+      [
+        {
+          name: "a::unmapped",
+          filename: "src/a.rs",
+          invocationCount: 0,
+          branchRecordCount: 1,
+        },
+      ],
+    );
+    writeFileSync(normalization, JSON.stringify({ version: 1 }));
+    assert.throws(
+      () =>
+        execFileSync(
+          process.execPath,
+          [
+            "scripts/coverage-ratchet.mjs",
+            "--rust-lcov",
+            lcov,
+            "--rust-normalization-summary",
+            normalization,
+            "--frontend-lcov",
+            lcov,
+            "--output",
+            output,
+          ],
+          { cwd: root, encoding: "utf8" },
+        ),
+      /Rust normalization summary is not bound to the supplied LCOV cohort/,
+    );
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -185,6 +353,89 @@ test("provider smoke contract validates secrets without exposing them or connect
   );
 });
 
+test("disposable Gmail smoke runs a private binary copy after the shared target is replaced", () => {
+  const directory = mkdtempSync(join(tmpdir(), "dakia-gmail-smoke-runner-"));
+  try {
+    const scriptDirectory = join(directory, "scripts");
+    const targetDirectory = join(directory, "target", "debug");
+    const toolDirectory = join(directory, "tools");
+    const temporaryDirectory = join(directory, "tmp");
+    mkdirSync(scriptDirectory, { recursive: true });
+    mkdirSync(targetDirectory, { recursive: true });
+    mkdirSync(toolDirectory, { recursive: true });
+    mkdirSync(temporaryDirectory, { recursive: true });
+    const runner = join(scriptDirectory, "run-disposable-gmail-smoke.sh");
+    const target = join(targetDirectory, "dakia-provider-smoke");
+    const witness = join(directory, "executed-paths.txt");
+    writeFileSync(
+      runner,
+      readFileSync(join(root, "scripts/run-disposable-gmail-smoke.sh")),
+    );
+    chmodSync(runner, 0o700);
+    writeFileSync(
+      target,
+      `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$0" >> "$FAKE_PROVIDER_WITNESS"
+if [[ "$1" == "--write-gmail-template" ]]; then
+  : > "$2"
+  cat > "$FAKE_PROVIDER_TARGET" <<'MUTABLE'
+#!/usr/bin/env bash
+echo mutable-target-ran >&2
+exit 97
+MUTABLE
+  chmod 700 "$FAKE_PROVIDER_TARGET"
+  exit 0
+fi
+while [[ "$#" -gt 0 ]]; do
+  if [[ "$1" == "--evidence-report" ]]; then
+    printf '{"outcome":"passed"}\\n' > "$2"
+    break
+  fi
+  shift
+done
+`,
+    );
+    chmodSync(target, 0o700);
+    writeFileSync(
+      join(toolDirectory, "cargo"),
+      "#!/usr/bin/env bash\nexit 0\n",
+    );
+    writeFileSync(
+      join(toolDirectory, "git"),
+      "#!/usr/bin/env bash\nprintf '%040d\\n' 1\n",
+    );
+    chmodSync(join(toolDirectory, "cargo"), 0o700);
+    chmodSync(join(toolDirectory, "git"), 0o700);
+    const result = spawnSync("bash", [runner], {
+      cwd: directory,
+      encoding: "utf8",
+      input: "isolated.runner@gmail.com\n",
+      env: {
+        ...process.env,
+        PATH: `${toolDirectory}:${process.env.PATH}`,
+        TMPDIR: temporaryDirectory,
+        FAKE_PROVIDER_TARGET: target,
+        FAKE_PROVIDER_WITNESS: witness,
+      },
+    });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.doesNotMatch(
+      `${result.stdout}${result.stderr}`,
+      /mutable-target-ran/,
+    );
+    const executions = readFileSync(witness, "utf8").trim().split("\n");
+    assert.equal(executions.length, 2);
+    assert.ok(
+      executions.every((path) => path.includes("dakia-gmail-smoke-config.")),
+      executions.join("\n"),
+    );
+    assert.ok(executions.every((path) => path !== target));
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("manual workflow remains dispatch-only and runs bounded infrastructure", () => {
   const workflow = readFileSync(
     join(root, ".github/workflows/manual-validation.yml"),
@@ -192,7 +443,7 @@ test("manual workflow remains dispatch-only and runs bounded infrastructure", ()
   );
   assert.match(workflow, /^\s*workflow_dispatch:/m);
   assert.doesNotMatch(workflow, /^\s*schedule:/m);
-  assert.match(
+  assert.doesNotMatch(
     workflow,
     /cargo install cargo-llvm-cov --version 0\.6\.13 --locked/,
   );
@@ -325,6 +576,254 @@ test("manual workflow remains dispatch-only and runs bounded infrastructure", ()
     /--localstorage-file/,
     "Node 20 rejects --localstorage-file in NODE_OPTIONS on hosted runners",
   );
+});
+
+test("coverage lane uses branch-capable Rust coverage and an isolated lock-reproducible Vitest provider", () => {
+  const workflow = readFileSync(
+    join(root, ".github/workflows/manual-validation.yml"),
+    "utf8",
+  );
+  const lock = JSON.parse(
+    readFileSync(join(root, "package-lock.json"), "utf8"),
+  );
+  const lockedVitest = lock.packages["node_modules/vitest"]?.version;
+  assert.match(
+    lockedVitest ?? "",
+    /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/,
+    "the workflow must derive a well-formed locked Vitest version",
+  );
+
+  const coverageJob = workflow.slice(
+    workflow.indexOf("\n  coverage:"),
+    workflow.indexOf("\n  fuzz:"),
+  );
+  const outsideCoverage = workflow.replace(coverageJob, "");
+  assert.match(
+    coverageJob,
+    /rustup toolchain install nightly-2026-10-17 --profile minimal --component llvm-tools-preview/,
+  );
+  assert.match(coverageJob, /RUSTUP_TOOLCHAIN=nightly-2026-10-17/);
+  assert.match(
+    coverageJob,
+    /cargo \+nightly-2026-10-17 install cargo-llvm-cov --version 0\.9\.1 --locked/,
+  );
+  assert.match(
+    coverageJob,
+    /cargo \+nightly-2026-10-17 llvm-cov --workspace --branch --locked --no-report/,
+  );
+  assert.doesNotMatch(
+    outsideCoverage,
+    /nightly-2026-10-17|cargo-llvm-cov --version 0\.9\.1|llvm-cov[^\n]*--branch/,
+  );
+  assert.equal(
+    [
+      ...coverageJob.matchAll(
+        /cargo \+nightly-2026-10-17 llvm-cov report --workspace --branch --locked --lcov --skip-functions/g,
+      ),
+    ].length,
+    1,
+    "only the coverage job may generate branch LCOV through the no-function crash workaround",
+  );
+
+  const ordinaryJobs = [
+    [
+      "full-source",
+      workflow.slice(
+        workflow.indexOf("\n  full-source:"),
+        workflow.indexOf("\n  coverage:"),
+      ),
+    ],
+    [
+      "fuzz",
+      workflow.slice(
+        workflow.indexOf("\n  fuzz:"),
+        workflow.indexOf("\n  provider-smoke:"),
+      ),
+    ],
+    ["provider-smoke", workflow.slice(workflow.indexOf("\n  provider-smoke:"))],
+  ];
+  for (const [name, job] of ordinaryJobs) {
+    assert.match(
+      job,
+      /rustup toolchain install 1\.89\.0 --profile minimal/,
+      `${name} must remain on the supported stable Rust toolchain`,
+    );
+    assert.match(job, /RUSTUP_TOOLCHAIN=1\.89\.0/);
+    assert.doesNotMatch(
+      job,
+      /nightly-2026-10-17|cargo-llvm-cov|llvm-cov[^\n]*--branch/,
+    );
+  }
+
+  assert.match(
+    coverageJob,
+    /locked_vitest_version="\$\(node -p "require\('\.\/package-lock\.json'\)\.packages\['node_modules\/vitest'\]\.version"\)"/,
+  );
+  assert.match(
+    coverageJob,
+    /cargo \+nightly-2026-10-17 llvm-cov report --workspace --branch --locked --json --output-path coverage\/rust-functions\.json/,
+  );
+  assert.match(
+    coverageJob,
+    /export LLVM_COV="\$PWD\/scripts\/coverage-llvm-cov-proxy\.mjs"/,
+  );
+  assert.match(
+    coverageJob,
+    /target_libdir="\$\(rustc \+nightly-2026-10-17 --print target-libdir\)"/,
+  );
+  assert.match(
+    coverageJob,
+    /llvm_tools_dir="\$\(dirname "\$target_libdir"\)\/bin"/,
+  );
+  assert.match(
+    coverageJob,
+    /export RUST_COVERAGE_REAL_LLVM_COV="\$llvm_tools_dir\/llvm-cov"/,
+  );
+  assert.match(coverageJob, /test -x "\$RUST_COVERAGE_REAL_LLVM_COV"/);
+  assert.doesNotMatch(coverageJob, /rustup which .*llvm-(cov|profdata)/);
+  assert.match(
+    coverageJob,
+    /node scripts\/create-rust-coverage-provenance\.mjs/,
+  );
+  assert.match(coverageJob, /node scripts\/normalize-rust-coverage-lcov\.mjs/);
+  assert.match(
+    coverageJob,
+    /--rust-normalization-summary coverage\/rust-normalization-summary\.json/,
+  );
+  assert.match(
+    coverageJob,
+    /coverage_provider_root="\$RUNNER_TEMP\/dakia-vitest-coverage-provider"/,
+  );
+  assert.match(
+    coverageJob,
+    /cp scripts\/coverage-provider\/package\.json scripts\/coverage-provider\/package-lock\.json/,
+  );
+  assert.match(
+    coverageJob,
+    /cd "\$coverage_provider_root"\n\s+npm ci --ignore-scripts --no-audit/,
+  );
+  assert.match(
+    coverageJob,
+    /cp scripts\/coverage-provider\/package-lock\.json[\s\\]+"\$GITHUB_WORKSPACE\/coverage\/vitest-coverage-provider\.package-lock\.json"/,
+  );
+  assert.match(
+    coverageJob,
+    /sha256sum "\$GITHUB_WORKSPACE\/coverage\/vitest-coverage-provider\.package-lock\.json"/,
+  );
+  assert.match(coverageJob, /cmp "\$root_tree_before" "\$root_tree_after"/);
+  assert.match(
+    coverageJob,
+    /ln -s "\$coverage_provider_root\/node_modules\/@vitest\/coverage-v8" "\$coverage_provider_link"/,
+  );
+  assert.doesNotMatch(coverageJob, /--legacy-peer-deps/);
+  assert.doesNotMatch(coverageJob, /npm install/);
+  assert.match(
+    coverageJob,
+    /installed_vitest_version="\$\(node -p "require\('\.\/node_modules\/vitest\/package\.json'\)\.version"\)"/,
+  );
+  assert.match(
+    coverageJob,
+    /installed_provider_version="\$\(node -p "require\('\.\/node_modules\/@vitest\/coverage-v8\/package\.json'\)\.version"\)"/,
+  );
+  assert.match(
+    coverageJob,
+    /test "\$installed_vitest_version" = "\$locked_vitest_version"/,
+  );
+  assert.match(
+    coverageJob,
+    /test "\$installed_provider_version" = "\$locked_vitest_version"/,
+  );
+  assert.match(
+    coverageJob,
+    /test "\$installed_provider_vitest_version" = "\$locked_vitest_version"/,
+  );
+  assert.doesNotMatch(
+    coverageJob,
+    /@vitest\/coverage-v8@(?!\$locked_vitest_version)/,
+    "the coverage provider version must be lock-derived rather than hard-coded",
+  );
+
+  const coverageGenerationIndex = coverageJob.indexOf(
+    "Generate Rust coverage reports without the LLVM full-LCOV crash path",
+  );
+  const providerInstallIndex = coverageJob.indexOf(
+    "npm ci --ignore-scripts --no-audit",
+  );
+  const runtimeCheckIndex = coverageJob.indexOf(
+    'test "$installed_vitest_version" = "$locked_vitest_version"',
+  );
+  const providerCheckIndex = coverageJob.indexOf(
+    'test "$installed_provider_version" = "$locked_vitest_version"',
+  );
+  assert.ok(coverageGenerationIndex >= 0);
+  for (const [name, index] of [
+    ["provider install", providerInstallIndex],
+    ["Vitest runtime check", runtimeCheckIndex],
+    ["coverage provider check", providerCheckIndex],
+  ]) {
+    assert.ok(
+      index >= 0 && index < coverageGenerationIndex,
+      `${name} must run before coverage`,
+    );
+  }
+});
+
+test("coverage workflow rejects Rust LCOV without branch observations", () => {
+  const workflow = readFileSync(
+    join(root, ".github/workflows/manual-validation.yml"),
+    "utf8",
+  );
+  const coverageJob = workflow.slice(
+    workflow.indexOf("\n  coverage:"),
+    workflow.indexOf("\n  fuzz:"),
+  );
+  assert.match(
+    coverageJob,
+    /uses: actions\/upload-artifact@[0-9a-f]+ # v4\.6\.0\n\s+if: always\(\)/,
+  );
+  const check = coverageJob.match(
+    /node --input-type=module - coverage\/rust-normalized\.lcov <<'NODE'\n([\s\S]*?)\n\s+NODE/,
+  )?.[1];
+  assert.ok(
+    check,
+    "the coverage job must contain an executable Rust branch check",
+  );
+  assert.match(
+    check,
+    /coverageAvailability\(summary\)\.branches\.status !== "observed"/,
+  );
+  assert.match(
+    check,
+    /Rust branch LCOV observations are unavailable; coverage candidate cannot be accepted/,
+  );
+  const directory = mkdtempSync(join(tmpdir(), "dakia-rust-branch-lcov-"));
+  try {
+    const runCheck = (name, contents) => {
+      const lcov = join(directory, name);
+      writeFileSync(lcov, contents);
+      return spawnSync(process.execPath, ["--input-type=module", "-", lcov], {
+        cwd: root,
+        encoding: "utf8",
+        input: check,
+      });
+    };
+    const observed = runCheck(
+      "observed.lcov",
+      "SF:src/a.rs\nDA:1,1\nBRDA:1,0,0,1\nend_of_record\n",
+    );
+    assert.equal(observed.status, 0, observed.stderr);
+    const unavailable = runCheck(
+      "unavailable.lcov",
+      "SF:src/a.rs\nDA:1,1\nend_of_record\n",
+    );
+    assert.notEqual(unavailable.status, 0);
+    assert.match(
+      `${unavailable.stdout}${unavailable.stderr}`,
+      /Rust branch LCOV observations are unavailable; coverage candidate cannot be accepted/,
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("fixed-seed lane executes the property targets and exact MIME regression", () => {

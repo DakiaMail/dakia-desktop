@@ -1,0 +1,1632 @@
+{
+  "schemaVersion": 1,
+  "name": "mail-parser",
+  "version": "0.11.5",
+  "vendorPath": "vendor/mail-parser",
+  "registryChecksum": "47785d444be4d32c1709171c6219a90f667c0ad0ffe68b4b179e794f31f4f9e8",
+  "upstreamRepository": "https://github.com/stalwartlabs/mail-parser",
+  "upstreamRevision": "67a53e3ded665d68d9fc66cb41d89b3ded559d0e",
+  "license": "Apache-2.0 OR MIT",
+  "review": {
+    "required": "independent-review",
+    "evidence": "2026-10-21 independent review approved the final vendor tree; fresh offline vendor suite passed 59 tests with serde,full_encoding and rustfmt, including fail-closed route folding and nested-comment controls. The retained provenance record documents the earlier nested message/rfc822 recovery change."
+  },
+  "upstreamFiles": [
+    {
+      "path": ".cargo_vcs_info.json",
+      "sha256": "48a0cb4b06f3753cbe6f2034ae110675c5398165cee626f3cac0c7cc15f5c18a"
+    },
+    {
+      "path": ".github/workflows/rust.yml",
+      "sha256": "f3fb2cba71e32cd265cdd0b5f375acf73155028565b0d3a56d7534921cde3e2d"
+    },
+    {
+      "path": ".gitignore",
+      "sha256": "e76cda64850fd27265dcad1a342670f1edc98fefbe07d9d2c44a239e69f1b84f"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "sha256": "befce55cbe5e52af9c450c1cb7b85f58d93c21467466bdf130cbcb96501e67d9"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "27036e8b1c892e4f5b30b063d6ec5bec190fd919a47f15361ecf3923e868de46"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "d220b9e12b9b1cac2298ace5e5a4205a5d9928c687ff1bcb4668da4dfab0f57b"
+    },
+    {
+      "path": "Cargo.toml.orig",
+      "sha256": "75750d3e0954bc1b3f1bf1a69de9f8ae5693341f446eab89b9063f3df227fa4d"
+    },
+    {
+      "path": "LICENSES/Apache-2.0.txt",
+      "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+      "path": "LICENSES/MIT.txt",
+      "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    },
+    {
+      "path": "README.md",
+      "sha256": "490a129f7296248bb93679d7024168f8d710f871f405413df6aafc6879396b59"
+    },
+    {
+      "path": "examples/custom_parser.rs",
+      "sha256": "a6610a8c673bb95f665d93129c72cf52809fa0d61be685e142742f7d1521bcd3"
+    },
+    {
+      "path": "examples/mailbox_iterate_maildir.rs",
+      "sha256": "91cd099664dc9fa3e5562897f35af56ac24176a67c926def36ff317d4ba0c199"
+    },
+    {
+      "path": "examples/mailbox_parse_mbox.rs",
+      "sha256": "748c069ba15e2e6413d8ea5de463826f5f580842709dcdf8f7c66ebe71635d7e"
+    },
+    {
+      "path": "examples/message_parse.rs",
+      "sha256": "9c877c4db4107ae8ee06b2284c08a79ade3487852389f2939af6a5931d522ae8"
+    },
+    {
+      "path": "examples/message_write_attachments.rs",
+      "sha256": "7e244d0fa0758f2ccadbe0cff0df232b47190a716ecd41c8ca31601750974920"
+    },
+    {
+      "path": "flamegraph.sh",
+      "sha256": "7d3afbc99ec9f7479288685bfd771338353e6677d6b918292006521b0b08159e"
+    },
+    {
+      "path": "resources/address.json",
+      "sha256": "e1641e74dcf668d55f2285d0dbb8e1396e1157e42c43dcb4e157cecd9d279d16"
+    },
+    {
+      "path": "resources/content_type.json",
+      "sha256": "a87e90e349f911a45209d0860893ac864fc608087ad910219f4d921cefa9d614"
+    },
+    {
+      "path": "resources/date.json",
+      "sha256": "a41ff3e3678edfb75ecb0a2fcece6aeef39caf4b0eace27eaf1a21efc9283e40"
+    },
+    {
+      "path": "resources/eml/legacy/000.crlf.json",
+      "sha256": "871a757ea4717aa8b15740e68ee32ce2873a218d032110c43c30e269babf3bb6"
+    },
+    {
+      "path": "resources/eml/legacy/000.eml",
+      "sha256": "33c0493dd17864a14b4d11eeee3653bb001a9428f57551dd71acc3ebd51f8b8f"
+    },
+    {
+      "path": "resources/eml/legacy/000.json",
+      "sha256": "66f1ee699ad0e8fbfee913f91c9facae628379e227108feffe9e7d7f7febcd65"
+    },
+    {
+      "path": "resources/eml/legacy/001.crlf.json",
+      "sha256": "49f86d61f636718f9262f652d445a9bb59a1c4720907bbe82923ec1f0393f907"
+    },
+    {
+      "path": "resources/eml/legacy/001.eml",
+      "sha256": "ca08b1681037845493766628ad5c0d1dd70f0fa3756b91527bca1d655b760fd2"
+    },
+    {
+      "path": "resources/eml/legacy/001.json",
+      "sha256": "87941302b002e58cfb7b82204054b06d684ca86e1d80c1bcaca0caeca34f3ea4"
+    },
+    {
+      "path": "resources/eml/legacy/002.crlf.json",
+      "sha256": "c3281e2f608bd621db5508100ed64db67ce84c71a5575a46ab05aba80f649f72"
+    },
+    {
+      "path": "resources/eml/legacy/002.eml",
+      "sha256": "801355692ddb21e4466b6ce7104fc8e79c0fb10190ff86cb093fc15db9c8ec51"
+    },
+    {
+      "path": "resources/eml/legacy/002.json",
+      "sha256": "3f71998d43dfdf17f5f79fdba9429f9b59554372600c23b5d641bba52eb6d6f1"
+    },
+    {
+      "path": "resources/eml/legacy/003.crlf.json",
+      "sha256": "d87b1a7e8bbe6a759359c585f9c3cab880141fd8fd6e4f3a1266f28532ca2714"
+    },
+    {
+      "path": "resources/eml/legacy/003.eml",
+      "sha256": "67e4bfb5f16554024a2fe033ce469804ee017e309d5b8697635290771a7e0b28"
+    },
+    {
+      "path": "resources/eml/legacy/003.json",
+      "sha256": "0cf13b5fde53d1420aa7659e4d856befaa7c28ddcb811282a22825affff12578"
+    },
+    {
+      "path": "resources/eml/legacy/004.crlf.json",
+      "sha256": "dec61150515b6decd1f806de0bf4642559df41aae1277f02fef29d1ae47cb1f4"
+    },
+    {
+      "path": "resources/eml/legacy/004.eml",
+      "sha256": "d2c6682afd2dd66ed2cb52412d5711c8d42af3dca15d147835cb14b2ce1953c1"
+    },
+    {
+      "path": "resources/eml/legacy/004.json",
+      "sha256": "ada1ce7f760fd97809eedf63e44421589be3767e0e945466294ba91dbb4631ed"
+    },
+    {
+      "path": "resources/eml/legacy/005.crlf.json",
+      "sha256": "0f1c2cc7fcd9224c633f57030f051e4f4533a06862121e55a8a75c503959e187"
+    },
+    {
+      "path": "resources/eml/legacy/005.eml",
+      "sha256": "0c90f80fb64a316e84a095f2813fadbe06982fec24bf02b47659096ce93a3325"
+    },
+    {
+      "path": "resources/eml/legacy/005.json",
+      "sha256": "19a69e674fe8f7e7d4ebb7cbc401343afd3fcedc237c58cdb39a7a9513a4e81c"
+    },
+    {
+      "path": "resources/eml/legacy/006.crlf.json",
+      "sha256": "c860bab8be2b95cb121ddcc512460e3dad6efc59fd82e6fd3e27a0af7b9386cf"
+    },
+    {
+      "path": "resources/eml/legacy/006.eml",
+      "sha256": "dc176e4e61e07e04ccd3ea75407bc4ffecf6373642babc45bd4a4fe0e5e7c10c"
+    },
+    {
+      "path": "resources/eml/legacy/006.json",
+      "sha256": "16ed113c1033da508239ae19b24648c2b1efc6871dff0e60ca78417610e2048e"
+    },
+    {
+      "path": "resources/eml/legacy/007.crlf.json",
+      "sha256": "aca8806fde7a732c90cfcc7f0ab5cc53b1eefbbf9f9cbb1340506026bbb007e2"
+    },
+    {
+      "path": "resources/eml/legacy/007.eml",
+      "sha256": "192e20313ec6e91c60fe9d2bfaa444035b3e7d7613d0a10a291d3b448355f835"
+    },
+    {
+      "path": "resources/eml/legacy/007.json",
+      "sha256": "6cdcfb36c0c69a612c58b005afdc7874ab1d04b9426c193d15258f5afc2c67e5"
+    },
+    {
+      "path": "resources/eml/legacy/008.crlf.json",
+      "sha256": "978c8419085d8e3e98f72bf00300290d47be7a327bb2df666de662025e647a5c"
+    },
+    {
+      "path": "resources/eml/legacy/008.eml",
+      "sha256": "b8ad81db95b5802597dcd09920e0f8b537c86b0169ac2303f73e6d38019e67a8"
+    },
+    {
+      "path": "resources/eml/legacy/008.json",
+      "sha256": "4eceb410b12da1b58b6be8805a22e1537b531447adec59a02be6997c792ab18a"
+    },
+    {
+      "path": "resources/eml/legacy/009.crlf.json",
+      "sha256": "3d1a5b15f76fa2d36226a57e421126f583116f0d0485a5008ad5449a76b251a7"
+    },
+    {
+      "path": "resources/eml/legacy/009.eml",
+      "sha256": "4cbab7b2405467a9c5a1ee2e29947a087399aeed76064cdccde4fd3725269872"
+    },
+    {
+      "path": "resources/eml/legacy/009.json",
+      "sha256": "51b25e889c5e7ca156fdab107f4e4a8fe4b8a45047a5775d080e6dc272436a90"
+    },
+    {
+      "path": "resources/eml/legacy/010.crlf.json",
+      "sha256": "8d5dde8f68f6c95a9e545ff91f83b8fdacfa9fd7ba9ba4f24b5bd0fc58da672d"
+    },
+    {
+      "path": "resources/eml/legacy/010.eml",
+      "sha256": "04121e20e9037dc1f950a3413106ca74e4950adc21b7fae776cb6a7340412028"
+    },
+    {
+      "path": "resources/eml/legacy/010.json",
+      "sha256": "9e8d053bff993f3f2c44f10d15587d829db43d7a355e5bc737b59681f9091a62"
+    },
+    {
+      "path": "resources/eml/legacy/011.crlf.json",
+      "sha256": "b01f766c54db3fb5e579007cafebda5c5049daeb41b220a42c5e88b7ae32b767"
+    },
+    {
+      "path": "resources/eml/legacy/011.eml",
+      "sha256": "85d278c93346fafe4575189489509a1ddc7a9b4924bb16e3fcfd249dc2274afa"
+    },
+    {
+      "path": "resources/eml/legacy/011.json",
+      "sha256": "33ff3a206913cba7df15e38d213401601b99359726840201511e87d4349052ed"
+    },
+    {
+      "path": "resources/eml/legacy/012.crlf.json",
+      "sha256": "425ff1331f84f314c1e6cbc3ef86d5240e659decc136cf278912044289cbc22d"
+    },
+    {
+      "path": "resources/eml/legacy/012.eml",
+      "sha256": "cf358ada53425459af493a915f248ade57f4f661f7d9bd7a353bab1844986195"
+    },
+    {
+      "path": "resources/eml/legacy/012.json",
+      "sha256": "67f2521a41b1414f2e71d7cd079ae74c7be21a35458789f6731ec945ee35014d"
+    },
+    {
+      "path": "resources/eml/legacy/013.crlf.json",
+      "sha256": "77854aa58295ebb63019401dbac59632a8f158b3c8820b52d58733a4addd0b29"
+    },
+    {
+      "path": "resources/eml/legacy/013.eml",
+      "sha256": "dd2b8aee75c8fa132c775fb53445c5f877084d6e04d525dc971ab3840d67adab"
+    },
+    {
+      "path": "resources/eml/legacy/013.json",
+      "sha256": "265eb4c5367dbbdd2f5c18be679fed3c436976d9c37eb89819efbe2f48205759"
+    },
+    {
+      "path": "resources/eml/legacy/014.crlf.json",
+      "sha256": "46804dfedf3b21edf8229d172240c5fa93982755b5a1b6e5a7115173c4bf1701"
+    },
+    {
+      "path": "resources/eml/legacy/014.eml",
+      "sha256": "939b458099895fb9780c683c8e78fbcba16ea82f71743349d6cd4b6c84069845"
+    },
+    {
+      "path": "resources/eml/legacy/014.json",
+      "sha256": "e3f0e111a64c3886af3c4172e959685c5d93263473419f50b48a1045c2056260"
+    },
+    {
+      "path": "resources/eml/legacy/015.crlf.json",
+      "sha256": "723a43edc08b4ce8048c0d2119c01b913f3ff07763e05904b557e87e4fe16ccf"
+    },
+    {
+      "path": "resources/eml/legacy/015.eml",
+      "sha256": "b4581a4faa9b63c2fcdc75c28e06a6a2f28fd33e97072ee6b423fe1b897edc00"
+    },
+    {
+      "path": "resources/eml/legacy/015.json",
+      "sha256": "4ef92de8712e7c8d8527d4c94cd206d851afc5856e8b4563901673195b84956d"
+    },
+    {
+      "path": "resources/eml/legacy/016.crlf.json",
+      "sha256": "25621dc739d89dd950924f9beb5d1cf11c78e965fcb0878f08cf47bfef5786bc"
+    },
+    {
+      "path": "resources/eml/legacy/016.eml",
+      "sha256": "c48fc006172d7c565abfb75988dac6273375d8056a46cd40aff65300d726bbf5"
+    },
+    {
+      "path": "resources/eml/legacy/016.json",
+      "sha256": "7b635f79c7c1e9aa47928b10e0ccadf7a8372748aa205ed8800288d468ac7901"
+    },
+    {
+      "path": "resources/eml/legacy/017.crlf.json",
+      "sha256": "32891e4c991c5597c904df0f4190ce9e6c257ee932f4a03ca4b0a59d01a0dd91"
+    },
+    {
+      "path": "resources/eml/legacy/017.eml",
+      "sha256": "24e379786536dea745b46ff90688e2b4ea09c30a0b683fa3fd6e3ef96ee8d60b"
+    },
+    {
+      "path": "resources/eml/legacy/017.json",
+      "sha256": "cc213f570362c3bbdab1a17db75fcce55421d02316e3f3823da5867d142d734b"
+    },
+    {
+      "path": "resources/eml/legacy/018.crlf.json",
+      "sha256": "8e700a9581dbcc9ff730415ad68e220fe1ed0e450eaa04b59716bb5e666651c9"
+    },
+    {
+      "path": "resources/eml/legacy/018.eml",
+      "sha256": "ccaef34dbf226bf1a138a0697edf2875516869466dfeab6a9454ccd8d0ece8a9"
+    },
+    {
+      "path": "resources/eml/legacy/018.json",
+      "sha256": "80f8ae9d603ee3b670c7efac6d11094a8a33b64a3b3a197b669fb01a37c26016"
+    },
+    {
+      "path": "resources/eml/legacy/019.crlf.json",
+      "sha256": "0dad5399a5ce791a1177d0767fac23f5a592b2810885370d83fd7c92bb073444"
+    },
+    {
+      "path": "resources/eml/legacy/019.eml",
+      "sha256": "c5d84a527b05b2c8d63019b92a61e985e954393385dbaa5112b6842fbaa125d7"
+    },
+    {
+      "path": "resources/eml/legacy/019.json",
+      "sha256": "45533882a3feafd56f1cbb48a51677cbdcfb9807b797cd87b65b93cb8f9519d9"
+    },
+    {
+      "path": "resources/eml/legacy/020.crlf.json",
+      "sha256": "640ce743d955477159e100afef175f8a8a9aa3740d8c92be43ace1c298535af5"
+    },
+    {
+      "path": "resources/eml/legacy/020.eml",
+      "sha256": "133a20a52fa9f8d83079aadafd347d23df1d226146810092963c7ae5943c0251"
+    },
+    {
+      "path": "resources/eml/legacy/020.json",
+      "sha256": "9d19abf7b81300da54fff9516505c7b0b6a318b9a0956504edd761a4f0b1a8d2"
+    },
+    {
+      "path": "resources/eml/legacy/021.crlf.json",
+      "sha256": "247173cac5297bc6c19484d38695a62f98a29d32d4a1d9114a6af953381b194f"
+    },
+    {
+      "path": "resources/eml/legacy/021.eml",
+      "sha256": "adbfdfe4f8b3db241bdd97d02de50c50042588da65d94392fdd652101e8e841f"
+    },
+    {
+      "path": "resources/eml/legacy/021.json",
+      "sha256": "7cbb7824cfd7706bbe67fb385ba50ea3e7d2c3c2b220810009e9c170757aa4ee"
+    },
+    {
+      "path": "resources/eml/legacy/022.crlf.json",
+      "sha256": "590036c3f8f224ed9cfdfa8a17f2fcd9155d86d307795976afe7fa2d22876991"
+    },
+    {
+      "path": "resources/eml/legacy/022.eml",
+      "sha256": "5567362ea46bbe800715bc1e459d397894eb7f2552ee53f097ea201b84ce3914"
+    },
+    {
+      "path": "resources/eml/legacy/022.json",
+      "sha256": "b023d6a729bec3a0b15b7c1dce2e2778189b63084a8c8ba821ea318563966444"
+    },
+    {
+      "path": "resources/eml/legacy/023.crlf.json",
+      "sha256": "4e5cdfcc3b9dbbe63e8a944854c2fa9408f57a4c6b4555be84c78d9029d29311"
+    },
+    {
+      "path": "resources/eml/legacy/023.eml",
+      "sha256": "3f8f695994f474864602c482488fd9e46d0d5cf72516bf9b375fde5e7e06be35"
+    },
+    {
+      "path": "resources/eml/legacy/023.json",
+      "sha256": "683b77a5ec36f9089bff3277ad65496e8e5c72747c1f53ab7ebb6ac6c4775d5a"
+    },
+    {
+      "path": "resources/eml/legacy/024.crlf.json",
+      "sha256": "931bc312c8eb3f7041f773b4728652fa25b8a4d5f6ac77f6f1269342ec32d2ae"
+    },
+    {
+      "path": "resources/eml/legacy/024.eml",
+      "sha256": "2de3b147a98c468a1810919266c9d7fe236860746858025b02fc3c1f5aeec7f0"
+    },
+    {
+      "path": "resources/eml/legacy/024.json",
+      "sha256": "e18575812a52d82b7c7873a1eecaae3715bc7043935c89e258c6f65edf4624d5"
+    },
+    {
+      "path": "resources/eml/legacy/025.crlf.json",
+      "sha256": "da8c7f05f26136f5b3e972ea9dbc265c934402ed80bf66284606bbe761b07f31"
+    },
+    {
+      "path": "resources/eml/legacy/025.eml",
+      "sha256": "82c108305bd463cef08494d1e1db92a4b80632d43d6bd687b983cd37334ee1e1"
+    },
+    {
+      "path": "resources/eml/legacy/025.json",
+      "sha256": "07802066e30966e59af28831d3ca0712325a789e1c8edc13bf48217e4f9c23e8"
+    },
+    {
+      "path": "resources/eml/legacy/026.crlf.json",
+      "sha256": "ace9dda17a6b4601c396c3b007b4c48f352d5e5b7af58f770e2e34b05f38e83a"
+    },
+    {
+      "path": "resources/eml/legacy/026.eml",
+      "sha256": "373cb883c80823d3da6779af8c593066e6df91ec7ca93f6c712d9325524d0ecf"
+    },
+    {
+      "path": "resources/eml/legacy/026.json",
+      "sha256": "1e90781cb96f07c14a3b803133352a91601cb554d81c1f77c0f63eb905141857"
+    },
+    {
+      "path": "resources/eml/legacy/027.crlf.json",
+      "sha256": "ed6bf87238946a559e99b13bd35f13677a90b9415f8f727ad4bb4bfef8907b42"
+    },
+    {
+      "path": "resources/eml/legacy/027.eml",
+      "sha256": "9572dc394cb08195f4ce2222d72286763a13c8523cbf50759802daf4c853c653"
+    },
+    {
+      "path": "resources/eml/legacy/027.json",
+      "sha256": "434fb800abcb4abfa3795c6d82afca4b668a1d9857912bf86fbc17708f853118"
+    },
+    {
+      "path": "resources/eml/legacy/028.crlf.json",
+      "sha256": "869a73c0174c350534bd846cee1d8a6e98424c1e8c75a6a1d47e824285be98bd"
+    },
+    {
+      "path": "resources/eml/legacy/028.eml",
+      "sha256": "c2cf6ce6c94797a294aede51f8392ff87d6e96b3fcc59901b5abb8032d5abc88"
+    },
+    {
+      "path": "resources/eml/legacy/028.json",
+      "sha256": "afff9f31ecfd264b157ee51d211e6977720f77e1e3dd8738f581d6dc6606bf48"
+    },
+    {
+      "path": "resources/eml/legacy/029.crlf.json",
+      "sha256": "fbaae7c44665951512d547227f33624c6163d4d14affd74fe00025cca13f274c"
+    },
+    {
+      "path": "resources/eml/legacy/029.eml",
+      "sha256": "31f9af468f270164d8d1d2a56736527e96fd3d14019f05b8b6d733ea97424d21"
+    },
+    {
+      "path": "resources/eml/legacy/029.json",
+      "sha256": "1da729630bc5795b12297d5dad88e301cc72dafc764d69e846d4b58a348ae979"
+    },
+    {
+      "path": "resources/eml/legacy/030.crlf.json",
+      "sha256": "1f579e4cd64530f0a5a6275af7c5fae3d749634e791e13130c34df34a4f5cea3"
+    },
+    {
+      "path": "resources/eml/legacy/030.eml",
+      "sha256": "3b0eb1a00ade4b695611494559be1f00e30508fd56b3ee57af7a17928257957a"
+    },
+    {
+      "path": "resources/eml/legacy/030.json",
+      "sha256": "017e2c7881733e76aca2e9278c2225e9451b48d6aba3afc225cae4417ba9e390"
+    },
+    {
+      "path": "resources/eml/legacy/031.crlf.json",
+      "sha256": "a949b0896e54187eeb7bb85a99005718590409345bac2462b7a593ede5bd746c"
+    },
+    {
+      "path": "resources/eml/legacy/031.eml",
+      "sha256": "98ce00850223c8ddfa969a49090849d6eacaa393c1e950ca74b684a668055130"
+    },
+    {
+      "path": "resources/eml/legacy/031.json",
+      "sha256": "e86dfd5682ebbe36249fabed7cc071e9794d0d27315f5c20ae2e54dca9e971fe"
+    },
+    {
+      "path": "resources/eml/legacy/032.crlf.json",
+      "sha256": "b476f979565adc62ec6ad2ce2c18314fa31bced452e0642fe6d0d3898274d0de"
+    },
+    {
+      "path": "resources/eml/legacy/032.eml",
+      "sha256": "12d133eaab0928e6962a8cbf18c6b870728400c4ae40441f46bf7fade55163b7"
+    },
+    {
+      "path": "resources/eml/legacy/032.json",
+      "sha256": "3178b18db5589ee0d1ac2292124139b55a1efa2a4311e92f8235696997a3241a"
+    },
+    {
+      "path": "resources/eml/legacy/033.crlf.json",
+      "sha256": "d17822260e94305c796270e32d12085327c07a15f84061d076f6c8edbc280415"
+    },
+    {
+      "path": "resources/eml/legacy/033.eml",
+      "sha256": "8900b725ebe67da579f4b2fdcbaf52ce95f51b5398ef7023c09a862aa6312daf"
+    },
+    {
+      "path": "resources/eml/legacy/033.json",
+      "sha256": "122996853a5417f1c42f3755ec8eb3166b145ff57b8105022c337edcc94cd328"
+    },
+    {
+      "path": "resources/eml/legacy/034.crlf.json",
+      "sha256": "9ed4990bce60b47d9b213684283ba7d75bcd0d4e0e5e83c92d8413802587c333"
+    },
+    {
+      "path": "resources/eml/legacy/034.eml",
+      "sha256": "5340d6d32ab83cb05476b1b1d0f76ff4223222aec3ce2d7b0b5308e0aa7b8a82"
+    },
+    {
+      "path": "resources/eml/legacy/034.json",
+      "sha256": "bcc7e547df07f4c6cffb095f774df222712ad648fbc194b87d651510180cfa1d"
+    },
+    {
+      "path": "resources/eml/legacy/035.crlf.json",
+      "sha256": "391c5ba4980f20236f348df54ab5a9711e52c8b7ee486f0f8ddc22b0d41aac70"
+    },
+    {
+      "path": "resources/eml/legacy/035.eml",
+      "sha256": "54b391aea50bf93bb7c37bdf4e9160d4616c8f9c64cba4f48c55ca172c692c75"
+    },
+    {
+      "path": "resources/eml/legacy/035.json",
+      "sha256": "5017a43a8ebeffc4aa8ef48514d2a72c68a773278273f212f9f8bcf952814088"
+    },
+    {
+      "path": "resources/eml/legacy/036.crlf.json",
+      "sha256": "d406f0748ae2b5ca9af2c10877281ca13701d59e208d9b748b3e24345e32ce52"
+    },
+    {
+      "path": "resources/eml/legacy/036.eml",
+      "sha256": "dc1cc6bd2948d88aa56526993413aae77bf8b5e22baf71a74b8289cecc25acfc"
+    },
+    {
+      "path": "resources/eml/legacy/036.json",
+      "sha256": "9e20c2cd024639dea7fcbf0ffbe5b9dabc201acfb451ad91c79f57fbdc442560"
+    },
+    {
+      "path": "resources/eml/legacy/037.crlf.json",
+      "sha256": "5e785a89c92b6eb0b5538c24b9cac6a320920a461d217805e18d358e47f5c30c"
+    },
+    {
+      "path": "resources/eml/legacy/037.eml",
+      "sha256": "b20cc65a8999ed6f52ea6c5b79873f7e6d6a31791a5a73172d1245eb4aeb99a5"
+    },
+    {
+      "path": "resources/eml/legacy/037.json",
+      "sha256": "84e25b310feb231359077dd962e55ebfc4c74b6ab773977cd51c9313abb098b5"
+    },
+    {
+      "path": "resources/eml/legacy/038.crlf.json",
+      "sha256": "d6ebf1fe77ff1f9fa6da2595ebc3ac4c5199836dcf0b6ebc6875d1077f287156"
+    },
+    {
+      "path": "resources/eml/legacy/038.eml",
+      "sha256": "4982c5a022946244af68c5175813b753184aa6d8272e1d4b92e3bcf2fa34afe5"
+    },
+    {
+      "path": "resources/eml/legacy/038.json",
+      "sha256": "85d47737cb27acf1b61f2ced62e4cc8c015df0a8df41444125ff0a78186287c3"
+    },
+    {
+      "path": "resources/eml/legacy/039.crlf.json",
+      "sha256": "dfe262d8ddde89383dd5e2bfa786d7664cdcb524def2157363eb8d5f142375d7"
+    },
+    {
+      "path": "resources/eml/legacy/039.eml",
+      "sha256": "ac89095771f831b034b772f0cad96f082a2e4c7235fb3a1dff92f86c2bf11078"
+    },
+    {
+      "path": "resources/eml/legacy/039.json",
+      "sha256": "bd24bfbc1d661fa4dcfe2ce460d14062cd4d7384baff765936c8e963ebd5f331"
+    },
+    {
+      "path": "resources/eml/legacy/040.crlf.json",
+      "sha256": "71ecff1bb12de52f06d7706b1215c2223b16fbb4b0b8bbe2c7d70f3620d0fc00"
+    },
+    {
+      "path": "resources/eml/legacy/040.eml",
+      "sha256": "ad3d55ff2ea13a63c626ee181271cce04c18e6f0fbdffb22d0d3d7e942ec883c"
+    },
+    {
+      "path": "resources/eml/legacy/040.json",
+      "sha256": "d02d6cbdedb810590a62df3b20e66374424c9c8121e6d29226d7da6893e04e96"
+    },
+    {
+      "path": "resources/eml/legacy/041.crlf.json",
+      "sha256": "3b3a58425e453b5ce830cf1bae9291d7591faee3e9a4e4dfa260c5c176af5a52"
+    },
+    {
+      "path": "resources/eml/legacy/041.eml",
+      "sha256": "b2e4fb58ba824fd1745c93d54061aba9df346d72382972dd09c2bc4a72bedbe5"
+    },
+    {
+      "path": "resources/eml/legacy/041.json",
+      "sha256": "2f0b9d3e948e88558612da155451ec4fe049c8d853a23645ec0837893fa6fa61"
+    },
+    {
+      "path": "resources/eml/legacy/042.crlf.json",
+      "sha256": "bd45177e5a894650f0b91a043ae2ea5375be624e67c29dcee010d9cf4ae3f599"
+    },
+    {
+      "path": "resources/eml/legacy/042.eml",
+      "sha256": "3d789dc91c139a5520743889b51d6548ee415c68953553b48d086b4e4195b719"
+    },
+    {
+      "path": "resources/eml/legacy/042.json",
+      "sha256": "14a9d5b4726e7b0f19b10639df0d0eef80710488557cb61de2e6ae1639108591"
+    },
+    {
+      "path": "resources/eml/legacy/043.crlf.json",
+      "sha256": "c5925096456a2e660d6675beeb7ee7e53433b26b4c2b505641d7cb014cff60f0"
+    },
+    {
+      "path": "resources/eml/legacy/043.eml",
+      "sha256": "76499085efb18b9cdf0f2cb987d3340ce77b850b1ca4f104fd8e41ea44e2eeb8"
+    },
+    {
+      "path": "resources/eml/legacy/043.json",
+      "sha256": "b06b51f8f394a683e8d9f6a8125c337b55de15924866c4aab71b608d0ed06c15"
+    },
+    {
+      "path": "resources/eml/legacy/044.crlf.json",
+      "sha256": "e17afc1dd9a3df3d91af9c97e16f9dc3631ecc6ca78a85ce1782d01f51476a94"
+    },
+    {
+      "path": "resources/eml/legacy/044.eml",
+      "sha256": "9fd9d4df2fbd79a6cdf1327c80638c73600f4648254286a1d967bdeabe1c075c"
+    },
+    {
+      "path": "resources/eml/legacy/044.json",
+      "sha256": "1699e0971a84278ea7853deebbcc9c9bd1f6d4f465b9b778203c2eaf08d4fbcf"
+    },
+    {
+      "path": "resources/eml/legacy/045.crlf.json",
+      "sha256": "104feeab57c5b59c6bed5a0347190b5a21e9bd571dbddaa8f57d40aa98e22e39"
+    },
+    {
+      "path": "resources/eml/legacy/045.eml",
+      "sha256": "4cbbe93cfdb348557dac21d4934bcb6010f4bbbb569106bb0b2c29e0fc606766"
+    },
+    {
+      "path": "resources/eml/legacy/045.json",
+      "sha256": "3cb07a73ef0eb98bbf3ec27003fb876cb21ea47a704d55f599da05701e4a00da"
+    },
+    {
+      "path": "resources/eml/legacy/046.crlf.json",
+      "sha256": "9efcb681826644e3a15de8b293c7aa6dfbd98205c20cf91b6204345d4d26719a"
+    },
+    {
+      "path": "resources/eml/legacy/046.eml",
+      "sha256": "354cf591f1206fe0fa3cc5769acf48028ca31fa11ce743e2457593e0c1f540bc"
+    },
+    {
+      "path": "resources/eml/legacy/046.json",
+      "sha256": "5066f99e3e42ccd98dcde4619a39b8319f7bd00a40544dcead520a457eec6397"
+    },
+    {
+      "path": "resources/eml/legacy/047.crlf.json",
+      "sha256": "7f97a395b804b255cf3b731f05de363073615e4abf3c1961671c1078018cdef8"
+    },
+    {
+      "path": "resources/eml/legacy/047.eml",
+      "sha256": "742468edff0a339f45af4aedb5684db74ba7e6e0f5c2a60bcc9b58a9f92f8c7c"
+    },
+    {
+      "path": "resources/eml/legacy/047.json",
+      "sha256": "523696728e60352fa63c5e9b1251ef5560f2ed2238bf6050e230952adbe4a128"
+    },
+    {
+      "path": "resources/eml/legacy/048.crlf.json",
+      "sha256": "e2eb2a084838f3af6710df72cc8df0cda555697f974ed072bef88dbbfe707943"
+    },
+    {
+      "path": "resources/eml/legacy/048.eml",
+      "sha256": "efdc1a0919995bbe57df281d65d4e632d79cb60087cc727239ce5abd6c53bdf8"
+    },
+    {
+      "path": "resources/eml/legacy/048.json",
+      "sha256": "2e90b37ac9114d493b45e6c35d326a4e75dd23b63918ef8bf56f72ef0cafea01"
+    },
+    {
+      "path": "resources/eml/legacy/049.crlf.json",
+      "sha256": "aabc408bc92496649b66ad8060055ee2ea5dfe5d09eacc4d3e96e02357499bd7"
+    },
+    {
+      "path": "resources/eml/legacy/049.eml",
+      "sha256": "0720cbc1989d4608fc2a1570c47b4346095d1cfeb54e7739276f366e6469da38"
+    },
+    {
+      "path": "resources/eml/legacy/049.json",
+      "sha256": "9a60e626bb31428fc7ac3ff0a5a62a62e0908f4674ab73a82603ad84e7bb3b3d"
+    },
+    {
+      "path": "resources/eml/legacy/050.crlf.json",
+      "sha256": "a04d0db75522c49034f8e823637ce8a23a572c1f91852b217f5d61e47cb175f4"
+    },
+    {
+      "path": "resources/eml/legacy/050.eml",
+      "sha256": "f44aa09efceb791bb31f88760014b799c3f6977b1e7d40c8b09af20bc2dcc51e"
+    },
+    {
+      "path": "resources/eml/legacy/050.json",
+      "sha256": "6fe696c6201c05323abd5101d1757e1db511d545f4f30cd592363e8c7165ba88"
+    },
+    {
+      "path": "resources/eml/legacy/051.crlf.json",
+      "sha256": "7151a6bdea4746e238a45e9bcac0137067cf4d16a6e9eaef4cf260ff64c6976b"
+    },
+    {
+      "path": "resources/eml/legacy/051.eml",
+      "sha256": "af388bdbd2fd4bdad2b1b89d46b063af1d22cba2d0e71099af35a588928cfa86"
+    },
+    {
+      "path": "resources/eml/legacy/051.json",
+      "sha256": "e938a8b6e850309567991306bae5270cb1063e014ccaa95b99296dd5a5df8c88"
+    },
+    {
+      "path": "resources/eml/legacy/052.crlf.json",
+      "sha256": "9080ea41e7ad70f70c4a15aa9802451644c8c03250bf1c6ed417d41d3030ff9e"
+    },
+    {
+      "path": "resources/eml/legacy/052.eml",
+      "sha256": "7a1cf190d3e24abc76e609f50c478ffadc3dd92f18355e51858ae110e4463c4e"
+    },
+    {
+      "path": "resources/eml/legacy/052.json",
+      "sha256": "86b05d06adbae6b372c3a15180efb47acee1d1a7ffbed1da353a12f6afad7523"
+    },
+    {
+      "path": "resources/eml/legacy/053.crlf.json",
+      "sha256": "d79b0eb5c84c9fcff83653f97da85bde384f70dfaeb6bcf12e2ef5983b0a8ba6"
+    },
+    {
+      "path": "resources/eml/legacy/053.eml",
+      "sha256": "fd83d62b53ff0ccb4d5ac60ec1f57cd918afe6e739ca067f0d7315aa2af38228"
+    },
+    {
+      "path": "resources/eml/legacy/053.json",
+      "sha256": "2c1c9ce2f5292bbb54b6cdb6ce1526f5c01ebc59f027f6fe07ee86d909c0f17d"
+    },
+    {
+      "path": "resources/eml/legacy/COPYING",
+      "sha256": "237b36754178fd69395ae29ee172670d4adfee3d64343cd900c40ae2af571b8c"
+    },
+    {
+      "path": "resources/eml/malformed/000.crlf.json",
+      "sha256": "910e2c1a51d66b78621a13bb2c9432713df5878b6e578991b91810c50b3fc8d7"
+    },
+    {
+      "path": "resources/eml/malformed/000.eml",
+      "sha256": "df6dea994ba91a7dad18f5b0906c9c174d9ec06023a769e327e28ebd00d180a4"
+    },
+    {
+      "path": "resources/eml/malformed/000.json",
+      "sha256": "62a38ef16b1ca297df3fbc14f9707aea3c070565f6dc0b17e6f5243b725d47dc"
+    },
+    {
+      "path": "resources/eml/malformed/001.crlf.json",
+      "sha256": "9cfc7ed53954f74be263d47a01f0406c2c7a1609c39eda14d1b57611c5ac272d"
+    },
+    {
+      "path": "resources/eml/malformed/001.eml",
+      "sha256": "284ab4f001267a0dee9de02329eed1a396daab38458cdfdb43ffc8decd226860"
+    },
+    {
+      "path": "resources/eml/malformed/001.json",
+      "sha256": "a6e4973e8ac8cda2983aaf285b24e55af4761904ea65285532083304380ddee0"
+    },
+    {
+      "path": "resources/eml/malformed/002.crlf.json",
+      "sha256": "b46e4b7f81cf0dbeae4444669872a015c3ce0940c002369ac30bef8e1bb48462"
+    },
+    {
+      "path": "resources/eml/malformed/002.eml",
+      "sha256": "ec3224ff3b1642350e64e191ccf9a9892f881724c6298d2265aafc9c2df524af"
+    },
+    {
+      "path": "resources/eml/malformed/002.json",
+      "sha256": "4723133050cb246a5a81465c84bd37acf69f5a016b91395249f80cd3464ffb30"
+    },
+    {
+      "path": "resources/eml/malformed/003.crlf.json",
+      "sha256": "6ccd261342642eb43d58d004ebb6332ecbdebfa189f46e34e32621d5ae5fb2e5"
+    },
+    {
+      "path": "resources/eml/malformed/003.eml",
+      "sha256": "7ead2546e80697fcfff6791c1d736148f6f68ccce76c3fbbecdda149c2e3bbe0"
+    },
+    {
+      "path": "resources/eml/malformed/003.json",
+      "sha256": "08e002cd5170ed8fa5e68521ae2fe87a822762b8f532f58206f430ca996f477e"
+    },
+    {
+      "path": "resources/eml/malformed/004.crlf.json",
+      "sha256": "8bc7f8f3ee6f14baa4b83d2ac31d89481560a22a31295d91d828dac138e740e2"
+    },
+    {
+      "path": "resources/eml/malformed/004.eml",
+      "sha256": "49a7872745bfeedb401b96111408362c76aadbcf8e68e75df92f678a12052f14"
+    },
+    {
+      "path": "resources/eml/malformed/004.json",
+      "sha256": "df974755c4579ad707109f351df57813c1482582b06b961f81a41f08bc69f212"
+    },
+    {
+      "path": "resources/eml/malformed/005.crlf.json",
+      "sha256": "fd657bb245b8100000fd593d1e98fdad9637aec446c43f4179ccf3eb78ce8981"
+    },
+    {
+      "path": "resources/eml/malformed/005.eml",
+      "sha256": "5890507921d5c93ed30943be4a6d3344bcb65308365b8cd0f1ad1da3959d643c"
+    },
+    {
+      "path": "resources/eml/malformed/005.json",
+      "sha256": "910839259af6460863e7629e8f85bfb96478a16f2706856941a9da4753804c80"
+    },
+    {
+      "path": "resources/eml/malformed/006.crlf.json",
+      "sha256": "9ccd784df0982a5a93fa1645aab7472c1d4f2b5bee9972ff63eaba2e4cc504ca"
+    },
+    {
+      "path": "resources/eml/malformed/006.eml",
+      "sha256": "127cf48cc5aa73c7e23de7ccb2a1be0bdfcab0c75623e03004197cefb6c5bc0f"
+    },
+    {
+      "path": "resources/eml/malformed/006.json",
+      "sha256": "b4bb5ccfe227559323ff71635ff166f37ccb5ad03873487c9a45b230fc9ca66e"
+    },
+    {
+      "path": "resources/eml/malformed/007.crlf.json",
+      "sha256": "ee71d1c33b7bbb8235c315ea1eb0a148a8a031ed662454fe36623163bbcb666d"
+    },
+    {
+      "path": "resources/eml/malformed/007.eml",
+      "sha256": "3cecee934e32048b3caf4ac40a43290ff4083ac10f4dfb80ae2a67421a35b741"
+    },
+    {
+      "path": "resources/eml/malformed/007.json",
+      "sha256": "b390aa68713472c9181b1abad4376a2aa07e1d18db23d0af6d7e6bd60523f7ac"
+    },
+    {
+      "path": "resources/eml/malformed/008.crlf.json",
+      "sha256": "fa685610488d1855d43ef24b6083e76fda3add43d7b4639db1f4cf7e873aa7bc"
+    },
+    {
+      "path": "resources/eml/malformed/008.eml",
+      "sha256": "97179317510d3c2198ebe0f17a52d72cb2769bd0fcf3f5b5446b41af2ed5aca4"
+    },
+    {
+      "path": "resources/eml/malformed/008.json",
+      "sha256": "5525f76c4d84140d33159923e96ed1507997ca5d3af8d5ddacea8bd29821a1bc"
+    },
+    {
+      "path": "resources/eml/malformed/009.crlf.json",
+      "sha256": "ac09019ec879552fc2c30bd81b4b8285899d4a624e95b43b1763aa24c4231db4"
+    },
+    {
+      "path": "resources/eml/malformed/009.eml",
+      "sha256": "447352b9dc0c21f7e790731f967632dddf9972daade5141d5230161fcbf7557c"
+    },
+    {
+      "path": "resources/eml/malformed/009.json",
+      "sha256": "5bfcea3d3e4ef69686e6e073ecdf680b4e08dceadfdeac676b7bd8fc45b92798"
+    },
+    {
+      "path": "resources/eml/malformed/010.crlf.json",
+      "sha256": "fbb094211c62a7cc225898dddd00ca4d88911392656d9305947513d0d2e605b0"
+    },
+    {
+      "path": "resources/eml/malformed/010.eml",
+      "sha256": "49881c503386deefbd6311255609cd33b50e85cfbc66596356c5a3215c62364d"
+    },
+    {
+      "path": "resources/eml/malformed/010.json",
+      "sha256": "bbc46746ecf14e1b24e5ddcf0fd06b9112fe934b3ba0107e8f88880d7cc76222"
+    },
+    {
+      "path": "resources/eml/malformed/011.crlf.json",
+      "sha256": "ac09019ec879552fc2c30bd81b4b8285899d4a624e95b43b1763aa24c4231db4"
+    },
+    {
+      "path": "resources/eml/malformed/011.eml",
+      "sha256": "447352b9dc0c21f7e790731f967632dddf9972daade5141d5230161fcbf7557c"
+    },
+    {
+      "path": "resources/eml/malformed/011.json",
+      "sha256": "5bfcea3d3e4ef69686e6e073ecdf680b4e08dceadfdeac676b7bd8fc45b92798"
+    },
+    {
+      "path": "resources/eml/malformed/012.crlf.json",
+      "sha256": "9923544f385190f8ef97ce3ed19ca25c47e3d0d1b42ac31af0403463b40cca91"
+    },
+    {
+      "path": "resources/eml/malformed/012.eml",
+      "sha256": "11d52546805af7f36e1426df63e32f1e28aab21cad8f24e87bb2ef5ce7db4336"
+    },
+    {
+      "path": "resources/eml/malformed/012.json",
+      "sha256": "ec50af4e513b7b272d249c122f93b485e4d249474cf02fe997dadf46e6977493"
+    },
+    {
+      "path": "resources/eml/malformed/013.crlf.json",
+      "sha256": "50c38167baf0c872afb238e35fb7c42ae0bdd19f720fc1fd52a80ed86e754589"
+    },
+    {
+      "path": "resources/eml/malformed/013.eml",
+      "sha256": "b8d141aa099a611fa25ace5f5f7b73db07f0837d4351cb4720830c49fe09f9e1"
+    },
+    {
+      "path": "resources/eml/malformed/013.json",
+      "sha256": "114b18f9b1b0f1f24573783a87be1692081856b5414e5c2ed6f78640dfa4099f"
+    },
+    {
+      "path": "resources/eml/malformed/014.crlf.json",
+      "sha256": "fb9ee9d558e1bd2c8f444938eeb72f605a75cb65af0923253878770dae54063c"
+    },
+    {
+      "path": "resources/eml/malformed/014.eml",
+      "sha256": "53a2a87eee852927a2c934368795a9cf96fecc6a04e6ec9c1b28a557a8739c08"
+    },
+    {
+      "path": "resources/eml/malformed/014.json",
+      "sha256": "9c59089c19d58e7eff695084636ccaa5fccea60ac542c6dd39e324be00b61fa4"
+    },
+    {
+      "path": "resources/eml/malformed/015.crlf.json",
+      "sha256": "4d4e10f57b32bbe64f11e167b0cfbc324349775778edc40b740ecdd6597f3d7f"
+    },
+    {
+      "path": "resources/eml/malformed/015.eml",
+      "sha256": "92c8fb97c12af41521b569ceb6424382a942a9a0a6c1c9e0d56b12c8a762e700"
+    },
+    {
+      "path": "resources/eml/malformed/015.json",
+      "sha256": "3d7ce9d4391b8cdbd58fdb87351d48c9491862ad0ccdf4b9c7ad736d1f3a96e1"
+    },
+    {
+      "path": "resources/eml/malformed/016.crlf.json",
+      "sha256": "b120df4398f776314c913522e577d5c35d2c35311ee399d3595602ea7b258afa"
+    },
+    {
+      "path": "resources/eml/malformed/016.eml",
+      "sha256": "d4a41fc90b0580fd5e188b1524dbaa9cb5b1cafb03255538abb8498205678050"
+    },
+    {
+      "path": "resources/eml/malformed/016.json",
+      "sha256": "7fddf4ad7e117b75e80048de4e4821bedfa42e55425948890252c054c66c1ef3"
+    },
+    {
+      "path": "resources/eml/malformed/017.crlf.json",
+      "sha256": "203c51cdd615d97a2cd8fc9188ff7b1f6f3fed87b2bc07f616e990ded4f72eae"
+    },
+    {
+      "path": "resources/eml/malformed/017.eml",
+      "sha256": "713f7737b3019eca961df6852ce71b7bf9396c39743d109679e499e7fe721ff6"
+    },
+    {
+      "path": "resources/eml/malformed/017.json",
+      "sha256": "58289d52436b53be95a18d4204f08f4a00c879a4a010e392db13551f3a764f4e"
+    },
+    {
+      "path": "resources/eml/malformed/018.crlf.json",
+      "sha256": "1f0d942fa3bd979f855ed1c39d939e42d2aea73e767befa7c5f1a0cd4d1edb97"
+    },
+    {
+      "path": "resources/eml/malformed/018.eml",
+      "sha256": "0ba08281d660f0b88303fd4798061d7e6a0c17ef6a7e2e83b260a48c3b4a3655"
+    },
+    {
+      "path": "resources/eml/malformed/018.json",
+      "sha256": "271ebc4220b75ff88f7596d3e3a778608dfae879f3dcf4472303c9d15279c6c0"
+    },
+    {
+      "path": "resources/eml/malformed/019.crlf.json",
+      "sha256": "781893c449fccac2295f63345b3b9b49f17e1506b9ae155bcb9478d52786878f"
+    },
+    {
+      "path": "resources/eml/malformed/019.eml",
+      "sha256": "b436f63021a26c5e65b9230a623bb1b6cc720da172e271fbac9155b180e8ffaf"
+    },
+    {
+      "path": "resources/eml/malformed/019.json",
+      "sha256": "d115b5a0029a473d612ed2e370aea0f3901af1db304144befe0d793a3f472028"
+    },
+    {
+      "path": "resources/eml/malformed/020.crlf.json",
+      "sha256": "cd93fc6e2218f470fe6967a8a93f13e02bb24e2f32d4b36283b63e9b26e4b097"
+    },
+    {
+      "path": "resources/eml/malformed/020.eml",
+      "sha256": "e3e9c5fd835c46c6d979c9d7921a2221a232c0d963660167a97dab03731b15f3"
+    },
+    {
+      "path": "resources/eml/malformed/020.json",
+      "sha256": "e18cd2cc8874259e26650fd5eaef5a2955b185c7c4466f9e47757f4d7d94feb0"
+    },
+    {
+      "path": "resources/eml/malformed/021.crlf.json",
+      "sha256": "fabc37fa8fed383d66de82340caebe4143c14a607bc832167814b2dec561a881"
+    },
+    {
+      "path": "resources/eml/malformed/021.eml",
+      "sha256": "844d507273f98ceaa3be8810dcaf30711dd80b463d3e4fdf32b71d8778fc3e19"
+    },
+    {
+      "path": "resources/eml/malformed/021.json",
+      "sha256": "a6ca7239dbc6183df24ece101ae31c57604eaf29bf8001e005009b9018abca89"
+    },
+    {
+      "path": "resources/eml/malformed/022.crlf.json",
+      "sha256": "e499f8655835b5c7b05a480054739c7f990302225192b9baa1c343dc28d18a9b"
+    },
+    {
+      "path": "resources/eml/malformed/022.eml",
+      "sha256": "845b5f33dbd8014e2707f69369d9d66e11792fc15a2d3f8f5b43dd3a4221e7c3"
+    },
+    {
+      "path": "resources/eml/malformed/022.json",
+      "sha256": "c45ba8e488a809bf7cd31ba0695f92f8be580826578590861179eda9c14ced6e"
+    },
+    {
+      "path": "resources/eml/malformed/COPYING",
+      "sha256": "6960a0bc3c17417633742a6f03aa1aa5fd06b67c4516a59f0815b4bd4b67cd93"
+    },
+    {
+      "path": "resources/eml/rfc/000.crlf.json",
+      "sha256": "8d0f3585e25eb41449815ea2ee22ee19a72518d0b06bc418dd7197a2b334f621"
+    },
+    {
+      "path": "resources/eml/rfc/000.eml",
+      "sha256": "c2584d07757b16b4f7d035dcc57d8d65f11e9e55ae43a868df3428415c4a5f7f"
+    },
+    {
+      "path": "resources/eml/rfc/000.json",
+      "sha256": "729472c29710178e8cb05602ce27a9de9215653299f9d36cde447c7a046d52c8"
+    },
+    {
+      "path": "resources/eml/rfc/001.crlf.json",
+      "sha256": "ab4214773d2bbc4e29b9742b7cea0b799d1d7fc285c8801f3bea908bdfd3f8be"
+    },
+    {
+      "path": "resources/eml/rfc/001.eml",
+      "sha256": "8aaf8745405811a6431cf0ab764541f177bfcda21b536bbc158faefbb312767c"
+    },
+    {
+      "path": "resources/eml/rfc/001.json",
+      "sha256": "a14b7b0276cb9fe832840c39e8376758c00e185555d6be56b36acbe9094d3cfd"
+    },
+    {
+      "path": "resources/eml/rfc/002.crlf.json",
+      "sha256": "f23c5aac84b15ed265bb0e3ec063434d842cf2a4b8ec5c961e140afe3f81dc5a"
+    },
+    {
+      "path": "resources/eml/rfc/002.eml",
+      "sha256": "714c3cd342f6177bd62d04262b8792f06d2717f48df910fd6405b0e6ded576e5"
+    },
+    {
+      "path": "resources/eml/rfc/002.json",
+      "sha256": "ad1b56d848ff21e3ac9c69180d5b4824bdc16bbb24f1232248586e62865cd555"
+    },
+    {
+      "path": "resources/eml/rfc/003.crlf.json",
+      "sha256": "66f7275edc58ad987d4a3830ed44460edf4a0771558d80e59921fbc8a291ef2b"
+    },
+    {
+      "path": "resources/eml/rfc/003.eml",
+      "sha256": "7a15c2eebb893e2677cbb98bf89b44ef794b1b75ca73eda310ae9a0fdb1e7c90"
+    },
+    {
+      "path": "resources/eml/rfc/003.json",
+      "sha256": "a724772d5a9f47879012052ac157145001b872a705edef08991f8997b26ec945"
+    },
+    {
+      "path": "resources/eml/rfc/004.crlf.json",
+      "sha256": "30e7a8c14e8fa9d86006fe55020978b7f854d51cd75da56e67ac131f48748c17"
+    },
+    {
+      "path": "resources/eml/rfc/004.eml",
+      "sha256": "e25ebb5c13ab9a8ccaea6a5a0a6c6f5c54ce11070b0fe15ea9605716cb1a01e7"
+    },
+    {
+      "path": "resources/eml/rfc/004.json",
+      "sha256": "30eb4d3e10bd57c372b902d8a7e989b5dc270060da99e0d5d3bd0bd702ab5556"
+    },
+    {
+      "path": "resources/eml/rfc/005.crlf.json",
+      "sha256": "183ecd7333d5b8688bf1881454c12421897f8faee8db5c8b9a0a3dd2727d20aa"
+    },
+    {
+      "path": "resources/eml/rfc/005.eml",
+      "sha256": "007dddf14a5816fb66e8a18c2b1191d81ae5e900e88bb75e906933ed3a1986f7"
+    },
+    {
+      "path": "resources/eml/rfc/005.json",
+      "sha256": "09ffb1da59c8e69bfbd029a8f5caa69b88a4934b95df9e2b8a0b6a9c38650821"
+    },
+    {
+      "path": "resources/eml/rfc/006.crlf.json",
+      "sha256": "d72d4b249f2ee2540c35627c64d815dd2f68d99095367c3b811aa5db32325c51"
+    },
+    {
+      "path": "resources/eml/rfc/006.eml",
+      "sha256": "03105c63475d087ff12a88fa64501802202407c5b17b24e9f99d5afe68ef9945"
+    },
+    {
+      "path": "resources/eml/rfc/006.json",
+      "sha256": "7508b6079dd4eb3188a6e67d82de2d146a5fdd0f934627f05f72b7cd68dddfeb"
+    },
+    {
+      "path": "resources/eml/rfc/007.crlf.json",
+      "sha256": "41031ce054157ed0ac72c14ef67480c36b47cf1fe223d53abf28e8eb1aa5b124"
+    },
+    {
+      "path": "resources/eml/rfc/007.eml",
+      "sha256": "e49702bdbc0e5d0345c680eff836924327050bebabc2f11335a9a98c9081c5f4"
+    },
+    {
+      "path": "resources/eml/rfc/007.json",
+      "sha256": "3d35f05b53907764d262875dcda7ee607c73d3507cf4baa1c0eb99bb8361ff82"
+    },
+    {
+      "path": "resources/eml/rfc/008.crlf.json",
+      "sha256": "60d4657d06e5e4c0899bc34e6b41f7bac53ab5a84e4c81e9146a28019da684e3"
+    },
+    {
+      "path": "resources/eml/rfc/008.eml",
+      "sha256": "af961f1635d25015388258d7a83f4a5bdab0980b4c0745e2bff1f3b0e65751d6"
+    },
+    {
+      "path": "resources/eml/rfc/008.json",
+      "sha256": "5573dc8634a45801bc8a567c2f305a5036af97d20c983af80a4f367e2883c93c"
+    },
+    {
+      "path": "resources/eml/rfc/009.crlf.json",
+      "sha256": "5a5ca625e30c2eb29fd9d1005a6a0f55983d7819954a09dbc62e1518af7db72c"
+    },
+    {
+      "path": "resources/eml/rfc/009.eml",
+      "sha256": "6ecf0b0cf3f10c95af68d8bff5e11dba5ac381e29b4fe68ddbf0b0be44e32e7f"
+    },
+    {
+      "path": "resources/eml/rfc/009.json",
+      "sha256": "8163c11c22a5ea4c3bee926aa40828cc4a5161079a032505dbb3ddad83f1e303"
+    },
+    {
+      "path": "resources/eml/thirdparty/000.crlf.json",
+      "sha256": "bd01b7d0b315dbb1467eec7739e5a13ea72c1369737777406f49f849d15a1048"
+    },
+    {
+      "path": "resources/eml/thirdparty/000.eml",
+      "sha256": "a0edc2abbaea395d5635df033ac897d33810bb8a404165b79aa6bd3324e47fa8"
+    },
+    {
+      "path": "resources/eml/thirdparty/000.json",
+      "sha256": "f2fc0139686b99d52e43e091cfdc710fe8bb991cbdc695df48a0ecfa83d4de9a"
+    },
+    {
+      "path": "resources/eml/thirdparty/001.crlf.json",
+      "sha256": "1de7b5baf6e35f9f576567952819e4d5e557c3498069569fbff1f69537a09a64"
+    },
+    {
+      "path": "resources/eml/thirdparty/001.eml",
+      "sha256": "4aa1ca556ba60649c18a3059fd8b6c5967a3dd4b6a20a174bcb1ffc82629d468"
+    },
+    {
+      "path": "resources/eml/thirdparty/001.json",
+      "sha256": "918102c0dd42a3f1910895818f106ad24cdb14f3111c29bc1004cfb786703da4"
+    },
+    {
+      "path": "resources/eml/thirdparty/002.crlf.json",
+      "sha256": "c2e5adbddcdce8c66b5ee3af3d50e428a5c7548f5ab4a9e6f45573e10e1447bb"
+    },
+    {
+      "path": "resources/eml/thirdparty/002.eml",
+      "sha256": "3ebc6200fc9ee2db2e97d8c71b10632c37b806f57e1d8ec27123c27f2e20a907"
+    },
+    {
+      "path": "resources/eml/thirdparty/002.json",
+      "sha256": "e3778d14e5a643aab48537dc716242ebf26dac1f04c66e27c6b53c11086a9bcc"
+    },
+    {
+      "path": "resources/eml/thirdparty/003.crlf.json",
+      "sha256": "8c4a2f3f44cf86b44f2f0a80fdd63f0bece634c3ce5165517696733d98d77295"
+    },
+    {
+      "path": "resources/eml/thirdparty/003.eml",
+      "sha256": "8012e2ac08b6a051172d2efc22c49b567e57c942f72eccfb126a01a9e21cdddb"
+    },
+    {
+      "path": "resources/eml/thirdparty/003.json",
+      "sha256": "c680f5434b5ad00c53fcee5b4ee2b99cf25a6eeb076b966ae0a66af0f00773b8"
+    },
+    {
+      "path": "resources/eml/thirdparty/004.crlf.json",
+      "sha256": "b46a606fe850c3c5169b26c0e54bb6f5460e4cdf861499164b03e4525ac16331"
+    },
+    {
+      "path": "resources/eml/thirdparty/004.eml",
+      "sha256": "a63ca941118c4b1c52843c461caeaef3ea3d425807497c4c1849337d6017bfd1"
+    },
+    {
+      "path": "resources/eml/thirdparty/004.json",
+      "sha256": "7eb5b8b1edb4a6ba9ec217883ac9e544ea01b1d31717063fee349eef5ac491da"
+    },
+    {
+      "path": "resources/eml/thirdparty/005.crlf.json",
+      "sha256": "412c8ac8f006a4026d948cf2ded19ded4c1ec068b6453c91ed32099247bf1f35"
+    },
+    {
+      "path": "resources/eml/thirdparty/005.eml",
+      "sha256": "18309580beccc3085529eadd7924ce487e18e5ec9610d808e57e06cfb351f3f9"
+    },
+    {
+      "path": "resources/eml/thirdparty/005.json",
+      "sha256": "95c35751c2336c814f5ae962bf92da0151f7b8a656d332822abee4105bfc7483"
+    },
+    {
+      "path": "resources/eml/thirdparty/006.crlf.json",
+      "sha256": "a3daa64f3015befd1c07c088829fe21bdb37dd0dcea8d5c48212d626d53709e8"
+    },
+    {
+      "path": "resources/eml/thirdparty/006.eml",
+      "sha256": "5ff3bcf7947f628813b830c7b4c3a13da04600ea60ec20bd6537aa620d923d2b"
+    },
+    {
+      "path": "resources/eml/thirdparty/006.json",
+      "sha256": "b281b5dc5717e5b5b9a30b8303163d7620ec40eeaa87736b5b4d9712ad05850e"
+    },
+    {
+      "path": "resources/eml/thirdparty/007.crlf.json",
+      "sha256": "2fca71803120bb6f2c8e35a76a95dffe59c8f459da2a024818c9714465ed18f1"
+    },
+    {
+      "path": "resources/eml/thirdparty/007.eml",
+      "sha256": "a473dd97b00ef1e0e4674df651f11a14ac6d2b02b6d4d08c641ead13100d4313"
+    },
+    {
+      "path": "resources/eml/thirdparty/007.json",
+      "sha256": "461f73c559ca6e06938b394379afd656c2c66dfe923865c1c7db14d23e07a296"
+    },
+    {
+      "path": "resources/eml/thirdparty/008.crlf.json",
+      "sha256": "a108acebf2cab150090f1bfe79b6c641473f09ca0c312b4a96dc03d41a2ecac0"
+    },
+    {
+      "path": "resources/eml/thirdparty/008.eml",
+      "sha256": "8b1974f8caf58bbe82472055f62dad78fa3263fe7b751d0d35606ffeb2b8675a"
+    },
+    {
+      "path": "resources/eml/thirdparty/008.json",
+      "sha256": "99f88685583f691c6d32ed104d1808a0c37934e0d2b4cbcfec44b4e819d34bfb"
+    },
+    {
+      "path": "resources/eml/thirdparty/009.crlf.json",
+      "sha256": "99e6c5f9931f1188a03efa7e7b3d2af2ee3d5c13ebd1ab0f2db77c7aa2a1200d"
+    },
+    {
+      "path": "resources/eml/thirdparty/009.eml",
+      "sha256": "2f372c3c4dc1afacec65663a44a4bcfc84e96d29ae8d9f12c9614f4e2c05c91d"
+    },
+    {
+      "path": "resources/eml/thirdparty/009.json",
+      "sha256": "31674ebef6f0619911612ebb4be4814b2aa67ab186b1c05456d88a8e98d280b4"
+    },
+    {
+      "path": "resources/eml/thirdparty/010.crlf.json",
+      "sha256": "ef935c702e1a943e696c565b1e2b7bb39f056c162c07f61df6f816b5c632a5ee"
+    },
+    {
+      "path": "resources/eml/thirdparty/010.eml",
+      "sha256": "ca5a12c32f62b98768764d434d0e63d739d77408217225b1aec4d4fcfd9f6044"
+    },
+    {
+      "path": "resources/eml/thirdparty/010.json",
+      "sha256": "7afa7f605a654d6ec7fda2e7ef2f962d1d301a862c824b006cf3fa705dcc6f2d"
+    },
+    {
+      "path": "resources/eml/thirdparty/011.crlf.json",
+      "sha256": "4e31b420a65103793208d2cbde16099e2c26e8137d7e5ba768eb6d146a788113"
+    },
+    {
+      "path": "resources/eml/thirdparty/011.eml",
+      "sha256": "267aba0bec93b828c74c666d628a5478a33a77dc550375f55a16d4d46f5b67f7"
+    },
+    {
+      "path": "resources/eml/thirdparty/011.json",
+      "sha256": "5c1826b7372c184bb49f633af599d93145fd15c9b020a1b730a4bf4b5698f611"
+    },
+    {
+      "path": "resources/eml/thirdparty/012.crlf.json",
+      "sha256": "6e3c6c3b8c9810538665ceaa62ac32fd9d029183f21519a719736e2ddd07cedc"
+    },
+    {
+      "path": "resources/eml/thirdparty/012.eml",
+      "sha256": "0a349a7d2712097f79ade93a2ebb85e78477f06e0562a49556103f6783c033b4"
+    },
+    {
+      "path": "resources/eml/thirdparty/012.json",
+      "sha256": "e958633d27fe25559b64899cbc9b523af28dfa6aa70429c55d12f1e852c4bc57"
+    },
+    {
+      "path": "resources/eml/thirdparty/013.crlf.json",
+      "sha256": "3a9ecc3a4e5049a645bc6126775f5338e9b66bb18e6952a0fde9bf0cde240be8"
+    },
+    {
+      "path": "resources/eml/thirdparty/013.eml",
+      "sha256": "7120b71052d910621efb222e80696002d6d6f5e7e3d53ccb5482e826cb972be3"
+    },
+    {
+      "path": "resources/eml/thirdparty/013.json",
+      "sha256": "59fc34c48c288446bde2a3f4d3e0a1006a89e552feddd3a12a681172f102c86b"
+    },
+    {
+      "path": "resources/eml/thirdparty/014.crlf.json",
+      "sha256": "08c49be2c75d1507797e7e5ea1b3c914aa7b975dcabaebcb0b9000da9f852e72"
+    },
+    {
+      "path": "resources/eml/thirdparty/014.eml",
+      "sha256": "91d5997b5e9eb0e760ef6f6250f0c7fc1c7434612889e0a29f7fb99a665a7c83"
+    },
+    {
+      "path": "resources/eml/thirdparty/014.json",
+      "sha256": "c397a20de415905e2c48d5d678a99640dd296d7180cc7fe87b9256e42408b57b"
+    },
+    {
+      "path": "resources/eml/thirdparty/015.crlf.json",
+      "sha256": "c39b2be878544869ab8e1da8ac015c0fdfb751971ecff151c166696ba9b140c2"
+    },
+    {
+      "path": "resources/eml/thirdparty/015.eml",
+      "sha256": "217ee0aa6517f1c351f5e011212b027d30baf135255b958e31a0f11b118397d3"
+    },
+    {
+      "path": "resources/eml/thirdparty/015.json",
+      "sha256": "6e12a96fa4236abeab95895dd47b251761426cada1c202eb4060d3fbd35be617"
+    },
+    {
+      "path": "resources/eml/thirdparty/016.crlf.json",
+      "sha256": "079462707ca5385e8f575a621b3d3faf3f0c2d6ef155dc40cef119c74e027bc1"
+    },
+    {
+      "path": "resources/eml/thirdparty/016.eml",
+      "sha256": "fc757eab4aec6005389b5c2978469bb2cffaf7efe0a8a209db737c5d4c436089"
+    },
+    {
+      "path": "resources/eml/thirdparty/016.json",
+      "sha256": "c8fd34699fe391afa6b3c23023d9d5230be61371fedd6578cceb4113f7606317"
+    },
+    {
+      "path": "resources/eml/thirdparty/017.crlf.json",
+      "sha256": "c0d1357a236bf1ffa8f35ec8ce4679259b7389ebbbb8b6a8de8fe393511f8fbc"
+    },
+    {
+      "path": "resources/eml/thirdparty/017.eml",
+      "sha256": "babcae31c04c64b5c40e69bc1233a9ac961095a6c687147eeecdfacbacbe695f"
+    },
+    {
+      "path": "resources/eml/thirdparty/017.json",
+      "sha256": "1afd08b6c41c2eeacdbac577911bc09b53c3ac9a37879c63e437698611bbccea"
+    },
+    {
+      "path": "resources/eml/thirdparty/018.crlf.json",
+      "sha256": "41a1a9f7f94d38a5455d829da44d41eccb73bbcf825d225564bf79aff87e820d"
+    },
+    {
+      "path": "resources/eml/thirdparty/018.eml",
+      "sha256": "808202c7bfe82ae4b21686b4e80a4055ad3284d4d4da59492ada026348658d93"
+    },
+    {
+      "path": "resources/eml/thirdparty/018.json",
+      "sha256": "09949923bc7f6981969ff31df8800ea962d38daac6ffaa51b6c3a55ee611fd1a"
+    },
+    {
+      "path": "resources/eml/thirdparty/019.crlf.json",
+      "sha256": "af27c45426f7cb7f8445738a9c1a902242e5e88c93799b39034860b5db9ecd8e"
+    },
+    {
+      "path": "resources/eml/thirdparty/019.eml",
+      "sha256": "091ca60680e4af30a8d7460f0b60a342958770e0a81a1793aaf2beb2edec7117"
+    },
+    {
+      "path": "resources/eml/thirdparty/019.json",
+      "sha256": "b09caabd738393a011d5cbc4f30b18800677a2b5ee10c74745dbe3ba60975ef3"
+    },
+    {
+      "path": "resources/eml/thirdparty/COPYING",
+      "sha256": "6960a0bc3c17417633742a6f03aa1aa5fd06b67c4516a59f0815b4bd4b67cd93"
+    },
+    {
+      "path": "resources/id.json",
+      "sha256": "95fc707b0047bdc81592065686bd982b5b72f5bd8ab71db11fd07111d0da4bd6"
+    },
+    {
+      "path": "resources/list.json",
+      "sha256": "1659184769c0e954b8327e208aa3d7be7fc21cc93d2c9f32fec1864c72d6e619"
+    },
+    {
+      "path": "resources/maildir/.My Folder.Nested Folder/cur/1276533073.M242911P3632.kurkku;2,FP",
+      "sha256": "a2bbdb2de53523b8099b37013f251546f3d65dbe7a0774fa41af0a4176992fd4"
+    },
+    {
+      "path": "resources/maildir/.My Folder.Nested Folder/new/1035478339.27041_118.foo.org,S=1000,W=1030;2,RDF,",
+      "sha256": "092fcfbbcfca3b5be7ae1b5e58538e92c35ab273ae13664fed0d67484c8e78a6"
+    },
+    {
+      "path": "resources/maildir/.My Folder/cur/1035478339.27041_118.foo.org,S=1000,W=1030;2,TDR",
+      "sha256": "a3a5e715f0cc574a73c3f9bebb6bc24f32ffd5b67b387244c2c909da779a1478"
+    },
+    {
+      "path": "resources/maildir/.My Folder/new/1276528487.M364837P9451.kurkku,S=1355,W=1394;2,",
+      "sha256": "8d74beec1be996322ad76813bafb92d40839895d6dd7ee808b17ca201eac98be"
+    },
+    {
+      "path": "resources/maildir/cur/1491941793.M41850P8566V0000000000000015I0000000004F3030E_0.mx1.example.com,S=10956;2,STln",
+      "sha256": "87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7"
+    },
+    {
+      "path": "resources/maildir/new/1234567890.M20046P2137.mailserver,S=4542,W=4642;2,Sb",
+      "sha256": "0263829989b6fd954f72baaf2fc64bc2e2f01d692d4de72986ea808f6e99813f"
+    },
+    {
+      "path": "resources/received.json",
+      "sha256": "dd8f59f700b7a3d4d3e3124eb1d25226be6a7cf7360c86f037011f7ac3cf7e7d"
+    },
+    {
+      "path": "resources/unstructured.json",
+      "sha256": "afcb3b4b6864910810106d77d03c59ae73ed33995eebde4fd8c7fc1792a53cb0"
+    },
+    {
+      "path": "src/core/address.rs",
+      "sha256": "4472f8b09463887f164d7893c52922a7504a69f2a84a302973be9bdbb0d8cc8b"
+    },
+    {
+      "path": "src/core/body.rs",
+      "sha256": "73c309abcc08320146c858e5fb9cf1129093b69c4ef35c743262a8546d7092da"
+    },
+    {
+      "path": "src/core/builder.rs",
+      "sha256": "7d023549b1965d17d87b196b28ea3c256f86ab31c3550f208657067e7f6ae067"
+    },
+    {
+      "path": "src/core/header.rs",
+      "sha256": "5fbb8fb32fbcbfa6e2aba2fd1d151e64776aec3c2154cf5c9eaa958ea8d1280e"
+    },
+    {
+      "path": "src/core/message.rs",
+      "sha256": "d026c1b915e5a3676647906a8edd1d6efb35b5797d0acdd5eecce8f1e7390afc"
+    },
+    {
+      "path": "src/core/mod.rs",
+      "sha256": "f4ebd6f26e31a33924ccbc94890d097fa2808c21f07f1bf187d4a953ee6aee8e"
+    },
+    {
+      "path": "src/core/rkyv.rs",
+      "sha256": "dbab085d412975e5e143472de5dc3e01f53c115ec84d983e778e5ff66146f5f4"
+    },
+    {
+      "path": "src/decoders/base64.rs",
+      "sha256": "415ebd16714c8c941b8938e634e927c5b2dc3d26f588ccc0fef1ed618e534f2d"
+    },
+    {
+      "path": "src/decoders/charsets/map.rs",
+      "sha256": "c1e926aec52fe7d780368f998719d45dc184fa504d0f529864cd2f1ffb4528c7"
+    },
+    {
+      "path": "src/decoders/charsets/mod.rs",
+      "sha256": "266ad022634e5160c9e97b46e3d51a44285e570c6d58f2f3748312a25bdcd08f"
+    },
+    {
+      "path": "src/decoders/charsets/multi_byte.rs",
+      "sha256": "664aee7363ccffe6b90391bdea1879765301c5ad6ffbf6cce4ba8fe0825486a9"
+    },
+    {
+      "path": "src/decoders/charsets/single_byte.rs",
+      "sha256": "e9847ec58d12ea589760f13c6db37b70af06754f22e02301e629e86006164c5b"
+    },
+    {
+      "path": "src/decoders/charsets/utf.rs",
+      "sha256": "254cea5e98a97aa2201e12604b154fb41f9fb3efb046bd732a5160f327c903a0"
+    },
+    {
+      "path": "src/decoders/encoded_word.rs",
+      "sha256": "558e64ab774a97a9540ee45ceb3701e3fd0afe77b75512322fa7974d94ccea99"
+    },
+    {
+      "path": "src/decoders/hex.rs",
+      "sha256": "7de84df7a6d856cd44ce521ebe64d174fb17cf0e89a8e90c7daa51193b68f11e"
+    },
+    {
+      "path": "src/decoders/html.rs",
+      "sha256": "077427c2a4fe583f1e3241ffba89e9052e5c8f977ccc168e5f120b786ae6f134"
+    },
+    {
+      "path": "src/decoders/mod.rs",
+      "sha256": "ea1c2b943917e0864bafa7bd488941dc183001215a3af7b8ee48d0d61d88e56a"
+    },
+    {
+      "path": "src/decoders/quoted_printable.rs",
+      "sha256": "c7712bb7930558fdb33f3d2fb07c5e6633117c1752cecf6d2f84e231cca2e9d2"
+    },
+    {
+      "path": "src/lib.rs",
+      "sha256": "f11893d9fd6fcc04bb8b67e21bc1746ad538d6534e994e60cf145fc08f0ba415"
+    },
+    {
+      "path": "src/mailbox/maildir.rs",
+      "sha256": "1a8de7a7becf2644adc27a6d7fc879d7339fa0ba8e3953c897d6d088598fc797"
+    },
+    {
+      "path": "src/mailbox/mbox.rs",
+      "sha256": "a16f7c91477aa3d89fb79aeafe00cc195141070494f966a6095b57ef5d6d08b7"
+    },
+    {
+      "path": "src/mailbox/mod.rs",
+      "sha256": "3896ffe48490490c968dc3811c6e03140d28d20d922383d2e9597d271d88fdaa"
+    },
+    {
+      "path": "src/parsers/fields/address.rs",
+      "sha256": "07c41d15c3ef82316680e0f4e0bf5d54e120d397ecf368a05ab219b263b083f0"
+    },
+    {
+      "path": "src/parsers/fields/content_type.rs",
+      "sha256": "d3c03e8033fd8f73c5a9bd530f9d43f5fc4136345751aa9a1f4024d1a73b4aed"
+    },
+    {
+      "path": "src/parsers/fields/date.rs",
+      "sha256": "0b829455590b8db8f3a3de58e1a7a63ade7f6cc826a95d8ebb8e25bb6ee68547"
+    },
+    {
+      "path": "src/parsers/fields/id.rs",
+      "sha256": "e400917312a94deb8508f697284cf55a5a533993d879ada601fc0859b70dd5ad"
+    },
+    {
+      "path": "src/parsers/fields/list.rs",
+      "sha256": "b89d4590f578788acbe8aa11395abd7f27e91535f375acfefa3065bb1abab10b"
+    },
+    {
+      "path": "src/parsers/fields/mod.rs",
+      "sha256": "4bf7c4677fcf29096a529953274ec735c9bf520f20e88b56fb363c1fafe09165"
+    },
+    {
+      "path": "src/parsers/fields/raw.rs",
+      "sha256": "99d32ef3a8aa89855c14d3298d3af7a8832a36e6fca41564d506a0bf3e6271a7"
+    },
+    {
+      "path": "src/parsers/fields/received.rs",
+      "sha256": "d1a684cfad5770810e26de94f3d63c2b81014047197a3005ba6cbcdb858b8ceb"
+    },
+    {
+      "path": "src/parsers/fields/thread.rs",
+      "sha256": "eb89d97fe658a71ba7e118c8763422a52af4c58aa1e71dd24a994dc3e970d912"
+    },
+    {
+      "path": "src/parsers/fields/unstructured.rs",
+      "sha256": "e3e6291a280ec4d5de5b28473d30500dbfc1268a7b7ebb736cab106f43d34f5e"
+    },
+    {
+      "path": "src/parsers/header.rs",
+      "sha256": "42bc12d9d173d8283b6301c31219f02db29ac21cf34d3acd2944c1c8b14889d1"
+    },
+    {
+      "path": "src/parsers/message.rs",
+      "sha256": "04eaa48c94796e8639a60076e6077f138298b257f8643691533544f8b5681500"
+    },
+    {
+      "path": "src/parsers/mime.rs",
+      "sha256": "e068e5f5b6688d62ac63806c8ca958d0ad5381c95421534672052b7bc766338b"
+    },
+    {
+      "path": "src/parsers/mod.rs",
+      "sha256": "e15a1438ee4117cbe50579771a8517762beb620295d3e8257ae9e99e15dfdcbf"
+    },
+    {
+      "path": "src/parsers/preview.rs",
+      "sha256": "cead47dc59dac587df9871930b560787ada7d4a8d3ff940ebf3ad4633e945e7c"
+    },
+    {
+      "path": "tests/integration_test.rs",
+      "sha256": "860698372fe080e16c8826f0b1b7d85bebaf0ed15905ef5a3ef60b21e473f751"
+    }
+  ],
+  "allowedChanges": [
+    {
+      "path": "resources/address.json",
+      "upstreamSha256": "e1641e74dcf668d55f2285d0dbb8e1396e1157e42c43dcb4e157cecd9d279d16",
+      "patchedSha256": "aa9a372a60d01c95518e180132b900256f16c18d705115584f1074844b7fc4da",
+      "reason": "Adds reviewed RFC 5322 address and obsolete-route regression oracle cases."
+    },
+    {
+      "path": "resources/id.json",
+      "upstreamSha256": "95fc707b0047bdc81592065686bd982b5b72f5bd8ab71db11fd07111d0da4bd6",
+      "patchedSha256": "d313227eb49bbafe77fba819eb7399609372ae1f76662de2187c8c8560da4f6e",
+      "reason": "Adds reviewed Message-ID lexical-preservation regression oracle cases."
+    },
+    {
+      "path": "src/parsers/fields/address.rs",
+      "upstreamSha256": "07c41d15c3ef82316680e0f4e0bf5d54e120d397ecf368a05ab219b263b083f0",
+      "patchedSha256": "7f16a95aafbbb0b46cdb8e4afeeffca7ad26f0b576d0f0294808242d9da8439d",
+      "reason": "Adds reviewed fail-closed source-route validation, strict folding and nested-comment control validation while preserving valid quoted and domain-literal terminal identities."
+    },
+    {
+      "path": "src/parsers/fields/date.rs",
+      "upstreamSha256": "0b829455590b8db8f3a3de58e1a7a63ade7f6cc826a95d8ebb8e25bb6ee68547",
+      "patchedSha256": "875ceea21fd390b9aa26d06803970ae409ef3a63b8876911ab6fde93639daba4",
+      "reason": "Adds reviewed obsolete-date parsing that preserves leading-zero and digit-width semantics."
+    },
+    {
+      "path": "src/parsers/fields/id.rs",
+      "upstreamSha256": "e400917312a94deb8508f697284cf55a5a533993d879ada601fc0859b70dd5ad",
+      "patchedSha256": "b2f6dbb0c6d7f452dfee46ae2ce91a90ec8a4b81d5743ecf048ae02261156dbd",
+      "reason": "Adds reviewed Message-ID lexical validation that rejects malformed comments and whitespace without rewriting valid domain literals."
+    },
+    {
+      "path": "src/parsers/message.rs",
+      "upstreamSha256": "04eaa48c94796e8639a60076e6077f138298b257f8643691533544f8b5681500",
+      "patchedSha256": "9a9f609a661f93e45256669932e46e30ae3ca4e5ba5957580605d5a82ede6ef5",
+      "reason": "Pre-existing Dakia malformed nested message/rfc822 recovery patch documented in the retained provenance record."
+    }
+  ],
+  "vendorOnlyFiles": [
+    {
+      "path": "DAKIA_PROVENANCE.md",
+      "sha256": "b079372d9abb359dbf028aa97cd95fc556fc2e920c21a7f14a74f4a7afbc10ea",
+      "reason": "Dakia provenance record for the reviewed local mail-parser changes and retained upstream licensing."
+    }
+  ],
+  "omittedUpstreamFiles": [
+    {
+      "path": "Cargo.lock",
+      "upstreamSha256": "27036e8b1c892e4f5b30b063d6ec5bec190fd919a47f15361ecf3923e868de46",
+      "reason": "Dakia root Cargo.lock is the sole resolved graph; the vendored library does not retain a separate lockfile."
+    }
+  ]
+}

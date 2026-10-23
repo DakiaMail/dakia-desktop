@@ -1,0 +1,15 @@
+X-Dakia-Corpus-Case: obs-14-repeat-destinations
+X-Dakia-Corpus-Source: RFC 5322 section 4.5.3; fictional
+Date: Tue, 28 Jul 2026 12:01:00 +0000
+From: Sender <sender@example.test>
+Subject: Fictional obsolete syntax
+Message-ID: <obs-obs-14-repeat-destinations@example.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+To: first@example.test
+To : second@example.test
+Cc: copy-one@example.test
+Cc	: copy-two@example.test
+Bcc : , ,
+
+Fictional body obs-14-repeat-destinations.

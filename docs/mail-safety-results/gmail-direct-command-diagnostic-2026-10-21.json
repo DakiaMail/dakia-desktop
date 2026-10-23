@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T15:27:22.872261+00:00",
+  "lane": "direct-read-only-gmail-command-diagnostic",
+  "status": "passed-narrow-diagnostic",
+  "evidence": {
+    "cleanupIncomplete": false,
+    "elapsedMs": 262,
+    "endpoint": "gmail-imap-tls-993-hostname-verified",
+    "fixedRecoveryId": "redacted-fixed-id",
+    "kind": "private-direct-gmail-imap-search-step-diagnostic",
+    "mailSubmissionRequested": false,
+    "operations": [
+      "CAPABILITY",
+      "LOGIN",
+      "LIST INBOX",
+      "EXAMINE INBOX",
+      "UID SEARCH X-GM-RAW exact fixed ID",
+      "LOGOUT"
+    ],
+    "outcome": "passed",
+    "ownedChildTempDirRemoved": true,
+    "remoteMutationRequested": false,
+    "resultCount": 1,
+    "schemaVersion": 1,
+    "steps": [
+      {
+        "elapsedMs": 87,
+        "name": "tls_connect",
+        "outcome": "ok"
+      },
+      {
+        "elapsedMs": 9,
+        "name": "capability",
+        "outcome": "ok"
+      },
+      {
+        "elapsedMs": 73,
+        "name": "authenticate",
+        "outcome": "ok"
+      },
+      {
+        "elapsedMs": 45,
+        "name": "list_inbox",
+        "outcome": "ok"
+      },
+      {
+        "elapsedMs": 16,
+        "name": "examine_inbox",
+        "outcome": "ok"
+      },
+      {
+        "elapsedMs": 22,
+        "name": "search_exact",
+        "outcome": "ok"
+      },
+      {
+        "elapsedMs": 10,
+        "name": "logout",
+        "outcome": "ok"
+      }
+    ]
+  },
+  "sanitizedReportSha256": "2b8af1477a1f229d49dfb8f244997a802c3e49323e4341a305934eabbf814137",
+  "helperSha256": "0cd618c906a43f651c68d42a19b7afbc5a2bac7108a895f8336c42ee7830b201",
+  "limitations": [
+    "Uses independently reviewed Python imaplib with verified Gmail TLS, not the production Dakia client.",
+    "No FETCH, message body, local database, header publication, canonicalization or Reader/cache verification occurred.",
+    "One exact search returned one result in22ms; this does not identify the cause of failed production recovery invocations or close that gap.",
+    "No credentials, addresses, UIDs or message contents are recorded; no sends or mutations requested."
+  ]
+}

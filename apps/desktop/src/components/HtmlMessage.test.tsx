@@ -5,7 +5,9 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { Suspense, startTransition, useState } from "react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import tauriConfig from "../../src-tauri/tauri.conf.json";
 import appleMailReplySection from "../test/fixtures/apple-mail-reply-section.html?raw";
 import freshdeskReplySection from "../test/fixtures/freshdesk-reply-section.html?raw";
 import outlookWordReplySection from "../test/fixtures/outlook-word-reply-section.html?raw";
@@ -13,24 +15,85 @@ import stripeReceiptLayout from "../test/fixtures/stripe-receipt-layout.html?raw
 import swedbankSignatureLayout from "../test/fixtures/swedbank-signature-layout.html?raw";
 import { buildEmailDocument, HtmlMessage } from "./HtmlMessage";
 
+const mocks = vi.hoisted(() => ({
+  openExternal: vi.fn(async () => undefined),
+}));
+
+vi.mock("../api", () => ({
+  api: { openExternal: mocks.openExternal },
+}));
+
 function parse(source: string | undefined) {
   if (!source) throw new Error("Expected an isolated history document");
   return new DOMParser().parseFromString(source, "text/html");
 }
 
-function renderedEmailRoot(message: HTMLElement, surface = "current") {
+function renderedEmailFrame(message: HTMLElement, surface = "current") {
   const host =
     surface === "current"
       ? message
       : message.querySelector<HTMLElement>(
           `[data-dakia-email-surface="${surface}"]`,
         );
-  const emailSurface = host?.shadowRoot
-    ?.firstElementChild as HTMLElement | null;
-  return emailSurface?.shadowRoot ?? null;
+  return host?.shadowRoot?.querySelector("iframe") ?? null;
+}
+
+function renderedEmailRoot(message: HTMLElement, surface = "current") {
+  const frame = renderedEmailFrame(message, surface);
+  return frame
+    ? parse(frame.getAttribute("srcdoc") ?? "").documentElement
+    : null;
+}
+
+function rendererToken(message: HTMLElement, surface = "current") {
+  const source = renderedEmailFrame(message, surface)?.getAttribute("srcdoc");
+  const token = source
+    ? parse(source)
+        .querySelector("script[data-dakia-renderer-token]")
+        ?.getAttribute("data-dakia-renderer-token")
+    : null;
+  if (!token) throw new Error("Expected sandbox renderer token");
+  return token;
+}
+
+async function sha256CspHash(source: string) {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(source),
+  );
+  const bytes = new Uint8Array(digest);
+  return `sha256-${btoa(String.fromCharCode(...bytes))}`;
+}
+
+function packagedCsp() {
+  return tauriConfig.app.security.csp;
+}
+
+function sendRendererMessage(
+  message: HTMLElement,
+  data: Record<string, unknown>,
+  surface = "current",
+) {
+  const frame = renderedEmailFrame(message, surface);
+  if (!frame) throw new Error("Expected sandbox renderer frame");
+  // jsdom does not create a browsing context for an iframe in a shadow tree.
+  // Give this test-only frame a stable stand-in so the production source check
+  // is exercised instead of weakening it for the test environment.
+  if (!frame.contentWindow) {
+    Object.defineProperty(frame, "contentWindow", {
+      configurable: true,
+      value: window,
+    });
+  }
+  window.dispatchEvent(
+    new MessageEvent("message", { data, source: frame.contentWindow }),
+  );
 }
 
 describe("HTML email appearance", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
   it("uses a legible reader baseline for ordinary messages", () => {
     const email = buildEmailDocument("<p>Hello from Dakia</p>", false);
 
@@ -54,7 +117,8 @@ describe("HTML email appearance", () => {
     expect(email.source).toContain("color: #d9dedb");
     expect(email.source).toContain("#4f83c4");
     expect(email.source).toContain("#734744");
-    expect(email.source).toContain("swedbank-logo.png");
+    expect(email.source).not.toContain("swedbank-logo.png");
+    expect(email.hasBlockedRemoteContent).toBe(true);
     expect(stylesheet.source).toContain("color:#d9dedb");
     expect(stylesheet.source).toContain("background-color:#191a19");
   });
@@ -117,7 +181,9 @@ describe("HTML email appearance", () => {
     expect(email.dark).toBe(false);
     expect(email.source).toContain("body{background:#111;color:#fff}");
     expect(email.source).toContain(".qr{background:#fff}");
-    expect(email.source).toContain("transparent-black-qr.png");
+    expect(email.source).not.toContain("transparent-black-qr.png");
+    expect(email.hasBlockedRemoteContent).toBe(true);
+    expect(email.source).toContain('alt="QR code"');
   });
 
   it("keeps image-only white QR cards light without mistaking a decorative header for the body", () => {
@@ -140,7 +206,9 @@ describe("HTML email appearance", () => {
     for (const html of variants) {
       const email = buildEmailDocument(html, true);
       expect(email.dark).toBe(false);
-      expect(email.source).toContain("transparent-black-qr.png");
+      expect(email.source).not.toContain("transparent-black-qr.png");
+      expect(email.hasBlockedRemoteContent).toBe(true);
+      expect(email.source).toContain('alt="QR code"');
       expect(email.source).toContain("background:#fff");
     }
     expect(buildEmailDocument(stripeReceiptLayout, true).dark).toBe(true);
@@ -237,9 +305,23 @@ describe("HTML email appearance", () => {
         ?.getAttribute("style"),
     ).toContain("background-color: #000000");
     expect(email.source).toContain("color: #d9dedb");
-    expect(email.source).toContain(
-      "https://stripe-images.s3.amazonaws.com/html_emails/2017-08-21/header/Header-background.png",
+    expect(email.source).not.toContain("Header-background.png");
+    expect(email.hasBlockedRemoteContent).toBe(true);
+    // Consent enables image src only, never CSS background fetches.
+    const consented = buildEmailDocument(stripeReceiptLayout, true, true);
+    expect(consented.source).not.toContain("Header-background.png");
+    expect(
+      consented.document
+        .querySelector("td.Header-left img")
+        ?.getAttribute("src"),
+    ).toBe(
+      "https://stripe-images.stripecdn.com/notifications/hosted/20180110/Header/Left.png",
     );
+    expect(
+      consented.document
+        .querySelector("table.st-Wrapper")
+        ?.getAttribute("width"),
+    ).toBe("600");
   });
 
   it("uses reader wrapping only for plain content, not designed receipt tables", () => {
@@ -354,11 +436,13 @@ describe("HTML email appearance", () => {
     });
     const current = renderedEmailRoot(message);
     const currentBody = current?.querySelector("body");
-    const currentCompatibilityStyle = current?.querySelector(
-      "head style:last-child",
-    )?.textContent;
+    const currentCompatibilityStyle = [
+      ...(current?.querySelectorAll("head style") ?? []),
+    ]
+      .map((style) => style.textContent ?? "")
+      .find((style) => style.includes("body.dakia-reader-content"));
 
-    expect(currentBody).toHaveClass("dakia-reader-content");
+    expect(currentBody?.classList.contains("dakia-reader-content")).toBe(true);
     expect(currentBody?.textContent).toContain(longReply);
     expect(currentBody?.textContent).not.toContain("Quoted table message");
     expect(currentBody?.querySelector("table")).toBeNull();
@@ -369,13 +453,43 @@ describe("HTML email appearance", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Show history" }));
     const history = renderedEmailRoot(message, "history");
-    expect(history?.querySelector("body")).not.toHaveClass(
-      "dakia-reader-content",
-    );
+    expect(
+      history
+        ?.querySelector("body")
+        ?.classList.contains("dakia-reader-content"),
+    ).toBe(false);
     expect(
       history?.querySelector(".quoted-spacer")?.getAttribute("height"),
     ).toBe("24");
     expect(history?.textContent).toContain("Quoted table message");
+    fireEvent.click(screen.getByRole("button", { name: "Hide history" }));
+    expect(
+      message.querySelector('[data-dakia-email-surface="history"]')
+        ?.parentElement,
+    ).toHaveAttribute("aria-hidden", "true");
+    expect(
+      message.querySelector('[data-dakia-email-surface="history"]')
+        ?.parentElement,
+    ).toHaveStyle({ display: "none" });
+    expect(
+      renderedEmailRoot(message)
+        ?.querySelector("body")
+        ?.classList.contains("dakia-reader-content"),
+    ).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Show history" }));
+    const reopened = renderedEmailRoot(message, "history");
+    expect(
+      reopened?.querySelector(".quoted-spacer")?.getAttribute("height"),
+    ).toBe("24");
+    expect(
+      reopened
+        ?.querySelector("body")
+        ?.classList.contains("dakia-reader-content"),
+    ).toBe(false);
+    expect(reopened?.textContent).toContain("Quoted table message");
+    expect(
+      renderedEmailRoot(message)?.querySelector("img")?.hasAttribute("src"),
+    ).toBe(false);
   });
 
   it("does not constrain complex wrappers that contain a table or artwork", () => {
@@ -391,35 +505,105 @@ describe("HTML email appearance", () => {
     expect(email.source).toContain("<table>");
   });
 
-  it("preserves remote email images, stylesheets, and fonts", () => {
+  it("blocks every remote email resource before it reaches the rendered document", () => {
+    const html = [
+      '<link rel="stylesheet" href="https://assets.example.test/mail.css">',
+      "<style>",
+      '@import url("https://assets.example.test/imported.css");',
+      '@font-face { font-family: Mail; src: url("https://assets.example.test/mail.woff2"); }',
+      '.hero { color: #000000; background-image: url("https://assets.example.test/hero.jpg"); }',
+      "</style>",
+      '<img src="https://images.example.test/newsletter.jpg" alt="Newsletter">',
+      '<img src="//images.example.test/protocol-relative.jpg" alt="Second">',
+      '<img srcset="https://images.example.test/one.jpg 1x, https://images.example.test/two.jpg 2x">',
+      '<svg><image href="https://images.example.test/vector.svg"></image></svg>',
+      '<div background="https://images.example.test/background.jpg"></div>',
+      '<div style="background-image: u\\72l(https://images.example.test/escaped.jpg)"></div>',
+      '<style>.retina { background-image: image-set("https://images.example.test/retina.jpg" 1x) }</style>',
+      '<style>@import/**/"//images.example.test/commented-import.css";</style>',
+      '<svg><defs><filter id="local-filter"></filter></defs><rect filter="u\\72l(https://images.example.test/filter.svg#blur)" fill="url(//images.example.test/fill.svg#paint)" mask="url(https://images.example.test/mask.svg#mask)" clip-path="url(https://images.example.test/clip.svg#clip)" marker-start="url(https://images.example.test/marker.svg#start)" stroke="url(#local-filter)"></rect></svg>',
+      '<img src="data:image/png;base64,iVBORw0KGgo=" alt="Inline">',
+    ].join("");
+    const email = buildEmailDocument(html, false);
+    const document = parse(email.source);
+
+    expect(email.hasBlockedRemoteContent).toBe(true);
+    expect(email.source).not.toContain("assets.example.test");
+    expect(email.source).not.toContain("images.example.test");
+    expect(document.querySelector("link")).toBeNull();
+    expect(
+      document.querySelector("img[alt='Newsletter']")?.hasAttribute("src"),
+    ).toBe(false);
+    expect(
+      document.querySelector("img[alt='Inline']")?.getAttribute("src"),
+    ).toBe("data:image/png;base64,iVBORw0KGgo=");
+    expect(document.querySelector("img[srcset]")).toBeNull();
+    expect(document.querySelector("svg image")?.hasAttribute("href")).toBe(
+      false,
+    );
+    const rect = document.querySelector("svg rect");
+    expect(rect?.getAttribute("filter")).toBe("");
+    expect(rect?.getAttribute("fill")).toBe("");
+    expect(rect?.getAttribute("mask")).toBe("");
+    expect(rect?.getAttribute("clip-path")).toBe("");
+    expect(rect?.getAttribute("marker-start")).toBe("");
+    expect(rect?.getAttribute("stroke")).toBe("");
+    expect(document.querySelector("[background]")).toBeNull();
+    expect(email.source).toContain("img-src data:");
+    expect(email.source).not.toContain("img-src data: http: https:");
+  });
+
+  it("loads only HTTP(S) image attributes after explicit consent", () => {
     const email = buildEmailDocument(
       [
         '<link rel="stylesheet" href="https://assets.example.test/mail.css">',
-        "<style>",
-        '@import url("https://assets.example.test/imported.css");',
-        '@font-face { font-family: Mail; src: url("https://assets.example.test/mail.woff2"); }',
-        '.hero { color: #000000; background-image: url("https://assets.example.test/hero.jpg"); }',
-        "</style>",
-        '<img src="https://images.example.test/newsletter.jpg" alt="Newsletter">',
-        '<img src="//images.example.test/protocol-relative.jpg" alt="Second">',
-        '<img src="data:image/png;base64,iVBORw0KGgo=" alt="Inline">',
+        '<style>@import url("https://assets.example.test/imported.css"); .hero { background-image:url("https://assets.example.test/hero.jpg") }</style>',
+        '<img src="//images.example.test/newsletter.jpg" srcset="https://images.example.test/one.jpg 1x">',
+        '<img src="http://images.example.test/plain-http.jpg" alt="HTTP image">',
+        '<svg><image href="https://images.example.test/vector.svg"></image></svg>',
+        '<div style="background:u\\72l(asset://localhost/private); border-image:u\\72l(https://images.example.test/escaped.jpg)"></div>',
+        '<div style="background-image:image-set(&quot;asset://localhost/private.png&quot; 1x); border-image:-webkit-image-set(&quot;file:///etc/passwd&quot; 1x); mask:cross-fade(url(tauri://localhost/ipc), url(ipc://localhost/command));"></div>',
       ].join(""),
       false,
+      true,
     );
 
+    expect(email.hasBlockedRemoteContent).toBe(false);
+    expect(email.source).not.toContain("assets.example.test/mail.css");
+    expect(email.source).not.toContain("assets.example.test/imported.css");
+    expect(email.source).not.toContain("assets.example.test/hero.jpg");
     expect(email.source).toContain(
-      'href="https://assets.example.test/mail.css"',
+      'src="https://images.example.test/newsletter.jpg"',
     );
     expect(email.source).toContain(
-      'url("https://assets.example.test/mail.woff2")',
+      'src="http://images.example.test/plain-http.jpg"',
     );
-    expect(email.source).toContain(
-      'url("https://assets.example.test/hero.jpg")',
-    );
-    expect(email.source).toContain(
-      'src="https://images.example.test/protocol-relative.jpg"',
-    );
+    expect(email.source).not.toContain("srcset=");
+    expect(email.source).not.toContain("asset://");
+    expect(email.source).not.toContain("file://");
+    expect(email.source).not.toContain("tauri://");
+    expect(email.source).not.toContain("ipc://");
     expect(email.source).toContain("img-src data: http: https:");
+    expect(email.source).toContain("style-src 'unsafe-inline'; font-src data:");
+  });
+
+  it("never restores local or executable srcset schemes after consent", () => {
+    const email = buildEmailDocument(
+      [
+        '<img srcset="asset://localhost/private.png 1x">',
+        '<img srcset="tauri://localhost/ipc 1x">',
+        '<img srcset="file:///etc/passwd 1x">',
+        '<img srcset="java&#x0A;script:alert(1) 1x">',
+        '<img srcset="data:text/html;base64,PHNjcmlwdD4= 1x">',
+      ].join(""),
+      false,
+      true,
+    );
+
+    expect(parse(email.source).querySelectorAll("img[srcset]")).toHaveLength(0);
+    expect(email.source).not.toContain("asset://");
+    expect(email.source).not.toContain("tauri://");
+    expect(email.source).not.toContain("file://");
   });
 
   it("removes active email content and installs an execution-denying CSP", () => {
@@ -432,6 +616,7 @@ describe("HTML email appearance", () => {
         '<object data="https://evil.example/payload"></object>',
         '<form action="https://evil.example"><input autofocus></form>',
         '<img src="java\nscript:alert(1)" ONERROR="alert(1)" onload="alert(1)">',
+        '<img src="data:image/png;base64,iVBORw0KGgo=" onload="url(#x);window.__owned=true" srcdoc="url(https://evil.example/frame)">',
         '<video poster="file:///etc/passwd" onanimationstart="alert(1)"></video>',
         '<div srcdoc="<script>alert(1)</script>"></div>',
         '<svg><foreignObject><iframe srcdoc="<script>alert(1)</script>"></iframe></foreignObject></svg>',
@@ -467,10 +652,12 @@ describe("HTML email appearance", () => {
     expect(policy?.getAttribute("content")).toContain("form-action 'none'");
   });
 
-  it("renders sanitized current content in a layout-contained nested shadow tree", () => {
+  it("renders sanitized current content in an opaque sandboxed iframe", async () => {
     render(
       <HtmlMessage
-        html="<script>bad()</script><p>Hello</p>"
+        html={
+          '<script data-dakia-renderer-token="sender-token">bad()</script><p id="dakia-renderer-bootstrap" data-dakia-renderer-token="sender-token">Hello</p>'
+        }
         title="Secure message"
         showHistoryLabel="Show history"
         hideHistoryLabel="Hide history"
@@ -479,9 +666,355 @@ describe("HTML email appearance", () => {
 
     const message = screen.getByRole("document", { name: "Secure message" });
     expect(renderedEmailRoot(message)).not.toBeNull();
-    expect(renderedEmailRoot(message)?.querySelector("script")).toBeNull();
+    expect(
+      renderedEmailRoot(message)?.querySelector(
+        "script:not([data-dakia-renderer-token])",
+      ),
+    ).toBeNull();
     expect(message.style.contain).toBe("layout paint");
-    expect(document.querySelector("iframe")).toBeNull();
+    const frame = renderedEmailFrame(message);
+    expect(frame).not.toBeNull();
+    expect(frame).toHaveAttribute("sandbox", "allow-scripts");
+    expect(frame?.getAttribute("sandbox")).not.toContain("allow-same-origin");
+    expect(frame).toHaveAttribute("referrerpolicy", "no-referrer");
+    expect(frame).toHaveAttribute("scrolling", "auto");
+    expect(frame?.getAttribute("srcdoc")).toContain("connect-src 'none'");
+    expect(frame?.getAttribute("srcdoc")).toContain("media-src 'none'");
+    expect(frame?.getAttribute("srcdoc")).toContain("script-src 'sha256-");
+    const serialized = parse(frame?.getAttribute("srcdoc") ?? undefined);
+    const csp = serialized
+      .querySelector('meta[http-equiv="Content-Security-Policy"]')
+      ?.getAttribute("content");
+    const bootstrap = serialized.querySelector(
+      "script[data-dakia-renderer-token]",
+    );
+    const source = bootstrap?.textContent ?? "";
+    const hash = await sha256CspHash(source);
+    const alteredHash = await sha256CspHash(`${source} `);
+    expect(bootstrap?.getAttribute("data-dakia-renderer-token")).toMatch(
+      /^[a-f0-9]{48}$/,
+    );
+    expect(bootstrap?.getAttribute("data-dakia-renderer-token")).not.toBe(
+      "sender-token",
+    );
+    expect(serialized.querySelectorAll("script")).toHaveLength(1);
+    expect(bootstrap?.hasAttribute("nonce")).toBe(false);
+    expect(csp).toContain(`script-src '${hash}'`);
+    expect(csp).not.toContain(`'${alteredHash}'`);
+    expect(packagedCsp()).toContain(`script-src 'self' '${hash}'`);
+    expect(packagedCsp()).not.toMatch(/script-src[^;]*'unsafe-inline'/);
+    expect(packagedCsp()).not.toContain(`'${alteredHash}'`);
+    expect(source).toContain("document.currentScript?.getAttribute");
+    expect(source).not.toContain("sender-token");
+    expect(
+      serialized.querySelector("style[data-dakia-renderer-scroll]")
+        ?.textContent,
+    ).toContain("overflow-y: auto !important");
+  });
+
+  it("keeps bootstrap bytes static while each opaque frame gets a distinct capability", () => {
+    render(
+      <>
+        <HtmlMessage
+          html="<p>First message</p>"
+          title="First static bridge"
+          showHistoryLabel="Show history"
+          hideHistoryLabel="Hide history"
+        />
+        <HtmlMessage
+          html="<p>Second message</p>"
+          title="Second static bridge"
+          showHistoryLabel="Show history"
+          hideHistoryLabel="Hide history"
+        />
+      </>,
+    );
+
+    const first = screen.getByRole("document", {
+      name: "First static bridge",
+    });
+    const second = screen.getByRole("document", {
+      name: "Second static bridge",
+    });
+    const firstSource = parse(
+      renderedEmailFrame(first)?.getAttribute("srcdoc") ?? undefined,
+    );
+    const secondSource = parse(
+      renderedEmailFrame(second)?.getAttribute("srcdoc") ?? undefined,
+    );
+    const firstBootstrap = firstSource.querySelector(
+      "script[data-dakia-renderer-token]",
+    );
+    const secondBootstrap = secondSource.querySelector(
+      "script[data-dakia-renderer-token]",
+    );
+
+    expect(firstBootstrap?.textContent).toBe(secondBootstrap?.textContent);
+    expect(firstBootstrap?.getAttribute("data-dakia-renderer-token")).toMatch(
+      /^[a-f0-9]{48}$/,
+    );
+    expect(secondBootstrap?.getAttribute("data-dakia-renderer-token")).toMatch(
+      /^[a-f0-9]{48}$/,
+    );
+    expect(firstBootstrap?.getAttribute("data-dakia-renderer-token")).not.toBe(
+      secondBootstrap?.getAttribute("data-dakia-renderer-token"),
+    );
+  });
+
+  it("keeps remote markup out of the sandbox until the Reader grants consent", () => {
+    const onLoadRemoteContent = vi.fn();
+    const html = [
+      "<script>window.__emailOwned = true</script>",
+      '<img src="https://images.example.test/tracker.png" alt="Tracker">',
+      '<style>.banner { background-image: url("https://images.example.test/banner.jpg") }</style>',
+      '<p class="banner">Hello</p>',
+    ].join("");
+    const rendered = render(
+      <HtmlMessage
+        html={html}
+        title="Remote content"
+        showHistoryLabel="Show history"
+        hideHistoryLabel="Hide history"
+        loadRemoteContentLabel="Load remote content"
+        onLoadRemoteContent={onLoadRemoteContent}
+      />,
+    );
+    const message = screen.getByRole("document", { name: "Remote content" });
+
+    expect(
+      screen.getByRole("button", { name: "Load remote content" }),
+    ).toBeVisible();
+    expect(
+      renderedEmailRoot(message)?.querySelector("img")?.hasAttribute("src"),
+    ).toBe(false);
+    expect(
+      renderedEmailRoot(message)?.querySelector("style")?.textContent,
+    ).not.toContain("images.example.test");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Load remote content" }),
+    );
+    expect(onLoadRemoteContent).toHaveBeenCalledOnce();
+
+    rendered.rerender(
+      <HtmlMessage
+        html={html}
+        title="Remote content"
+        showHistoryLabel="Show history"
+        hideHistoryLabel="Hide history"
+        remoteContentAllowed
+        loadRemoteContentLabel="Load remote content"
+        onLoadRemoteContent={onLoadRemoteContent}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "Load remote content" }),
+    ).toBeNull();
+    expect(
+      renderedEmailRoot(message)?.querySelector("img")?.getAttribute("src"),
+    ).toBe("https://images.example.test/tracker.png");
+    expect(
+      renderedEmailRoot(message)?.querySelector(
+        "script:not([data-dakia-renderer-token])",
+      ),
+    ).toBeNull();
+  });
+
+  it("uses app-owned contrast surfaces for Reader controls", () => {
+    render(
+      <HtmlMessage
+        html={[
+          '<img src="https://images.example.test/tracker.png" alt="Tracker">',
+          '<div class="gmail_quote">Earlier message</div>',
+        ].join("")}
+        title="Control contrast"
+        showHistoryLabel="Show history"
+        hideHistoryLabel="Hide history"
+        loadRemoteContentLabel="Load remote content"
+        onLoadRemoteContent={vi.fn()}
+      />,
+    );
+
+    const remote = screen.getByRole("button", {
+      name: "Load remote content",
+    });
+    const history = screen.getByRole("button", { name: "Show history" });
+    expect(remote).toHaveClass("html-message-remote-content-toggle");
+    expect(history).toHaveClass("html-message-history-toggle");
+    for (const control of [remote, history]) {
+      expect(control.style.background).toBe(
+        "var(--dakia-email-control-surface)",
+      );
+      expect(control.style.borderColor).toBe(
+        "var(--dakia-email-control-border)",
+      );
+      expect(control.style.borderStyle).toBe("solid");
+      expect(control.style.borderWidth).toBe("1px");
+      expect(control.style.color).toBe("var(--dakia-email-control-ink)");
+      expect(control.getAttribute("style")).not.toContain("color: inherit");
+    }
+  });
+
+  it("installs a trusted no-referrer policy before consented resource markup", () => {
+    const rendered = render(
+      <HtmlMessage
+        html={[
+          '<meta name="referrer" content="unsafe-url">',
+          '<img referrerpolicy="unsafe-url" src="https://images.example.test/consented.png" alt="Consented">',
+          '<body data-email-body="preserved"><style>.copy { color: #123456 }</style><p class="copy">Email</p></body>',
+        ].join("")}
+        title="Referrer policy"
+        showHistoryLabel="Show history"
+        hideHistoryLabel="Hide history"
+        remoteContentAllowed
+      />,
+    );
+    const message = screen.getByRole("document", { name: "Referrer policy" });
+    const source = renderedEmailFrame(message)?.getAttribute("srcdoc") ?? "";
+    const document = parse(source);
+
+    expect(source).not.toContain("unsafe-url");
+    expect(document.head.firstElementChild).toMatchObject({
+      localName: "meta",
+    });
+    expect(document.head.firstElementChild?.getAttribute("name")).toBe(
+      "referrer",
+    );
+    expect(document.head.firstElementChild?.getAttribute("content")).toBe(
+      "no-referrer",
+    );
+    expect(document.querySelectorAll('meta[name="referrer"]')).toHaveLength(1);
+    expect(
+      [...document.querySelectorAll("style")].some((style) =>
+        style.textContent?.includes("#123456"),
+      ),
+    ).toBe(true);
+    expect(document.body.getAttribute("data-email-body")).toBe("preserved");
+    expect(
+      document.querySelector("img")?.getAttribute("referrerpolicy"),
+    ).toBeNull();
+    expect(
+      renderedEmailRoot(message)?.querySelector("img")?.getAttribute("src"),
+    ).toBe("https://images.example.test/consented.png");
+
+    rendered.unmount();
+  });
+
+  it("preserves well-formed embedded SVG image data through the iframe source", () => {
+    const embeddedSvg =
+      "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMjAiIGhlaWdodD0iNDgiPjx0ZXh0IHg9IjAiIHk9IjMyIj5FbWJlZGRlZCBpbWFnZSBsb2FkZWQgbG9jYWxseTwvdGV4dD48L3N2Zz4=";
+    const email = buildEmailDocument(
+      `<img src="${embeddedSvg}" alt="Embedded image loaded locally">`,
+      false,
+    );
+    expect(email.source).toContain(embeddedSvg);
+
+    render(
+      <HtmlMessage
+        html={`<img src="${embeddedSvg}" alt="Embedded image loaded locally">`}
+        title="Embedded SVG"
+        showHistoryLabel="Show history"
+        hideHistoryLabel="Hide history"
+      />,
+    );
+    const message = screen.getByRole("document", { name: "Embedded SVG" });
+    expect(
+      renderedEmailRoot(message)?.querySelector("img")?.getAttribute("src"),
+    ).toBe(embeddedSvg);
+  });
+
+  it("keeps embedded SVG sources unchanged when remote-content permission changes", () => {
+    const embeddedOne =
+      "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPjx0ZXh0PkZpcnN0PC90ZXh0Pjwvc3ZnPg==";
+    const embeddedTwo =
+      "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPjx0ZXh0PlNlY29uZDwvdGV4dD48L3N2Zz4=";
+    const html = [
+      `<img src="${embeddedOne}" alt="First embedded">`,
+      '<img src="https://images.example.test/allowed.png" alt="Remote">',
+      `<img src="${embeddedTwo}" alt="Second embedded">`,
+    ].join("");
+    const rendered = render(
+      <HtmlMessage
+        html={html}
+        title="Embedded permission boundary"
+        showHistoryLabel="Show history"
+        hideHistoryLabel="Hide history"
+      />,
+    );
+    const message = screen.getByRole("document", {
+      name: "Embedded permission boundary",
+    });
+
+    expect(
+      renderedEmailRoot(message)
+        ?.querySelector("img[alt='First embedded']")
+        ?.getAttribute("src"),
+    ).toBe(embeddedOne);
+    expect(
+      renderedEmailRoot(message)
+        ?.querySelector("img[alt='Second embedded']")
+        ?.getAttribute("src"),
+    ).toBe(embeddedTwo);
+
+    rendered.rerender(
+      <HtmlMessage
+        html={html}
+        title="Embedded permission boundary"
+        showHistoryLabel="Show history"
+        hideHistoryLabel="Hide history"
+        remoteContentAllowed
+      />,
+    );
+
+    const root = renderedEmailRoot(message);
+    expect(
+      root?.querySelector("img[alt='First embedded']")?.getAttribute("src"),
+    ).toBe(embeddedOne);
+    expect(
+      root?.querySelector("img[alt='Second embedded']")?.getAttribute("src"),
+    ).toBe(embeddedTwo);
+    expect(root?.querySelector("img[alt='Remote']")?.getAttribute("src")).toBe(
+      "https://images.example.test/allowed.png",
+    );
+  });
+
+  it("never mounts media or SVG subresources after remote-image consent", () => {
+    const rendered = render(
+      <HtmlMessage
+        html={[
+          '<img src="https://images.example.test/allowed.png" alt="Allowed">',
+          '<video autoplay src="https://media.example.test/open.mp4" poster="https://media.example.test/poster.jpg"><source src="https://media.example.test/source.mp4"><track src="https://media.example.test/captions.vtt"></video>',
+          '<audio src="https://media.example.test/open.mp3"><source src="https://media.example.test/source.mp3"></audio>',
+          '<svg><use href="https://svg.example.test/symbols.svg#mail"></use><image href="https://svg.example.test/image.svg"></image><filter id="f"><feImage href="https://svg.example.test/filter.svg"></feImage></filter></svg>',
+        ].join("")}
+        title="Remote media"
+        showHistoryLabel="Show history"
+        hideHistoryLabel="Hide history"
+        remoteContentAllowed
+      />,
+    );
+    const message = screen.getByRole("document", { name: "Remote media" });
+    const root = renderedEmailRoot(message);
+
+    expect(root?.querySelector("img[alt='Allowed']")?.getAttribute("src")).toBe(
+      "https://images.example.test/allowed.png",
+    );
+    expect(root?.querySelector("video")?.hasAttribute("src")).toBe(false);
+    expect(root?.querySelector("video")?.hasAttribute("poster")).toBe(false);
+    expect(root?.querySelector("video source")?.hasAttribute("src")).toBe(
+      false,
+    );
+    expect(root?.querySelector("video track")?.hasAttribute("src")).toBe(false);
+    expect(root?.querySelector("audio")?.hasAttribute("src")).toBe(false);
+    expect(root?.querySelector("audio source")?.hasAttribute("src")).toBe(
+      false,
+    );
+    expect(root?.querySelector("svg use")?.hasAttribute("href")).toBe(false);
+    expect(root?.querySelector("svg image")?.hasAttribute("href")).toBe(false);
+    expect(root?.querySelector("feImage")?.hasAttribute("href")).toBe(false);
+    expect(root?.outerHTML).not.toContain("media.example.test");
+    expect(root?.outerHTML).not.toContain("svg.example.test");
+    rendered.unmount();
   });
 
   it("splits current content and provider history into separately sanitized documents", () => {
@@ -814,17 +1347,436 @@ describe("HTML email appearance", () => {
       />,
     );
 
-    const root = renderedEmailRoot(
-      screen.getByRole("document", { name: "Message with email link" }),
-    );
+    const message = screen.getByRole("document", {
+      name: "Message with email link",
+    });
+    const root = renderedEmailRoot(message);
     const anchor = root?.querySelector("a");
     expect(anchor).not.toBeNull();
-    fireEvent.click(anchor!);
+    sendRendererMessage(message, {
+      channel: "dakia-email-renderer",
+      token: rendererToken(message),
+      type: "external-link",
+      href: anchor?.getAttribute("data-dakia-external-href"),
+    });
 
     expect(onMailto).toHaveBeenCalledOnce();
     expect(onMailto).toHaveBeenCalledWith(
       "mailto:juhan%2Btamm@example.com?subject=Tere",
     );
+  });
+
+  it("keeps the sandbox frame across parent rerenders while using the current mailto handler", () => {
+    const firstMailto = vi.fn();
+    const currentMailto = vi.fn();
+    const html =
+      '<a href="mailto:current@example.com?subject=Current">Write</a>';
+    const rendered = render(
+      <HtmlMessage
+        html={html}
+        title="Stable sandbox"
+        showHistoryLabel="Show history"
+        hideHistoryLabel="Hide history"
+        onMailto={firstMailto}
+      />,
+    );
+    const message = screen.getByRole("document", { name: "Stable sandbox" });
+    const initialFrame = renderedEmailFrame(message);
+    const initialSource = initialFrame?.getAttribute("srcdoc");
+
+    rendered.rerender(
+      <HtmlMessage
+        html={html}
+        title="Stable sandbox"
+        showHistoryLabel="Show history"
+        hideHistoryLabel="Hide history"
+        onMailto={currentMailto}
+      />,
+    );
+
+    expect(renderedEmailFrame(message)).toBe(initialFrame);
+    expect(renderedEmailFrame(message)?.getAttribute("srcdoc")).toBe(
+      initialSource,
+    );
+
+    const anchor = renderedEmailRoot(message)?.querySelector("a");
+    sendRendererMessage(message, {
+      channel: "dakia-email-renderer",
+      token: rendererToken(message),
+      type: "external-link",
+      href: anchor?.getAttribute("data-dakia-external-href"),
+    });
+
+    expect(firstMailto).not.toHaveBeenCalled();
+    expect(currentMailto).toHaveBeenCalledOnce();
+    expect(currentMailto).toHaveBeenCalledWith(
+      "mailto:current@example.com?subject=Current",
+    );
+  });
+
+  it("does not redirect a visible frame to an abandoned transition callback", () => {
+    const committedMailto = vi.fn();
+    const abandonedMailto = vi.fn();
+    let suspendTransition: (() => void) | undefined;
+    const pendingTransition = new Promise<void>((resolve) => {
+      suspendTransition = resolve;
+    });
+
+    function SuspendPending({ suspended }: { suspended: boolean }) {
+      if (suspended) throw pendingTransition;
+      return null;
+    }
+
+    function TransitionHarness() {
+      const [pendingUpdate, setPendingUpdate] = useState(false);
+      return (
+        <>
+          <button
+            type="button"
+            onClick={() =>
+              startTransition(() => {
+                setPendingUpdate(true);
+              })
+            }
+          >
+            Start suspended transition
+          </button>
+          <Suspense fallback={<span>Loading pending mail</span>}>
+            <HtmlMessage
+              html='<a href="mailto:transition@example.com">Write</a>'
+              title="Transition sandbox"
+              showHistoryLabel="Show history"
+              hideHistoryLabel="Hide history"
+              onMailto={pendingUpdate ? abandonedMailto : committedMailto}
+            />
+            <SuspendPending suspended={pendingUpdate} />
+          </Suspense>
+        </>
+      );
+    }
+
+    render(<TransitionHarness />);
+    const message = screen.getByRole("document", {
+      name: "Transition sandbox",
+    });
+    const initialFrame = renderedEmailFrame(message);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Start suspended transition" }),
+    );
+
+    expect(renderedEmailFrame(message)).toBe(initialFrame);
+    const anchor = renderedEmailRoot(message)?.querySelector("a");
+    sendRendererMessage(message, {
+      channel: "dakia-email-renderer",
+      token: rendererToken(message),
+      type: "external-link",
+      href: anchor?.getAttribute("data-dakia-external-href"),
+    });
+
+    expect(committedMailto).toHaveBeenCalledOnce();
+    expect(abandonedMailto).not.toHaveBeenCalled();
+    suspendTransition?.();
+  });
+
+  it("replaces the sandbox only when remote-content permission changes its source", () => {
+    const html =
+      '<img src="https://images.example.test/consented.png" alt="Consented">';
+    const rendered = render(
+      <HtmlMessage
+        html={html}
+        title="Permission source"
+        showHistoryLabel="Show history"
+        hideHistoryLabel="Hide history"
+      />,
+    );
+    const message = screen.getByRole("document", {
+      name: "Permission source",
+    });
+    const blockedFrame = renderedEmailFrame(message);
+    expect(
+      renderedEmailRoot(message)?.querySelector("img")?.hasAttribute("src"),
+    ).toBe(false);
+
+    rendered.rerender(
+      <HtmlMessage
+        html={html}
+        title="Permission source"
+        showHistoryLabel="Show history"
+        hideHistoryLabel="Hide history"
+        remoteContentAllowed
+      />,
+    );
+
+    expect(renderedEmailFrame(message)).not.toBe(blockedFrame);
+    expect(
+      renderedEmailRoot(message)?.querySelector("img")?.getAttribute("src"),
+    ).toBe("https://images.example.test/consented.png");
+  });
+
+  it("rejects an old renderer token after a source-changing permission grant", () => {
+    const onMailto = vi.fn();
+    const html =
+      '<a href="mailto:permission@example.com">Write</a><img src="https://images.example.test/consented.png">';
+    const rendered = render(
+      <HtmlMessage
+        html={html}
+        title="Old capability"
+        showHistoryLabel="Show history"
+        hideHistoryLabel="Hide history"
+        onMailto={onMailto}
+      />,
+    );
+    const message = screen.getByRole("document", { name: "Old capability" });
+    const oldToken = rendererToken(message);
+
+    rendered.rerender(
+      <HtmlMessage
+        html={html}
+        title="Old capability"
+        showHistoryLabel="Show history"
+        hideHistoryLabel="Hide history"
+        remoteContentAllowed
+        onMailto={onMailto}
+      />,
+    );
+
+    const frame = renderedEmailFrame(message);
+    if (!frame?.contentWindow) {
+      Object.defineProperty(frame, "contentWindow", {
+        configurable: true,
+        value: window,
+      });
+    }
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          channel: "dakia-email-renderer",
+          token: oldToken,
+          type: "external-link",
+          href: "mailto:permission@example.com",
+        },
+        source: frame?.contentWindow,
+      }),
+    );
+
+    expect(onMailto).not.toHaveBeenCalled();
+  });
+
+  it("preserves an exact safe link target and leaves encoded unsafe schemes inert", () => {
+    render(
+      <HtmlMessage
+        html={[
+          '<a href="https&#58;//example.test/%E2%98%83?q=a%2Bb#part">Safe target</a>',
+          '<a href="java&#x09;script:alert(1)">Script target</a>',
+          '<a href="tauri&#58;//localhost/delete-all">Native target</a>',
+          '<a href="file&#58;///etc/passwd">File target</a>',
+        ].join("")}
+        title="Link boundaries"
+        showHistoryLabel="Show history"
+        hideHistoryLabel="Hide history"
+      />,
+    );
+
+    const message = screen.getByRole("document", { name: "Link boundaries" });
+    const root = renderedEmailRoot(message);
+    const anchors = [...(root?.querySelectorAll("a") ?? [])];
+    sendRendererMessage(message, {
+      channel: "dakia-email-renderer",
+      token: rendererToken(message),
+      type: "external-link",
+      href: anchors[0]?.getAttribute("data-dakia-external-href"),
+    });
+    for (const anchor of anchors.slice(1)) {
+      sendRendererMessage(message, {
+        channel: "dakia-email-renderer",
+        token: rendererToken(message),
+        type: "external-link",
+        href: anchor.getAttribute("data-dakia-external-href"),
+      });
+    }
+
+    expect(mocks.openExternal).toHaveBeenCalledOnce();
+    expect(mocks.openExternal).toHaveBeenCalledWith(
+      "https://example.test/%E2%98%83?q=a%2Bb#part",
+    );
+    for (const anchor of anchors.slice(1)) {
+      expect(anchor.getAttribute("href")).toBeNull();
+      expect(anchor.getAttribute("data-dakia-external-href")).toBeNull();
+    }
+  });
+
+  it("accepts renderer messages only from the current sandbox and capability token", () => {
+    const rendered = render(
+      <HtmlMessage
+        html='<a href="https://example.test/only-this-frame">Open</a>'
+        title="Bridge boundaries"
+        showHistoryLabel="Show history"
+        hideHistoryLabel="Hide history"
+      />,
+    );
+    const message = screen.getByRole("document", { name: "Bridge boundaries" });
+    const frame = renderedEmailFrame(message);
+    expect(frame).not.toBeNull();
+    if (!frame?.contentWindow) {
+      Object.defineProperty(frame, "contentWindow", {
+        configurable: true,
+        value: window,
+      });
+    }
+    const token = rendererToken(message);
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          channel: "dakia-email-renderer",
+          token: "forged-token",
+          type: "external-link",
+          href: "https://example.test/forged-token",
+        },
+        source: frame?.contentWindow,
+      }),
+    );
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          channel: "dakia-email-renderer",
+          token,
+          type: "external-link",
+          href: "https://example.test/forged-source",
+        },
+        source: null,
+      }),
+    );
+    sendRendererMessage(message, {
+      channel: "dakia-email-renderer",
+      token,
+      type: "external-link",
+      href: "https://example.test/not-in-this-message",
+    });
+    expect(mocks.openExternal).not.toHaveBeenCalled();
+
+    sendRendererMessage(message, {
+      channel: "dakia-email-renderer",
+      token,
+      type: "external-link",
+      href: "https://example.test/only-this-frame",
+    });
+    expect(mocks.openExternal).toHaveBeenCalledWith(
+      "https://example.test/only-this-frame",
+    );
+
+    rendered.rerender(
+      <HtmlMessage
+        html='<a href="https://example.test/next-frame">Next</a>'
+        title="Bridge boundaries"
+        showHistoryLabel="Show history"
+        hideHistoryLabel="Hide history"
+      />,
+    );
+    const nextFrame = renderedEmailFrame(message);
+    if (!nextFrame?.contentWindow) {
+      Object.defineProperty(nextFrame!, "contentWindow", {
+        configurable: true,
+        value: window,
+      });
+    }
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          channel: "dakia-email-renderer",
+          token,
+          type: "external-link",
+          href: "https://example.test/stale-frame",
+        },
+        source: nextFrame?.contentWindow,
+      }),
+    );
+    expect(mocks.openExternal).toHaveBeenCalledOnce();
+  });
+
+  it("bounds opaque frame height while keeping long content internally scrollable", () => {
+    render(
+      <HtmlMessage
+        html="<p>Resize me</p>"
+        title="Resize boundaries"
+        showHistoryLabel="Show history"
+        hideHistoryLabel="Hide history"
+      />,
+    );
+    const message = screen.getByRole("document", { name: "Resize boundaries" });
+    const frame = renderedEmailFrame(message);
+    const token = rendererToken(message);
+
+    expect(frame?.getAttribute("srcdoc")).toContain(
+      "range.getBoundingClientRect()",
+    );
+    expect(frame?.getAttribute("srcdoc")).not.toContain("root?.scrollHeight");
+    expect(frame).toHaveAttribute("scrolling", "auto");
+    expect(frame?.style.overflow).toBe("auto");
+
+    sendRendererMessage(message, {
+      channel: "dakia-email-renderer",
+      token,
+      type: "resize",
+      height: 5_999,
+    });
+    expect(frame?.style.height).toBe("5999px");
+    sendRendererMessage(message, {
+      channel: "dakia-email-renderer",
+      token,
+      type: "resize",
+      height: 6_000,
+    });
+    expect(frame?.style.height).toBe("6000px");
+    sendRendererMessage(message, {
+      channel: "dakia-email-renderer",
+      token,
+      type: "resize",
+      height: 6_001,
+    });
+    expect(frame?.style.height).toBe("6000px");
+
+    sendRendererMessage(message, {
+      channel: "dakia-email-renderer",
+      token,
+      type: "resize",
+      height: 640,
+    });
+    expect(frame?.style.height).toBe("640px");
+    sendRendererMessage(message, {
+      channel: "dakia-email-renderer",
+      token,
+      type: "resize",
+      height: 84,
+    });
+    expect(frame?.style.height).toBe("84px");
+  });
+
+  it("overrides sender inline root caps so long email content remains scrollable", () => {
+    render(
+      <HtmlMessage
+        html={
+          '<body style="height:100px !important;max-height:100px !important;overflow:hidden !important"><p>Start</p><p>Long content stays reachable.</p></body>'
+        }
+        title="Root cap boundaries"
+        showHistoryLabel="Show history"
+        hideHistoryLabel="Hide history"
+      />,
+    );
+    const message = screen.getByRole("document", {
+      name: "Root cap boundaries",
+    });
+    const rendered = renderedEmailRoot(message);
+    const body = rendered?.querySelector("body") as HTMLBodyElement | null;
+
+    expect(body?.style.getPropertyValue("height")).toBe("auto");
+    expect(body?.style.getPropertyPriority("height")).toBe("important");
+    expect(body?.style.getPropertyValue("max-height")).toBe("none");
+    expect(body?.style.getPropertyPriority("max-height")).toBe("important");
+    expect(body?.style.getPropertyValue("overflow-y")).toBe("auto");
+    expect(body?.style.getPropertyPriority("overflow-y")).toBe("important");
+    expect(rendered?.textContent).toContain("Long content stays reachable.");
   });
 
   it("removes non-HTML navigation surfaces while retaining safe SVG links", () => {

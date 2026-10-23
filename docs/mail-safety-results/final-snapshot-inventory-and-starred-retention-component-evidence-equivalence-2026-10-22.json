@@ -1,0 +1,245 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-21T21:40:38.412Z",
+  "lane": "snapshot-inventory-and-starred-retention-component-evidence-equivalence",
+  "status": "component-inputs-match-with-explicit-exclusions",
+  "scope": "Read-only path-and-content comparison from the measured 4cf deep and audit inputs to the frozen a86 source.",
+  "sourceManifests": {
+    "measured4cf": {
+      "digest": "4cf414d3efa2cdbb69321b0eccfbce26ce8ec987afeb26453c12ae9867eda6b7",
+      "fileCount": 940,
+      "path": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-snapshot-inventory-and-smart-membership.json",
+      "sha256": "77624e0b8825b94084030334c232a38ee340608649d0bf666df97e80b4ba63eb"
+    },
+    "frozenA86": {
+      "digest": "a86feeae88ffe172c8697a84f1d29afa123856661ee3765ca3307562c410193c",
+      "fileCount": 940,
+      "path": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-snapshot-inventory-and-starred-retention.json",
+      "sha256": "3b20d3a6017d10e7bdb84e74672327e2f3439d3c062a2bd4b17770532501293a",
+      "archivePath": "/private/tmp/dakia-frozen-source-20261021-snapshot-inventory-and-starred-retention.zip",
+      "archiveSha256": "e6c4f94fa4821b73a0ab478c2efbe662ad634cbb5d8d3245578ce864337d52b9"
+    }
+  },
+  "measuredEvidence": {
+    "deep": {
+      "receipt": "docs/mail-safety-results/remaining-gap-closure-deep-snapshot-inventory-and-smart-membership-2026-10-22.json",
+      "receiptSha256": "d09ffd7372e35ee43aa8e153dd8ff480d4e0b730a683a1753504218607080798",
+      "status": "passed",
+      "boundedResult": "GreenMail and Dovecot loopback server checks passed. Two 31-second fuzz campaigns completed 28,826 MIME and 109,436 attachment executions across 75 seeds without artifacts.",
+      "retainedLimitation": "The fuzz runner enforces a 64 MiB quarantine limit; this is not an unbounded fuzz or native/provider result."
+    },
+    "source": {
+      "receipt": "docs/mail-safety-results/remaining-gap-closure-three-run-source-snapshot-inventory-and-smart-membership-2026-10-22.json",
+      "receiptSha256": "b9406978b31c97033a6cfd7e6cc2d5780453c590ca6260e5107e0f1b4943f3c6",
+      "status": "failed",
+      "boundedResult": "The 4cf three-run source record retained an App Seen regression: 614 frontend passes, one failure, and two skips.",
+      "carryForward": false
+    },
+    "dependencyAudit": {
+      "receipt": "docs/mail-safety-results/final-dependency-audit-2026-10-21.json",
+      "receiptSha256": "b380755a49ca459cd642d4ad5d774bbf5a37858236b10f1c933713cf38777e42",
+      "status": "previously-passed-inputs-unchanged",
+      "carryForward": "input-equivalence only; no audit was rerun"
+    }
+  },
+  "manifestDelta": {
+    "changedPathCount": 3,
+    "changedPaths": [
+      {
+        "path": "apps/desktop/src/App.tsx",
+        "before": {
+          "path": "apps/desktop/src/App.tsx",
+          "sha256": "b200c752d42884493887e3a7aa55c908534ddcaf590eed7ad6898c153d853bd0",
+          "bytes": 122009,
+          "state": "present"
+        },
+        "after": {
+          "path": "apps/desktop/src/App.tsx",
+          "sha256": "778ceca895d71f5be9e658159511e80fdec45f4f8b703542e2c2e0711c243079",
+          "bytes": 121781,
+          "state": "present"
+        }
+      },
+      {
+        "path": "apps/desktop/src/realtimeDelivery.integration.test.tsx",
+        "before": {
+          "path": "apps/desktop/src/realtimeDelivery.integration.test.tsx",
+          "sha256": "0fa16e10d61e10f92c105860c373a1e669751c978e8d53af5b00fa54d5ca99d8",
+          "bytes": 25581,
+          "state": "present"
+        },
+        "after": {
+          "path": "apps/desktop/src/realtimeDelivery.integration.test.tsx",
+          "sha256": "0c6e1cc502c42dc56e1cde0fc7090b5373af8eb32ca39ed16ff3a5edc76b74fa",
+          "bytes": 26144,
+          "state": "present"
+        }
+      },
+      {
+        "path": "testdata/mail-safety-catalogue.json",
+        "before": {
+          "path": "testdata/mail-safety-catalogue.json",
+          "sha256": "ee9e29db08637ee6bd94ee60405751681f9900a81d02e6c5f3536bea85df81fe",
+          "bytes": 353703,
+          "state": "present"
+        },
+        "after": {
+          "path": "testdata/mail-safety-catalogue.json",
+          "sha256": "9c01abcba18d686c9d21fb3d61bb9509ec3862e74a1a92cc48653ae5532f6719",
+          "bytes": 361726,
+          "state": "present"
+        }
+      }
+    ]
+  },
+  "componentInputComparisons": {
+    "deep": [
+      {
+        "name": "cargo-core-cli",
+        "paths": [
+          "Cargo.toml",
+          "Cargo.lock",
+          "crates/dakia-core/**",
+          "crates/dakia-cli/**"
+        ],
+        "before": {
+          "fileCount": 137,
+          "pathAndContentDigest": "460cedefbce7908852f7126e8b5a11efcf4b56b98f5f71106179c37324f58b75"
+        },
+        "after": {
+          "fileCount": 137,
+          "pathAndContentDigest": "460cedefbce7908852f7126e8b5a11efcf4b56b98f5f71106179c37324f58b75"
+        },
+        "matches": true
+      },
+      {
+        "name": "fuzz",
+        "paths": ["fuzz/**"],
+        "before": {
+          "fileCount": 5,
+          "pathAndContentDigest": "973a9cc84ee5d72ab34d5981a9452a423ac8aa30ad37b5d4e484fb5c7424c2c7"
+        },
+        "after": {
+          "fileCount": 5,
+          "pathAndContentDigest": "973a9cc84ee5d72ab34d5981a9452a423ac8aa30ad37b5d4e484fb5c7424c2c7"
+        },
+        "matches": true
+      },
+      {
+        "name": "vendor",
+        "paths": ["vendor/**"],
+        "before": {
+          "fileCount": 519,
+          "pathAndContentDigest": "16bfcb16a2aa30458c96238ada05a0a0265873455020232db635f98986201548"
+        },
+        "after": {
+          "fileCount": 519,
+          "pathAndContentDigest": "16bfcb16a2aa30458c96238ada05a0a0265873455020232db635f98986201548"
+        },
+        "matches": true
+      },
+      {
+        "name": "mime-fixtures",
+        "paths": ["crates/dakia-core/testdata/mime/**"],
+        "before": {
+          "fileCount": 76,
+          "pathAndContentDigest": "2affd0eb21ea0b1eaaaf4e091d74aa36be15bc19356df5cb00397fbf5b0827ba"
+        },
+        "after": {
+          "fileCount": 76,
+          "pathAndContentDigest": "2affd0eb21ea0b1eaaaf4e091d74aa36be15bc19356df5cb00397fbf5b0827ba"
+        },
+        "matches": true
+      },
+      {
+        "name": "deep-runners",
+        "paths": [
+          "scripts/mail-safety-servers.sh",
+          "scripts/run-mail-safety-fuzz.sh",
+          "scripts/run-mail-safety.mjs"
+        ],
+        "before": {
+          "fileCount": 3,
+          "pathAndContentDigest": "3c4d327a713fa1cc17d4e2a3f1ef3bbb21ccf844292fb5d6a7226cd10f3cc9f7"
+        },
+        "after": {
+          "fileCount": 3,
+          "pathAndContentDigest": "3c4d327a713fa1cc17d4e2a3f1ef3bbb21ccf844292fb5d6a7226cd10f3cc9f7"
+        },
+        "matches": true
+      }
+    ],
+    "dependencyAudit": [
+      {
+        "path": "Cargo.lock",
+        "beforeSha256": "78e7136d6ff7a477e2317feb99a976a75376b1283a331babaca26b83c27f58b2",
+        "afterSha256": "78e7136d6ff7a477e2317feb99a976a75376b1283a331babaca26b83c27f58b2",
+        "matches": true
+      },
+      {
+        "path": "fuzz/Cargo.lock",
+        "beforeSha256": "f07697a88633babbc07378ec41088987457527ec00f217566d6bb573411c71a3",
+        "afterSha256": "f07697a88633babbc07378ec41088987457527ec00f217566d6bb573411c71a3",
+        "matches": true
+      },
+      {
+        "path": "package-lock.json",
+        "beforeSha256": "ec85e8d77a670963d49224d083cc9133b30763f048e8b520360f9c51c4bb5e1b",
+        "afterSha256": "ec85e8d77a670963d49224d083cc9133b30763f048e8b520360f9c51c4bb5e1b",
+        "matches": true
+      },
+      {
+        "path": ".cargo/audit.toml",
+        "beforeSha256": "0a31dab852dead3b6c393c395475001792fde4cb008bad2c478d6776d0e52cc0",
+        "afterSha256": "0a31dab852dead3b6c393c395475001792fde4cb008bad2c478d6776d0e52cc0",
+        "matches": true
+      },
+      {
+        "path": "scripts/audit-dependencies.sh",
+        "beforeSha256": "78a1949129f8863be0f70e4e54651552c537781aab07f3da7dce8ace5fe9503b",
+        "afterSha256": "78a1949129f8863be0f70e4e54651552c537781aab07f3da7dce8ace5fe9503b",
+        "matches": true
+      },
+      {
+        "path": "scripts/verify-vendored-crates.mjs",
+        "beforeSha256": "1b5edfd506b5cd15fb96b8a1ce702fbf01791ff1c105815a2a8984dae4ad504c",
+        "afterSha256": "1b5edfd506b5cd15fb96b8a1ce702fbf01791ff1c105815a2a8984dae4ad504c",
+        "matches": true
+      },
+      {
+        "path": "testdata/vendored-crates/mail-parser.json",
+        "beforeSha256": "c3e8a70769cff092572b7c596c4e8f577c8073db15f241648a3a406dfeddcf58",
+        "afterSha256": "c3e8a70769cff092572b7c596c4e8f577c8073db15f241648a3a406dfeddcf58",
+        "matches": true
+      },
+      {
+        "path": "testdata/vendored-crates/lettre.json",
+        "beforeSha256": "e83a4564682f3d2d6619068efafb1af2c9854d1e941fab6fc0393319850ff50e",
+        "afterSha256": "e83a4564682f3d2d6619068efafb1af2c9854d1e941fab6fc0393319850ff50e",
+        "matches": true
+      },
+      {
+        "path": "testdata/vendored-crates/tauri-plugin-updater.json",
+        "beforeSha256": "b1eca38b3ce7e43c84929ddeafb53ceed67b79f6106f8108f19d520f90ee3815",
+        "afterSha256": "b1eca38b3ce7e43c84929ddeafb53ceed67b79f6106f8108f19d520f90ee3815",
+        "matches": true
+      }
+    ]
+  },
+  "conclusions": {
+    "carryForwardAllowed": [
+      "The measured 4cf deep evidence has identical production core, CLI, fuzz, vendor, Cargo, MIME-fixture, server-runner, and fuzz-runner inputs at a86.",
+      "The nine recorded dependency-audit inputs are byte-identical at a86; this records input continuity only, not a new audit execution."
+    ],
+    "excluded": [
+      "apps/desktop/src/App.tsx and apps/desktop/src/realtimeDelivery.integration.test.tsx changed, so no frontend, whole-source, bridge, native, packaged-app, or provider result carries forward.",
+      "testdata/mail-safety-catalogue.json changed only as catalogue metadata reconciliation. It is outside the deep runner input groups and does not change a scenario status.",
+      "The failed 4cf source baseline remains failed historical evidence and cannot be recast as a pass."
+    ]
+  },
+  "limitations": [
+    "This receipt performs no source, deep, fuzz, audit, native, provider, packaged-app, or UI execution.",
+    "Path-and-content equality does not establish equivalent compilation, cache state, runtime behavior, timing, host load, or external service behavior.",
+    "The a86 full-source run was in progress when this receipt was written and is not represented as passed."
+  ]
+}

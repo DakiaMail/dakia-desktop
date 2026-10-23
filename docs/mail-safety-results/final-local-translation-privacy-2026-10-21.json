@@ -1,0 +1,146 @@
+{
+  "schema": 1,
+  "generatedAt": "2026-10-21T15:35:13.183Z",
+  "lane": "local-translation-privacy",
+  "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "workingTree": {
+    "dirty": true,
+    "statusSha256": "92afaf59bb2710f3e27992509f16255696da9281463d01994fdcb464500c2d91"
+  },
+  "environment": {
+    "node": "v22.23.2",
+    "platform": "darwin",
+    "arch": "arm64",
+    "sandbox": "macOS sandbox-exec deny-default"
+  },
+  "relevantInputs": {
+    "before": {
+      "runner": {
+        "path": "/Users/arsalan/code/codex-worktrees/36f9/dakia-desktop/scripts/run-local-translation-privacy.mjs",
+        "bytes": 15498,
+        "sha256": "681a3443cc79275d9af4790c6c8a14ccb9f90fd03816f9a0ecaff5d9fb5fec50"
+      },
+      "modelManifest": {
+        "path": "/Users/arsalan/code/codex-worktrees/36f9/dakia-desktop/apps/desktop/src-tauri/src/translation_models.json",
+        "bytes": 46564,
+        "sha256": "3d8094a1aa758c40c0049d7c6d89dc3016cae447a19fce039dc528f7428c2cd4"
+      },
+      "packageWorkerJs": {
+        "path": "/Users/arsalan/code/codex-worktrees/36f9/dakia-desktop/node_modules/@browsermt/bergamot-translator/worker/bergamot-translator-worker.js",
+        "bytes": 80474,
+        "sha256": "748b2418418a2ffc6e70721aeb10098d8e6fb589ea156b91f4ae8bc3490d8f7a"
+      },
+      "packageWorkerWasm": {
+        "path": "/Users/arsalan/code/codex-worktrees/36f9/dakia-desktop/node_modules/@browsermt/bergamot-translator/worker/bergamot-translator-worker.wasm",
+        "bytes": 5174294,
+        "sha256": "95a2b58dd6773bf1b3f345d71f9149928b9f75f4ec9c9064c0b3e42c298671b2"
+      },
+      "packageTranslatorJs": {
+        "path": "/Users/arsalan/code/codex-worktrees/36f9/dakia-desktop/node_modules/@browsermt/bergamot-translator/translator.js",
+        "bytes": 30661,
+        "sha256": "b46f0ccf834392caf097cf4eed968d72e3ec8a855faaabe1b57bcc5f661994a5"
+      },
+      "packageLock": {
+        "path": "/Users/arsalan/code/codex-worktrees/36f9/dakia-desktop/package-lock.json",
+        "bytes": 132373,
+        "sha256": "ec85e8d77a670963d49224d083cc9133b30763f048e8b520360f9c51c4bb5e1b"
+      }
+    },
+    "after": {
+      "runner": {
+        "path": "/Users/arsalan/code/codex-worktrees/36f9/dakia-desktop/scripts/run-local-translation-privacy.mjs",
+        "bytes": 15498,
+        "sha256": "681a3443cc79275d9af4790c6c8a14ccb9f90fd03816f9a0ecaff5d9fb5fec50"
+      },
+      "modelManifest": {
+        "path": "/Users/arsalan/code/codex-worktrees/36f9/dakia-desktop/apps/desktop/src-tauri/src/translation_models.json",
+        "bytes": 46564,
+        "sha256": "3d8094a1aa758c40c0049d7c6d89dc3016cae447a19fce039dc528f7428c2cd4"
+      },
+      "packageWorkerJs": {
+        "path": "/Users/arsalan/code/codex-worktrees/36f9/dakia-desktop/node_modules/@browsermt/bergamot-translator/worker/bergamot-translator-worker.js",
+        "bytes": 80474,
+        "sha256": "748b2418418a2ffc6e70721aeb10098d8e6fb589ea156b91f4ae8bc3490d8f7a"
+      },
+      "packageWorkerWasm": {
+        "path": "/Users/arsalan/code/codex-worktrees/36f9/dakia-desktop/node_modules/@browsermt/bergamot-translator/worker/bergamot-translator-worker.wasm",
+        "bytes": 5174294,
+        "sha256": "95a2b58dd6773bf1b3f345d71f9149928b9f75f4ec9c9064c0b3e42c298671b2"
+      },
+      "packageTranslatorJs": {
+        "path": "/Users/arsalan/code/codex-worktrees/36f9/dakia-desktop/node_modules/@browsermt/bergamot-translator/translator.js",
+        "bytes": 30661,
+        "sha256": "b46f0ccf834392caf097cf4eed968d72e3ec8a855faaabe1b57bcc5f661994a5"
+      },
+      "packageLock": {
+        "path": "/Users/arsalan/code/codex-worktrees/36f9/dakia-desktop/package-lock.json",
+        "bytes": 132373,
+        "sha256": "ec85e8d77a670963d49224d083cc9133b30763f048e8b520360f9c51c4bb5e1b"
+      }
+    }
+  },
+  "source": "et",
+  "target": "en",
+  "modelVersion": "2.0",
+  "modelFiles": [
+    {
+      "name": "model.bin",
+      "url": "https://firefox-settings-attachments.cdn.mozilla.net/main-workspace/translations-models/db579f73-6a71-45fa-b8a2-4a10592d1708.bin",
+      "bytes": 31561787,
+      "sha256": "df844b3a6df906b2e0682fb7765694f35b351854db00f964896d9c8c365fbff3"
+    },
+    {
+      "name": "shortlist.bin",
+      "url": "https://firefox-settings-attachments.cdn.mozilla.net/main-workspace/translations-models/d1eac33a-7bc9-4434-83ba-2f4d4b71169e.bin",
+      "bytes": 4625968,
+      "sha256": "ad9750f3b41cb5686e561608271a0dc935fc827bf43226e579a6f48a3f6b5f11"
+    },
+    {
+      "name": "vocab-0.spm",
+      "url": "https://firefox-settings-attachments.cdn.mozilla.net/main-workspace/translations-models/3d6825f2-7be2-4f57-9c75-1d0eeafc7f8c.spm",
+      "bytes": 817574,
+      "sha256": "89a3deea4ae7d674fb46a4dae39135dd4dfaac9786f2868d0b5bc5c0aca2ef83"
+    }
+  ],
+  "boundary": "macOS sandbox-exec deny-default profile with local model files",
+  "provenance": {
+    "modelManifest": "Reused the existing checked-in Mozilla Firefox Translations manifest; no model binaries are committed.",
+    "modelLicenseReview": "Model license and registry provenance remain tied to the existing Mozilla manifest and must be reviewed before redistribution.",
+    "workerAdaptation": {
+      "reason": "The package worker is .js under type=module but uses CommonJS require().",
+      "sourceFile": "node_modules/@browsermt/bergamot-translator/worker/translator-worker.js",
+      "sourceBytes": 17191,
+      "sourceSha256": "90257af9ee0758983501bdce77ca7ec168cd7360d4689298c20a81b0251d6b62",
+      "temporaryCopy": "translator-worker.cjs",
+      "copyBytes": 17191,
+      "copySha256": "90257af9ee0758983501bdce77ca7ec168cd7360d4689298c20a81b0251d6b62",
+      "limitation": "This temporary adaptation is test-only and is not evidence for the production WebKit worker path."
+    }
+  },
+  "positiveControl": {
+    "unsandboxedLoopbackConnection": true,
+    "serverConnections": 1
+  },
+  "probe": {
+    "denied": true,
+    "explicitErrno": 1,
+    "exitCode": 0,
+    "timedOut": false,
+    "serverConnections": 1
+  },
+  "inference": {
+    "succeeded": true,
+    "exitCode": 0,
+    "signal": null,
+    "timedOut": false,
+    "postInferenceMarkerObserved": true,
+    "canaryAbsentFromOutput": true,
+    "outputBytes": 39,
+    "diagnostics": "translation-privacy-inference-complete\n"
+  },
+  "limitations": [
+    "This proves successful Bergamot inference under the enforced macOS sandbox; it does not observe blocked syscall attempts inside the translator process.",
+    "It does not replace packaged WebKit acceptance or prove behavior outside this sandbox."
+  ],
+  "status": "passed"
+}

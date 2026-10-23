@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "notification-permission-macos",
+  "description": "Main and settings windows may inspect and request notification permission on macOS. Delivery uses Dakia's identity-gated command.",
+  "windows": ["main", "settings"],
+  "platforms": ["macOS"],
+  "permissions": [
+    "notification:allow-is-permission-granted",
+    "notification:allow-request-permission"
+  ]
+}

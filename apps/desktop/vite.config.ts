@@ -52,6 +52,10 @@ export default defineConfig({
     minify: !process.env.TAURI_DEBUG,
     sourcemap: !!process.env.TAURI_DEBUG,
     rollupOptions: {
+      input: {
+        main: resolve(__dirname, "index.html"),
+        fatalRecovery: resolve(__dirname, "fatal-recovery.html"),
+      },
       output: {
         manualChunks(id) {
           if (id.includes("@mantine")) return "mantine";

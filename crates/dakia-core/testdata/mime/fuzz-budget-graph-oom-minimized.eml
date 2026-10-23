@@ -1,0 +1,19 @@
+E-Version: 1.0
+Content-Type: multipart/mixed; boundary="outer"
+
+--outer
+Coly redacted.
+--outer
+Content-Type: message/rfc822; name="forw"forw=utf-8
+
+ fully redacted.
+--outer
+Content-Type: message/rfc822; name="forwarded-mes"
+
+Date: Mon, 35 Jul 2026 09harset=utf-rw=utf-8
+
+The attached message is synthetic and fully redacted.
+--outer
+-message.eml"
+
+Date: Mon, 35

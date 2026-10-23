@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-21T18:20:00.000Z",
+  "lane": "final-csp-bridge-safe-source-input-equivalence",
+  "status": "passed",
+  "scope": "read-only path-and-content equivalence for previously measured core, deep, performance, storage, and dependency-audit inputs",
+  "sourceChain": {
+    "measuredCoreDeepPerformance": {
+      "digest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+      "fileCount": 933,
+      "manifestPath": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-c47c2de0.json",
+      "manifestSha256": "43060add67b37337eec6820d93c0d8dfe00db7fc0123fa188b58b452778bc3d2"
+    },
+    "finalLsUnavailableSource": {
+      "digest": "a3f5e5edcef56f09522ee3f5f4485b0a5b804df4065624e355a24aa532b15b71",
+      "fileCount": 937,
+      "manifestPath": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-ls-unavailable.json",
+      "manifestSha256": "4ddff015b80254f000bf365f080336c6d4b230d3ae6fa11c2877b1fabeb394dd"
+    },
+    "finalCspBridgeSafeSource": {
+      "digest": "5bcd262aab449b72708b8f9a8991f414abbe56169468d3ccd6293e42195f28c4",
+      "fileCount": 937,
+      "manifestPath": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-csp-bridge-safe.json",
+      "manifestSha256": "6d434e154df647cb76e38437bbab131a2353d8998947a464ffe0f0ee95593043",
+      "liveFilesVerified": 937,
+      "liveMismatches": 0
+    }
+  },
+  "cspBridgeSafeDelta": {
+    "fromDigest": "a3f5e5edcef56f09522ee3f5f4485b0a5b804df4065624e355a24aa532b15b71",
+    "toDigest": "5bcd262aab449b72708b8f9a8991f414abbe56169468d3ccd6293e42195f28c4",
+    "changedPathCount": 6,
+    "changedPaths": [
+      {
+        "path": "apps/desktop/src-tauri/tauri.conf.json",
+        "beforeSha256": "08547ee57d0b7cf44d01c43d0a275556e2566ce431452e832003659328090af2",
+        "afterSha256": "c2f33d90d573f42df98b952cba00fdad7b53a117b545acb266ee5ef55769b17f"
+      },
+      {
+        "path": "apps/desktop/src/components/HtmlMessage.test.tsx",
+        "beforeSha256": "29276f350e384af94de2a387f57c925224e37593e596695b5bd800061b9192fa",
+        "afterSha256": "9bbb12aebc934fe4550d020f554756f72449bb8eea22d903b10993c7e46f71cb"
+      },
+      {
+        "path": "apps/desktop/src/components/HtmlMessage.tsx",
+        "beforeSha256": "0f6098915a6edf87856e434d295dd9d513bc4aced24eacd28bdeb606d1fea62c",
+        "afterSha256": "f3b290dfc2c5f280cfeece7a2254e7bd059050fb32305a914932e54831f278ab"
+      },
+      {
+        "path": "apps/desktop/src/components/Reader.test.tsx",
+        "beforeSha256": "7b6cb0844b9708a1449d27dcc07f0069c25e225b71f6187719122de0d79c56fe",
+        "afterSha256": "c2de4bd4eb0b6103c7909729c87a6a3dffecc4732a8bc665a1b88188d9cb8f76"
+      },
+      {
+        "path": "apps/desktop/src/mailIdentityContinuity.integration.test.tsx",
+        "beforeSha256": "be6d36fd9a988034f94856ad129e5be057f7b19a80d19260094107a688809ad0",
+        "afterSha256": "1a404e636de491bd030d862124f847739a20d2ba51f34a6668728faa7d252041"
+      },
+      {
+        "path": "apps/desktop/src/privacyBoundaries.test.ts",
+        "beforeSha256": "f5f4cd848c05b02984aefc385234c9d3839f5196579beca700937c3206bcc807",
+        "afterSha256": "f0123e49395096859e14f6d4eb218f42414258dd29f9c7ab4429b19ccecac886"
+      }
+    ]
+  },
+  "coreInputEquivalence": {
+    "status": "passed",
+    "referenceReport": "docs/mail-safety-results/remaining-gap-closure-three-run-source-2026-10-21.json",
+    "referenceReportSha256": "0b0d137906a3845ba87e23f18613d5768d2643c3d1fabe4311ce3b0f2252e6f9",
+    "referenceSourceDigest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+    "oracle": "The c47-to-CSP bridge delta contains no root Cargo, dakia-core, fuzz, mail-parser, lettre, or core test-data path.",
+    "conclusion": "The Rust core and vendored parser and SMTP inputs exercised by the c47 source run remain byte-identical. This does not carry forward a whole-source or native desktop result."
+  },
+  "deepInputEquivalence": {
+    "status": "passed",
+    "referenceReport": "docs/mail-safety-results/remaining-gap-closure-deep-current-source-2026-10-21.json",
+    "referenceReportSha256": "3fcc68edc2aa7f378c194e64cdcec4d24faba880609c93917aa8aa729ced174f",
+    "referenceSourceDigest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+    "oracle": "The deep entrypoints and their Cargo, dakia-core, fuzz corpus, fixture, and vendor inputs are unchanged from c47.",
+    "conclusion": "The recorded c47 independent-server and bounded fuzz inputs remain byte-identical. This is not another deep execution."
+  },
+  "performanceInputEquivalence": {
+    "status": "passed",
+    "referenceReport": "docs/mail-safety-results/remaining-gap-closure-performance-2026-10-21.json",
+    "referenceReportSha256": "6b5d4c28d6f95f3370c6fe6689a43aade155b5caf65b7796d61df837a7b85352",
+    "referenceSourceDigest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+    "oracle": "The performance runner, Cargo resolution, dakia-core implementation, and resilience and performance tests are unchanged from c47.",
+    "conclusion": "The recorded c47 mailbox-scale and resource-soak inputs remain byte-identical. Matching inputs does not prove identical timing, code generation, system load, or incremental-cache state."
+  },
+  "storageCoverageInputEquivalence": {
+    "status": "passed",
+    "referenceReport": "docs/mail-safety-results/remaining-gap-closure-final-storage-branch-coverage-2026-10-21.json",
+    "referenceReportSha256": "0fb107639b55242dae6a360e43a408ec7bf145628bab7fa16f5fc88055705ea1",
+    "inputManifestPath": "/private/tmp/dakia-mail-safety-remaining-gap-final-storage-branch-coverage-2026-10-21/input-after.sha256",
+    "inputManifestSha256": "28fdc43ae6ca1266cf7624f8b41a4b748e53265e23331c8ba681d7c10063141d",
+    "inputFileCount": 538,
+    "currentMismatchCount": 0,
+    "conclusion": "Every recorded root Cargo, dakia-core, mail-parser, and lettre input for the three separate storage coverage cohorts remains byte-identical."
+  },
+  "dependencyAuditInputEquivalence": {
+    "status": "passed",
+    "referenceReport": "docs/mail-safety-results/final-dependency-audit-2026-10-21.json",
+    "referenceReportSha256": "b380755a49ca459cd642d4ad5d774bbf5a37858236b10f1c933713cf38777e42",
+    "referenceSourceDigest": "c47c2de0737df3489b5f53e5d4d034d7ac7e7211b74350f60f76e6d096c0776c",
+    "inputFileCount": 9,
+    "currentMismatchCount": 0,
+    "conclusion": "The recorded root and fuzz locks, audit configuration, audit and provenance entrypoints, and all three vendored provenance declarations remain byte-identical. This does not rerun an audit."
+  },
+  "limitations": [
+    "This is path-and-content equivalence evidence. It does not rerun source, core, deep, fuzz, performance, coverage, audit, native, provider, or packaged-app lanes.",
+    "The final source is not wholly equivalent to c47 or LS-unavailable. The CSP bridge delta changes desktop CSP configuration, HTML rendering, Reader and identity-continuity tests, and privacy-boundary tests.",
+    "No earlier native, packaged-app, shared-profile, or live UI result is carried forward by this report.",
+    "The deep result retains its recorded bounded fuzz limits and temporal-safety limitation.",
+    "The performance result remains tied to its recorded hardware, build profile, and load conditions.",
+    "The storage result remains three separate focused cohorts. Branch observations are not aggregated into product or workspace coverage.",
+    "The dependency audit result retains its recorded allowed warnings and is not a fresh audit result."
+  ]
+}

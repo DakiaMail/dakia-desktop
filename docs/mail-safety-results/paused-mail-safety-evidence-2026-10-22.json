@@ -1,0 +1,160 @@
+{
+  "date": "2026-10-22",
+  "status": "paused-at-owner-request",
+  "source": {
+    "digest": "681dfc29e1cc782d363999cf572dc56be9498565d34f78ba5f0120187e0c70e9",
+    "fileCount": 996,
+    "manifest": "paused-681d-source-manifest-2026-10-22.json",
+    "manifestSha256": "cf9c10b83bf1951210b09b08ef739f31e2f634ebd724ba0786cd8444a813d1f2",
+    "allFilesVerifiedAtShutdown": true
+  },
+  "productChangesDuringShutdown": false,
+  "fullSource": {
+    "cycles": 3,
+    "gatesPerCycle": 18,
+    "gatesPassed": 54,
+    "retries": 0,
+    "report": "gmail-schema3-typed-reader-three-run-source-2026-10-22.json"
+  },
+  "frontendCoverage": {
+    "sourceDigest": "681dfc29e1cc782d363999cf572dc56be9498565d34f78ba5f0120187e0c70e9",
+    "sourceFileCount": 996,
+    "sourceManifest": {
+      "path": "/private/tmp/dakia-final-gmail-schema3-typed-reader-source-20261022/source-manifest.json",
+      "bytes": 208406,
+      "sha256": "cf9c10b83bf1951210b09b08ef739f31e2f634ebd724ba0786cd8444a813d1f2"
+    },
+    "sourceFilesVerifiedAfter": 996,
+    "command": [
+      "npm",
+      "test",
+      "--",
+      "--coverage.enabled",
+      "true",
+      "--coverage.provider",
+      "v8",
+      "--coverage.reporter",
+      "lcov",
+      "--coverage.reportsDirectory",
+      "/private/tmp/dakia-681d-global-workspace-coverage-20261022/frontend",
+      "--maxWorkers=1"
+    ],
+    "terminalExitCode": 0,
+    "testFiles": {
+      "passed": 66,
+      "skipped": 3
+    },
+    "tests": {
+      "passed": 652,
+      "skipped": 2,
+      "failed": 0
+    },
+    "durationSeconds": 180.57,
+    "retries": 0,
+    "log": {
+      "path": "/private/tmp/dakia-681d-global-workspace-coverage-20261022/frontend-coverage.log",
+      "bytes": 526,
+      "sha256": "3b323033df7b539f682e8fe4ac377a305c979e9a0059cf00ec2d3fa607fb31f1"
+    },
+    "lcov": {
+      "path": "/private/tmp/dakia-681d-global-workspace-coverage-20261022/frontend/lcov.info",
+      "bytes": 210578,
+      "sha256": "a6f1a22b3492cc8345cecae044c7df03d5fafecc9282f90994049c66397e38a2"
+    },
+    "providerPackage": {
+      "path": "/Users/arsalan/code/codex-worktrees/36f9/dakia-desktop/node_modules/@vitest/coverage-v8/package.json",
+      "bytes": 1890,
+      "sha256": "1ad9c076ee135374dd0f1d28f3a5200deabb39cb2a86fb4774e3974c17bdb787"
+    },
+    "providerVersion": "4.1.12",
+    "productSourceChanged": false,
+    "baselineChanged": false,
+    "nativeOrProviderAcceptanceClaimed": false
+  },
+  "rustCoverage": {
+    "instrumentedTests": "passed",
+    "fullLcovExport": "failed-llvm23-sigsegv",
+    "jsonExport": "passed-diagnostic",
+    "skipFunctionsLcovExport": "passed-diagnostic",
+    "canonicalAccepted": false,
+    "ratchetCompared": false,
+    "baselineChanged": false,
+    "rawLineObservations": {
+      "hit": 42807,
+      "found": 49373
+    },
+    "rawBranchObservations": {
+      "hit": 3305,
+      "found": 4944
+    },
+    "functionMappingUnavailableCount": 4,
+    "unmappedFunctionsMayHaveBranchCounters": true,
+    "reviewedUnappliedPatch": "draft-handoff-2026-10-22/coverage-normalizer.patch",
+    "patchSha256": "dc893421fba8d5f506110e5852b4bb8dc2df14765e8249889969f220294c5cef",
+    "privateSyntheticTestsPassed": 7,
+    "next": "Revalidate actual retained object/profile cohort, normalize and compare existing baseline; integrate only after validation."
+  },
+  "performance": {
+    "status": "incomplete-owner-stopped-third-200k-run",
+    "terminalResultAvailable": false,
+    "passed": false,
+    "baselineMilliseconds": {
+      "2000": 560,
+      "30000": 7660,
+      "100000": 25662,
+      "200000": 52573
+    },
+    "samplesMilliseconds": [
+      {
+        "2000": 851,
+        "30000": 11339,
+        "100000": 40819,
+        "200000": 80145
+      },
+      {
+        "2000": 845,
+        "30000": 11765,
+        "100000": 39266,
+        "200000": 80035
+      },
+      {
+        "2000": 780,
+        "30000": 19007,
+        "100000": 40660,
+        "200000": null
+      }
+    ],
+    "rawLogSha256": "a82bdacd14d4827a2aa4c1bab9ba2f5cc070ebca650aa923fe2d37cce5863d83",
+    "ownedProcessStopped": true,
+    "rootCause": "unproven",
+    "baselineChanged": false
+  },
+  "deep": {
+    "status": "passed",
+    "report": "deep-681d-gmail-schema3-2026-10-22.json",
+    "mimeBudgetExecutions": 31068,
+    "attachmentMetadataExecutions": 104594,
+    "crashArtifacts": 0
+  },
+  "nativeCurrentSource": {
+    "buildResourcePreflight": "passed",
+    "appLaunch": false,
+    "appSwap": false,
+    "runtimeAcceptance": "unrun",
+    "releaseAcceptance": "unrun"
+  },
+  "gmailCurrentSource": {
+    "offlineReviewedV5": "passed",
+    "newLiveRunStarted": false,
+    "envReadByQueuedLiveRun": false,
+    "remoteMutation": false,
+    "queuedAuthorizationCancelled": true
+  },
+  "remainingCatalogueDeclarations": {
+    "implemented": 131,
+    "gap": 12,
+    "manualRequired": 17,
+    "unsupported": 2
+  },
+  "programmeComplete": false
+}

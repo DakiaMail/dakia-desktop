@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T16:56:36.410538+00:00",
+  "lane": "source-three-run",
+  "status": "interrupted-for-new-correctness-fix",
+  "initialSourceTree": {
+    "digest": "a7a9edfa42117d74424c4ea25c646aca6be0cd6912ddad791d68002083bdb1ed",
+    "fileCount": 937
+  },
+  "exitCode": 130,
+  "completedCommandCyclesObserved": 1,
+  "secondCycle": "593 frontend tests passed; interrupted during Rust workspace tests.",
+  "failureObserved": false,
+  "reason": "Independent review found that the notification dependency installs a global NSBundle identity hook before checking LaunchServices. The fail-soft path could leave a Terminal identity after failure. Stop before more repetition, add preflight before invoking dependency, then establish a new frozen baseline.",
+  "rawLog": {
+    "path": "/private/tmp/dakia-three-run-source-notification-safe-unrestricted-20261021.log",
+    "sha256": "b4609783ea65bb3013edb0587cb639284bb1600a983e6d2f4ee65e179f8c4b86",
+    "bytes": 169074
+  },
+  "limitations": [
+    "Not three clean runs and not a replacement baseline.",
+    "The process was stopped intentionally; the incomplete run is not a flaky-test failure.",
+    "No final source-after snapshot or native acceptance is established by this interrupted invocation."
+  ]
+}

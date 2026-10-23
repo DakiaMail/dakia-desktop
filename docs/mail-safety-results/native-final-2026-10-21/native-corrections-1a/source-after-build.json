@@ -1,0 +1,13 @@
+{
+  "status": "passed",
+  "baseline": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "1a27848c0142d4b2f51439fc77caeae076acc9fd7a640b66569aa0b4d67376e6",
+    "fileCount": 761
+  },
+  "current": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "1a27848c0142d4b2f51439fc77caeae076acc9fd7a640b66569aa0b4d67376e6",
+    "fileCount": 761
+  }
+}

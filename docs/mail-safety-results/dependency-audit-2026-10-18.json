@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-17T21:03:02.858663+00:00",
+  "rustAudit": "passed",
+  "allowedUnmaintainedWarnings": 10,
+  "logPath": "/private/tmp/dakia-gap-next-rust-audit.log",
+  "logSha256": "97910124424b85c3f06b98fa69dd28677689c79b3ea0caa936e00ffc916983c4",
+  "npmAudit": "blocked-awaiting-explicit-approval",
+  "npmRegistry": "https://registry.npmjs.org/",
+  "limitation": "Automatic approval review rejected npm dependency metadata submission; the Rust-only audit ran separately. This is not evidence that npm dependencies are free of vulnerabilities."
+}

@@ -1,0 +1,78 @@
+[
+  {
+    "label": "CR To rejection",
+    "blocked": true,
+    "warning": true,
+    "from": true
+  },
+  {
+    "label": "CR Cc rejection",
+    "blocked": true,
+    "warning": true,
+    "from": true,
+    "encodedLiteral": false
+  },
+  {
+    "label": "CR subject rejection",
+    "blocked": true,
+    "warning": true,
+    "from": true,
+    "encodedLiteral": false
+  },
+  {
+    "label": "LF To rejection",
+    "blocked": true,
+    "warning": true,
+    "from": true,
+    "encodedLiteral": false
+  },
+  {
+    "label": "LF Cc rejection",
+    "blocked": true,
+    "warning": true,
+    "from": true,
+    "encodedLiteral": false
+  },
+  {
+    "label": "LF subject rejection",
+    "blocked": true,
+    "warning": true,
+    "from": true,
+    "encodedLiteral": false
+  },
+  {
+    "label": "double encoded To",
+    "blocked": false,
+    "warning": false,
+    "from": true,
+    "encodedLiteral": true
+  },
+  {
+    "label": "double encoded Cc",
+    "blocked": false,
+    "warning": false,
+    "from": true,
+    "encodedLiteral": true
+  },
+  {
+    "label": "double encoded subject",
+    "blocked": false,
+    "warning": false,
+    "from": true,
+    "encodedLiteral": true
+  },
+  {
+    "label": "double encoded body",
+    "blocked": false,
+    "warning": false,
+    "from": true,
+    "encodedLiteral": true
+  },
+  {
+    "label": "body CRLF",
+    "blocked": false,
+    "warning": false,
+    "from": true,
+    "encodedLiteral": false
+  }
+]

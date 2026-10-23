@@ -1,0 +1,107 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-21T07:46:08Z",
+  "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "lane": "dependency-security-audit",
+  "status": "passed-with-allowed-informational-warnings",
+  "rootRustAudit": {
+    "command": "DAKIA_CARGO_AUDIT_BIN=/private/tmp/dakia-mail-safety-tools/bin/cargo-audit scripts/audit-dependencies.sh",
+    "exitCode": 0,
+    "tool": {
+      "path": "/private/tmp/dakia-mail-safety-tools/bin/cargo-audit",
+      "version": "0.22.2"
+    },
+    "inputs": {
+      "cargoLock": {
+        "path": "Cargo.lock",
+        "sha256": "c75c4da551e415e6b883c061b19b0ed24a3d8ba5e4b36809db3f947ab4c31a4d"
+      },
+      "cargoManifest": {
+        "path": "Cargo.toml",
+        "sha256": "47bbb06da69694b95d75f64ebbebdf1bc7e6b829a150b00cc9637821fc6d65b3"
+      },
+      "auditConfig": {
+        "path": ".cargo/audit.toml",
+        "sha256": "0a31dab852dead3b6c393c395475001792fde4cb008bad2c478d6776d0e52cc0"
+      },
+      "gateScript": {
+        "path": "scripts/audit-dependencies.sh",
+        "sha256": "28038e8fae98384dca288dc7771ad02fc77d32ef819598294150ba2905520a37"
+      }
+    },
+    "advisoryDatabase": {
+      "mode": "refreshed",
+      "loadedAdvisories": 1348,
+      "revision": "4b587f00996ebe5c05a73eaef105ef241e876414",
+      "revisionTime": "2026-10-21T08:20:38+02:00"
+    },
+    "configuredTargetScopedExceptionChecks": {
+      "supportedTarget": "aarch64-apple-darwin",
+      "result": "passed",
+      "exceptions": [
+        {
+          "advisory": "RUSTSEC-2023-0071",
+          "package": "rsa@0.9.10",
+          "reason": "inactive sqlx-mysql feature subgraph"
+        },
+        {
+          "advisory": "RUSTSEC-2024-0429",
+          "package": "glib@0.18.5",
+          "reason": "Linux-only Tauri/GTK subgraph"
+        }
+      ]
+    },
+    "vulnerabilities": [],
+    "allowedInformationalWarnings": [
+      { "advisory": "RUSTSEC-2024-0436", "package": "paste", "version": "1.0.15", "kind": "unmaintained" },
+      { "advisory": "RUSTSEC-2024-0370", "package": "proc-macro-error", "version": "1.0.4", "kind": "unmaintained" },
+      { "advisory": "RUSTSEC-2025-0081", "package": "unic-char-property", "version": "0.9.0", "kind": "unmaintained" },
+      { "advisory": "RUSTSEC-2025-0075", "package": "unic-char-range", "version": "0.9.0", "kind": "unmaintained" },
+      { "advisory": "RUSTSEC-2025-0080", "package": "unic-common", "version": "0.9.0", "kind": "unmaintained" },
+      { "advisory": "RUSTSEC-2025-0100", "package": "unic-ucd-ident", "version": "0.9.0", "kind": "unmaintained" },
+      { "advisory": "RUSTSEC-2025-0098", "package": "unic-ucd-version", "version": "0.9.0", "kind": "unmaintained" },
+      { "advisory": "RUSTSEC-2026-0371", "package": "zbus_names", "version": "4.3.3", "kind": "unmaintained" },
+      { "advisory": "RUSTSEC-2026-0370", "package": "zvariant", "version": "5.13.0", "kind": "unmaintained" },
+      { "advisory": "RUSTSEC-2026-0372", "package": "zvariant_derive", "version": "5.13.0", "kind": "unmaintained" }
+    ],
+    "evidence": {
+      "logPath": "/private/tmp/dakia-dependency-audit-2026-10-21-rust.log",
+      "logSha256": "5a87c38aeacbf6e4b173bb02c0ce5991508d7d4c6335a39f3562d32fd9f8523c"
+    }
+  },
+  "standaloneFuzzLockAudit": {
+    "command": "/private/tmp/dakia-mail-safety-tools/bin/cargo-audit audit --file fuzz/Cargo.lock --no-fetch --json",
+    "exitCode": 0,
+    "inputs": {
+      "cargoLock": {
+        "path": "fuzz/Cargo.lock",
+        "sha256": "1c403442a94a7c8c2663cebaea192d93172205fa8553a41f21eacb80bb5578df"
+      },
+      "cargoManifest": {
+        "path": "fuzz/Cargo.toml",
+        "sha256": "8e9454a4cdbb5d374d4fddf23e93b43b941fdc91f7f606afdeecfc9363aaca04"
+      }
+    },
+    "databaseMode": "offline after the refreshed root audit",
+    "vulnerabilities": [],
+    "allowedInformationalWarnings": [
+      { "advisory": "RUSTSEC-2024-0436", "package": "paste", "version": "1.0.15", "kind": "unmaintained" }
+    ],
+    "lockConsistency": {
+      "status": "blocked",
+      "evidence": "cargo tree --manifest-path fuzz/Cargo.toml --locked --depth 1 exits nonzero because fuzz/Cargo.lock needs an update",
+      "implication": "The lockfile vulnerability scan passed, but the standalone fuzz project cannot currently be used with Cargo --locked until its owner updates the lockfile."
+    },
+    "evidence": {
+      "reportPath": "/private/tmp/dakia-dependency-audit-2026-10-21-fuzz.json",
+      "reportSha256": "2c1fac13ed58b98738ee226b2c150fc820f45610196be2040a47f4d0b4a2aa81",
+      "stderrPath": "/private/tmp/dakia-dependency-audit-2026-10-21-fuzz.stderr",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "limitations": [
+    "The root target-scoped checks prove only the declared supported macOS target; they are not evidence for inactive or unsupported target graphs.",
+    "The private raw logs and JSON reports are referenced by hash but their retention is not guaranteed.",
+    "This audit does not replace locked builds, fuzz execution, native verification, or provider testing."
+  ]
+}

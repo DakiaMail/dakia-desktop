@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "kind": "test-only-successor-source-three-run",
+  "status": "passed",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "b14fca648f7d0862f439fbb08890cef8085d025687e35d75322814d2f8dcca0e",
+    "fileCount": 961
+  },
+  "sourceTreeAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "b14fca648f7d0862f439fbb08890cef8085d025687e35d75322814d2f8dcca0e",
+    "fileCount": 961
+  },
+  "execution": {
+    "runner": "node scripts/run-mail-safety.mjs --lane source --repeat 3",
+    "sessionId": 62291,
+    "startedAt": "2026-10-22T09:34:45.200Z",
+    "finishedAt": "2026-10-22T09:47:49.043Z",
+    "environment": {
+      "platform": "darwin",
+      "architecture": "arm64",
+      "node": "v22.23.2",
+      "stdin": "/dev/null",
+      "gmailCredentials": "GMAIL_ACCOUNT and GMAIL_PASSWORD unset"
+    },
+    "runs": 3,
+    "gatesPerRun": 17,
+    "totalGates": 51,
+    "exitCode": 0,
+    "retries": 0,
+    "allGatesPassed": true
+  },
+  "rawEvidence": {
+    "report": "/private/tmp/dakia-final-test-successor-evidence-v3-20261022/source-repeat3.json",
+    "reportSha256": "d6aac414bfa42a62856b6e6ce0b1add652794b511a91f7e2692d6e75b1a1044a",
+    "log": "/private/tmp/dakia-final-test-successor-evidence-v3-20261022/source-repeat3.log",
+    "logSha256": "47bac627143023e4fe28078e0c0e8db240d552d677da5efcb7b22a5926c44218",
+    "closingReceipt": "/private/tmp/dakia-final-test-successor-evidence-v3-20261022/source-repeat3-receipt.json",
+    "closingReceiptSha256": "8353b52d5a661e45087f2a021dbe3322245636145d8389788ed8f6fe430427c0",
+    "sourceManifest": "/private/tmp/dakia-final-test-successor-evidence-v3-20261022/source-manifest.json",
+    "sourceManifestSha256": "5728448b1f79241dffbd132b71642bb2df9e7bcba1c0311bfe724611df42cbbc"
+  },
+  "gates": [
+    "mail-safety catalogue validation",
+    "mail standards requirements validation",
+    "realistic fixture validation",
+    "Tauri contract inventory",
+    "TypeScript typecheck",
+    "format check",
+    "Rust format check",
+    "workspace clippy with warnings denied",
+    "frontend tests",
+    "locked workspace Rust tests",
+    "fixture-enabled Dakia desktop library tests",
+    "realtime delivery coupling",
+    "MIME Reader artifact coupling",
+    "attachment command artifact coupling",
+    "mail command TLS coupling",
+    "release-script tests",
+    "web build"
+  ],
+  "limitations": [
+    "Credentialed and independent-server tests ignored by the source lane remain separate evidence.",
+    "This source result does not establish native WebKit, packaged upgrade, live-provider, audit, performance, fuzzing, signing, notarization, or release acceptance.",
+    "The b14 native session was still pending when this receipt was recorded."
+  ]
+}

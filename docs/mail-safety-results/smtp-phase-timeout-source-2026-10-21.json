@@ -1,0 +1,189 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T14:34:38Z",
+  "kind": "smtp-phase-timeout-source-evidence",
+  "status": "passed-scoped-with-explicit-skip-and-limits",
+  "scope": "Production SMTP submission phase timing, reply-stage validation, delivery-certainty mapping, cancellation cleanup, and vendored Lettre provenance. This is focused Rust source evidence. Full-source, deep-server, native, provider, packaged-app, and release results remain separate.",
+  "sourceIdentity": {
+    "checkoutHead": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+    "coordinatingInputDigest": "e9d99598cfa7d3adf3cba2fee4487a8fb61151f9bfd29950dd3bc50950dd74c4",
+    "coordinatingInputFileCount": 929,
+    "digestClaim": "Context only. The digest identifies the coordinating source input in the first remaining-gap deep record, whose sandbox server attempt failed with exit 69. Later authorized deep work is separate and is not counted as SMTP evidence here. Scoped calendar and date edits can change the whole mail.rs hash without changing the reviewed SMTP fragments below."
+  },
+  "reviewedSourceFragments": [
+    {
+      "path": "crates/dakia-core/src/mail.rs",
+      "symbols": ["SmtpPhaseTimeouts", "MailSendEndpoints"],
+      "recordedLines": "97-149",
+      "sha256": "4c381d85b0c26b4e480712b1f52933f3a4ef4d6327b73f334eceef03c7a441c9"
+    },
+    {
+      "path": "crates/dakia-core/src/mail.rs",
+      "symbols": [
+        "MailService::send",
+        "MailService::send_with_production_endpoint"
+      ],
+      "recordedLines": "3900-3951",
+      "sha256": "1a2f58c38add3ede234b835de99e73d9622a3d9439ea5f5bfa5a31c37991b03d"
+    },
+    {
+      "path": "crates/dakia-core/src/mail.rs",
+      "symbols": ["MailService::send_with_endpoints_and_smtp_timeouts"],
+      "recordedLines": "3999-4039",
+      "sha256": "b317d11894257f5098c97cdfe875c39fcd41d8e045a70a8315e7263e31d0d1bd"
+    },
+    {
+      "path": "crates/dakia-core/src/mail.rs",
+      "symbols": ["send_smtp_raw_with_timeouts"],
+      "recordedLines": "4133-4351",
+      "sha256": "336c8d662a0a155f1f5b749d05da755a5115374feecf93101bd708b6dd73b4d4"
+    },
+    {
+      "path": "crates/dakia-core/src/mail.rs",
+      "symbols": ["SmtpEndpoint", "SmtpEndpoint::native_mail_safety_fixture"],
+      "recordedLines": "4379-4455",
+      "sha256": "c33ca8e0679fbde166f882c0ccacb6ad2b5307650aced6354badaba304e6c37f"
+    },
+    {
+      "path": "crates/dakia-core/src/standards_safety_tests.rs",
+      "sha256": "39d275755160fa680585c2ad5066ed0ef448a92911d009f0d26f093971482651"
+    },
+    {
+      "path": "crates/dakia-core/src/mail/tests/protocol_gap_tests.rs",
+      "sha256": "16ed6ed2b9e92970d0e11af94ef672504c80e52e84469e1054d6690fef307058"
+    }
+  ],
+  "vendoredLettre": {
+    "package": "lettre",
+    "version": "0.11.22",
+    "license": "MIT",
+    "sourceArchiveSha256": "0da65617f6cb926332d039cb578aad56178da86e128db6a1b09f4c94fa5b3349",
+    "upstreamVcsRevision": "9b88c4ff98fd8653cb389a66f885f02efd79ee6b",
+    "acceptedPatchSha256": "5420143c0f7a2ba808230c42f22257aabc097d4aeb5630384a331d0b3feba20c",
+    "independentReviewDocumentSha256": "abc84c5d7bb2e95252693a54bd5277cd9796be7f366ba608ca2fddb772044b92",
+    "files": [
+      {
+        "path": "vendor/lettre/DAKIA_PROVENANCE.md",
+        "sha256": "658f2d08a3e9db4515375daeda0fde3471924f3e18b65ee09fdfdb41542cfbbc"
+      },
+      {
+        "path": "vendor/lettre/Cargo.toml",
+        "sha256": "b28c8327c3dc4a8b38eea9a3ad8a1e09972dbd18c059b3d4867284011317d7b4"
+      },
+      {
+        "path": "vendor/lettre/Cargo.toml.orig",
+        "sha256": "4dedbd5f5bc45aad83ab1a5864d8542a79f0cbd1fda593fcc9b914bcf5046be6"
+      },
+      {
+        "path": "vendor/lettre/src/transport/smtp/client/async_connection.rs",
+        "sha256": "6f759ad5d6bd778574f1a02978d4ae1bc25e786edcfa5dc4955274d6022f3727"
+      },
+      {
+        "path": "vendor/lettre/src/transport/smtp/client/mod.rs",
+        "sha256": "37f185303fb7bf9fd55e5d0fb955470ced795d8da18b7850c76cd15b66f97acd"
+      }
+    ],
+    "freshArchiveVerification": {
+      "command": "cargo test --lib --no-default-features --features 'builder hostname pool smtp-transport tokio1-rustls-tls' phase_timeout_tests",
+      "result": "24 passed, 0 failed, 0 ignored, 146 filtered out",
+      "review": "The independent reviewer applied the exact accepted patch to a fresh verified archive, matched the four patched upstream-file hashes to the vendor tree, and reran the exact suite."
+    }
+  },
+  "phasePolicy": {
+    "connectSeconds": 60,
+    "tlsHandshakeSeconds": 60,
+    "greetingSeconds": 300,
+    "ehloSeconds": 300,
+    "startTlsCommandSeconds": 120,
+    "authCommandSeconds": 300,
+    "mailCommandSeconds": 300,
+    "eachRecipientCommandSeconds": 300,
+    "dataInitiationSeconds": 120,
+    "dataProgressSeconds": 180,
+    "dataTerminatorSeconds": 180,
+    "finalResponseSeconds": 600,
+    "dataInputChunkBytes": 16384,
+    "semantics": "There is no absolute transaction deadline. Greeting, setup, MAIL, every RCPT, DATA initiation, each successful DATA stream write and flush, terminator write, and final reply receive their own bounded budget. DATA progress resets its timer after each successful write."
+  },
+  "replyAndOutcomePolicy": [
+    "Greeting requires 220; EHLO requires 250; STARTTLS requires 220; AUTH succeeds only with 235; DATA initiation requires 354.",
+    "MAIL and RCPT accept positive-completion class replies. Wrong-stage 3xx replies stop before the next command.",
+    "A content write failure before the terminator is NotSubmitted and drops the connection without QUIT, retry, or reuse.",
+    "An explicit final 451 or 554 is NotSubmitted because the relay confirmed rejection.",
+    "Terminator failure or final timeout, EOF, malformed reply, or 3xx reply is DeliveryUncertain.",
+    "Sent append occurs only after a final positive-completion reply. An uncertain result never triggers automatic SMTP retry or Sent append.",
+    "The send future exclusively owns its connection. Cancellation drops the connection and never returns it to a pool."
+  ],
+  "focusedVerification": [
+    {
+      "command": "cargo test --locked -p dakia-core smtp_ --lib -- --nocapture",
+      "result": "41 passed, 0 failed, 1 ignored",
+      "ignored": "production_smtp_connector_rejects_openssl_tls11_before_credentials_or_envelope requires an OpenSSL CLI with TLS 1.1 server support. This is a skip, not a pass."
+    },
+    {
+      "command": "cargo test --locked -p dakia-core cancelling_a_send_drops_its_exclusive_connection_without_quit_or_reuse --lib -- --nocapture",
+      "result": "1 passed, 0 failed, 0 ignored"
+    },
+    {
+      "command": "cargo fmt --all -- --check",
+      "result": "passed"
+    },
+    {
+      "command": "cargo clippy --locked -p dakia-core --all-targets -- -D warnings",
+      "result": "passed"
+    },
+    {
+      "command": "git diff --check -- Cargo.toml Cargo.lock fuzz/Cargo.toml fuzz/Cargo.lock crates/dakia-core/src/mail.rs crates/dakia-core/src/standards_safety_tests.rs crates/dakia-core/src/mail/tests/protocol_gap_tests.rs vendor/lettre",
+      "result": "passed"
+    }
+  ],
+  "sensitivity": [
+    {
+      "artifact": "lettre-data-phase-timeouts.patch",
+      "sha256": "e8c547486f5a4eebe3a14ced9a462657b3a98255369af28b65fce15b98594056",
+      "status": "rejected",
+      "reason": "It treated a final SMTP 354 as delivery success and lacked the complete phase and outcome matrix."
+    },
+    {
+      "artifact": "lettre-data-phase-timeouts-final354-fixed-v2.patch",
+      "sha256": "84193190b67726af9f42556ddcb5df7b8f86f8e145ade74641af55e9c09f9e03",
+      "status": "retained as narrow historical evidence only",
+      "reason": "Its seven DATA tests corrected final 354 but did not cover constructor, STARTTLS, AUTH, command, cancellation, and complete ambiguity boundaries."
+    },
+    {
+      "artifact": "lettre-smtp-phase-timeouts-full-v2.patch",
+      "sha256": "3dc64f9bcb621ca6b80446f595faaebf80fd96fc7b507f2828715a934be313c6",
+      "status": "rejected",
+      "reason": "It did not contain fixes present only in the mutable candidate tree, including AUTH poisoning and exact 235 handling, deterministic constructor coverage, and zero-write tests."
+    },
+    {
+      "artifact": "lettre-smtp-phase-timeouts-full-v3.patch",
+      "sha256": "5420143c0f7a2ba808230c42f22257aabc097d4aeb5630384a331d0b3feba20c",
+      "status": "accepted",
+      "reason": "Fresh extraction, exact file-hash comparison, 24-test rerun, and independent review passed."
+    },
+    {
+      "mutation": "Replace the shared production SMTP policy with a uniform one-second timeout.",
+      "expectedAndObserved": "smtp_production_send_path_uses_the_production_phase_policy_once failed with NotSubmitted after the server delayed MAIL for 1.2 seconds. Restoring the production policy made the same test pass with one transaction and no reconnect."
+    }
+  ],
+  "independentReview": {
+    "result": "approved SMTP behavior",
+    "findingsClosed": [
+      "Final 354 can no longer become false delivery success.",
+      "Malformed or excessive AUTH challenges poison the connection; AUTH succeeds only on exact 235.",
+      "Public MailService::send reaches the single no-timeout-argument production helper.",
+      "Final 451 and 554 map to NotSubmitted; missing or invalid final acknowledgement remains DeliveryUncertain.",
+      "Cancellation and all DATA errors drop the exclusively owned connection without unbounded QUIT cleanup, retry, or reuse."
+    ],
+    "externalGate": "Vendored-crate root verification remained blocked at review time only because the separately changing mail-parser vendor manifest was not yet frozen. The Lettre manifest and isolated verifier passed."
+  },
+  "limits": [
+    "The one TLS 1.1 OpenSSL capability test is explicitly ignored and provides no passing evidence.",
+    "SMTP timeout values are internal policy and are not runtime or user configurable.",
+    "The separate read-only smtp_auth_probe retains its single 20-second probe deadline and never reaches MAIL, RCPT, DATA, or message submission.",
+    "Only Tokio with rustls is covered by the Dakia vendor patch. Async-std, native-tls, and boring-tls behavior remains upstream.",
+    "A real DNS resolver stall and a real unroutable multi-address TCP target are not independently deterministic in CI. The timeout helper and synchronized public constructor path are covered.",
+    "This record does not claim a full-source, independent-server, native WebKit, live-provider, packaged-app, upgrade, signing, notarization, publication, or release pass."
+  ]
+}

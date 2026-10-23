@@ -1,0 +1,133 @@
+{
+  "schemaVersion": 1,
+  "status": "partial-failed",
+  "recordedAtUtc": "2026-10-22T07:19:46.070Z",
+  "scope": "Bounded same-identity 09a5 native observations for MIME rejection, attachment saving, one terminal Sent-copy recovery, watcher delivery, and one same-profile relaunch. This is not complete native acceptance or original 69-gap closure.",
+  "sourceTree": {
+    "digest": "09a533c681e40a8a36fbb0159a5c5de025c43c88dbca3dbdc7b0abec91aad2c4",
+    "fileCount": 956
+  },
+  "candidate": {
+    "desktopSha256": "cf45c7eafc868882e4e28f437a484896db56c779286251d0420ec844b9b970ef",
+    "mainPid": 37090,
+    "restartPid": 53764,
+    "dataStoreIdentifier": "ca7f45a9-f8dd-432b-8457-a8b1ef903829",
+    "restoration": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.nbX3Jl/approved-identity-swap-d674ea51-98f9-45e2-8063-857551adec44-restored.json",
+      "sha256": "1bd71c6d942190c6c5f1115ca2e56cea446c6ef66b8e43824cd3758cda94013a"
+    }
+  },
+  "mime": {
+    "status": "passed-bounded-native-slice",
+    "sequence": [4, 8, 5, 8, 6, 8, 7, 8],
+    "rejectedSeedUids": [4, 5, 6, 7],
+    "validNeighborUid": 8,
+    "observedBehavior": "Each rejected seed showed a decode error without attachment controls. UID 8 remained readable without attachment controls after every rejected seed.",
+    "hydrationCyclesPerRejectedSeed": 2,
+    "cacheProtection": "four rejected seeds have no content cache and no attachments; valid neighbor remains cached",
+    "evidence": {
+      "acceptance": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.nbX3Jl/exact-mime-phase-snapshot-immutable-v3/exact-mime-native-acceptance.json",
+        "sha256": "cf627ce5a76dd14617558c4572b559b013b17d69f462651d495c4189f984d6fd"
+      },
+      "phaseSnapshot": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.nbX3Jl/exact-mime-phase-snapshot-immutable-v3/phase-snapshot-receipt.json",
+        "sha256": "39b4b7ce993622a2c7aa0524e5cffffe9a686986cfe06dd30d5092970bed27e8"
+      },
+      "uiObservation": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.nbX3Jl/exact-mime-ui-observation.json",
+        "sha256": "12354d66aed6ad379f77e9a4fb5573a9724973f384224bc3b31a812ca71a41af"
+      }
+    },
+    "historicalLimit": "The earlier phase snapshot failed verification because of SQLite WAL-sidecar handling and a harness count assumption. This immutable successor used a real WAL snapshot and passed its reviewed sealing and re-verification path."
+  },
+  "attachments": {
+    "status": "passed-bounded-native-slice",
+    "safeSave": {
+      "bytes": 32,
+      "sha256": "666dec5256feac267cd6c46b97107397c0a87fcde80a932321819f5a1cf2955e",
+      "mode": "0600",
+      "quarantine": "0081;6ad9b2d9;Dakia;",
+      "noExecuteBits": true
+    },
+    "leafSymlink": {
+      "savedBytes": "28",
+      "savedSha256": "1679a56fbd964b0463ec644f56fa9a3189d1402343de932a66b210586d00c02f",
+      "savedMode": "600",
+      "quarantine": "0081;6ad9b2c6;Dakia;",
+      "canarySha256": "af0fb29d777c7bfea075bfff6615c174e9c4236bd770ccc05d1f7943fdfe6faf"
+    },
+    "warningPersistenceObserved": true,
+    "noConsentContacts": 0,
+    "evidence": {
+      "safeSave": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.nbX3Jl/native-safe-attachment-save.json",
+        "sha256": "dbe549b9f6d80e8aa3ea5abf25f4f7d8841f00eac7971608d654ed187d30297a"
+      },
+      "leafCheck": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.nbX3Jl/native-attachment-fault-evidence/leaf-check.json",
+        "sha256": "50216a66713d5fa024b4397da8af7eac91294bc461c78dacbb8d2697c769c152"
+      },
+      "noConsentCounter": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.nbX3Jl/native-no-consent-network-counter.json",
+        "sha256": "91875d437d1f57e27731d66137ab624a9ff7ec141904d1c9687579382596774f"
+      },
+      "mainUiCaptureIndex": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.nbX3Jl/native-ui-capture-index.json",
+        "sha256": "4c3a076d875c2da2031fd6ff59628a197dc00ca589f14f42a682fa4e72c92cfe"
+      }
+    },
+    "limits": "This evidence does not cover every interruption or a user cancellation API, which is not available."
+  },
+  "terminalSentCopyRecovery": {
+    "status": "passed-bounded-native-slice",
+    "observed": "One fictional SMTP acceptance followed by IMAP disconnect produced the submitted-with-Sent-copy-failure warning. Keyboard repetition remained disabled in the terminal compose view.",
+    "restart": {
+      "status": "passed",
+      "attemptId": "43e080ba-f3ea-42d4-bc80-609dd5c0c411",
+      "accountId": "62a9320c-04f5-47c2-b4fa-d4952f0b6121",
+      "claim": "same-profile terminal Sent-copy recovery remained viewable after one normal packaged relaunch, with Send disabled and no user-initiated send action in the observed flow",
+      "sendAction": "not-performed-by-user",
+      "beforeAfterUid": 9,
+      "rawMessageSha256": "85c4437d7cee8b325cba1655ddc01677e1e54154b627bee6be01d3fc0e53b361",
+      "bodySha256": "312bffe64bca72ecabb2d1324ecffec563a53aa711fa41ffe34e618388106429",
+      "beforeAfterMatch": true
+    },
+    "evidence": {
+      "restartReport": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.nbX3Jl/native-same-profile-relaunch/final-report.json",
+        "sha256": "bd96fbd9b7d495c89ae9406bbb7e49614780fa096825c62125b0748d5a324769"
+      },
+      "imapBefore": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.nbX3Jl/terminal-recovery-imap-before.json",
+        "sha256": "fb5ad861d0ccaf8d79c9444a053c602d97248bcf0ffbec4da3fde9785ad591ab"
+      },
+      "imapAfter": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.nbX3Jl/terminal-recovery-imap-after.json",
+        "sha256": "ccca6db9bdb217ff6c70500a0f5e52aecf40511342388d4b965ecf27e214ed57"
+      },
+      "restartUiCaptureIndex": {
+        "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.nbX3Jl/native-ui-capture-index-restart.json",
+        "sha256": "023a1a78011075d865e2ee0f8cb021c6b611e3819bf60d469f4ec9add91457c4"
+      }
+    },
+    "limits": "The observed flow contained no user-initiated second send. It does not prove the absence of every automatic resend, a retryable not-submitted flow, or broad SMTP/provider behavior."
+  },
+  "watcher": {
+    "status": "passed-bounded-native-slice",
+    "observed": "A UID 9 watcher arrival was displayed without a manual Sync action.",
+    "evidence": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.nbX3Jl/native-ui-capture-index.json",
+      "sha256": "4c3a076d875c2da2031fd6ff59628a197dc00ca589f14f42a682fa4e72c92cfe"
+    }
+  },
+  "overallFailure": {
+    "receipt": "docs/mail-safety-results/native-fatal-recovery-09a5-partial-2026-10-22.json",
+    "reason": "The corrupt-database fatal screen exited 0 through Cmd-Q instead of the required 1. The pending bridge cause keeps the overall native run partial-failed."
+  },
+  "limits": [
+    "This receipt does not claim all native checks, all MIME cases, all attachment interruptions, or all provider scenarios.",
+    "The UID 7 leap-second scenario, complete resource cohort, notification delivery, and broader release acceptance remain outside these observations.",
+    "No claim is made for the later private c2 fix or any candidate not applied to the 09a5 primary source."
+  ]
+}

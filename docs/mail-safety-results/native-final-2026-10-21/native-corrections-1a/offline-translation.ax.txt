@@ -1,0 +1,86 @@
+Window: "Dakia Fictional Provider Reader", App: Dakia Fictional Provider Reader.
+0 standard window Dakia Fictional Provider Reader, Secondary Actions: Raise
+	1 scroll area
+		2 HTML content Description: Dakia, URL: 127.0.0.1:1420/
+			3 container Dakia
+				4 text MAIL
+				5 button Inbox
+				6 button (expanded) Hide inbox accounts, Secondary Actions: Collapse
+				7 container Accounts
+					8 button Fictional native mail safety, Help: fictional-reader@localhost
+					9 button Fictional native mail safety two, Help: fictional-reader-two@localhost
+					10 button Add account
+				11 text FOLDERS
+				12 button All mail
+				13 button Unread
+				14 button Starred
+				15 button Outbox
+				16 button Sent
+				17 button Drafts
+				18 button Archive
+				19 button Spam
+				20 button Trash
+				21 button Feedback
+			22 container Fictional native mail safety
+				23 container
+					24 text Fictional native mail safety
+					25 container Message view
+						26 toggle button Smart, Value: on
+						27 toggle button List, Value: off
+					28 button Compose, Help: Compose (⌘N)
+					29 button Sync
+					30 text field (settable) Search mail, Placeholder: Search every account…
+				31 container Notifications
+					32 text NOTIFICATIONS
+					33 button Select Fictional Provider 15:10 Fictional Reader height-bound acceptance Fictional long email starts here. Fictional tall message content.Fictional bottom marker remains reachable by scrolling inside the capped email surface. Star conversation
+				34 container Other
+					35 text OTHER
+					36 button Select Fictional Provider 15:21 Dakia fictional Estonian translation arrival Tere, see on turvaline fiktiivne kiri. Palun kinnita, et Dakia tõlgib selle sõnumi kohapeal ilma sisu võrku saatmata. Star conversation
+					37 button Select Fictional Provider 15:10 Malformed fictional MIME regression Star conversation
+				38 container Seen
+					39 text SEEN
+					40 button Select Fictional Provider 15:10 Remote content safety check Fictional provider body reached the real Reader. Native remote-resource matrix marker. Remote CSS and font marker stays readable. Submit hostile formNative mailto regression anchors. Open each in Dakia compose and close without sending. Nat Star conversation Has attachments
+			41 container
+				42 button Archive
+				43 button Mark as spam
+				44 button Mark as unread
+				45 button Delete
+				46 button Star conversation
+				47 button Show original
+				48 container Dakia fictional Estonian translation arrival
+					49 heading Dakia fictional Estonian translation arrival, Value: 1
+						50 text Dakia fictional Estonian translation arrival
+					51 text Translated from Estonian on this device
+					52 container Message from Fictional Provider
+						53 text F Fictional Provider
+						54 button Email provider@example.test
+						55 button (collapsed) Show full recipient details, Secondary Actions: Expand
+						56 text fictional-reader@localhost
+						57 text Wednesday 21 Oct at 15:21
+						58 button Quick reply
+						59 button More actions
+						60 container Dakia fictional Estonian translation arrival
+							61 scroll area
+								62 HTML content Description: Email content, URL: about:srcdoc
+									63 text Hello, this is a secure fictitious letter. Please confirm that Dakia will translate this message on the spot without sending any content to the network.
+									64 image remote content remains blocked
+								65 scroll bar (settable, float) 0
+							66 button Load remote content
+						67 container Reply
+							68 button Reply
+							69 button Reply all
+							70 button Forward
+	71 close button
+	72 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	73 minimize button
+	74 text Dakia Fictional Provider Reader
+75 menu bar
+	76 Dakia Fictional Provider Reader
+	77 File
+	78 Edit
+	79 Mailbox
+	80 Message
+	81 Window
+	82 Help
+
+The focused UI element is 2 HTML content Description: Dakia, URL: 127.0.0.1:1420/

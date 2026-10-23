@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "kind": "manual-coverage-provider-installation-correction-primary-focused-result",
+  "status": "passed-focused-installation-correction",
+  "recordedAtUtc": "2026-10-22T11:50:17Z",
+  "scope": "A focused, isolated npm installation check and primary workflow-contract check for the manual coverage lane. It establishes the corrected package-install command under the recorded local runtime. It does not run GitHub-hosted coverage, generate LCOV, or establish a coverage percentage.",
+  "application": {
+    "journal": {
+      "path": "/private/tmp/dakia-coverage-install-correction-primary-20261022/application-journal.json",
+      "sha256": "6fc2bbbf7f7dd310f5c2f252cedc8162585393f6bf2f54241ede8c80a28f1fd7"
+    },
+    "patch": {
+      "path": "/private/tmp/dakia-coverage-provider-workflow-candidate-20261022/candidate-repository.patch",
+      "sha256": "1f5207605d883eee44a1cee36ab3e58e227a6c6cd506de90d3b6c6a64a765523"
+    },
+    "changedFiles": [
+      {
+        "path": ".github/workflows/manual-validation.yml",
+        "beforeSha256": "6960bbdacc4154af1e66d365ac0115969eb377bcf6f4c537228dd5f6476c52a2",
+        "afterSha256": "66c28e76ca712122a0cb6e3301207710cc956ab800a1b3be9588b7babc7150f4"
+      },
+      {
+        "path": "scripts/manual-validation.node-test.mjs",
+        "beforeSha256": "40250a34375453accd4b3be87bf9ee3cc73783ea016a66eddff91c9859c60440",
+        "afterSha256": "f0002e6b7786d37ff22926d871d673bc5bb0c9452ed13933ec83a32505c440ff"
+      }
+    ],
+    "sourceSnapshotQualification": "These workflow-contract files are recorded by hash. This focused configuration receipt is not a whole-source snapshot claim."
+  },
+  "failureReproduction": {
+    "scope": "A fresh temporary copy containing only package.json and package-lock.json completed npm ci --ignore-scripts, then ran the previously configured single-provider command.",
+    "command": "npm install --ignore-scripts --no-save --package-lock=false --no-audit \"@vitest/coverage-v8@$locked_vitest_version\"",
+    "result": "failed",
+    "error": "npm Arborist: Cannot read properties of null (reading 'edgesOut')",
+    "npmLog": {
+      "path": "/Users/arsalan/.npm/_logs/2026-10-22T11_49_09_647Z-debug-0.log",
+      "sha256": "d8bf5849d9e191988998abc581749ee331f5a46c136c0bebd1b6668ec906938f"
+    },
+    "environment": {
+      "node": "22.23.2",
+      "npm": "10.9.8",
+      "node20": "not available for this local reproduction"
+    }
+  },
+  "correctedInstallation": {
+    "command": "npm install --ignore-scripts --no-save --package-lock=false --no-audit --legacy-peer-deps \"vitest@$locked_vitest_version\" \"@vitest/coverage-v8@$locked_vitest_version\"",
+    "lockDerivedVersion": "4.1.12",
+    "result": "passed in isolated copies",
+    "rootRunLog": {
+      "path": "/private/tmp/dakia-coverage-provider-pinned-install-20261022.log",
+      "sha256": "a61343b87b255a6c8df5cb59cdf0f6cd0be46634a855a5b232d25ab05c2ac36b"
+    },
+    "independentCopy": {
+      "path": "/private/tmp/dakia-coverage-provider-escalated-EGiZqy",
+      "runtimeVitestVersion": "4.1.12",
+      "coverageProviderVersion": "4.1.12",
+      "packageLockSha256": "ec85e8d77a670963d49224d083cc9133b30763f048e8b520360f9c51c4bb5e1b",
+      "sourcePackageLockSha256": "ec85e8d77a670963d49224d083cc9133b30763f048e8b520360f9c51c4bb5e1b",
+      "packageLockChanged": false
+    }
+  },
+  "verification": {
+    "primaryContract": {
+      "command": "node --test scripts/manual-validation.node-test.mjs",
+      "log": "/private/tmp/dakia-coverage-install-correction-primary-20261022/focused-node.log",
+      "sha256": "1ea3935f5430ff423e5eac2aee64a1b46e807dbe8e1970779b386e11d7e07ccd",
+      "result": {
+        "passed": 10,
+        "failed": 0,
+        "skipped": 0
+      }
+    },
+    "patchChecks": [
+      "The private candidate passed git apply --check --whitespace=error-all with repository-relative paths.",
+      "Prettier passed for the two candidate files."
+    ],
+    "independentReview": "GO after the candidate patch headers were made repository-relative."
+  },
+  "limitations": [
+    "The isolated evidence used Node 22.23.2 and npm 10.9.8. GitHub-hosted Node 20 installation remains unexecuted.",
+    "No GitHub-hosted manual coverage job, Rust LCOV generation, frontend coverage, global branch observation, or ratchet comparison ran.",
+    "This corrects package peer resolution for the manual coverage lane only. It does not establish source, native, provider, performance, release, or dependency-audit acceptance."
+  ]
+}

@@ -1,0 +1,113 @@
+{
+  "attempt": {
+    "binarySha256": "141748518de1d8a72513abc261d3e3162301455196ad9b2b148d5f3b592218b3",
+    "capturedChildStageMarkerCount": 0,
+    "capturedStageTimeline": [
+      {
+        "elapsedSinceRecoveryBeginMs": -788,
+        "marker": "parent.template.begin"
+      },
+      {
+        "elapsedSinceRecoveryBeginMs": -1,
+        "marker": "parent.template.eof"
+      },
+      {
+        "elapsedSinceRecoveryBeginMs": 0,
+        "marker": "parent.recovery.begin"
+      },
+      {
+        "elapsedSinceRecoveryBeginMs": 25,
+        "marker": "parent.password_prompt.seen"
+      },
+      {
+        "elapsedSinceRecoveryBeginMs": 25,
+        "marker": "parent.password_handoff.begin"
+      },
+      {
+        "elapsedSinceRecoveryBeginMs": 25,
+        "marker": "parent.password_handoff.complete"
+      },
+      {
+        "elapsedSinceRecoveryBeginMs": 49858,
+        "marker": "parent.child.eof"
+      }
+    ],
+    "process": {
+      "childEofObserved": true,
+      "childExitCode": 1,
+      "childSignal": "none",
+      "parentTimeout": false,
+      "passwordHandoffAfterRecoveryBeginMs": 25,
+      "recoveryDurationMs": 49858,
+      "wrapperExitCode": 1
+    },
+    "result": {
+      "outcome": "failed",
+      "remoteMutationRequested": false,
+      "stage": "timeout"
+    },
+    "sourceAfterInstrumentationSha256": "dbb7af774e93c506b125847cecdda63f38d3ef00b7d27eaa2f89f32a8626363a",
+    "sourceBeforeInstrumentationSha256": "26adc271c59154ab15e58a7e772f91779162bbd5058dcc66a13dc5fcf7340fbe",
+    "stageCaptureLimitations": {
+      "capturedChildStageMarkers": 0,
+      "conclusion": "The timeout cannot be assigned to a network protocol or recovery stage from this attempt.",
+      "firstStageMarkerOccursAfter": [
+        "recovery store open",
+        "recovery account persistence",
+        "recovery credential persistence",
+        "nested smoke store open",
+        "nested smoke account persistence",
+        "nested smoke credential persistence"
+      ],
+      "markerFlushBehavior": "the private instrumentation uses eprintln without an explicit flush",
+      "sourceBoundaryAnalysis": {
+        "credentialSemantics": "CredentialStore::set_password encrypts then writes the secret to the temporary SQLite credentials table; this path does not call a platform keychain or network service.",
+        "networkAttribution": "The first explicit IMAP marker surrounds imap_auth_probe only after the unmarked local work. With no captured child marker, neither a local setup delay nor a network delay can be established.",
+        "preparedEvidence": "The initial prepared evidence is written before temporary-store creation and before the timed recovery future begins.",
+        "storeLockSemantics": "Store::open may wait up to 10 seconds for a profile migration lock and separately retries SQLite busy connection setup for up to 10 seconds; the probe uses fresh distinct temporary database paths.",
+        "timeoutEnvelope": "execute_local wraps the entire recover_roundtrip future in the 45-second timeout before mapping it to the generic timeout evidence state.",
+        "unmarkedOperationsBeforeFirstImapMarker": [
+          "recover_roundtrip opens and migrates its temporary SQLite store",
+          "recover_roundtrip persists the account and encrypted credential",
+          "run_smoke opens and migrates a second temporary SQLite store",
+          "run_smoke persists the account and encrypted credential"
+        ]
+      },
+      "wrapperAllowlistOfflineCheck": "accepted representative IMAP and recovery stage lines"
+    }
+  },
+  "interpretation": {
+    "confirmed": [
+      "The child completed with exit code 1 after its own timeout evidence, not an Expect parent timeout or a signal.",
+      "The probe did not request a remote mutation and did not issue SMTP submission commands.",
+      "The private raw evidence and allowlisted lifecycle log are retained under a mode-0700 disposable directory."
+    ],
+    "notConfirmed": [
+      "No allowlisted child stage marker was captured, so this attempt does not identify whether the timeout occurred during IMAP, SMTP, or a later recovery operation.",
+      "This single result does not establish a provider outage or a client defect."
+    ]
+  },
+  "kind": "private-read-only-provider-recovery-diagnostic",
+  "originalReportRecovery": {
+    "originalSha256": "ff75657eb6228d59fcb84c9d9fc387e514cff6769e755bf9422f20eed366f5b3",
+    "restoredBytesMatchedRecoveredCopy": true,
+    "sessionRecordLine": 29094
+  },
+  "preflight": {
+    "firstWrapperInvocation": "local Tcl marker-escaping error before the diagnostic binary was spawned",
+    "fixedWrapperSha256": "806bd09c3a92d2cfbe70d2ac933cbceff22fbce419f58e6ac466536d02c72afc",
+    "providerConnectionAttempted": false
+  },
+  "schemaVersion": 1,
+  "scope": {
+    "additionalProviderRetries": 0,
+    "operations": [
+      "read-only IMAP probe",
+      "SMTP authentication and QUIT",
+      "existing-message recovery verification"
+    ],
+    "remoteMutationRequested": false,
+    "runIdentifier": "redacted-existing-fixture",
+    "smtpMailOrRecipientsIssued": false
+  }
+}

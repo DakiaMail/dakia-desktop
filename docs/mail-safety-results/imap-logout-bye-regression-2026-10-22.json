@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "status": "fixed-reviewed-expanded-source-baseline-passed-native-pending",
+  "recordedAtUtc": "2026-10-22T00:37:11.320919+00:00",
+  "affectedSnapshot": {
+    "digest": "b9c128031b2054c5839e254809e5bcc526e981ee0b0c8fa033a701513e5c94fb",
+    "fileCount": 951,
+    "mailRsSha256": "3ce2f50be5f10522e7ea7cf1eaa7ae8db361709b4b6cb99218dc751a287dc50b"
+  },
+  "productionEntryPoint": "ImapClient::command_with_literal_inner",
+  "finding": "The generic response parser rejects untagged BYE before the matching tagged completion, including normal LOGOUT. Existing callers generally ignore the cleanup error and drop the transport.",
+  "standardReferences": [
+    {
+      "url": "https://www.rfc-editor.org/rfc/rfc3501.html#section-3.4",
+      "requirement": "For client-requested logout, read the tagged OK before closing the connection."
+    },
+    {
+      "url": "https://www.rfc-editor.org/rfc/rfc3501.html#section-6.1.3",
+      "requirement": "LOGOUT normally receives untagged BYE followed by tagged OK."
+    },
+    {
+      "url": "https://www.rfc-editor.org/rfc/rfc9051.html#section-3.4",
+      "requirement": "The modern reference retains the same client completion rule; this does not claim full IMAP4rev2 support."
+    }
+  ],
+  "repairScope": "Accept and drain BYE only for exact case-insensitive LOGOUT, through bounded matching completion; keep BYE fatal for other commands and retain failure on EOF or wrong tags.",
+  "sensitivity": "The valid fragmented BYE with trailing literal-looking text then tagged OK fails on the original parser.",
+  "initialFocusedResult": "3 LOGOUT regressions,16 IMAP gap-matrix tests and8 scripted Gmail tests passed. Combined source/oracle review GO. The credentialed probe remains ignored in ordinary source suites.",
+  "limitations": [
+    "The affected b9 snapshot and its earlier source baseline remain historical evidence.",
+    "The fixed04b source, deep and bounded provider observations are separate from pending native acceptance.",
+    "Tagged-OK-only server compatibility is intentionally tolerated; this does not claim complete IMAP4rev2 support."
+  ],
+  "standardsGuard": "102 selected requirements; all5newLOGOUT clauses protected against deletion;22 validator sensitivity tests passed.",
+  "gmailProbeSafety": "Scripted TLS tests cover command allowlist, malformed/missing-INBOX rejection without follow-up commands, per-phase authentication/LIST/LOGOUT deadlines, fixed error redaction and nonidentifying observations. No live provider invocation yet.",
+  "initialObservation": {
+    "providerExecution": false,
+    "credentialsRead": false
+  },
+  "fullSourceVerification": {
+    "receipt": "staged-logout-full-list-three-run-source-2026-10-22.json",
+    "gatesPassed": 51,
+    "iterations": 3,
+    "unchangedSource": true
+  },
+  "separateProviderVerification": {
+    "receipt": "gmail-full-list-production-proof-04b-2026-10-22.json",
+    "providerExecution": true,
+    "authorizedDisposableCredentialsUsed": true,
+    "remoteMailboxMutationRequested": false,
+    "result": "Full LIST and matching tagged LOGOUT passed."
+  }
+}

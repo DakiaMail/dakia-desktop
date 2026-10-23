@@ -1,0 +1,9 @@
+Date: Tue, 28 Jul 2026 12:01:00 +0000
+From: "=?UTF-8?Q?attacker?=" (note) @example.test
+To: Reader <reader@example.test>
+Subject: Fictional obsolete syntax
+Message-ID: <obs-quoted-local-encoded-looking-identity@example.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+Fictional body quoted-local-encoded-looking-identity.

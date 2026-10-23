@@ -1,0 +1,107 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21",
+  "kind": "production-realtime-supervisor-tls-evidence",
+  "status": "passed-source-native-performance-separate",
+  "scope": "Default-visible deterministic tests drive the concrete production realtime cycle runner through real loopback TLS and the production watcher supervisor. They cover disconnect, rate limiting, fragmented successful polling, bounded retry reset, cancellation during backoff, and permanent authentication rejection.",
+  "tests": [
+    {
+      "name": "realtime::tests::l010_tls_tests::real_tls_provider_failures_flow_through_the_production_watcher_without_a_storm",
+      "coverage": "An accepted IDLE session disconnects, two provider LIMIT failures produce first and second bounded delays, a fragmented polling session succeeds, the next failure resets to the first delay, and cancellation while that delay is held prevents a fifth TCP accept."
+    },
+    {
+      "name": "realtime::tests::l010_tls_tests::real_tls_authentication_rejection_pauses_the_production_watcher_without_reconnect",
+      "coverage": "A real TLS IMAP LOGIN rejection publishes paused authentication state, requests no retry delay, and opens no second provider connection."
+    }
+  ],
+  "verification": [
+    {
+      "command": "cargo test -p dakia-desktop real_tls_ -- --nocapture",
+      "status": "passed",
+      "testsPassed": 2,
+      "qualification": "Final source after child-process harness hardening."
+    },
+    {
+      "command": "cargo test -p dakia-desktop realtime::tests -- --nocapture",
+      "status": "passed",
+      "testsPassed": 33,
+      "qualification": "Historical scoped module run before the later harness-only exact-child and timeout hardening. The two final tests were rerun afterward."
+    },
+    {
+      "command": "cargo test -p dakia-desktop -- --nocapture",
+      "status": "passed",
+      "testsPassed": 187,
+      "qualification": "Historical whole-package run before the later harness-only exact-child and timeout hardening. It is not presented as a final full-source baseline."
+    },
+    {
+      "command": "cargo clippy -p dakia-desktop --all-targets -- -D warnings",
+      "status": "passed",
+      "qualification": "Final source after harness hardening."
+    },
+    {
+      "command": "cargo check -p dakia-desktop --lib",
+      "status": "passed",
+      "qualification": "Normal application graph."
+    },
+    {
+      "command": "cargo test -p dakia-core production_imap_connector_rejects_untrusted_loopback_certificate -- --nocapture",
+      "status": "passed",
+      "testsPassed": 1,
+      "qualification": "Ordinary core build without the fictional root feature still rejects the untrusted loopback certificate."
+    }
+  ],
+  "featureIsolation": {
+    "normalBuildGraph": "cargo tree -p dakia-desktop -e normal,build contains no dakia-core/native-mail-safety-fixture feature.",
+    "testGraph": "cargo tree -p dakia-desktop -e features includes the dev-only dakia-core/native-mail-safety-fixture feature.",
+    "trustBoundary": "The fixture accepts only its exact loopback endpoint, exact fictional account identity, sentinel-owned temporary root, and CA file inside that root. Each wrapper runs its fixture environment in an isolated child process. Production certificate verification remains mandatory."
+  },
+  "sensitivity": [
+    {
+      "mutation": "Remove the successful-cycle failure counter reset.",
+      "status": "failed-as-expected",
+      "observed": "Delays became [1.04s, 2.08s, 312s, 5.2s] instead of resetting the final delay to 1.04s.",
+      "rawLog": "/private/tmp/dakia-l010-tls-retry-reset-sensitivity.log",
+      "sha256": "cce121f7e1a4da4bbeb2c6b4be1d48f1dbc9847ddd53ce2f2547060500d3dbdf"
+    },
+    {
+      "mutation": "Disable permanent authentication-error classification.",
+      "status": "failed-as-expected",
+      "observed": "The watcher entered retry delay instead of pausing without reconnecting.",
+      "rawLog": "/private/tmp/dakia-l010-tls-auth-pause-sensitivity.log",
+      "sha256": "7bd693c3f66af1cc74c1d74f787279a7e7bd35c4a38ddb3d76eab7654881ac9f"
+    }
+  ],
+  "harnessHardening": {
+    "exactChildProof": "A successful isolated child must report running exactly one test, the exact requested test name ending in ok, and one passed with zero failed. Rust test status alone is insufficient because an exact filter matching zero tests exits successfully.",
+    "timeout": "The asynchronous child process has a 10 second hard timeout and kill-on-drop enabled.",
+    "environmentRestoration": "All seven fixture environment variables are restored through a panic-safe RAII guard inside the isolated process."
+  },
+  "independentReview": {
+    "reviewer": "/root/remaining_realtime/l010_tls_review",
+    "status": "approved",
+    "findingsFixed": [
+      "A zero-test isolated child could previously exit successfully.",
+      "The isolated child previously had no hard timeout."
+    ],
+    "finalResult": "No remaining material issue in this slice. The reviewer independently reran both focused TLS tests successfully."
+  },
+  "files": [
+    {
+      "path": "apps/desktop/src-tauri/Cargo.toml",
+      "sha256": "07b3145666e7ee2bf014e6b1d32a5dad216d758696a55989f361ed320a96f03c"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/realtime.rs",
+      "sha256": "dbd500242a08bf4fec0ac0e2ff33be4c12c5f31116def11d6ad5f13a5a3d78a4"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/realtime/tests/l010_tls_tests.rs",
+      "sha256": "f78a4475dd914b6eb3afb78d24b409313e7fb9761efe200cf84ba04cd04ac904"
+    }
+  ],
+  "limitations": [
+    "The user declined a physical sleep and wake interruption, so physical wake recovery remains an explicit waiver rather than a pass.",
+    "These deterministic source tests prove bounded supervisor ordering and cancellation, not native UI frame latency, memory growth, socket counts, or long-duration soak performance.",
+    "Native measured performance and the coordinated final full-source baseline remain separate evidence lanes."
+  ]
+}

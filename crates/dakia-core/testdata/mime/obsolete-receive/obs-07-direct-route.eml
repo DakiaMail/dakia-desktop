@@ -1,0 +1,11 @@
+X-Dakia-Corpus-Case: obs-07-direct-route
+X-Dakia-Corpus-Source: RFC 5322 section 4.4; fictional
+Date: Tue, 28 Jul 2026 12:01:00 +0000
+Subject: Fictional obsolete syntax
+Message-ID: <obs-obs-07-direct-route@example.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+From: <@relay-a.example,@relay-b.example:sender@example.test>
+To: <,@relay-a.example,,@relay-b.example:reader@example.test>
+
+Fictional body obs-07-direct-route.

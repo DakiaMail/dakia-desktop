@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T12:28:40.782Z",
+  "scope": "Private fix for same-process, same-second hdiutil observation filename collision during the owned fictional attachment ENOSPC acceptance.",
+  "governedSourceModified": false,
+  "liveVolumeTouchedByFixPreparation": false,
+  "liveProcessControlledByFixPreparation": false,
+  "privateHelper": {
+    "path": "/private/tmp/dakia-native-attachment-observation-fix-20261021/native-attachment-fault-acceptance.sh",
+    "sha256": "5caadb830454fa2eb8af4da21dbed0e998b40a24fdb466f360fa5d2389e915cf",
+    "change": "capture_hdiutil_info atomically reserves a unique mktemp token for each observation and retains failed output without overwriting prior evidence"
+  },
+  "regression": {
+    "path": "/private/tmp/dakia-native-attachment-observation-fix-20261021/observation-collision-test.mjs",
+    "sha256": "55a1c151140bb81b952d6b7a65784a6957963d08dce28917bdb2018c5ebfc719",
+    "command": "node /private/tmp/dakia-native-attachment-observation-fix-20261021/observation-collision-test.mjs",
+    "result": "passed",
+    "assertion": "two same-label captures create distinct private evidence paths",
+    "sensitivity": {
+      "checkedInHelper": "/Users/arsalan/code/codex-worktrees/36f9/dakia-desktop/scripts/native-attachment-fault-acceptance.sh",
+      "checkedInHelperSha256": "a87d754fec02a586d1b4342155ae0e0b7941201e49dc26428aec429f031d058f",
+      "result": "failed as expected",
+      "diagnostic": "refusing to overwrite hdiutil evidence"
+    }
+  },
+  "syntax": {
+    "command": "/bin/bash -n /private/tmp/dakia-native-attachment-observation-fix-20261021/native-attachment-fault-acceptance.sh",
+    "result": "passed"
+  },
+  "independentReview": {
+    "reviewer": "/root/native_acl_acceptance/native_harness_review",
+    "result": "approved",
+    "blockingFindings": 0
+  },
+  "approvedResume": {
+    "command": "/private/tmp/dakia-native-attachment-observation-fix-20261021/native-attachment-fault-acceptance.sh enospc-fill-resume --root /private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2",
+    "preHandoffState": {
+      "device": "/dev/disk8s1",
+      "availableKiB": 0,
+      "fillerBytes": 64970752,
+      "fillerMode": "600",
+      "finalFillEvidencePresent": false,
+      "tailReportPresent": false,
+      "preservedPriorWork": ".enospc-tail-append.work.4897"
+    }
+  }
+}

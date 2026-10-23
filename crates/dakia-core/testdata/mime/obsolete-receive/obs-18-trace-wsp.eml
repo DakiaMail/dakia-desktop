@@ -1,0 +1,13 @@
+X-Dakia-Corpus-Case: obs-18-trace-wsp
+X-Dakia-Corpus-Source: RFC 5322 section 4.5.7; fictional
+Return-Path 	: <sender@example.test>
+Received : from relay.example by mailbox.example; 28 Jul 26 12:01:00 GMT
+Date: Tue, 28 Jul 2026 12:01:00 +0000
+From: Sender <sender@example.test>
+To: Reader <reader@example.test>
+Subject: Fictional obsolete syntax
+Message-ID: <obs-obs-18-trace-wsp@example.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+Fictional body obs-18-trace-wsp.

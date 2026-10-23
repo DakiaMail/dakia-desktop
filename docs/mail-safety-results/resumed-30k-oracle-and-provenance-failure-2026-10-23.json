@@ -1,0 +1,272 @@
+{
+  "schemaVersion": 1,
+  "status": "failed",
+  "evidenceRoot": "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/large-mailbox",
+  "startedAt": "2026-10-23T09:26:03.343Z",
+  "phases": [
+    {
+      "name": "tool-cargo",
+      "command": "cargo",
+      "args": [
+        "--version",
+        "--verbose"
+      ],
+      "timeoutMs": 30000,
+      "startedAt": "2026-10-23T09:26:03.528Z",
+      "status": "passed",
+      "finishedAt": "2026-10-23T09:26:03.609Z"
+    },
+    {
+      "name": "tool-rustc",
+      "command": "rustc",
+      "args": [
+        "-vV"
+      ],
+      "timeoutMs": 30000,
+      "startedAt": "2026-10-23T09:26:03.609Z",
+      "status": "passed",
+      "finishedAt": "2026-10-23T09:26:03.745Z"
+    },
+    {
+      "name": "tool-openssl",
+      "command": "openssl",
+      "args": [
+        "version",
+        "-a"
+      ],
+      "timeoutMs": 30000,
+      "startedAt": "2026-10-23T09:26:03.745Z",
+      "status": "passed",
+      "finishedAt": "2026-10-23T09:26:03.752Z"
+    },
+    {
+      "name": "tool-git",
+      "command": "git",
+      "args": [
+        "--version"
+      ],
+      "timeoutMs": 30000,
+      "startedAt": "2026-10-23T09:26:03.752Z",
+      "status": "passed",
+      "finishedAt": "2026-10-23T09:26:03.760Z"
+    },
+    {
+      "name": "ca",
+      "command": "openssl",
+      "args": [
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/large-mailbox/ca.key",
+        "-out",
+        "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/large-mailbox/ca.crt",
+        "-days",
+        "1",
+        "-subj",
+        "/CN=Dakia-large-mailbox-fixture-CA",
+        "-addext",
+        "basicConstraints=critical,CA:TRUE",
+        "-addext",
+        "keyUsage=critical,keyCertSign,cRLSign"
+      ],
+      "timeoutMs": 30000,
+      "startedAt": "2026-10-23T09:26:03.760Z",
+      "status": "passed",
+      "finishedAt": "2026-10-23T09:26:03.801Z"
+    },
+    {
+      "name": "csr",
+      "command": "openssl",
+      "args": [
+        "req",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/large-mailbox/tls.key",
+        "-out",
+        "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/large-mailbox/tls.csr",
+        "-subj",
+        "/CN=localhost",
+        "-addext",
+        "subjectAltName=DNS:localhost,IP:127.0.0.1",
+        "-addext",
+        "basicConstraints=critical,CA:FALSE",
+        "-addext",
+        "keyUsage=critical,digitalSignature,keyEncipherment"
+      ],
+      "timeoutMs": 30000,
+      "startedAt": "2026-10-23T09:26:03.801Z",
+      "status": "passed",
+      "finishedAt": "2026-10-23T09:26:03.880Z"
+    },
+    {
+      "name": "certificate",
+      "command": "openssl",
+      "args": [
+        "x509",
+        "-req",
+        "-in",
+        "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/large-mailbox/tls.csr",
+        "-CA",
+        "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/large-mailbox/ca.crt",
+        "-CAkey",
+        "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/large-mailbox/ca.key",
+        "-CAcreateserial",
+        "-out",
+        "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/large-mailbox/tls.crt",
+        "-days",
+        "1",
+        "-copy_extensions",
+        "copy"
+      ],
+      "timeoutMs": 30000,
+      "startedAt": "2026-10-23T09:26:03.880Z",
+      "status": "passed",
+      "finishedAt": "2026-10-23T09:26:03.897Z"
+    },
+    {
+      "name": "ca-der",
+      "command": "openssl",
+      "args": [
+        "x509",
+        "-in",
+        "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/large-mailbox/ca.crt",
+        "-outform",
+        "DER",
+        "-out",
+        "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/large-mailbox/ca.der"
+      ],
+      "timeoutMs": 30000,
+      "startedAt": "2026-10-23T09:26:03.897Z",
+      "status": "passed",
+      "finishedAt": "2026-10-23T09:26:03.911Z"
+    },
+    {
+      "name": "build-core",
+      "command": "cargo",
+      "args": [
+        "test",
+        "-p",
+        "dakia-core",
+        "--lib",
+        "--locked",
+        "--no-run",
+        "--message-format=json"
+      ],
+      "timeoutMs": 600000,
+      "startedAt": "2026-10-23T09:26:03.911Z",
+      "status": "passed",
+      "finishedAt": "2026-10-23T09:26:31.486Z"
+    },
+    {
+      "name": "build-cli",
+      "command": "cargo",
+      "args": [
+        "build",
+        "-p",
+        "dakia-cli",
+        "--bin",
+        "dakia",
+        "--locked",
+        "--message-format=json"
+      ],
+      "timeoutMs": 600000,
+      "startedAt": "2026-10-23T09:26:31.486Z",
+      "status": "passed",
+      "finishedAt": "2026-10-23T09:26:35.842Z"
+    },
+    {
+      "name": "smoke",
+      "command": "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/large-mailbox/bin/core",
+      "args": [
+        "large_mailbox_tls_smoke_tests::large_mailbox_tls_smoke",
+        "--ignored",
+        "--exact",
+        "--nocapture"
+      ],
+      "timeoutMs": 120000,
+      "startedAt": "2026-10-23T09:26:36.346Z",
+      "status": "passed",
+      "finishedAt": "2026-10-23T09:28:11.152Z"
+    },
+    {
+      "name": "cli-search",
+      "command": "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/large-mailbox/bin/cli",
+      "args": [
+        "--data-dir",
+        "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/large-mailbox/profile",
+        "--json",
+        "search",
+        "Fictional retained multipart Reader message",
+        "--account",
+        "21c9e79c-c5b8-4d50-9d1e-6ba3d5323000"
+      ],
+      "timeoutMs": 30000,
+      "startedAt": "2026-10-23T09:28:11.152Z",
+      "status": "passed",
+      "finishedAt": "2026-10-23T09:28:13.251Z"
+    }
+  ],
+  "finalizationFailures": [
+    "unexpected capability/LIST command count",
+    "source or revision/dirty provenance drift during smoke"
+  ],
+  "tools": {
+    "node": {
+      "version": "v22.23.2",
+      "executable": "/Users/arsalan/.hermes/node/bin/node"
+    },
+    "cargo": "cargo 1.89.0 (c24e10642 2025-06-23)\nrelease: 1.89.0\ncommit-hash: c24e1064277fe51ab72011e2612e556ac56addf7\ncommit-date: 2025-06-23\nhost: aarch64-apple-darwin\nlibgit2: 1.9.0 (sys:0.20.2 vendored)\nlibcurl: 8.7.1 (sys:0.4.80+curl-8.12.1 system ssl:(SecureTransport) LibreSSL/3.3.6)\nssl: OpenSSL 3.5.0 8 Apr 2025\nos: Mac OS 26.6.2 [64-bit]",
+    "rustc": "rustc 1.89.0 (29483883e 2025-08-04)\nbinary: rustc\ncommit-hash: 29483883eed69d5fb4db01964cdf2af4d86e9cb2\ncommit-date: 2025-08-04\nhost: aarch64-apple-darwin\nrelease: 1.89.0\nLLVM version: 20.1.7",
+    "openssl": "OpenSSL 3.6.4 25 Aug 2026 (Library: OpenSSL 3.6.4 25 Aug 2026)\nbuilt on: Tue Aug 25 11:48:34 2026 UTC\nplatform: darwin64-arm64-cc\noptions:  bn(64,64)\ncompiler: clang -fPIC -arch arm64 -O3 -Wall -DL_ENDIAN -DOPENSSL_PIC -D_REENTRANT -DOPENSSL_BUILDING_OPENSSL -DNDEBUG\nOPENSSLDIR: \"/opt/homebrew/etc/openssl@3\"\nENGINESDIR: \"/opt/homebrew/Cellar/openssl@3/3.6.4/lib/engines-3\"\nMODULESDIR: \"/opt/homebrew/Cellar/openssl@3/3.6.4/lib/ossl-modules\"\nSeeding source: os-specific\nCPUINFO: OPENSSL_armcap=0x987d",
+    "git": "git version 2.48.1"
+  },
+  "limitations": [
+    "Test-only loopback CA injection shares production TLS client, authentication, synchronization, Store and Reader MIME core; production endpoint construction/WebPKI policy is not exercised.",
+    "CLI proof is a local search of the persisted Reader projection. CLI show uses public trust and is outside this fixture.",
+    "This is not native WebKit or large-mailbox UI acceptance.",
+    "The default run-owned target cache is retained for reproducibility and may consume multiple GiB. No existing profile, cache, or evidence is removed.",
+    "Source digest binds governed file bytes. Revision and dirty status are separate provenance and do not assert a clean checkout."
+  ],
+  "sourceBefore": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "670652ff0da3121eabc3f2ede32d2089828588da85904de8e17ef602a69d6870",
+    "fileCount": 1027
+  },
+  "provenanceBefore": {
+    "revision": "a02f578b6c36f284dd3dbff3b308360c68cc4daa",
+    "dirty": ""
+  },
+  "profileRoot": "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/large-mailbox/profile",
+  "targetDirectory": "/private/tmp/dakia-l003-target",
+  "executables": [
+    {
+      "role": "core",
+      "builtPath": "/private/tmp/dakia-l003-target/debug/deps/dakia_core-ef845a9a22d2c538",
+      "executedPath": "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/large-mailbox/bin/core",
+      "sha256": "f8e6b7cf71b93d3d2d40e09106b6fe0a053b9e8d6c58f2bac2864b43f11effd5"
+    },
+    {
+      "role": "cli",
+      "builtPath": "/private/tmp/dakia-l003-target/debug/dakia",
+      "executedPath": "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/large-mailbox/bin/cli",
+      "sha256": "b21f05d5c00a559213cc56b69586b9a992fc71fd8bae63b4614eeb64bb9dbddd"
+    }
+  ],
+  "auditStatus": "failed",
+  "sourceAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "670652ff0da3121eabc3f2ede32d2089828588da85904de8e17ef602a69d6870",
+    "fileCount": 1027
+  },
+  "provenanceAfter": {
+    "revision": "a02f578b6c36f284dd3dbff3b308360c68cc4daa",
+    "dirty": "?? docs/mail-safety-results/resumed-6706-source-2026-10-23.json\n?? docs/mail-safety-results/resumed-6706-source-manifest-2026-10-23.json\n"
+  },
+  "failure": "CLI local search identity/epoch/cached body differs",
+  "finishedAt": "2026-10-23T09:28:13.653Z"
+}

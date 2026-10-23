@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T16:52:44.926211+00:00",
+  "lane": "native-packaged-preflight",
+  "status": "ready-awaiting-full-source-baseline",
+  "sourceTree": {
+    "digest": "a7a9edfa42117d74424c4ea25c646aca6be0cd6912ddad791d68002083bdb1ed",
+    "fileCount": 937
+  },
+  "appIdentity": {
+    "displayName": "Dakia Fictional Provider Reader",
+    "bundleIdentifier": "dev.dakia.fictional-provider-reader.run-OTAMH2",
+    "appPath": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.OTAMH2/Dakia Fictional Provider Reader.app",
+    "mode": "reuse-approved-identity; guarded candidate swap and original restoration"
+  },
+  "review": "Independent GO for nonfatal notification readiness, fail-closed delivery, platform-specific IPC permissions, exact LaunchServices registration and owned Swift cache.",
+  "artifacts": [
+    {
+      "path": "scripts/native-provider-reader-acceptance.sh",
+      "sha256": "2d543a203f94aff48e4c696e4c1bd6a60e6afa3db2b282a871251fa9f0935ab7",
+      "bytes": 101028,
+      "mode": "0o700"
+    },
+    {
+      "path": "scripts/native-provider-reader-fixture.node-test.mjs",
+      "sha256": "bfa4e4a876915bd7e655ad5ff0246ca9e82e13c6e482f70045f48e2f26b2bbde",
+      "bytes": 77921,
+      "mode": "0o644"
+    },
+    {
+      "path": "/private/tmp/dakia-final-frozen-source-file-manifest-20261021-notification-safe.json",
+      "sha256": "3a8497de99abf429fc8712bef7a4bebff53f3d1ee2634159cddcb7e716757ebf",
+      "bytes": 195605,
+      "mode": "0o600"
+    },
+    {
+      "path": "/private/tmp/dakia-l013-native-resource-runner-notification-safe.mjs",
+      "sha256": "ae7ff66796f6223e568083fc92321666b53549e521a84e7899e036be0f3f4754",
+      "bytes": 24288,
+      "mode": "0o700"
+    },
+    {
+      "path": "/private/tmp/dakia-l013-native-resource-runner-notification-safe-receipt.json",
+      "sha256": "8dea2c97f9b9f1b66f40f4c2a98e00ae02932c3f61640c9d6790b33b1acddbcb",
+      "bytes": 2058,
+      "mode": "0o600"
+    },
+    {
+      "path": "/private/tmp/dakia-g013-fullfetch-runner/final-build-provenance-notification-safe.json",
+      "sha256": "b52d4b030f4b3637aa1edb6626a4504b76b87e3359fbdbc6142d30d13c3a2e51",
+      "bytes": 3788,
+      "mode": "0o600"
+    },
+    {
+      "path": "/private/tmp/dakia-g013-fullfetch-runner/final-execution-binding-notification-safe.json",
+      "sha256": "5640e4874e6714e5c7075dd0313d8c4029f529397255d7c63de0c14740dcfff1",
+      "bytes": 4568,
+      "mode": "0o600"
+    },
+    {
+      "path": "/private/tmp/dakia-h016-provider-reader-adapter.mjs",
+      "sha256": "965c3f774e5561c106212896f735fe89cd51d4c87f76914072b1933c2e0a1813",
+      "bytes": 14751,
+      "mode": "0o700"
+    },
+    {
+      "path": "/private/tmp/dakia-h016-faithful-upgrade-provider-reader.mjs",
+      "sha256": "d06ec3717c2ef726e7adf7e2915e33e4bc394257b92bd7689ac98e8a2efb09fd",
+      "bytes": 57428,
+      "mode": "0o700"
+    }
+  ],
+  "sourceBaseline": "Three unchanged full source runs in progress outside sandbox; no native launch before they pass.",
+  "historicalFailure": "XQVKjR failed SIGABRT6 before ACL/UI; retained separately, original restored.",
+  "limitations": [
+    "No candidate compile, launch, ACL, WebKit, attachment, resource or upgrade pass is established by this preflight.",
+    "G013 runner reuses byte-identical compiled inputs; no rebuild claim.",
+    "The H016 helper receives fresh candidate hashes and source digest from the actual post-exit handoff.",
+    "Ad-hoc fictional arm64 debug candidate only; no Developer ID signing, notarization or release publication."
+  ]
+}

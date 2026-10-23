@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-21T07:46:08Z",
+  "sourceRevision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+  "lane": "dependency-security-audit",
+  "status": "failed",
+  "userDisclosureApproval": true,
+  "command": "npm audit --package-lock-only --ignore-scripts --audit-level=low --registry=https://registry.npmjs.org --json",
+  "exitCode": 1,
+  "toolEnvironment": {
+    "npm": "10.9.8",
+    "node": "v22.23.2",
+    "registry": "https://registry.npmjs.org"
+  },
+  "inputs": {
+    "packageLock": {
+      "path": "package-lock.json",
+      "sha256": "88d13fbfec1968f992106fab1f8d7fc9e8fc78049cfc26300b26c584d78c3db1"
+    },
+    "packageManifest": {
+      "path": "package.json",
+      "sha256": "3fdab5c887e52dde4e46087604f2624f4790fc5675588ad53c1bce6dd68a3ebe"
+    }
+  },
+  "metadata": {
+    "vulnerabilities": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 1,
+      "critical": 0,
+      "total": 1
+    },
+    "dependencies": {
+      "prod": 56,
+      "dev": 208,
+      "optional": 63,
+      "peer": 8,
+      "peerOptional": 0,
+      "total": 263
+    }
+  },
+  "vulnerabilities": [
+    {
+      "package": "vite",
+      "installedVersion": "7.3.6",
+      "direct": true,
+      "severity": "high",
+      "affectedRange": "7.0.0 - 7.3.6",
+      "fixAvailable": true,
+      "advisories": [
+        {
+          "id": "GHSA-698v-4r3x-3vcv",
+          "severity": "moderate",
+          "affectedRange": ">=7.0.0 <=7.3.6",
+          "title": "launch-editor: escapeCmdArgs() omits % escaping on Windows"
+        },
+        {
+          "id": "GHSA-r825-w8mm-5pxw",
+          "severity": "moderate",
+          "affectedRange": ">=7.0.0 <=7.3.6",
+          "title": "launch-editor: Editor CLI flag misinterpretation causing arbitrary command execution for some editors"
+        },
+        {
+          "id": "GHSA-587h-7wmj-h5pm",
+          "severity": "high",
+          "affectedRange": ">=7.0.0 <=7.3.6",
+          "title": "launch-editor: fs.existsSync() existence check can be bypassed on Windows"
+        }
+      ]
+    }
+  ],
+  "allowedWarnings": [],
+  "evidence": {
+    "reportPath": "/private/tmp/dakia-dependency-audit-2026-10-21-npm.json",
+    "reportSha256": "d61d40308626886d16bd8aa8180f3947318d8954032a071def562dfcc36278cd",
+    "stderrPath": "/private/tmp/dakia-dependency-audit-2026-10-21-npm.stderr",
+    "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "limitations": [
+    "This is a package-lock-only registry audit. It does not execute install scripts or validate runtime exploitability.",
+    "The private JSON report is referenced by hash but its retention is not guaranteed."
+  ]
+}

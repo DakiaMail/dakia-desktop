@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-22T06:37:12.005Z",
+  "status": "passed-and-applied-source-only",
+  "scope": "The standard noninteractive source lane for the 09a5 recovery-window candidate, followed by an exact primary application. Native acceptance remains pending.",
+  "sourceLane": {
+    "sourceDigest": "09a533c681e40a8a36fbb0159a5c5de025c43c88dbca3dbdc7b0abec91aad2c4",
+    "sourceFileCount": 956,
+    "revision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+    "status": "passed",
+    "runs": 3,
+    "commandsPerRun": [17, 17, 17],
+    "failedCommands": 0,
+    "retries": "none recorded",
+    "stdin": "noninteractive /dev/null",
+    "sourceBefore": {
+      "algorithm": "sha256-path-and-content-manifest",
+      "digest": "09a533c681e40a8a36fbb0159a5c5de025c43c88dbca3dbdc7b0abec91aad2c4",
+      "fileCount": 956
+    },
+    "sourceAfter": {
+      "algorithm": "sha256-path-and-content-manifest",
+      "digest": "09a533c681e40a8a36fbb0159a5c5de025c43c88dbca3dbdc7b0abec91aad2c4",
+      "fileCount": 956
+    },
+    "privateReport": {
+      "path": "/private/tmp/dakia-next-fatal-recovery-evidence-v3-20261022/mail-safety-source-repeat3-09a533c6-noninteractive.json",
+      "sha256": "53188c21b68b92c23c22b95b394d2100f85251087ad0ced945d8dd27066f181b"
+    },
+    "privateAcceptance": {
+      "path": "/private/tmp/dakia-next-fatal-recovery-evidence-v3-20261022/final-source-lane-acceptance.json",
+      "sha256": "d937163ebda8a154715fdab06c4c63fbb290d3d8778118cfc4c69e354c000782"
+    }
+  },
+  "primaryApplication": {
+    "status": "applied-and-source-equivalent",
+    "appliedChanges": {
+      "replacements": 16,
+      "additions": 4,
+      "removals": 0
+    },
+    "sourceAfter": {
+      "algorithm": "sha256-path-and-content-manifest",
+      "digest": "09a533c681e40a8a36fbb0159a5c5de025c43c88dbca3dbdc7b0abec91aad2c4",
+      "fileCount": 956
+    },
+    "privateJournal": {
+      "path": "/private/tmp/dakia-source-application-09a5.3319yx8n/journal.json",
+      "sha256": "158d26c04aef84bfa74b10039d3908887e8d1f50ecf94726411c80c75b28df4a"
+    },
+    "automaticAbruptTerminationRecovery": "not-supported"
+  },
+  "chronology": [
+    "The earlier eba4 manual-harness source failure and its provenance amendment remain retained.",
+    "The repaired 4e69 standard run was interrupted before completion and is not a pass.",
+    "The 09a5 result supersedes only the recovery-window source candidate status. It does not reclassify prior failures or native evidence."
+  ],
+  "limitations": [
+    "This establishes source gates only. Ignored credentialed and independent-server tests remain separate evidence.",
+    "No 09a5 deep, fuzz, performance, dependency-audit refresh, native WebKit, provider, package, release, or UI acceptance is claimed.",
+    "The current native 09a5 replay is pending."
+  ]
+}

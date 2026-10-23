@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "status": "passed-bounded-native-fatal-exit",
+  "recordedAtUtc": "2026-10-22T05:24:13.229Z",
+  "scope": "Two sealed fictional fatal-startup profiles were observed by the user, dismissed through Quit Dakia, and verified to exit with code 1 without changing durable profile files. This is not a general startup, recovery, release or upgrade acceptance claim.",
+  "sourceTree": {
+    "digest": "04b1368f7a758b2ad77d95442a2d5a0d3b7ce74f1f100bb59967aeef8b9ad471",
+    "fileCount": 952,
+    "applicationReceipt": "docs/mail-safety-results/source-application-04b-2026-10-22.json"
+  },
+  "candidate": {
+    "desktopSha256": "ab4ec8052fd398b8433119e36edb331089c4e8d4673499fd2ec164c2cc7b373d",
+    "cliSha256": "a3e358035e9503b9ce1416f6480ff010c4acb2129f643b76869b51cd7edbb359",
+    "expectedExit": { "code": 1, "signal": null }
+  },
+  "cases": [
+    {
+      "name": "conflicting-send-attempts",
+      "evidenceId": "84054b75-a268-4f16-8378-efd1f3ef3c74",
+      "humanObservation": {
+        "expectedRecoveryTextConfirmed": true,
+        "noInboxConfirmed": true,
+        "quitDakiaClicked": true,
+        "pathBasename": "human-observation.json",
+        "sha256": "844fde72bced6c1392b47b724191c8e8aa70b40564f922ec48eb6a4ee6b3d330"
+      },
+      "processExit": {
+        "pid": 79010,
+        "code": 1,
+        "signal": null,
+        "pathBasename": "exit.json",
+        "sha256": "bb8ecd8abe37ff444c143cb0a93689a8b1b42427a1f96e7f34784566e93d5862"
+      },
+      "durableFilesUnchanged": {
+        "beforeSha256": "87b1267a80154c00ad3080e2f5516ff13b1b8b828ee41d35d73b54da88961eb7",
+        "afterSha256": "87b1267a80154c00ad3080e2f5516ff13b1b8b828ee41d35d73b54da88961eb7",
+        "postExitBoundarySha256": "5a2af9f79d8c4725c761a5c4f7f9f9ad39960eecdf86c14dc775b4e05964a244"
+      }
+    },
+    {
+      "name": "corrupt-database",
+      "evidenceId": "8cafd8e2-529a-40f9-b154-66b6bedcf714",
+      "humanObservation": {
+        "expectedRecoveryTextConfirmed": true,
+        "noInboxConfirmed": true,
+        "quitDakiaClicked": true,
+        "pathBasename": "human-observation.json",
+        "sha256": "f5f807f153d39de86d79f7d371d52e10f6bf9f3e87c2a504a619f505e527a07b"
+      },
+      "processExit": {
+        "pid": 33818,
+        "code": 1,
+        "signal": null,
+        "pathBasename": "exit.json",
+        "sha256": "b72c5260be5e9958f34806d71b13a09b8837f5ea72402f5f353f41c5e4ee6c27"
+      },
+      "durableFilesUnchanged": {
+        "beforeSha256": "2e237a9212ead3387728354db0cf04ebf82f4591f4fb7d50e833474e9858b2f1",
+        "afterSha256": "2e237a9212ead3387728354db0cf04ebf82f4591f4fb7d50e833474e9858b2f1",
+        "postExitBoundarySha256": "52b2d5dac3daf65777ceaa723ee36cfb6075ab364d82c2b0859d83f2050d5fa0"
+      }
+    }
+  ],
+  "limits": [
+    "The system-owned alert content was inspected and reported by the user. No accessibility bypass was used.",
+    "The same-profile restart helper refused its wrong-build path before launch, so restart is unaccepted.",
+    "This does not establish future-version handling beyond the two fixture profiles, migration recovery, automatic rollback, packaged release acceptance, signing, notarization, updater delivery, or provider behavior."
+  ]
+}

@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "status": "failed",
+  "capturedAt": "2026-10-20",
+  "scope": "current native dev fictional-provider attempt, not final acceptance",
+  "acl": {
+    "error": "timed out waiting for main-window Wry IPC control",
+    "executable": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.GYy44p/Dakia Fictional Provider Reader.app/Contents/MacOS/dakia-desktop",
+      "pid": 94931,
+      "sha256": "e893e2987b4e5f1b10e657f553a79f035ae4ebd0828aed62bba3ef7a182222f7"
+    },
+    "feature": "native-mail-safety-fixture",
+    "localProbe": {
+      "label": "native-acl-local-probe",
+      "url": "http://127.0.0.1:1420/__dakia_native_acl_probe__"
+    },
+    "probeCommands": [
+      "set_message_read",
+      "save_attachment",
+      "open_external_url",
+      "send_desktop_notification",
+      "open_settings_window",
+      "plugin:webview|create_webview_window",
+      "plugin:opener|open_url",
+      "plugin:notification|notify"
+    ],
+    "probeFlag": "DAKIA_NATIVE_MAIL_SAFETY_ACL_PROBE",
+    "profile": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.GYy44p/profile",
+    "remoteProbe": {
+      "label": "native-acl-remote-probe",
+      "url": "http://127.0.0.1:51519/probe?nonce=561174edb97e4fce897737f8db1200c1"
+    },
+    "schemaVersion": 1,
+    "status": "failed"
+  },
+  "observations": {
+    "webview": "http://127.0.0.1:1420/",
+    "providerMessagesVisible": 3,
+    "readerBodyVisible": true,
+    "embeddedSvgVisibleText": [
+      "Embedded image loaded locally",
+      "Embedded SVG stays inert"
+    ],
+    "unsafeAttachmentWarningVisible": true,
+    "initialRequests": {
+      "schemaVersion": 2,
+      "startedAt": "2026-10-20T19:50:48.473Z",
+      "capturedAt": "2026-10-20T19:52:02.716Z",
+      "totalRequests": 0,
+      "tlsContactAttempts": 0,
+      "totalContacts": 0,
+      "counts": {},
+      "requests": []
+    },
+    "mainControlActualTitle": "resolved actual Wry IPC response [], but HTTP collector failed",
+    "consentAndAttachmentSave": "not exercised before mandatory ACL report failure stopped owned app"
+  },
+  "limitations": [
+    "MIME source changed after this candidate compiled; not final MIME acceptance.",
+    "No native ACL pass: collector timed out."
+  ],
+  "artifactsRoot": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.GYy44p",
+  "cleanup": "runner stopped owned app/Vite/server/container and retained evidence"
+}

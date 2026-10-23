@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 1,
+  "lane": "optional-credentialed-provider-bounded-production-proof",
+  "status": "passed-for-exact-bounded-inbox-sent-path",
+  "recordedAt": "2026-10-21",
+  "provider": "gmail",
+  "authenticationMethod": "app_password",
+  "accountScope": "one explicit disposable allowlisted account",
+  "roundtripId": "45bacd384f0c4a74893f14e4fea23d9a",
+  "execution": {
+    "rootSession": 10309,
+    "processExitCode": 0,
+    "elapsedSeconds": 4.073,
+    "outcome": "passed",
+    "resultCode": "b004_provider_proof_wrapper_passed",
+    "remoteMutationRequested": false,
+    "credentialsFileUnchanged": true,
+    "rawProviderObservationsRetained": false
+  },
+  "productionBoundaryProof": {
+    "scope": "one known existing message represented by one physical INBOX copy and one physical Sent copy",
+    "imapTls": "certificate_verified_tls_1_2_or_newer",
+    "wrapperListResolutionVerified": true,
+    "exactMessageIdCopies": 2,
+    "preRunnerInvarianceVerified": true,
+    "postRunnerInvarianceVerified": true,
+    "productionFullFetch": true,
+    "parserVerified": true,
+    "epochFencedStore": true,
+    "cachePublished": true,
+    "storeReopenVerified": true,
+    "physicalCopies": 2,
+    "distinctPhysicalLocators": true,
+    "displayRepresentatives": 1,
+    "expectedSubjectSha256": "13fd2499ca784a799eab087ec855ec10fbf08f998a42eb20ff775b52ef666f49",
+    "expectedBodySha256": "13fd2499ca784a799eab087ec855ec10fbf08f998a42eb20ff775b52ef666f49",
+    "runnerResultCode": "b004_narrow_provider_identity_parser_store_display"
+  },
+  "executionIdentity": {
+    "wrapper": {
+      "artifact": "dakia-b004-provider-proof-wrapper-v4-final-freeze-20261021.py",
+      "sha256": "120c1f691d1644a9c95e72d36d4610059560e4f0f173c2f4b0598e0f6aac9bf7"
+    },
+    "runner": {
+      "artifact": "dakia-b004-provider-proof-c56-final-v3",
+      "sha256": "ba0054e1c8e9128b299ee66a166339aed53eddea974db0fc0b3ef9762f2d0f13",
+      "sourceDigest": "c56d2d806d8623dd14c858c8a8362729655496036405ad8c24162fce02a9a85b"
+    },
+    "finalFrozenSource": {
+      "digest": "8218b1f3621ee3cba9b2cb697275f0d85c0cac6abc39b5b90a817ed876abe605",
+      "manifestSha256": "6207c844963d47316127e254b9e55a4de7d7dab9cffcb38b8b8c5cd64abd80ca"
+    },
+    "compiledInputEquivalence": {
+      "verified": true,
+      "fileCount": 657,
+      "scope": [
+        "root Cargo.toml and Cargo.lock",
+        ".cargo",
+        "crates/dakia-core",
+        "crates/dakia-cli",
+        "vendor"
+      ]
+    },
+    "pythonRuntime": {
+      "implementation": "CPython",
+      "version": "3.14.5",
+      "executableRealpath": "/opt/homebrew/Cellar/python@3.14/3.14.5/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+      "opensslVersion": "OpenSSL 3.6.4 25 Aug 2026"
+    }
+  },
+  "evidence": {
+    "publicReceipt": {
+      "path": "/private/tmp/dakia-b004-public-receipt-inol6vpz/b004-provider-proof-receipt.json",
+      "sha256": "38a8a12efe7fe13b648524749031c95b77652e0449016e8dc8c711e05dcdaaf1",
+      "mode": "0600"
+    },
+    "receiptSchemaVersion": 1,
+    "providerScope": "dedicated_disposable_gmail"
+  },
+  "privacyAndMutationChecks": {
+    "newMessageSubmitted": false,
+    "mailboxMutationRequested": false,
+    "remoteMutationRequested": false,
+    "credentialsFileUnchanged": true,
+    "rawProviderObservationsRetained": false,
+    "accountIdentifierRecordedInThisReceipt": false,
+    "roundtripTestIdRecorded": true,
+    "rfcMessageIdRecordedInThisReceipt": false,
+    "gmailMessageIdRecordedInThisReceipt": false,
+    "providerErrorRecordedInThisReceipt": false,
+    "messageContentRecordedInThisReceipt": false
+  },
+  "retainedHistoricalEvidence": [
+    {
+      "path": "docs/mail-safety-results/b004-private-provider-proof-harness-diagnostic-2026-10-21.json",
+      "sha256": "78662d59c2eb7c40f51415e3f8204ee5ab98d51261b70f9c6fe7ac3ee032acb1",
+      "status": "two earlier harness failures retained",
+      "detail": "The original wrapper returned imap_connection_failed without enough evidence to attribute a cause. V2 returned imap_capability_invalid because it decoded CPython tuple[str] capability values before LOGIN."
+    },
+    {
+      "path": "docs/mail-safety-results/gmail-read-only-recovery-frozen-timeout-2026-10-21.json",
+      "sha256": "1205fe6da6dcac68ef57c0645724c20ca0af2a9ab6d5054648a8554a08ea1e69",
+      "status": "earlier provider timeout retained"
+    },
+    {
+      "path": "docs/mail-safety-results/gmail-readonly-final-build-timeout-2026-10-21.json",
+      "sha256": "9b1c08f56731154cf9ba39e7bcf745a9bb80b64603169578e050fd38d035c58c",
+      "status": "earlier provider timeout retained"
+    },
+    {
+      "path": "docs/mail-safety-results/gmail-three-readonly-recovery-observations-2026-10-21.json",
+      "sha256": "7be1021e1bee184a6daadecbf02697e3960f6bad717b97bfc80b8d3fce4bb798",
+      "status": "three later narrow recovery observations passed"
+    }
+  ],
+  "limitations": [
+    "This proves one bounded production fetch, parse, Store, cache, reopen, and display-representative path for one known existing message in one disposable Gmail account.",
+    "It does not exercise sync_all or snapshot finalization.",
+    "The wrapper resolved INBOX and Sent for its safety checks, but the proof does not validate Dakia's production LIST parser or mailbox-plan resolution.",
+    "The Gmail message identity was observed remotely and was not used as a Store deduplication key.",
+    "It does not prove broad Gmail label behavior, large or changing mailboxes, multiple accounts, another provider, reconnect or long-duration reliability.",
+    "It does not prove the Reader frontend, native WebKit rendering, remote-content blocking, attachment saving, mutations, or sending.",
+    "This pass does not explain or erase the earlier harness failures or approximately 45-second provider timeouts. Those records remain separate evidence."
+  ]
+}

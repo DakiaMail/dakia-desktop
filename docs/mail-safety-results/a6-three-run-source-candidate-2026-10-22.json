@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-22T05:44:56.593Z",
+  "status": "passed-on-unapplied-candidate",
+  "scope": "Three consecutive source-gate runs for the sealed a6 candidate only. The candidate is not the primary checkout and this receipt does not carry native, provider, deep, performance, audit, package, or release evidence forward.",
+  "candidate": {
+    "sourceDigest": "a6ccaa7579e1a8014a4e8a0a26accd28da811cf54fed06a8112d9efb9f4bbd84",
+    "sourceFileCount": 952,
+    "revision": "796c297dbc4ddde75a5bfc771a629d7524bc984a",
+    "manifestSha256": "57c109a9e88e3e89124e6a54a0af879d331cb15318b593d0483e41d1931df9fd",
+    "deltaFromApplied04bSha256": "6f0d219af769e316fcb75a74049faa023e9526b5ba9bbae00f6f4207bc08304b",
+    "changedFilesFromApplied04b": 8,
+    "appliedToPrimary": false
+  },
+  "execution": {
+    "status": "passed",
+    "iterations": 3,
+    "commandsPerIteration": 17,
+    "totalGateExecutions": 51,
+    "failedCommands": 0,
+    "retries": "none recorded",
+    "sourceDigestBefore": "a6ccaa7579e1a8014a4e8a0a26accd28da811cf54fed06a8112d9efb9f4bbd84",
+    "sourceDigestAfter": "a6ccaa7579e1a8014a4e8a0a26accd28da811cf54fed06a8112d9efb9f4bbd84",
+    "startedAt": "2026-10-22T05:25:38.412Z",
+    "finishedAt": "2026-10-22T05:42:48.367Z"
+  },
+  "selectedObservedCountsPerIteration": {
+    "frontend": {
+      "passed": 646,
+      "skipped": 2,
+      "passedFiles": 65,
+      "skippedFiles": 3
+    },
+    "coreLibrary": {
+      "passed": 760,
+      "ignored": 13
+    },
+    "scripts": {
+      "passed": 254,
+      "skipped": 0
+    },
+    "standardsProfile": {
+      "clauses": 102,
+      "tested": 86,
+      "intentionallyTolerated": 11,
+      "unsupported": 5
+    },
+    "fixtureValidation": {
+      "fixtures": 81
+    },
+    "coupled": {
+      "rustCommands": 6,
+      "frontendCommands": 11
+    },
+    "note": "Fixture-enabled and coupled Rust tests overlap workspace targets and are not summed as independent test counts."
+  },
+  "evidence": {
+    "privateSourceReport": {
+      "path": "/private/tmp/dakia-final-expanded-evidence-v3-20261022.AITcN4/mail-safety-source-repeat3-a6ccaa75.json",
+      "sha256": "08d10da472f2f77bf5f68430aa7783ae5e1cb5811c1b06d473464e1ae5f09318"
+    },
+    "privateLog": {
+      "path": "/private/tmp/dakia-final-expanded-evidence-v3-20261022.AITcN4/mail-safety-source-repeat3-a6ccaa75.log",
+      "sha256": "831c039d429a5d33fdd7bdbfe64948ef81174918b05299ef824d5b867b0a9d15"
+    },
+    "privateAcceptance": {
+      "path": "/private/tmp/dakia-final-expanded-evidence-v3-20261022.AITcN4/final-source-lane-acceptance.json",
+      "sha256": "e3903afd0009a4776400e0ddfe459601c45baaeaafb91f6ec64c409efc6cea97"
+    },
+    "componentInputComparison": "docs/mail-safety-results/a6-component-evidence-equivalence-from-04b-2026-10-22.json"
+  },
+  "limitations": [
+    "This is a source lane only. Ignored credentialed and independent-server tests remain separate evidence.",
+    "No a6 deep, fuzz, performance, dependency-audit refresh, native WebKit, packaged upgrade, live provider, release, or UI result was executed or carried forward here.",
+    "The applied primary checkout remains 04b. A later primary application and its own evidence would be required before treating this candidate result as primary-checkout evidence."
+  ]
+}

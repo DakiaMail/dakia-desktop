@@ -1,0 +1,55 @@
+Window: "New message", App: Dakia Fictional Provider Reader.
+0 standard window New message, Secondary Actions: Raise
+	1 scroll area
+		2 HTML content Description: New message, URL: 127.0.0.1:1420/?view=compose&seedKey=9d7640c3-9448-4843-bcac-f49327866600
+			3 container
+				4 container New message
+					5 text To
+					6 text field (settable) To
+					7 button (collapsed) Cc · Bcc, Secondary Actions: Expand
+					8 text From
+					9 pop up button From, Value: Fictional Reader Two <fictional-reader-two@localhost>
+					10 text Subject
+					11 text field (settable) Subject, Value: Fwd: Account two collision safety check
+				12 container Formatting
+					13 text entry area (settable) Write your message…, Value: 
+---------- Original message ----------
+From: Fictional Provider <provider@example.test>
+Date: 21/10/2026, 15:10:26
+Subject: Account two collision safety check
+To: Fictional Reader Two <fictional-reader-two@localhost>
+
+Only account two owns this distinct cached body and attachment.
+						14 container (settable)
+							15 text (settable) ---------- Original message ---------- From: Fictional Provider <provider@example.test> Date: 21/10/2026, 15:10:26 Subject: Account two collision safety check To: Fictional Reader Two <fictional-reader-two@localhost>
+						16 text (settable) Only account two owns this distinct cached body and attachment.
+					17 toolbar Formatting
+						18 button Bold
+						19 button Italic
+						20 button Underline
+						21 button Strikethrough
+						22 button Quote
+						23 button Code block
+						24 button Bulleted list
+						25 button Numbered list
+						26 button Add link
+						27 button Clear formatting
+				28 container Attachments
+					29 text account-two-notes.txt 39 B
+					30 button Remove account-two-notes.txt
+				31 button (disabled) Send ⌘↵
+				32 button Attach
+				33 text Rich text
+	34 close button
+	35 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	36 minimize button
+37 menu bar
+	38 Dakia Fictional Provider Reader
+	39 File
+	40 Edit
+	41 Mailbox
+	42 Message
+	43 Window
+	44 Help
+
+The focused UI element is 6 text field (settable) To

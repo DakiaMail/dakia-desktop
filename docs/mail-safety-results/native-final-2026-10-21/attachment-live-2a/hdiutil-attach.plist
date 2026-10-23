@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>system-entities</key>
+	<array>
+		<dict>
+			<key>content-hint</key>
+			<string>Apple_HFS</string>
+			<key>dev-entry</key>
+			<string>/dev/disk8s1</string>
+			<key>mount-point</key>
+			<string>/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.dzkRZz/Downloads</string>
+			<key>potentially-mountable</key>
+			<true/>
+			<key>unmapped-content-hint</key>
+			<string>48465300-0000-11AA-AA11-00306543ECAC</string>
+			<key>volume-kind</key>
+			<string>hfs</string>
+		</dict>
+		<dict>
+			<key>content-hint</key>
+			<string>GUID_partition_scheme</string>
+			<key>dev-entry</key>
+			<string>/dev/disk8</string>
+			<key>potentially-mountable</key>
+			<false/>
+			<key>unmapped-content-hint</key>
+			<string>GUID_partition_scheme</string>
+		</dict>
+	</array>
+</dict>
+</plist>

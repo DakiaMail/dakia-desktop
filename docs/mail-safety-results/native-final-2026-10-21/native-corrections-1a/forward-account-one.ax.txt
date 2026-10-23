@@ -1,0 +1,127 @@
+Window: "New message", App: Dakia Fictional Provider Reader.
+0 standard window New message, Secondary Actions: Raise
+	1 scroll area
+		2 HTML content Description: New message, URL: 127.0.0.1:1420/?view=compose&seedKey=bab3d4e3-62f3-4b54-87ae-d4e678133694
+			3 container
+				4 container New message
+					5 text To
+					6 text field (settable) To
+					7 button (collapsed) Cc · Bcc, Secondary Actions: Expand
+					8 text From
+					9 pop up button From, Value: Fictional Reader <fictional-reader@localhost>
+					10 text Subject
+					11 text field (settable) Subject, Value: Fwd: Remote content safety check
+				12 container Formatting
+					13 text entry area (settable) Write your message…, Value: 
+---------- Original message ----------
+From: Fictional Provider <provider@example.test>
+Date: 21/10/2026, 15:10:26
+Subject: Remote content safety check
+To: Fictional Reader <fictional-reader@localhost>
+
+Fictional provider body reached the real Reader.
+
+Native remote-resource matrix marker.
+
+Remote CSS and font marker stays readable.
+
+[image: Direct remote fixture][image: Redirected remote fixture][image: Encoded remote fixture][image: Protocol-relative remote fixture][image: Srcset must stay inert][group: Local embedded safety marker][group: Embedded SVG active-content canary][image: Event handler canary][image: Local file canary][image: Asset canary][image: Tauri canary][image: IPC canary]
+Native mailto regression anchors. Open each in Dakia compose and close without sending.
+
+<u>[Native mailto CR To rejection](mailto:fictional%40example.test%0DBcc%3Afictional%40example.test?subject=Fictional%20report)</u>
+
+<u>[Native mailto CR Cc rejection](mailto:fictional%40example.test?cc=fictional%40example.test%0DBcc%3Afictional%40example.test&subject=Fictional%20report)</u>
+
+<u>[Native mailto CR subject rejection](mailto:fictional%40example.test?subject=Fictional%20report%0DX-Injected%3Ayes)</u>
+
+<u>[Native mailto LF To rejection](mailto:fictional%40example.test%0ABcc%3Afictional%40example.test?subject=Fictional%20report)</u>
+
+<u>[Native mailto LF Cc rejection](mailto:fictional%40example.test?cc=fictional%40example.test%0ABcc%3Afictional%40example.test&subject=Fictional%20report)</u>
+
+<u>[Native mailto LF subject rejection](mailto:fictional%40example.test?subject=Fictional%20report%0AX-Injected%3Ayes)</u>
+
+<u>[Native mailto double encoded To](mailto:%22Fictional%250D%250AName%22%20%3Cfictional%40example.test%3E?subject=Fictional%20report)</u>
+
+<u>[Native mailto double encoded Cc](mailto:fictional%40example.test?cc=%22Fictional%250D%250AName%22%20%3Cfictional%40example.test%3E&subject=Fictional%20report)</u>
+
+<u>[Native mailto double encoded subject](mailto:fictional%40example.test?subject=Fictional%250D%250AX-Not-A-Header%3Ayes)</u>
+
+<u>[Native mailto double encoded body](mailto:fictional%40example.test?subject=Fictional%20report&body=Literal%20keeps%20%250D%250Atext)</u>
+
+<u>[Native mailto body CRLF](mailto:fictional%40example.test?subject=Fictional%20report&body=First%20line%0D%0ASecond%20line)</u>
+
+Active-content canaries must remain inert before and after consent.
+
+On 17 October 2026, Fictional Sender wrote:
+> Fictional quoted history remains inside the isolated history iframe.
+> 
+
+						14 container (settable)
+							15 text (settable) ---------- Original message ---------- From: Fictional Provider <provider@example.test> Date: 21/10/2026, 15:10:26 Subject: Remote content safety check To: Fictional Reader <fictional-reader@localhost>
+						16 text (settable) Fictional provider body reached the real Reader.
+						17 text (settable) Native remote-resource matrix marker.
+						18 text (settable) Remote CSS and font marker stays readable.
+						19 image (settable) Direct remote fixture
+						20 image (settable) Redirected remote fixture
+						21 image (settable) Encoded remote fixture
+						22 image (settable) Protocol-relative remote fixture
+						23 image (settable) Srcset must stay inert
+						24 container (settable) Local embedded safety marker
+							25 text Embedded image loaded locally
+						26 container (settable) Embedded SVG active-content canary
+							27 text Embedded SVG stays inert
+							28 image
+						29 image (settable) Event handler canary
+						30 image (settable) Local file canary
+						31 image (settable) Asset canary
+						32 image (settable) Tauri canary
+						33 image (settable) IPC canary
+						34 text (settable) Native mailto regression anchors. Open each in Dakia compose and close without sending.
+						35 link (settable) Native mailto CR To rejection, Value: mailto:fictional%40example.test%0DBcc%3Afictional%40example.test?subject=Fictional%20report
+						36 link (settable) Native mailto CR Cc rejection, Value: mailto:fictional%40example.test?cc=fictional%40example.test%0DBcc%3Afictional%40example.test&subject=Fictional%20report
+						37 link (settable) Native mailto CR subject rejection, Value: mailto:fictional%40example.test?subject=Fictional%20report%0DX-Injected%3Ayes
+						38 link (settable) Native mailto LF To rejection, Value: mailto:fictional%40example.test%0ABcc%3Afictional%40example.test?subject=Fictional%20report
+						39 link (settable) Native mailto LF Cc rejection, Value: mailto:fictional%40example.test?cc=fictional%40example.test%0ABcc%3Afictional%40example.test&subject=Fictional%20report
+						40 link (settable) Native mailto LF subject rejection, Value: mailto:fictional%40example.test?subject=Fictional%20report%0AX-Injected%3Ayes
+						41 link (settable) Native mailto double encoded To, Value: mailto:%22Fictional%250D%250AName%22%20%3Cfictional%40example.test%3E?subject=Fictional%20report
+						42 link (settable) Native mailto double encoded Cc, Value: mailto:fictional%40example.test?cc=%22Fictional%250D%250AName%22%20%3Cfictional%40example.test%3E&subject=Fictional%20report
+						43 link (settable) Native mailto double encoded subject, Value: mailto:fictional%40example.test?subject=Fictional%250D%250AX-Not-A-Header%3Ayes
+						44 link (settable) Native mailto double encoded body, Value: mailto:fictional%40example.test?subject=Fictional%20report&body=Literal%20keeps%20%250D%250Atext
+						45 link (settable) Native mailto body CRLF, Value: mailto:fictional%40example.test?subject=Fictional%20report&body=First%20line%0D%0ASecond%20line
+						46 text (settable) Active-content canaries must remain inert before and after consent.
+						47 text (settable) On 17 October 2026, Fictional Sender wrote:
+						48 text (settable) Fictional quoted history remains inside the isolated history iframe.
+						49 text (settable) Expand, collapse, expand, collapse, and expand this history. The marker and Reader controls must remain visible and usable after every transition.
+						50 link (settable) History link, Value: example.invalid/history
+					51 toolbar Formatting
+						52 button Bold
+						53 button Italic
+						54 button Underline
+						55 button Strikethrough
+						56 button Quote
+						57 button Code block
+						58 button Bulleted list
+						59 button Numbered list
+						60 button Add link
+						61 button Clear formatting
+				62 container Attachments
+					63 text quarterly-report.pdf.command 28 B
+					64 button Remove quarterly-report.pdf.command
+					65 text meeting-notes.txt 32 B
+					66 button Remove meeting-notes.txt
+				67 button (disabled) Send ⌘↵
+				68 button Attach
+				69 text Rich text
+	70 close button
+	71 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	72 minimize button
+73 menu bar
+	74 Dakia Fictional Provider Reader
+	75 File
+	76 Edit
+	77 Mailbox
+	78 Message
+	79 Window
+	80 Help
+
+The focused UI element is 6 text field (settable) To

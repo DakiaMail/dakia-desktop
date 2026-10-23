@@ -164,6 +164,64 @@ function extractFixtureDomains(contents, permittedAssetUrls = []) {
   return domains;
 }
 
+function localOnlyNetworkIdentities(contents) {
+  const identities = [];
+  for (const match of contents.matchAll(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g)) {
+    const octets = match[0].split(".").map(Number);
+    if (octets.some((octet) => octet > 255)) continue;
+    const [first, second] = octets;
+    if (
+      first === 10 ||
+      first === 127 ||
+      (first === 169 && second === 254) ||
+      (first === 172 && second >= 16 && second <= 31) ||
+      (first === 192 && second === 168)
+    ) {
+      identities.push(`private network address: ${match[0]}`);
+    }
+  }
+  for (const match of contents.matchAll(/\[([0-9a-f:.]+)\]/gi)) {
+    const address = match[1].toLowerCase();
+    if (
+      address === "::1" ||
+      address.startsWith("fc") ||
+      address.startsWith("fd") ||
+      address.startsWith("fe8") ||
+      address.startsWith("fe9") ||
+      address.startsWith("fea") ||
+      address.startsWith("feb")
+    ) {
+      identities.push(`local IPv6 address: [${address}]`);
+    }
+  }
+  for (const match of contents.matchAll(/\b[a-z0-9-]+\.local\b/gi))
+    identities.push(`local hostname: ${match[0].toLowerCase()}`);
+  return identities;
+}
+
+function decodedTranscriptInspectionSurfaces(value) {
+  const surfaces = [];
+  const visit = (current, key = "") => {
+    if (typeof current === "string") {
+      surfaces.push(current);
+      if (/base64$/i.test(key)) {
+        const compact = current.replace(/\s/g, "");
+        if (compact.length >= 8 && /^[A-Za-z0-9+/]*={0,2}$/.test(compact))
+          surfaces.push(Buffer.from(compact, "base64").toString("utf8"));
+      }
+      return;
+    }
+    if (Array.isArray(current)) {
+      for (const child of current) visit(child);
+      return;
+    }
+    if (isPlainObject(current))
+      for (const [childKey, child] of Object.entries(current)) visit(child, childKey);
+  };
+  visit(value);
+  return surfaces;
+}
+
 function decodedInspectionSurfaces(contents) {
   const surfaces = [contents];
   const transferEncoding =
@@ -202,7 +260,7 @@ function declaredTestBody(source, exerciseId) {
   const escaped = exerciseId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const declarations = [
     new RegExp(
-      `#\\[(?:tokio::)?test\\]\\s*(?:async\\s+)?fn\\s+${escaped}\\s*\\(`,
+      `#\\[(?:tokio::)?test\\](?:\\s*#\\[[^\\]]+\\])*\\s*(?:async\\s+)?fn\\s+${escaped}\\s*\\(`,
     ),
     new RegExp(`(?:it|test)\\s*\\(\\s*["'\`]${escaped}["'\`]`),
   ];
@@ -277,7 +335,7 @@ function loaderResultIsConsumed(body, match) {
 function directLoaderExercisesFixture(body, fixtureName) {
   const escapedName = escapeRegExp(fixtureName);
   const loader = new RegExp(
-    `(?:mime_corpus\\s*|include_(?:str|bytes)!\\s*)\\([^)]*["'\\x60][^"'\\x60]*${escapedName}(?:\\.(?:eml|html))?["'\\x60]`,
+    `(?:(?:mime_corpus|governed_raw)\\s*|include_(?:str|bytes)!\\s*)\\([^)]*["'\\x60][^"'\\x60]*${escapedName}(?:\\.(?:eml|html))?["'\\x60]`,
     "g",
   );
   return [...body.matchAll(loader)].some((match) =>
@@ -288,7 +346,7 @@ function directLoaderExercisesFixture(body, fixtureName) {
 function enumeratedLoaderExercisesFixture(body, fixtureName) {
   const casesContainFixture = body.includes(`"${fixtureName}"`);
   if (!casesContainFixture) return false;
-  const loader = /mime_corpus\s*\(\s*name\s*\)/g;
+  const loader = /(?:mime_corpus|governed_raw)\s*\(\s*name\s*\)/g;
   return [...body.matchAll(loader)].some((match) => {
     const before = body.slice(0, match.index);
     if (/\bvoid\s*$/.test(before)) return false;
@@ -374,6 +432,60 @@ function assertString(errors, value, label) {
     return false;
   }
   return true;
+}
+
+function validateEvidence(errors, root, fixture) {
+  if (fixture.evidence === undefined) return [];
+  if (!Array.isArray(fixture.evidence) || fixture.evidence.length === 0) {
+    addError(errors, `Fixture ${fixture.id} evidence must be a non-empty array when declared.`);
+    return [];
+  }
+  const surfaces = [];
+  for (const evidence of fixture.evidence) {
+    const label = `Fixture ${fixture.id} evidence`;
+    if (
+      !isPlainObject(evidence) ||
+      evidence.kind !== "selective-imap-transcript" ||
+      !isSafeRelativePath(evidence.path) ||
+      !evidence.path.startsWith("testdata/mime-reader-handoff/") ||
+      !evidence.path.endsWith(".json") ||
+      typeof evidence.sha256 !== "string" ||
+      !/^[a-f0-9]{64}$/.test(evidence.sha256)
+    ) {
+      addError(errors, `${label} must declare a safe hashed selective IMAP transcript.`);
+      continue;
+    }
+    const absoluteEvidence = resolve(root, evidence.path);
+    if (
+      !absoluteEvidence.startsWith(`${root}/`) ||
+      !existsSync(absoluteEvidence) ||
+      !lstatSync(absoluteEvidence).isFile()
+    ) {
+      addError(errors, `${label} is missing: ${evidence.path}`);
+      continue;
+    }
+    const bytes = readFileSync(absoluteEvidence);
+    const actual = createHash("sha256").update(bytes).digest("hex");
+    if (actual !== evidence.sha256) {
+      addError(errors, `${label} checksum drift: expected ${evidence.sha256}, got ${actual}.`);
+      continue;
+    }
+    try {
+      const transcript = JSON.parse(bytes.toString("utf8"));
+      if (
+        !isPlainObject(transcript) ||
+        transcript.kind !== "dakia-fictional-uid6-selective-reader-transcript" ||
+        transcript.readOnly !== true
+      ) {
+        addError(errors, `${label} must be a read-only fictional selective IMAP transcript.`);
+        continue;
+      }
+      surfaces.push(...decodedTranscriptInspectionSurfaces(transcript));
+    } catch (error) {
+      addError(errors, `${label} is not valid JSON: ${error.message}`);
+    }
+  }
+  return surfaces;
 }
 
 function validateExercise(errors, root, fixture, exercise) {
@@ -610,7 +722,10 @@ export function validateFixtureCorpus(root = repositoryRoot) {
         }
       }
       const contents = readFileSync(absoluteFixture, "utf8");
-      const inspectionSurfaces = decodedInspectionSurfaces(contents);
+      const inspectionSurfaces = [
+        ...decodedInspectionSurfaces(contents),
+        ...validateEvidence(errors, absoluteRoot, fixture),
+      ];
       const permittedDomains = redaction?.permittedDomains ?? [];
       const permittedAssetUrls = redaction?.permittedAssetUrls ?? [];
       const validatedAssetUrls = [];
@@ -671,6 +786,8 @@ export function validateFixtureCorpus(root = repositoryRoot) {
             );
           }
         }
+        for (const identity of localOnlyNetworkIdentities(surface))
+          addError(errors, `Fixture ${fixture.id} contains ${identity}.`);
         for (const pattern of credentialPatterns) {
           if (pattern.test(surface))
             addError(

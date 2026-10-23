@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T17:14:57.104906+00:00",
+  "lane": "scope-reconciliation",
+  "status": "identified-original-two-defects",
+  "defects": [
+    {
+      "name": "Malformed nested message/rfc822 recovery reached a parser invariant",
+      "regression": "malformed_nested_message_part_is_rejected_without_blocking_the_next_message",
+      "fixtures": "Minimized and original fuzz-invalid-part-id seeds",
+      "expectedOutcome": "Complete parse rejects with mime_content_undecodable; applicable header/catalogue metadata remains readable and the following valid message parses."
+    },
+    {
+      "name": "Malformed MIME part graphs caused excessive traversal work",
+      "regression": "malformed_part_graph_is_rejected_without_blocking_the_next_message",
+      "fixtures": "Minimized and original fuzz-budget-graph-oom seeds",
+      "expectedOutcome": "Complete parse rejects with mime_invalid_part_graph and the following valid message parses.",
+      "additionalRegression": "parser_budget_rejects_invalid_part_graphs_before_queue_growth"
+    }
+  ],
+  "boundary": "The original defects are complete-parser rejection cases. They intentionally do not publish full content to Store, Tauri message_content or Reader.",
+  "separateCrossPathEvidence": "docs/mail-safety-results/ms-e004-reader-crosspath-2026-10-21.json",
+  "limitations": [
+    "The nine parseable cross-path fixtures are separate from these two malformed-message rejection regressions.",
+    "A generic malformed native fixture does not prove the exact original malformed nested-message seed crossed a public full-fetch seam.",
+    "No additional test, native app, provider or network execution is established by this reconciliation."
+  ]
+}

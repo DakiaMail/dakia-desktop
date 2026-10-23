@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-21T16:27:52.611540+00:00",
+  "lane": "unchanged-source-three-run-baseline-detail",
+  "status": "passed",
+  "sourceTree": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "f8209887faad2ed25f965c55ef7a3680f7663852bfa33674406dc02da5b6063c",
+    "fileCount": 935
+  },
+  "sourceTreeAfter": {
+    "algorithm": "sha256-path-and-content-manifest",
+    "digest": "f8209887faad2ed25f965c55ef7a3680f7663852bfa33674406dc02da5b6063c",
+    "fileCount": 935
+  },
+  "parentReport": "docs/mail-safety-results/remaining-gap-closure-three-run-source-plist-safe-2026-10-21.json",
+  "parentReportSha256": "5dc07c5fec9483e8fdf475ef46ab5ef4796c18a77bbd9a40ed65c4be4a0b64a1",
+  "consecutiveRuns": 3,
+  "gatesPerRun": 16,
+  "perRun": {
+    "rustRuntimePassed": 983,
+    "rustDoctestsPassed": 2,
+    "rustIgnored": 11,
+    "frontendPassed": 589,
+    "frontendSkipped": 2,
+    "frontendFilesPassed": 61,
+    "frontendFilesSkipped": 3,
+    "scriptTestsPassed": 244,
+    "scriptTestsFailed": 0,
+    "scriptTestsSkipped": 0,
+    "coupledIntegrationRunnersPassed": [
+      "realtime delivery",
+      "MIME Reader artifact",
+      "attachment command artifact",
+      "mail command TLS"
+    ]
+  },
+  "rawLog": {
+    "path": "/private/tmp/dakia-three-run-source-plist-safe-20261021.log",
+    "bytes": 493982,
+    "sha256": "dd101460f25fba7912ed5a9806e05f1c95a63f63c223d9d33fe81d8082890107"
+  },
+  "retries": 0,
+  "observedFlakes": 0,
+  "limitations": [
+    "Ignored and skipped tests are not passes.",
+    "These are source tests, separate from native, credentialed provider, performance, fuzz, dependency and release lanes.",
+    "Earlier invalidated and failed checkpoints remain retained; their corrected executions are not counted as retries in this clean three-run sequence.",
+    "Build emitted existing fixture-environment placeholder and browser externalization warnings; successful build alone does not establish WebKit translation execution."
+  ],
+  "coupledFrontendNote": "The three artifact-gated files omitted by the ordinary Vitest invocation execute separately through the coupled runners: one realtime, nine MIME and one attachment frontend tests, with no pending cases. These are separate from 589 ordinary frontend passes."
+}
