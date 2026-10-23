@@ -159,9 +159,9 @@ export function writeMailSafetySourceManifest({
   exclusiveJson(manifestPath, manifest);
   if (summaryPath) {
     exclusiveJson(summaryPath, {
-      sourceDigest: manifest.digest,
-      sourceManifestSha256: sha256(readFileSync(manifestPath)),
-      sourceFileCount: manifest.fileCount,
+      algorithm: manifest.algorithm,
+      digest: manifest.digest,
+      fileCount: manifest.fileCount,
     });
   }
   return { manifestPath, manifest, summaryPath };

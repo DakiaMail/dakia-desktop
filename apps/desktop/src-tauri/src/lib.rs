@@ -447,7 +447,7 @@ fn native_mail_safety_unsubscribe_transport(
         "DAKIA_UNSUBSCRIBE_COMMAND_TLS_PORT",
         "DAKIA_UNSUBSCRIBE_COMMAND_TLS_CA_DER_PATH",
     ];
-    let values = VARIABLES.map(|name| env::var(name));
+    let values = VARIABLES.map(env::var);
     if values
         .iter()
         .all(|value| matches!(value, Err(env::VarError::NotPresent)))

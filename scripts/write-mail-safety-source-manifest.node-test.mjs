@@ -101,16 +101,13 @@ test("writes the exact governed source manifest, includes untracked inputs, and 
     }
     const summary = JSON.parse(readFileSync(summaryPath, "utf8"));
     assert.deepEqual(Object.keys(summary), [
-      "sourceDigest",
-      "sourceManifestSha256",
-      "sourceFileCount",
+      "algorithm",
+      "digest",
+      "fileCount",
     ]);
-    assert.equal(summary.sourceDigest, manifest.digest);
-    assert.equal(summary.sourceFileCount, manifest.fileCount);
-    assert.equal(
-      summary.sourceManifestSha256,
-      sha256(readFileSync(manifestPath)),
-    );
+    assert.equal(summary.algorithm, manifest.algorithm);
+    assert.equal(summary.digest, manifest.digest);
+    assert.equal(summary.fileCount, manifest.fileCount);
     assert.equal(lstatSync(manifestPath).mode & 0o777, 0o600);
     assert.equal(lstatSync(summaryPath).mode & 0o777, 0o600);
   } finally {

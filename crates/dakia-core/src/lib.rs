@@ -15,7 +15,11 @@ pub mod provider;
 pub mod storage;
 
 #[cfg(test)]
+mod gmail_provider_identity_proof_tests;
+#[cfg(test)]
 mod independent_server_tests;
+#[cfg(test)]
+mod large_mailbox_tls_smoke_tests;
 
 pub use account::{Account, AccountAuth, AccountDraft, AccountId};
 pub use ai::{AiConfig, AiProvider, AiService};
