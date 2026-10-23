@@ -28,17 +28,15 @@ const SNAPSHOT = {
   fileCount: 1000,
 };
 const ACCOUNT = "21c9e79c-c5b8-4d50-9d1e-6ba3d5323000";
-const ROW = {
-  id: `${ACCOUNT}:INBOX:2`,
-  account_id: ACCOUNT,
-  mailbox: "INBOX",
-  uid: 2,
-  mailbox_uid_validity: 77,
-  content_state: "complete",
-  subject: "Fictional retained multipart Reader message",
-  body_text: "Fictional retained multipart text.\r\n",
-  body_html: null,
-};
+const capturedRoot = new URL("./testdata/large-mailbox/", import.meta.url);
+const capturedRows = JSON.parse(
+  await readFile(new URL("cli-search.json", capturedRoot), "utf8"),
+);
+const ROW = capturedRows[0];
+const CAPTURED_RUST_SMOKE = JSON.parse(
+  await readFile(new URL("rust-smoke.json", capturedRoot), "utf8"),
+);
+const READER_BODY = "Fictional retained multipart text.\r\n";
 const PRIVATE = { mode: 0o600, flag: "wx" };
 async function temporary(t) {
   const dir = await mkdtemp(join(tmpdir(), "dakia-load-runner-test-"));
@@ -48,9 +46,12 @@ async function temporary(t) {
 function transcript(reader = false) {
   const session = new LargeMailboxSession();
   const send = (command) => session.receive(`x ${command}\r\n`);
-  send(`LOGIN "${FIXTURE.account}" "${FIXTURE.password}"`);
   send("CAPABILITY");
-  if (!reader) send('LIST "" "*"');
+  send(`LOGIN "${FIXTURE.account}" "${FIXTURE.password}"`);
+  if (!reader) {
+    send("CAPABILITY");
+    send('LIST "" "*"');
+  }
   send('SELECT "INBOX"');
   if (reader) {
     send(
@@ -102,22 +103,27 @@ test("requires fresh absolute private evidence and never reuses existing paths",
   await chmod(publicDir, 0o755);
   await assert.rejects(exclusiveRunDirectory(publicDir), /EEXIST/);
 });
-test("CLI proof binds exact account, UID epoch, content state and reopened body bytes", () => {
-  assert.equal(validateCliSearch([ROW], ROW.body_text).cachedBodyExact, true);
+test("CLI proof accepts the captured metadata-only catalogue row and rejects invented cached body projection", () => {
+  const proof = validateCliSearch(capturedRows);
+  assert.equal(proof.bodyProjection, "metadata-catalogue");
+  assert.equal(proof.summaryBodyOmitted, true);
   for (const patch of [
     { account_id: "other" },
     { uid: 3 },
     { mailbox: "Sent" },
     { mailbox_uid_validity: 78 },
     { content_state: "partial" },
+    { body_text: READER_BODY },
     { body_text: "wrong" },
-    { body_text: ROW.body_text.trim() },
     { body_html: "unexpected" },
+    { snippet: "wrong" },
+    { is_read: false },
+    { is_flagged: true },
+    { has_attachments: true },
   ])
-    assert.throws(() =>
-      validateCliSearch([{ ...ROW, ...patch }], ROW.body_text),
-    );
+    assert.throws(() => validateCliSearch([{ ...ROW, ...patch }]));
 });
+
 for (const variant of ["exit", "timeout", "abort", "output"])
   test(`bounded command preserves logs and rejects ${variant}`, async (t) => {
     const dir = await temporary(t);
@@ -185,11 +191,11 @@ async function mockRun(t, variant) {
           "large-mailbox-tls-smoke.json",
         ),
         JSON.stringify({
-          account_id: ACCOUNT,
-          message_count: 30000,
-          uid_validity: 77,
-          reader_uid: 2,
-          reader_body_text: ROW.body_text,
+          ...CAPTURED_RUST_SMOKE,
+          reader_body_text:
+            variant === "reader-body-drift"
+              ? READER_BODY.trim()
+              : CAPTURED_RUST_SMOKE.reader_body_text,
         }),
         PRIVATE,
       );
@@ -277,7 +283,8 @@ async function mockRun(t, variant) {
   );
   if (variant === "success") {
     assert(fixtureClosed);
-    assert.equal(result.cliSearch.cachedBodyExact, true);
+    assert.equal(result.cliSearch.summaryBodyOmitted, true);
+    assert.equal(result.rustSmoke.reader_body_text, READER_BODY);
     assert.equal(result.executables.length, 2);
     assert.equal(result.tools.cargo, "tool-version");
   }
@@ -292,6 +299,7 @@ for (const variant of [
   "source-drift",
   "audit-corruption",
   "binary-drift",
+  "reader-body-drift",
   "interrupted",
 ])
   test(`runner retains ${variant} receipt from unrelated working directory`, async (t) => {

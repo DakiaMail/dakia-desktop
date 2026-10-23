@@ -119,7 +119,12 @@ def mailbox_info(line: bytes) -> tuple[frozenset[str], str] | None:
         text = line.decode("ascii")
     except UnicodeDecodeError:
         return None
-    match = re.fullmatch(r'\* LIST \(([^)]*)\) (?:NIL|"(?:[^"\\]|\\.)*") "((?:[^"\\]|\\.)*)"', text)
+    # imaplib.list() returns the untagged LIST payload, not a complete
+    # `* LIST ...` wire line. Accepting an optional prefix keeps the parser
+    # useful in isolation without changing the production return contract.
+    if text.startswith("* LIST "):
+        text = text[len("* LIST "):]
+    match = re.fullmatch(r'\(([^)]*)\) (?:NIL|"(?:[^"\\]|\\.)*") "((?:[^"\\]|\\.)*)"', text)
     if not match:
         return None
     flags, name = match.groups()

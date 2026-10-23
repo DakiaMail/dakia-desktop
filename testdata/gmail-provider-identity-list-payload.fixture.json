@@ -1,0 +1,8 @@
+{
+  "description": "Redacted fictional imaplib.list() payloads. imaplib removes the leading untagged '* LIST ' marker.",
+  "listPayloads": [
+    "(\\HasNoChildren) \"/\" \"INBOX\"",
+    "(\\HasNoChildren \\Sent) \"/\" \"[Dakia.test]/Sent.test\"",
+    "(\\Noselect \\HasChildren) \"/\" \"[Dakia.test]\""
+  ]
+}

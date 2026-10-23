@@ -44,7 +44,7 @@ export function requireSnapshot(snapshot) {
     throw new Error("governed source snapshot unavailable");
   return snapshot;
 }
-export function validateCliSearch(rows, expectedBody) {
+export function validateCliSearch(rows) {
   if (!Array.isArray(rows) || rows.length !== 1)
     throw new Error(
       "CLI search must return exactly one retained Reader message",
@@ -58,11 +58,14 @@ export function validateCliSearch(rows, expectedBody) {
     row.mailbox_uid_validity !== 77 ||
     row.content_state !== "complete" ||
     row.subject !== "Fictional retained multipart Reader message" ||
-    row.body_text?.trim() !== "Fictional retained multipart text." ||
+    row.body_text !== "" ||
     row.body_html !== null ||
-    (expectedBody !== undefined && row.body_text !== expectedBody)
+    row.snippet !== "Fictional retained multipart text." ||
+    row.is_read !== true ||
+    row.is_flagged !== false ||
+    row.has_attachments !== false
   )
-    throw new Error("CLI local search identity/epoch/cached body differs");
+    throw new Error("CLI local search catalogue projection differs");
   return {
     id: row.id,
     account: row.account_id,
@@ -70,8 +73,10 @@ export function validateCliSearch(rows, expectedBody) {
     uid: row.uid,
     uidValidity: row.mailbox_uid_validity,
     contentState: row.content_state,
-    cachedBodyExact: expectedBody !== undefined,
-    cachedBodySha256: createHash("sha256").update(row.body_text).digest("hex"),
+    bodyProjection: "metadata-catalogue",
+    summaryBodyOmitted: true,
+    snippetExact: true,
+    isRead: row.is_read,
   };
 }
 export async function exclusiveRunDirectory(requested) {
@@ -329,7 +334,7 @@ export async function runLargeMailboxSmoke(options = {}) {
     tools: { node: { version: process.version, executable: process.execPath } },
     limitations: [
       "Test-only loopback CA injection shares production TLS client, authentication, synchronization, Store and Reader MIME core; production endpoint construction/WebPKI policy is not exercised.",
-      "CLI proof is a local search of the persisted Reader projection. CLI show uses public trust and is outside this fixture.",
+      "CLI local search proves the metadata catalogue projection, identity, UID epoch, complete content state and snippet. It deliberately omits cached body bytes. The Rust smoke separately proves exact reopened Reader cache bytes. CLI show uses public trust and is outside this fixture.",
       "This is not native WebKit or large-mailbox UI acceptance.",
       "The default run-owned target cache is retained for reproducibility and may consume multiple GiB. No existing profile, cache, or evidence is removed.",
       "Source digest binds governed file bytes. Revision and dirty status are separate provenance and do not assert a clean checkout.",
@@ -601,13 +606,10 @@ export async function runLargeMailboxSmoke(options = {}) {
       smoke.message_count !== 30000 ||
       smoke.uid_validity !== 77 ||
       smoke.reader_uid !== 2 ||
-      smoke.reader_body_text?.trim() !== "Fictional retained multipart text."
+      smoke.reader_body_text !== "Fictional retained multipart text.\r\n"
     )
       throw new Error("Rust smoke receipt differs");
-    receipt.cliSearch = validateCliSearch(
-      JSON.parse(cliResult.stdout),
-      smoke.reader_body_text,
-    );
+    receipt.cliSearch = validateCliSearch(JSON.parse(cliResult.stdout));
     receipt.rustSmoke = smoke;
   } catch (error) {
     problem = error;

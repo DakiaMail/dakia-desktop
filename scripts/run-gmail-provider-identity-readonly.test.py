@@ -15,9 +15,71 @@ from contextlib import redirect_stdout
 
 
 SCRIPT = Path(__file__).with_name("run-gmail-provider-identity-readonly.py")
+LIST_FIXTURE = SCRIPT.parent.parent / "testdata" / "gmail-provider-identity-list-payload.fixture.json"
 spec = importlib.util.spec_from_file_location("gmail_provider_proof", SCRIPT)
 wrapper = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(wrapper)
+
+
+class ReadOnlyFakeImap:
+    """Strict imaplib-shaped fake: unexpected commands fail the test."""
+
+    def __init__(self, listing, mutate_second_sent_snapshot=False):
+        self.listing = [entry.encode("ascii") for entry in listing]
+        self.mutate_second_sent_snapshot = mutate_second_sent_snapshot
+        self.records = []
+        self.current_mailbox = None
+        self.untagged_responses = {}
+        self.fetches_by_mailbox = {"INBOX": 0, "[Dakia.test]/Sent.test": 0}
+
+    def login(self, _account, _password):
+        self.records.append(("LOGIN",))
+        return "OK", [b"logged in"]
+
+    def list(self):
+        self.records.append(("LIST",))
+        return "OK", self.listing
+
+    def select(self, mailbox, readonly=False):
+        self.records.append(("SELECT", mailbox, readonly))
+        if not readonly or mailbox not in ('"INBOX"', '"[Dakia.test]/Sent.test"'):
+            raise AssertionError("only exact quoted readonly EXAMINE selections are permitted")
+        self.current_mailbox = mailbox[1:-1]
+        validity = b"111" if self.current_mailbox == "INBOX" else b"222"
+        self.untagged_responses = {"EXISTS": [b"2"], "UIDVALIDITY": [validity]}
+        return "OK", [b"2"]
+
+    def uid(self, command, *args):
+        self.records.append(("UID", command, *args))
+        if self.current_mailbox is None:
+            raise AssertionError("UID commands require a selected mailbox")
+        if command == "SEARCH":
+            expected = (None, "HEADER", "SUBJECT", wrapper.quote(wrapper.FIXTURE))
+            if args != expected and args != (None, "HEADER", "MESSAGE-ID", '"<fictional-provider-proof@example.test>"'):
+                raise AssertionError(f"unexpected bounded search: {args!r}")
+            return "OK", [b"11" if self.current_mailbox == "INBOX" else b"22"]
+        if command == "FETCH":
+            expected_uid = "11" if self.current_mailbox == "INBOX" else "22"
+            if args != (expected_uid, "(UID FLAGS X-GM-MSGID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT)])"):
+                raise AssertionError(f"unexpected read-only fetch: {args!r}")
+            self.fetches_by_mailbox[self.current_mailbox] += 1
+            flags = b"\\Seen"
+            if self.mutate_second_sent_snapshot and self.current_mailbox == "[Dakia.test]/Sent.test" and self.fetches_by_mailbox[self.current_mailbox] == 2:
+                flags = b"\\Flagged"
+            metadata = b"2 (UID " + expected_uid.encode("ascii") + b" FLAGS (" + flags + b") X-GM-MSGID 900100)"
+            header = (
+                b"Message-ID: <fictional-provider-proof@example.test>\r\n"
+                + b"Subject: " + wrapper.FIXTURE.encode("ascii") + b"\r\n"
+            )
+            return "OK", [(metadata, header), b")"]
+        raise AssertionError(f"forbidden IMAP command: {command}")
+
+    def logout(self):
+        self.records.append(("LOGOUT",))
+        return "BYE", [b"logged out"]
+
+    def __getattr__(self, name):
+        raise AssertionError(f"forbidden IMAP method: {name}")
 
 
 class GmailProviderProofWrapperTests(unittest.TestCase):
@@ -76,15 +138,72 @@ class GmailProviderProofWrapperTests(unittest.TestCase):
                 wrapper.credentials(path)
 
     def test_mailbox_parser_accepts_plain_inbox_and_real_sent_flag_only(self):
+        fixture = json.loads(LIST_FIXTURE.read_text(encoding="utf-8"))["listPayloads"]
+        self.assertEqual(
+            wrapper.mailbox_info(fixture[0].encode("ascii")),
+            (frozenset({"\\HasNoChildren"}), "INBOX"),
+        )
+        self.assertEqual(
+            wrapper.mailbox_info(fixture[1].encode("ascii")),
+            (frozenset({"\\HasNoChildren", "\\Sent"}), "[Dakia.test]/Sent.test"),
+        )
+        # The complete wire line is not what imaplib.list() returns, but the
+        # optional prefix is harmless for focused parser callers.
         self.assertEqual(
             wrapper.mailbox_info(b'* LIST (\\HasNoChildren) "/" "INBOX"'),
             (frozenset({"\\HasNoChildren"}), "INBOX"),
         )
-        self.assertEqual(
-            wrapper.mailbox_info(b'* LIST (\\HasNoChildren \\Sent) "/" "[Gmail]/&ZeVnLIqe-"'),
-            (frozenset({"\\HasNoChildren", "\\Sent"}), "[Gmail]/&ZeVnLIqe-"),
-        )
         self.assertIsNone(wrapper.mailbox_info(b'* LIST (\\HasNoChildren) NIL INBOX'))
+
+    def test_observations_execute_only_the_bounded_read_only_imap_contract(self):
+        listing = json.loads(LIST_FIXTURE.read_text(encoding="utf-8"))["listPayloads"]
+        client = ReadOnlyFakeImap(listing)
+        with mock.patch.object(wrapper.imaplib, "IMAP4_SSL", return_value=client):
+            observed = wrapper.observations("fictional.proof@gmail.com", "fictional-password")
+
+        self.assertEqual(observed["schemaVersion"], 1)
+        self.assertEqual(observed["roundtripId"], wrapper.ROUNDTRIP_ID)
+        self.assertEqual(len(observed["observations"]), 2)
+        self.assertEqual({item["localMailbox"] for item in observed["observations"]}, {"INBOX", "Sent"})
+        for item in observed["observations"]:
+            self.assertNotIn("flags", item)
+            self.assertNotIn("messageId", item)
+            self.assertTrue(item["flagsUnchanged"])
+        self.assertEqual(
+            [record[0] for record in client.records],
+            ["LOGIN", "LIST", "SELECT", "UID", "UID", "SELECT", "UID", "UID", "SELECT", "UID", "UID", "SELECT", "UID", "UID", "LOGOUT"],
+        )
+        selected = [record for record in client.records if record[0] == "SELECT"]
+        self.assertEqual(len(selected), 4)
+        self.assertTrue(all(record[2] is True for record in selected))
+        searches = [record for record in client.records if record[:2] == ("UID", "SEARCH")]
+        fetches = [record for record in client.records if record[:2] == ("UID", "FETCH")]
+        self.assertEqual(len(searches), 4)
+        self.assertEqual(len(fetches), 4)
+        self.assertEqual(searches[0][2:], (None, "HEADER", "SUBJECT", wrapper.quote(wrapper.FIXTURE)))
+        self.assertTrue(all(record[2:4] == (None, "HEADER") for record in searches[1:]))
+        self.assertTrue(all("BODY.PEEK" in record[-1] for record in fetches))
+        self.assertFalse(any("STORE" in str(record) or "APPEND" in str(record) or "EXPUNGE" in str(record) for record in client.records))
+
+    def test_observations_rejects_duplicate_special_mailboxes_before_selection(self):
+        fixture = json.loads(LIST_FIXTURE.read_text(encoding="utf-8"))["listPayloads"]
+        duplicate_inbox = ReadOnlyFakeImap([fixture[0], fixture[0], fixture[1]])
+        with mock.patch.object(wrapper.imaplib, "IMAP4_SSL", return_value=duplicate_inbox), self.assertRaises(wrapper.SafeFailure):
+            wrapper.observations("fictional.proof@gmail.com", "fictional-password")
+        self.assertEqual([record[0] for record in duplicate_inbox.records], ["LOGIN", "LIST", "LOGOUT"])
+
+        duplicate_sent = ReadOnlyFakeImap([fixture[0], fixture[1], fixture[1]])
+        with mock.patch.object(wrapper.imaplib, "IMAP4_SSL", return_value=duplicate_sent), self.assertRaises(wrapper.SafeFailure):
+            wrapper.observations("fictional.proof@gmail.com", "fictional-password")
+        self.assertEqual([record[0] for record in duplicate_sent.records], ["LOGIN", "LIST", "LOGOUT"])
+
+    def test_observations_rejects_a_changed_flag_without_mutating_the_mailbox(self):
+        listing = json.loads(LIST_FIXTURE.read_text(encoding="utf-8"))["listPayloads"]
+        client = ReadOnlyFakeImap(listing, mutate_second_sent_snapshot=True)
+        with mock.patch.object(wrapper.imaplib, "IMAP4_SSL", return_value=client), self.assertRaises(wrapper.SafeFailure):
+            wrapper.observations("fictional.proof@gmail.com", "fictional-password")
+        self.assertEqual(client.records[-1], ("LOGOUT",))
+        self.assertFalse(any("STORE" in str(record) or "APPEND" in str(record) or "EXPUNGE" in str(record) for record in client.records))
 
     def test_source_manifest_accepts_the_programme_snapshot_and_detects_mutation(self):
         directory, root = self.temporary_programme_repo()

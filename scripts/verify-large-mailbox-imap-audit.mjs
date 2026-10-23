@@ -132,7 +132,8 @@ export function verifyLargeMailboxAudit(audit) {
     fail("unexpected Reader ingress");
   for (const { commands } of parsed) {
     if (
-      commands.filter((command) => command === "CAPABILITY").length !== 1 ||
+      commands.filter((command) => command === "CAPABILITY").length !==
+        (commands === sync.commands ? 2 : 1) ||
       commands.filter((command) => command === "LIST").length !==
         (commands === sync.commands ? 1 : 0)
     )
@@ -144,6 +145,7 @@ export function verifyLargeMailboxAudit(audit) {
   )
     fail("unexpected SELECT command count");
   const expectedSync = [
+    "command:CAPABILITY",
     "command:LOGIN",
     "login",
     "command:CAPABILITY",
@@ -168,9 +170,9 @@ export function verifyLargeMailboxAudit(audit) {
     );
   expectedSync.push("command:SELECT", "select", "command:LOGOUT");
   const expectedReader = [
+    "command:CAPABILITY",
     "command:LOGIN",
     "login",
-    "command:CAPABILITY",
     "command:SELECT",
     "select",
     "command:UID FETCH",

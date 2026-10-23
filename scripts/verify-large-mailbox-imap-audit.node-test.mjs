@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFile } from "node:fs/promises";
+import { gunzipSync } from "node:zlib";
+import { createHash } from "node:crypto";
 import { verifyLargeMailboxAudit } from "./verify-large-mailbox-imap-audit.mjs";
 
 export function validAudit() {
@@ -8,6 +11,7 @@ export function validAudit() {
     sync.push({ kind: "command", command });
     if (result) sync.push(result);
   };
+  push("CAPABILITY");
   push("LOGIN", { kind: "login" });
   push("CAPABILITY");
   push("LIST");
@@ -33,9 +37,9 @@ export function validAudit() {
   push("SELECT", { kind: "select" });
   push("LOGOUT");
   const reader = [
+    { kind: "command", command: "CAPABILITY" },
     { kind: "command", command: "LOGIN" },
     { kind: "login" },
-    { kind: "command", command: "CAPABILITY" },
     { kind: "command", command: "SELECT" },
     { kind: "select" },
     { kind: "command", command: "UID FETCH" },
@@ -109,3 +113,56 @@ for (const [name, change] of Object.entries(corruptions))
     change(audit);
     assert.throws(() => verifyLargeMailboxAudit(audit));
   });
+
+test("accepts the exact failed-run transcript after correcting the capability oracle", async () => {
+  const root = new URL("./testdata/large-mailbox/", import.meta.url);
+  const provenance = JSON.parse(
+    await readFile(new URL("provenance.json", root), "utf8"),
+  );
+  for (const [name, record] of Object.entries(provenance.files)) {
+    const bytes = await readFile(new URL(name, root));
+    assert.equal(
+      createHash("sha256").update(bytes).digest("hex"),
+      record.sha256,
+      name,
+    );
+    assert.equal(bytes.length, record.bytes, name);
+  }
+  const compressed = await readFile(new URL("imap-audit.json.gz", root));
+  const raw = gunzipSync(compressed);
+  assert.equal(
+    createHash("sha256").update(raw).digest("hex"),
+    provenance.files["imap-audit.json.gz"].uncompressedSha256,
+  );
+  assert.equal(
+    raw.length,
+    provenance.files["imap-audit.json.gz"].uncompressedBytes,
+  );
+  const audit = JSON.parse(raw);
+  assert.deepEqual(
+    audit.sessions[0].events.slice(0, 5).map((e) => e.command ?? e.kind),
+    ["CAPABILITY", "LOGIN", "login", "CAPABILITY", "LIST"],
+  );
+  assert.deepEqual(
+    audit.sessions[1].events.slice(0, 4).map((e) => e.command ?? e.kind),
+    ["CAPABILITY", "LOGIN", "login", "SELECT"],
+  );
+  const result = verifyLargeMailboxAudit(audit);
+  assert.equal(result.metadataBatches, 1200);
+  assert.equal(result.snippetBatches, 1200);
+  for (const role of [0, 1]) {
+    const absent = structuredClone(audit);
+    absent.sessions[role].events.shift();
+    assert.throws(() => verifyLargeMailboxAudit(absent));
+    const extra = structuredClone(audit);
+    extra.sessions[role].events.unshift({
+      kind: "command",
+      command: "CAPABILITY",
+    });
+    assert.throws(() => verifyLargeMailboxAudit(extra));
+  }
+  const moved = structuredClone(audit);
+  const preauth = moved.sessions[0].events.shift();
+  moved.sessions[0].events.splice(2, 0, preauth);
+  assert.throws(() => verifyLargeMailboxAudit(moved), /sequence/);
+});
