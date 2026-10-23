@@ -669,6 +669,20 @@ test("coverage lane uses branch-capable Rust coverage and a lock-matched Vitest 
   );
   assert.match(
     coverageJob,
+    /target_libdir="\$\(rustc \+nightly-2026-10-17 --print target-libdir\)"/,
+  );
+  assert.match(
+    coverageJob,
+    /llvm_tools_dir="\$\(dirname "\$target_libdir"\)\/bin"/,
+  );
+  assert.match(
+    coverageJob,
+    /export RUST_COVERAGE_REAL_LLVM_COV="\$llvm_tools_dir\/llvm-cov"/,
+  );
+  assert.match(coverageJob, /test -x "\$RUST_COVERAGE_REAL_LLVM_COV"/);
+  assert.doesNotMatch(coverageJob, /rustup which .*llvm-(cov|profdata)/);
+  assert.match(
+    coverageJob,
     /node scripts\/create-rust-coverage-provenance\.mjs/,
   );
   assert.match(coverageJob, /node scripts\/normalize-rust-coverage-lcov\.mjs/);

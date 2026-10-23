@@ -96,6 +96,28 @@
     "behavior": "The manual coverage lane freezes a tracked-source manifest before instrumentation, records both cargo-llvm-cov export invocations through a checked-in LLVM proxy, verifies the source did not change, writes paired output receipts for one profile/object cohort, normalizes the receipt-bound LCOV and JSON reports, and then compares the candidate without invoking the known crashing full-LCOV function export.",
     "hostedValidation": "not run"
   },
+  "localWorkflowIntegrationPreflight": {
+    "status": "passed",
+    "scope": "A temporary one-file Git fixture used the installed LLVM 23.1.4-rust-1.101.0-nightly llvm-cov and llvm-profdata binaries resolved from rustlib/<target>/bin. The checked-in proxy captured a retained historical profdata plus one retained instrumented object, the helper wrote paired receipts, and the normalizer completed.",
+    "fixtureRoot": "/private/tmp/dakia-llvm-proxy-e2e-bO7oQG",
+    "result": {
+      "sourceFiles": 16,
+      "lines": {
+        "found": 17852,
+        "hit": 2837
+      },
+      "branches": {
+        "found": 2980,
+        "hit": 318
+      },
+      "instrumentationInstantiations": {
+        "found": 2201,
+        "hit": 388
+      },
+      "unavailableFunctionMappings": 2
+    },
+    "limitations": "This validates the helper integration only. It uses a retained 681d profile/object and does not establish current-source or hosted-workflow coverage acceptance."
+  },
   "limitations": [
     "The full LLVM 23 LCOV export crash remains a retained platform/toolchain failure; this result does not diagnose its cause.",
     "The four no-region JSON functions remain explicitly unavailable for FN/FNDA mapping. Their line and branch observations are retained from official LCOV.",

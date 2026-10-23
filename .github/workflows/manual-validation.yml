@@ -169,8 +169,14 @@ jobs:
         run: |
           mkdir -p coverage
           chmod +x scripts/coverage-llvm-cov-proxy.mjs
-          export RUST_COVERAGE_REAL_LLVM_COV="$(rustup which --toolchain nightly-2026-10-17 llvm-cov)"
-          export LLVM_PROFDATA="$(rustup which --toolchain nightly-2026-10-17 llvm-profdata)"
+          target_libdir="$(rustc +nightly-2026-10-17 --print target-libdir)"
+          llvm_tools_dir="$(dirname "$target_libdir")/bin"
+          export RUST_COVERAGE_REAL_LLVM_COV="$llvm_tools_dir/llvm-cov"
+          export LLVM_PROFDATA="$llvm_tools_dir/llvm-profdata"
+          test -x "$RUST_COVERAGE_REAL_LLVM_COV"
+          test -x "$LLVM_PROFDATA"
+          "$RUST_COVERAGE_REAL_LLVM_COV" --version
+          "$LLVM_PROFDATA" --version
           export RUST_COVERAGE_EXPORT_LOG="$PWD/coverage/rust-export-invocations.jsonl"
           export LLVM_COV="$PWD/scripts/coverage-llvm-cov-proxy.mjs"
           node scripts/create-rust-coverage-provenance.mjs --prepare-source \
