@@ -833,15 +833,16 @@ async fn ms_b_014_public_tls_idle_renews_on_one_connection_with_production_polic
 #[tokio::test]
 async fn ms_b_014_public_tls_noop_idle_noise_is_paced_on_one_connection() {
     let (_store, service, account) = realtime_fixture().await;
-    let (_sender, mut cancel) = watch::channel(false);
+    let (cancel_sender, mut cancel) = watch::channel(false);
     let (endpoint, server) = start_realtime_server(RealtimeScript::NoopNoise).await;
-    let pace = Duration::from_millis(10);
+    let pace = Duration::from_millis(100);
     let schedule = RealtimeSchedule {
         reconcile_interval: Duration::from_secs(1),
-        maintenance_interval: Duration::from_millis(45),
+        maintenance_interval: Duration::from_secs(5),
         noop_invalidation_min_interval: pace,
     };
-    let started = Instant::now();
+    let idle_ready_times = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed_idle_ready_times = idle_ready_times.clone();
 
     let cycle = tokio::time::timeout(
         Duration::from_secs(3),
@@ -851,7 +852,17 @@ async fn ms_b_014_public_tls_noop_idle_noise_is_paced_on_one_connection() {
             &mut cancel,
             endpoint,
             schedule,
-            || {},
+            move || {
+                let mut times = observed_idle_ready_times
+                    .lock()
+                    .expect("record IDLE continuation time");
+                times.push(Instant::now());
+                if times.len() == 2 {
+                    cancel_sender
+                        .send(true)
+                        .expect("cancel after repeated IDLE reconciliation");
+                }
+            },
         ),
     )
     .await
@@ -859,24 +870,24 @@ async fn ms_b_014_public_tls_noop_idle_noise_is_paced_on_one_connection() {
     .expect("no-op invalidations remain a healthy realtime cycle");
     assert!(cycle.new_messages.is_empty());
     assert!(!cycle.catalogue_changed);
-    assert!(!cycle.cancelled);
+    assert!(cycle.cancelled);
 
     let trace = server.await.expect("no-op noise server");
     let idle_count = trace
         .iter()
         .filter(|command| command.as_str() == "IDLE")
         .count();
-    assert!(
-        idle_count >= 2,
-        "noise must exercise repeated reconciliation"
+    assert_eq!(
+        idle_count, 2,
+        "noise must exercise one paced reconciliation"
     );
+    let idle_ready_times = idle_ready_times
+        .lock()
+        .expect("read IDLE continuation times");
+    assert_eq!(idle_ready_times.len(), 2);
     assert!(
-        idle_count <= 6,
-        "minimum pacing must bound immediate invalidation churn: {idle_count} IDLE commands"
-    );
-    assert!(
-        started.elapsed() >= pace.saturating_mul((idle_count - 1) as u32),
-        "each repeated no-op invalidation must pay the configured cancellable pace"
+        idle_ready_times[1].duration_since(idle_ready_times[0]) >= pace,
+        "the repeated IDLE subscription must pay the configured cancellable pace"
     );
     assert_eq!(
         trace

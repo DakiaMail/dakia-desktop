@@ -1,5 +1,7 @@
 # Mail safety programme: paused draft handoff
 
+Resumed on 23 October 2026 with the owner’s authorization in draft PR #113. The [continuation record](mail-safety-resume-2026-10-23.md) tracks the combined source, current checks and remaining acceptance. The pause details below are retained as the historical checkpoint.
+
 Paused on 22 October 2026 at the owner's request. Implementation, tests, provider work and native acceptance have stopped. This draft is not ready to merge or release. The original request to close all 69 testing gaps is not complete.
 
 The tested source snapshot is `681dfc29e1cc782d363999cf572dc56be9498565d34f78ba5f0120187e0c70e9`, containing 996 governed files. This is a source-manifest digest, not a Git commit. The [preserved manifest](mail-safety-results/paused-681d-source-manifest-2026-10-22.json) identifies the tested inputs. This handoff and its supporting documentation were added afterward; no product fix was added during shutdown.

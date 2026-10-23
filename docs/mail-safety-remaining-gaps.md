@@ -1,5 +1,7 @@
 # Remaining mail safety testing gaps
 
+The programme resumed on 23 October 2026. See the [continuation record](mail-safety-resume-2026-10-23.md) for the current combined-source work. The dated evidence below keeps its original source and scope; none is promoted to current native acceptance.
+
 Work was paused at the owner's request on 22 October 2026. The [pause handoff](mail-safety-paused-handoff-2026-10-22.md) records the latest incomplete performance, coverage and native/provider work. Earlier checkpoints below retain their original scope.
 
 Updated 22 October 2026. The programme and the original 69-gap request are **not complete**. This index distinguishes source tests, live-provider evidence, native acceptance and release evidence. The exact pre-reconciliation version is preserved as [a dated history snapshot](mail-safety-results/remaining-gaps-history-before-b14-current-evidence-reconciliation-2026-10-22.md); the [earlier detailed index](mail-safety-results/remaining-gaps-history-before-04b-final-verification-2026-10-22.md) remains unchanged.

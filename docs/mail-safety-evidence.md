@@ -1,5 +1,7 @@
 # Mail safety evidence lanes
 
+The programme resumed on 23 October 2026. See the [continuation record](mail-safety-resume-2026-10-23.md) for the current combined-source work. The dated evidence below keeps its original source and scope; none is promoted to current native acceptance.
+
 Work was paused at the owner's request on 22 October 2026. See the [pause handoff](mail-safety-paused-handoff-2026-10-22.md) for the latest results, failures and remaining work. This programme is not complete or release-approved.
 
 Current status, 22 October 2026: the latest source result is `681dfc29e1cc782d363999cf572dc56be9498565d34f78ba5f0120187e0c70e9`, 996 governed files. Its [three 18-gate source cycles](mail-safety-results/gmail-schema3-typed-reader-three-run-source-2026-10-22.json) passed all 54 gates without retries or manifest drift, with a separate strict native-fixture Clippy pass. This is source evidence only. It does not establish native WebKit, live-provider, package, release, performance, fuzzing, audit or global coverage acceptance.

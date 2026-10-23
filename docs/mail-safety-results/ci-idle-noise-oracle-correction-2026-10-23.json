@@ -1,0 +1,105 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-10-23T09:19:04Z",
+  "scope": "PR #113 Linux CI IDLE no-op pacing test-oracle correction",
+  "ciFailure": {
+    "runId": 39929067906,
+    "runUrl": "https://github.com/DakiaMail/dakia-desktop/actions/runs/39929067906",
+    "headSha": "00e00b77b14fc00834b1568f31bdbe597215d267",
+    "job": "Validate applicable scopes",
+    "step": "Validate Rust core scope",
+    "result": {
+      "passed": 771,
+      "failed": 1,
+      "ignored": 13,
+      "filteredOut": 2,
+      "durationSeconds": 99.60
+    },
+    "failedTest": "mail::tests::public_realtime_recovery_tests::ms_b_014_public_tls_noop_idle_noise_is_paced_on_one_connection",
+    "failure": "idle_count >= 2 failed: noise must exercise repeated reconciliation",
+    "compileOrClippyErrors": 0,
+    "downstreamResult": "Mail boundary, Tauri boundary, release-script and dependency-audit steps were skipped after the Rust core failure.",
+    "preservedLog": {
+      "path": "/private/tmp/dakia-pr113-run-39929067906-log-failed.txt",
+      "sha256": "492d40c1d8340826e298498213ae8e219508e2d2c7be0cb6ff76dedaaae484bf"
+    }
+  },
+  "diagnosis": {
+    "classification": "test-oracle timing defect exposed by the slower or contended Linux runner",
+    "originalOracle": "A 45 ms maintenance deadline had to permit at least two IDLE subscriptions. The first no-op invalidation performs real IMAP and Store reconciliation, so host scheduling and I/O could consume the deadline before the second subscription.",
+    "productConclusion": "The failure does not demonstrate a production realtime or pacing regression. The cycle completed cleanly after one IDLE subscription.",
+    "currentSourceBeforeCorrection": "The test and production pacing implementation were unchanged between 00e00b7 and 17a6e41, so the CI failure was not already fixed locally."
+  },
+  "correction": {
+    "file": "crates/dakia-core/src/mail/tests/public_realtime_recovery_tests.rs",
+    "productionBehaviorChanged": false,
+    "testOnlySchedule": {
+      "noopInvalidationMinimumMilliseconds": 100,
+      "maintenanceMilliseconds": 5000,
+      "outerTimeoutMilliseconds": 3000
+    },
+    "termination": "The IDLE-ready callback records accepted continuations and sends the existing watch cancellation after the second continuation. The test therefore stops from observed protocol progress rather than inferring progress from a short maintenance deadline.",
+    "assertions": [
+      "The cycle remains empty and reports cancellation.",
+      "The transcript contains exactly two IDLE commands and exactly two matching DONE commands.",
+      "The transcript contains exactly one LOGIN, proving both subscriptions used one authenticated connection.",
+      "The monotonic interval between accepted IDLE continuations is at least the configured 100 ms no-op pace."
+    ],
+    "correctedFileSha256": "aef90b3b4912bde29a5eb360b262866a985514a936b4b6a6bd65574b02eb605e"
+  },
+  "validation": {
+    "focusedCommand": "cargo test -p dakia-core --lib --locked mail::tests::public_realtime_recovery_tests::ms_b_014_public_tls_noop_idle_noise_is_paced_on_one_connection -- --exact --nocapture",
+    "initialRestrictedSandboxAttempt": {
+      "status": "invalid-environment-failure",
+      "failure": "Loopback bind was denied with Operation not permitted.",
+      "acceptedAsProductEvidence": false
+    },
+    "correctedRun": {
+      "status": "passed",
+      "passed": 1,
+      "failed": 0,
+      "filteredOut": 790,
+      "testDurationSeconds": 0.17
+    },
+    "sensitivityPerturbation": {
+      "change": "Temporarily set only this test's noop_invalidation_min_interval to Duration::ZERO while retaining the 100 ms expected interval.",
+      "productionSourceChanged": false,
+      "status": "failed-as-expected",
+      "failedAssertion": "the repeated IDLE subscription must pay the configured cancellable pace",
+      "passed": 0,
+      "failed": 1,
+      "filteredOut": 790,
+      "testDurationSeconds": 0.11
+    },
+    "restoredRun": {
+      "status": "passed",
+      "passed": 1,
+      "failed": 0,
+      "filteredOut": 790,
+      "testDurationSeconds": 0.20
+    },
+    "strictClippy": {
+      "command": "cargo clippy -p dakia-core --all-targets --locked -- -D warnings",
+      "status": "passed"
+    },
+    "formatAndDiffChecks": {
+      "commands": [
+        "cargo fmt --all -- --check",
+        "git diff --check -- crates/dakia-core/src/mail/tests/public_realtime_recovery_tests.rs"
+      ],
+      "status": "passed"
+    }
+  },
+  "sourceIdentity": {
+    "driftedFullCycleBeforeDigestPrefix": "e4fcf708",
+    "driftedFullCycleAfterDigest": "670652ff0da3121eabc3f2ede32d2089828588da85904de8e17ef602a69d6870",
+    "driftedFullCycleCommandGates": "18/18 passed",
+    "driftedFullCycleStatus": "failed by the final source-identity guard",
+    "acceptance": "The drifted cycle is historical evidence for its own inputs and is not current-source full-gate acceptance. A fresh frozen-source cycle is required after this correction."
+  },
+  "limits": [
+    "The focused test proves a measured monotonic continuation gap of at least 100 ms; it does not emit the exact larger duration.",
+    "The correction changes only the test oracle and does not alter the production one-second no-op pacing policy.",
+    "No full source cycle was accepted for the corrected source in this record."
+  ]
+}
