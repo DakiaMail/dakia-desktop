@@ -5927,7 +5927,7 @@ fn open_mail_window<R: tauri::Runtime>(
         Some(identifier) => builder.data_store_identifier(identifier),
         None => builder,
     };
-    builder
+    let builder = builder
         .title(spec.title)
         .inner_size(spec.size.0, spec.size.1)
         .min_inner_size(spec.minimum_size.0, spec.minimum_size.1)
@@ -5935,12 +5935,12 @@ fn open_mail_window<R: tauri::Runtime>(
         .focused(true)
         .resizable(true)
         .decorations(true)
-        .shadow(true)
+        .shadow(true);
+    #[cfg(target_os = "macos")]
+    let builder = builder
         .title_bar_style(tauri::TitleBarStyle::Overlay)
-        .hidden_title(true)
-        .build()
-        .map(|_| ())
-        .map_err(error)
+        .hidden_title(true);
+    builder.build().map(|_| ()).map_err(error)
 }
 
 fn window_seed_key(seed_key: &str) -> Result<(), String> {
