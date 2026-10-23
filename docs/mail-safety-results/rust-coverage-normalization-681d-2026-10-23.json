@@ -1,0 +1,105 @@
+{
+  "schemaVersion": 1,
+  "status": "passed-historical-normalization-partial-baseline-comparison",
+  "scope": "Normalizes only the retained 681d Rust coverage cohort. It is not current-source, hosted-workflow, native, provider, or release acceptance.",
+  "sourceCohort": {
+    "sourceDigest": "681dfc29e1cc782d363999cf572dc56be9498565d34f78ba5f0120187e0c70e9",
+    "sourceManifest": "docs/mail-safety-results/paused-681d-source-manifest-2026-10-22.json",
+    "sourceManifestSha256": "cf9c10b83bf1951210b09b08ef739f31e2f634ebd724ba0786cd8444a813d1f2",
+    "profile": "/private/tmp/dakia-global-workspace-coverage-20261022-target/llvm-cov-target/dakia-desktop.profdata",
+    "profileSha256": "5b0fa380448e567fc7dd6aceb961905f7528f282ff383cfc231afb408897d8bb",
+    "objectSetSha256": "9aae8bcbd9a65f86b75bd017a20f3fe0ae8021d6900c6a48fadc4d948ae13a8a"
+  },
+  "retainedInputs": {
+    "lineBranchLcov": "/private/tmp/dakia-681d-global-workspace-coverage-20261022/rust-lcov-skip-functions-provenance.lcov",
+    "lineBranchLcovSha256": "43ac7e23a892755391fbdb1de0aec66394b9d6063f9e4b31a94da390d9fcbdbf",
+    "lineBranchReceiptSha256": "b8dde53ea793382d5b997f9ab5f892bbedf2ce056b8ab127029a8ac9c433d595",
+    "functionsJson": "/private/tmp/dakia-681d-global-workspace-coverage-20261022/rust-json-provenance.json",
+    "functionsJsonSha256": "14911b0dec49baf2f70ac16503f0ebb5525fee77630e4704aff0d69d30dcc4f1",
+    "functionsReceiptSha256": "a86ea156cacee8ddbff132cfec463530217fc27b380ee5168a6eb941e6bbb5a0",
+    "revalidation": "The profile digest and all 19 recorded instrumented object files matched the hash-bound receipts before normalization."
+  },
+  "normalization": {
+    "script": "scripts/normalize-rust-coverage-lcov.mjs",
+    "normalizedLcovSha256": "2cd8c4ddac817ebb4da6641f81ebd90a7a6efba01a6d269b33b66b0ce3b9aa0c",
+    "normalizationSummarySha256": "901e691174b746d58c4796652aa25afcdfda62e7e6e49f1a559e2fef72a81a46",
+    "lineAndBranchAuthority": "The official --skip-functions LCOV DA and BRDA records are preserved and summary-compared before and after normalization.",
+    "functionAuthority": "FN and FNDA records are reconstructed only from same-cohort llvm-cov JSON instrumentation instantiations with one matching LCOV source filename and a mapped first region.",
+    "sourceFiles": 28,
+    "lines": {
+      "found": 49373,
+      "hit": 42807
+    },
+    "branches": {
+      "found": 4944,
+      "hit": 3305
+    },
+    "instrumentationInstantiations": {
+      "found": 11760,
+      "hit": 5526
+    },
+    "distinctFunctionDefinitions": {
+      "found": 4525,
+      "hit": 3743
+    },
+    "unavailableFunctionMappings": [
+      {
+        "name": "_RNCNvXs1x_NtCsl3D4KRelWmA_10dakia_core4mailNtB8_32NativeMailSafetyOneClickResolverNtB8_16OneClickResolver6lookup0Ba_",
+        "filename": "/Users/arsalan/code/codex-worktrees/36f9/dakia-desktop/crates/dakia-core/src/mail.rs",
+        "invocationCount": 0,
+        "branchRecordCount": 2
+      },
+      {
+        "name": "_RNCNvXs1z_NtCsl3D4KRelWmA_10dakia_core4mailNtB8_21ReqwestOneClickSenderNtB8_14OneClickSender4post0Ba_",
+        "filename": "/Users/arsalan/code/codex-worktrees/36f9/dakia-desktop/crates/dakia-core/src/mail.rs",
+        "invocationCount": 0,
+        "branchRecordCount": 1
+      },
+      {
+        "name": "_RNCNvXs1z_NtCs6L9aQeKyebt_10dakia_core4mailNtB8_21ReqwestOneClickSenderNtB8_14OneClickSender4post0Ba_",
+        "filename": "/Users/arsalan/code/codex-worktrees/36f9/dakia-desktop/crates/dakia-core/src/mail.rs",
+        "invocationCount": 0,
+        "branchRecordCount": 1
+      },
+      {
+        "name": "_RNCNvXs1x_NtCs6L9aQeKyebt_10dakia_core4mailNtB8_32NativeMailSafetyOneClickResolverNtB8_16OneClickResolver6lookup0Ba_",
+        "filename": "/Users/arsalan/code/codex-worktrees/36f9/dakia-desktop/crates/dakia-core/src/mail.rs",
+        "invocationCount": 0,
+        "branchRecordCount": 0
+      }
+    ],
+    "outsideLineBranchSourceFileRecords": 2047
+  },
+  "baselineComparison": {
+    "baseline": "testdata/coverage/baseline.json",
+    "baselineSha256": "8cc99d5b08a73af76be5e66307349250e3c06ab48eb880d8aa11e1a7e58aab1f",
+    "result": "partially-compared: Rust line and frontend ratios passed; the legacy Rust baseline has no branch observations, so Rust branch comparison is unavailable; Rust functions use LLVM instrumentation-instantiations and are incompatible with the legacy LCOV-FNDA baseline, so that comparison is also unavailable",
+    "candidateSha256": "9638d9590dbb3d9897348f371b11a3319b9ab680c9218c4fb7b1d4a3411e0216",
+    "baselineModified": false,
+    "frontendRetainedCohort": {
+      "lines": {
+        "found": 5401,
+        "hit": 4555
+      },
+      "branches": {
+        "found": 4213,
+        "hit": 3232
+      },
+      "functions": {
+        "found": 1723,
+        "hit": 1327
+      }
+    }
+  },
+  "workflowChange": {
+    "workflow": ".github/workflows/manual-validation.yml",
+    "behavior": "The manual coverage lane freezes a tracked-source manifest before instrumentation, records both cargo-llvm-cov export invocations through a checked-in LLVM proxy, verifies the source did not change, writes paired output receipts for one profile/object cohort, normalizes the receipt-bound LCOV and JSON reports, and then compares the candidate without invoking the known crashing full-LCOV function export.",
+    "hostedValidation": "not run"
+  },
+  "limitations": [
+    "The full LLVM 23 LCOV export crash remains a retained platform/toolchain failure; this result does not diagnose its cause.",
+    "The four no-region JSON functions remain explicitly unavailable for FN/FNDA mapping. Their line and branch observations are retained from official LCOV.",
+    "The JSON definition total is recorded separately from instrumentation instantiations and is not used as the LCOV function metric.",
+    "This historical comparison does not make the current checkout equivalent to source digest 681d."
+  ]
+}

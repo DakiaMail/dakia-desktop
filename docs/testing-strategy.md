@@ -335,9 +335,14 @@ The initial manual workflow is deliberately useful without overstating its
 scope:
 
 - the coverage dispatch installs pinned `cargo-llvm-cov` and Vitest V8 coverage
-  tooling, writes Rust and frontend LCOV reports, and emits a candidate JSON;
-  if `testdata/coverage/baseline.json` has been intentionally reviewed, it
-  fails on any line, branch, or function ratio regression. The workflow never
+  tooling, freezes and rechecks a tracked-source manifest, captures the two
+  actual LLVM export invocations and their profile/object state, writes paired
+  receipts, normalizes the Rust reports, and emits a candidate JSON. If
+  `testdata/coverage/baseline.json` has been intentionally reviewed, it
+  fails on any compatible line, branch, or function ratio regression. A metric
+  whose producer changes, such as legacy LCOV FNDA versus LLVM JSON
+  instrumentation instantiations, is reported as comparison-unavailable and
+  does not pass as a full ratchet until a compatible reviewed baseline exists. The workflow never
   writes the baseline itself.
 - the fuzz dispatch currently runs the checked-in, bounded fixed-seed thread
   property and MIME corpus regressions three times. This is not an unbounded

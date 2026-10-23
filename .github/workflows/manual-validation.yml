@@ -165,11 +165,46 @@ jobs:
           installed_provider_version="$(node -p "require('./node_modules/@vitest/coverage-v8/package.json').version")"
           test "$installed_vitest_version" = "$locked_vitest_version"
           test "$installed_provider_version" = "$locked_vitest_version"
-      - name: Generate Rust and frontend LCOV reports
+      - name: Generate Rust coverage reports without the LLVM full-LCOV crash path
         run: |
           mkdir -p coverage
-          cargo +nightly-2026-10-17 llvm-cov --workspace --branch --locked --lcov --output-path coverage/rust.lcov
-          node --input-type=module - coverage/rust.lcov <<'NODE'
+          chmod +x scripts/coverage-llvm-cov-proxy.mjs
+          export RUST_COVERAGE_REAL_LLVM_COV="$(rustup which --toolchain nightly-2026-10-17 llvm-cov)"
+          export LLVM_PROFDATA="$(rustup which --toolchain nightly-2026-10-17 llvm-profdata)"
+          export RUST_COVERAGE_EXPORT_LOG="$PWD/coverage/rust-export-invocations.jsonl"
+          export LLVM_COV="$PWD/scripts/coverage-llvm-cov-proxy.mjs"
+          node scripts/create-rust-coverage-provenance.mjs --prepare-source \
+            --source-root . \
+            --source-manifest coverage/rust-source-manifest.json \
+            --source-digest-output coverage/rust-source-digest.txt
+          cargo +nightly-2026-10-17 llvm-cov clean --workspace
+          cargo +nightly-2026-10-17 llvm-cov --workspace --branch --locked --no-report
+          cargo +nightly-2026-10-17 llvm-cov report --workspace --branch --locked --lcov --skip-functions --output-path coverage/rust.lcov
+          cargo +nightly-2026-10-17 llvm-cov report --workspace --branch --locked --json --output-path coverage/rust-functions.json
+          node scripts/create-rust-coverage-provenance.mjs \
+            --source-root . \
+            --source-manifest coverage/rust-source-manifest.json \
+            --source-digest-output coverage/rust-source-digest.txt \
+            --export-log coverage/rust-export-invocations.jsonl \
+            --line-branch-lcov coverage/rust.lcov \
+            --functions-json coverage/rust-functions.json \
+            --line-branch-receipt coverage/rust-line-branch.receipt.json \
+            --functions-receipt coverage/rust-functions.receipt.json \
+            --toolchain "nightly-2026-10-17 cargo-llvm-cov-0.9.1"
+          profile_path="$(node -p "require('./coverage/rust-line-branch.receipt.json').profilePath")"
+          profile_sha256="$(node -p "require('./coverage/rust-line-branch.receipt.json').profileSha256")"
+          node scripts/normalize-rust-coverage-lcov.mjs \
+            --line-branch-lcov coverage/rust.lcov \
+            --functions-json coverage/rust-functions.json \
+            --profile "$profile_path" \
+            --expected-profile-sha256 "$profile_sha256" \
+            --source-digest "$(cat coverage/rust-source-digest.txt)" \
+            --source-manifest coverage/rust-source-manifest.json \
+            --line-branch-receipt coverage/rust-line-branch.receipt.json \
+            --functions-receipt coverage/rust-functions.receipt.json \
+            --output coverage/rust-normalized.lcov \
+            --summary coverage/rust-normalization-summary.json
+          node --input-type=module - coverage/rust-normalized.lcov <<'NODE'
           import { readFileSync } from "node:fs";
           import { coverageAvailability, summarizeLcov } from "./scripts/coverage-ratchet.mjs";
 
@@ -187,7 +222,8 @@ jobs:
             baseline_args=(--baseline testdata/coverage/baseline.json)
           fi
           node scripts/coverage-ratchet.mjs \
-            --rust-lcov coverage/rust.lcov \
+            --rust-lcov coverage/rust-normalized.lcov \
+            --rust-normalization-summary coverage/rust-normalization-summary.json \
             --frontend-lcov coverage/frontend/lcov.info \
             --output coverage/candidate.json \
             "${baseline_args[@]}"
