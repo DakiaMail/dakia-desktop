@@ -1,12 +1,12 @@
 # Remaining mail safety testing gaps
 
-The programme resumed on 23 October 2026. See the [continuation record](mail-safety-resume-2026-10-23.md) for the current combined-source work. The dated evidence below keeps its original source and scope; none is promoted to current native acceptance.
+The programme resumed on 23 October 2026. The [continuation record](mail-safety-resume-2026-10-23.md#latest-acceptance-status) is the current status. Current native load and first-open Reader acceptance failed and fixes are under validation. Finite provider, attachment and schema observations retain their own source identities. The 22 October checkpoint below is historical; it is not the current combined-source result.
 
 Work was paused at the owner's request on 22 October 2026. The [pause handoff](mail-safety-paused-handoff-2026-10-22.md) records the latest incomplete performance, coverage and native/provider work. Earlier checkpoints below retain their original scope.
 
 Updated 22 October 2026. The programme and the original 69-gap request are **not complete**. This index distinguishes source tests, live-provider evidence, native acceptance and release evidence. The exact pre-reconciliation version is preserved as [a dated history snapshot](mail-safety-results/remaining-gaps-history-before-b14-current-evidence-reconciliation-2026-10-22.md); the [earlier detailed index](mail-safety-results/remaining-gaps-history-before-04b-final-verification-2026-10-22.md) remains unchanged.
 
-## Current 681d source result and bounded b14 native/provider checkpoint
+## Historical 22 October source and native/provider checkpoint
 
 The current source validation result is `681dfc29e1cc782d363999cf572dc56be9498565d34f78ba5f0120187e0c70e9`, across 996 governed files. Its [three source cycles](mail-safety-results/gmail-schema3-typed-reader-three-run-source-2026-10-22.json) passed all 54 gates, three 18-gate iterations, without retries or source-manifest drift. The source result also records a separate strict `native-mail-safety-fixture` Clippy pass. It does not establish native WebKit, live-provider, package, release, performance, fuzzing, audit or coverage acceptance.
 

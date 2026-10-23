@@ -4,6 +4,20 @@ The owner authorized resuming draft PR #113. Work remains in progress. The PR st
 
 The clean starting checkout was detached at `e1da334`. The existing programme head was `d813a25`, checked out in another worktree with private files and local assets. The continuation uses `f/mail-safety-confidence-resume` and will update the same remote PR branch. The older worktree, credentials, caches and evidence remain intact.
 
+## Latest acceptance status
+
+Native acceptance on governed source `4853dc68bac211ef68fd3b645f36210ebf133992aa1824e19d0c21c3cfff3f7c` / 1,034 files exposed two product defects. The native 30k conversation search stayed pending, delaying compose bootstrap. The thirteen-fixture run fetched and cached bodies but returned blank first-open Reader content; reopening displayed all thirteen bodies. Both failed runs are retained, and focused fixes are being validated. Neither is a native pass.
+
+The [finite native report](mail-safety-results/resumed-4853-native-partial-2026-10-23.json) separately records remote-content consent boundaries, watcher-delivered fictional mail, correct-account Reply/Forward, native mailto rejection, interrupted-save quit/restart and explicit retry, exact saved bytes, permissions and quarantine. Six main-process resource samples passed the declared ceilings; WebKit metrics remain unavailable and a user-interrupted 90-minute gap prevents a continuous-soak claim.
+
+The [schema report](mail-safety-results/resumed-4853-schema-native-2026-10-23.json) records normal forward upgrade from the sealed fictional v0.4.4 profile to schema 3, preserved starred cached content, whole-profile retention, and the accessible future-schema recovery window with unchanged durable files. It also retains the initial read-only fixture preparation failure and the corrected post-exit starred-body oracle. Downgrade was not attempted.
+
+The [native load and Reader failure report](mail-safety-results/resumed-4853-native-load-and-reader-failures-2026-10-23.json) keeps the failed first-open observations distinct from successful cached presentation. Settings selected Dark while Main remained light, so native dark-mode propagation remains open. The exact native CID data-URL rewrite was not inspected; the strict thirteen-fixture seal is not claimed.
+
+Hosted run [39937997278](https://github.com/DakiaMail/dakia-desktop/actions/runs/39937997278) timed out at twenty minutes during an eleven-minute-forty-seven-second Ubuntu Azure mirror download. Core and mail-boundary suites passed before cancellation; Linux Tauri compilation and later gates did not run. The reviewed workflow correction isolates the unchanged Linux Tauri suite, bounds official-mirror acquisition, and preserves the required aggregate merge gate. Hosted acceptance and warm-cache timing remain pending.
+
+The lane reports below retain their own source identities. They are not promoted across the newly discovered product fixes without fresh checks or explicit component equivalence.
+
 ## Combined source
 
 Merge commit `12383a0` includes main’s receipt layout and dark-mode corrections, the reviewed inert-document renderer, remote-content consent policy and all programme changes. The combined Reader suite passed 51 tests and the realistic-fixture validator passed 11 tests. Receipt images start blocked; consent permits image `src` only, while CSS network backgrounds remain blocked. Current and quoted-history bodies are classified independently. The regression exercises expand, collapse and expand again.

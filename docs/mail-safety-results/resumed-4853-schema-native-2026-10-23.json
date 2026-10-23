@@ -1,0 +1,235 @@
+{
+  "schemaVersion": 1,
+  "receiptType": "resumed-current-native-schema",
+  "status": "bounded-v044-forward-upgrade-and-future-profile-rejection-observed",
+  "sourceManifestDigest": "4853dc68bac211ef68fd3b645f36210ebf133992aa1824e19d0c21c3cfff3f7c",
+  "governedFileCount": 1034,
+  "sourceIdentityKind": "sha256-path-and-content-manifest, not a Git commit",
+  "evidenceDate": "2026-10-23",
+  "evaluationBoundary": "Historical retained native run. Later working-tree fixes and later source checks are separate and do not change this run into a pass.",
+  "executableSha256": "84cf7870c99a28058223d20eaf998f0770a250955ba87349428a454d74d2a734",
+  "sourceReceipts": {
+    "beforeBuild": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.Pnb9mp/source-before-build.json",
+      "sha256": "f6a4a553aa38974aceee534a0b728893b8f3da98bf05aa8ce7a7ba3963653b7f",
+      "bytes": 155
+    },
+    "afterRun": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.Pnb9mp/source-after-run.json",
+      "sha256": "c6d7e33459d2e1a498bd4003d7787394f218c074eb3cd786e4fbe862d54589cb",
+      "bytes": 380
+    }
+  },
+  "v044ForwardUpgrade": {
+    "status": "passed-bounded-fictional-forward-upgrade",
+    "previousStableVersion": "v0.4.4",
+    "sourceFixtureSchema": "1",
+    "resultSchema": "3",
+    "integrity": "ok",
+    "preservedMessageMetadata": {
+      "unread": true,
+      "starred": true,
+      "contentState": "complete"
+    },
+    "authoritativeBodyTable": "starred_message_bodies",
+    "starredBodyRowsByteEquivalent": true,
+    "oldAuthoritativeRowSnapshotSha256": "3a3fd2c0ccccfc3c32d7ab79a2d7f93ad53120bc246b1b8c85ef45d9e502f8b5",
+    "bodyStorageScope": "Authoritative starred-body row preservation and main CUA Reader markers, not messages metadata body fields or an unstarred cache.",
+    "exitCode": 0,
+    "result": {
+      "path": "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/schema-native-current/v044-forward-upgrade-result.json",
+      "sha256": "a6593d3efc90deeb3717babea5bdf843b23450df90374b1f6922d74c3ab281d2",
+      "bytes": 1594
+    },
+    "initialFixtureFailure": {
+      "status": "failed-readonly-fixture-preparation",
+      "exitCode": 1,
+      "fatalReason": "storage_unavailable",
+      "fatalWindowAccessible": true,
+      "classification": "The initial copied fixture retained read-only database modes. The app exposed an app-owned fatal recovery window. This is retained as an initial failed fixture attempt, not a failed migration of the later writable fixture.",
+      "normalModesLater": "Prelaunch writable whole-profile copy recorded mode0600 for database/WAL/SHM and markers."
+    },
+    "initialPostExitOracleFailure": {
+      "status": "failed-oracle-corrected",
+      "reason": "Incorrectly inspected metadata messages.body_text; authoritative starred body and actual Reader are preserved",
+      "authoritativeCheck": "Exact old starred_message_bodies row comparison was subsequently recorded true. The wrong metadata-column oracle remains disclosed."
+    },
+    "wholeProfilesRetained": [
+      "v044-readonly-attempt-profile",
+      "v044-upgraded-whole-profile"
+    ],
+    "downgradeAttempted": false,
+    "downgradePolicy": "Unsupported; restore the complete pre-upgrade backup."
+  },
+  "futureSchema4": {
+    "status": "passed-bounded-safe-fatal-rejection",
+    "result": {
+      "path": "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/schema-native-current/future4-result.json",
+      "sha256": "0fa2c134e605373e196888fa713d297bd6df4d46f2528769786fec5161437156",
+      "bytes": 449
+    },
+    "expectedSchemaMarker": "4",
+    "durableFilesUnchanged": true,
+    "durableFileChecks": [
+      {
+        "name": ".dakia-startup-failure-profile",
+        "bytes": 80,
+        "preLaunchSha256": "b11da62cd05828b0884e39519d016e10a2eadccaf83a5e6d39d5e826127d32b1",
+        "postRunSha256": "b11da62cd05828b0884e39519d016e10a2eadccaf83a5e6d39d5e826127d32b1",
+        "unchanged": true
+      },
+      {
+        "name": "dakia.db",
+        "bytes": 16384,
+        "preLaunchSha256": "527885c278de76eb7d4c5adc7d384cbf4f24c80e9df559904bacaa04e1badccd",
+        "postRunSha256": "527885c278de76eb7d4c5adc7d384cbf4f24c80e9df559904bacaa04e1badccd",
+        "unchanged": true
+      },
+      {
+        "name": "vault.key",
+        "bytes": 32,
+        "preLaunchSha256": "75e312f3e7cbbc27542c7594f644bf3fa997af238adf8a2f7108b0edcb75cd68",
+        "postRunSha256": "75e312f3e7cbbc27542c7594f644bf3fa997af238adf8a2f7108b0edcb75cd68",
+        "unchanged": true
+      }
+    ],
+    "walAbsentInResult": true,
+    "walAbsentAtExport": true,
+    "fatalRecoveryUrl": "tauri://localhost/fatal-recovery.html?reason=newer_profile",
+    "reason": "newer_profile",
+    "quitButtonVisible": true,
+    "inboxNotVisible": true,
+    "exitCode": 1,
+    "scope": "App-owned recovery UI with unchanged database/key/owned marker and no WAL. No system-dialog dismissal dependency."
+  },
+  "normalApprovedApplicationSupport": {
+    "path": "/Users/arsalan/Library/Application Support/dev.dakia.fictional-provider-reader.run-OTAMH2",
+    "existsAtExport": false,
+    "quarantinedWholeProfiles": true,
+    "scope": "Only the approved fictional bundle App Support location was used. Whole test profiles were retained under the private schema lane and the location was absent at export; no normal user mailbox is assessed."
+  },
+  "artifactSets": {
+    "schema": {
+      "root": "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/schema-native-current",
+      "files": [
+        {
+          "name": "staging-receipt.json",
+          "sha256": "9b0417750101cd0cb31c8404e286ab3c0fb7eae44e28ab84c51e47d5401e1853",
+          "bytes": 3545
+        },
+        {
+          "name": "v044-source-precopy-receipt.json",
+          "sha256": "c476b9cc10c33a51fad8f2a0a71ea387c226e3209f6c2b8d97bee813d5a98c72",
+          "bytes": 2651
+        },
+        {
+          "name": "future4-source-precopy-receipt.json",
+          "sha256": "05ff52bdc0880061b886dc65cd788a5b806e86f9e5eba2ccade7b8a70c146aec",
+          "bytes": 1313
+        },
+        {
+          "name": "v044-launch.json",
+          "sha256": "d19b0f87a5a8422d0bfb6c5d82fce4fd281001b16c418ffef792a9532f6ce8d4",
+          "bytes": 386
+        },
+        {
+          "name": "v044-exit.json",
+          "sha256": "7245bf22542e051fde159c0a9b5e43ccc9829712ea3255523d9ac7baac772ea1",
+          "bytes": 60
+        },
+        {
+          "name": "v044-writable-launch.json",
+          "sha256": "e73f4243b98eb9ea53099aac05c8e6d83348b44da91495512ada834eaafaaff1",
+          "bytes": 1327
+        },
+        {
+          "name": "v044-writable-exit.json",
+          "sha256": "3c167e9c58bba5276fe340a723c35cf057a770dff8fc1efa337cd85d9c243fd3",
+          "bytes": 61
+        },
+        {
+          "name": "v044-forward-upgrade-result.json",
+          "sha256": "a6593d3efc90deeb3717babea5bdf843b23450df90374b1f6922d74c3ab281d2",
+          "bytes": 1594
+        },
+        {
+          "name": "future4-launch.json",
+          "sha256": "198bc6eae6904b7a20b7fb890cf85d4e11041d75561a8308761e1c73acbf72c0",
+          "bytes": 428
+        },
+        {
+          "name": "future4-exit.json",
+          "sha256": "d9f9e112f135c0198d663f45fe485cf3fa8a3dc48c9e22eae43c47779906e9d3",
+          "bytes": 60
+        },
+        {
+          "name": "future4-result.json",
+          "sha256": "0fa2c134e605373e196888fa713d297bd6df4d46f2528769786fec5161437156",
+          "bytes": 449
+        }
+      ]
+    },
+    "mainCuaAx": {
+      "root": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.Pnb9mp",
+      "files": [
+        {
+          "name": "v044-readonly-fixture-failure.ax.json",
+          "sha256": "c662fae513c8e16db4d9ca2bb727a064543663df9e2439710c797ad4840bb95e",
+          "bytes": 1211
+        },
+        {
+          "name": "v044-upgraded-unread-starred.ax.json",
+          "sha256": "bff81639aaf87dc6324cdfce235d1352de4fd3d186ad0ba5207e8690c5cb226d",
+          "bytes": 2014
+        },
+        {
+          "name": "v044-upgraded-reader.ax.json",
+          "sha256": "ba7aee466cadb8974c8968aa6eff8b461b218ec78d69e7a967aff9aa0cc32591",
+          "bytes": 3275
+        },
+        {
+          "name": "future4-fatal-recovery.ax.json",
+          "sha256": "ab26711db2fa94abc8b8f1badfd7c88c39054b125b01eb06a649f0c251a9fd7f",
+          "bytes": 1204
+        }
+      ]
+    },
+    "mainCuaScreenshots": {
+      "root": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.Pnb9mp",
+      "files": [
+        {
+          "name": "v044-readonly-fixture-failure.png",
+          "sha256": "83ddfed6b2645d2c0b652da597061993550619d2fc4b1f8c6debc1be66e71037",
+          "bytes": 97412
+        },
+        {
+          "name": "v044-upgraded-unread-starred.png",
+          "sha256": "0227c4043c7db831a81edf24c7fd4edba8c4f2b32508dfef95ded207d0a28981",
+          "bytes": 200565
+        },
+        {
+          "name": "v044-upgraded-reader.png",
+          "sha256": "44457bb510594a3bc6f7ec5bbdbafabab70548b27f61a12c5eeb14e9f713822c",
+          "bytes": 260594
+        },
+        {
+          "name": "future4-fatal-recovery.png",
+          "sha256": "7e78e0fb2839768a4e7116bf2b296c3a4890d1a698291bc6ad770c5dbe28266c",
+          "bytes": 99914
+        }
+      ]
+    }
+  },
+  "limitations": [
+    "This proves the bounded fictional v0.4.4 forward-upgrade and future-schema4 rejection paths only. It is not an arbitrary historical-version, profile-corruption or downgrade support matrix.",
+    "The read-only fixture attempt and wrong post-exit metadata-body oracle are retained failures; the corrected writable run is not described as a retry-free first pass.",
+    "Authoritative body preservation is taken from the retained main native SQLite comparison receipt and AX Reader evidence; no raw message bodies or key bytes are exported.",
+    "No release signing, notarization, updater, packaging-distribution or physical sleep/wake acceptance is implied.",
+    "Later source fixes and tests are separate from this immutable4853 run."
+  ],
+  "redaction": {
+    "rawMailCopied": false,
+    "credentialsOrKeyBytesCopied": false,
+    "controlNonceCopied": false
+  }
+}

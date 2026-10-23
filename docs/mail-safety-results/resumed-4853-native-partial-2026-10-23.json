@@ -1,0 +1,612 @@
+{
+  "schemaVersion": 1,
+  "receiptType": "resumed-current-native-partial",
+  "status": "partial-current-native-evidence",
+  "sourceManifestDigest": "4853dc68bac211ef68fd3b645f36210ebf133992aa1824e19d0c21c3cfff3f7c",
+  "governedFileCount": 1034,
+  "sourceIdentityKind": "sha256-path-and-content-manifest, not a Git commit",
+  "evidenceDate": "2026-10-23",
+  "evaluationBoundary": "Historical retained native run. Later working-tree fixes and later source checks are separate and do not change this run into a pass.",
+  "primaryExecutableSha256": "84cf7870c99a28058223d20eaf998f0770a250955ba87349428a454d74d2a734",
+  "privateEvaluations": {
+    "partial": {
+      "path": "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/native-current-partial-evaluation.json",
+      "sha256": "93078ab7c9c56ac230a8d2e5be2eadd439a6a41db2f56be0c5ff2bfcdaed13ab",
+      "bytes": 63548
+    },
+    "network": {
+      "path": "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/native-network-evaluation.json",
+      "sha256": "4f0b477c90c9f1a9ac40aac9198dd73c1df136799e1db8708012fd05ae44661c",
+      "bytes": 10503
+    }
+  },
+  "retainedSourceChecks": {
+    "beforeBuild": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.Pnb9mp/source-before-build.json",
+      "sha256": "f6a4a553aa38974aceee534a0b728893b8f3da98bf05aa8ce7a7ba3963653b7f",
+      "bytes": 155
+    },
+    "afterRun": {
+      "path": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.Pnb9mp/source-after-run.json",
+      "sha256": "c6d7e33459d2e1a498bd4003d7787394f218c074eb3cd786e4fbe862d54589cb",
+      "bytes": 380
+    },
+    "unchangedDuringRun": true
+  },
+  "network": {
+    "status": "passed-scoped-network-counter-assertions",
+    "evaluatedChecks": {
+      "passed": 22,
+      "total": 22
+    },
+    "before": {
+      "http": 0,
+      "tls": 0,
+      "total": 0
+    },
+    "after": {
+      "http": 5,
+      "tls": 4,
+      "total": 9,
+      "completedResponses": 5
+    },
+    "settled": {
+      "http": 5,
+      "tls": 4,
+      "observationIntervalMs": 40341
+    },
+    "returned": {
+      "http": 5,
+      "tls": 4,
+      "capturedAt": "2026-10-23T12:13:07.945Z"
+    },
+    "exactAllowedRequests": [
+      {
+        "listener": "http",
+        "path": "/remote-image.svg",
+        "query": "?via=direct"
+      },
+      {
+        "listener": "http",
+        "path": "/redirect-image",
+        "query": ""
+      },
+      {
+        "listener": "http",
+        "path": "/remote-image.svg",
+        "query": "?via=redirect"
+      },
+      {
+        "listener": "http",
+        "path": "/remote-image.svg",
+        "query": "?via=encoded-html"
+      },
+      {
+        "listener": "http",
+        "path": "/remote-image.svg",
+        "query": "?via=event-handler"
+      }
+    ],
+    "forbiddenRequestsObserved": 0,
+    "responseStatuses": [200, 302, 200, 200, 200],
+    "tlsContactBounds": {
+      "minimum": 1,
+      "maximum": 8,
+      "observed": 4
+    },
+    "tlsRenderingClaim": false,
+    "scope": "Exact finite owned-listener counters and completed-response observations. No system-wide egress or successful HTTPS protocol-relative render claim."
+  },
+  "resources": {
+    "status": "main-snapshot-ceilings-passed-webkit-unavailable",
+    "metricDefinitionVersion": 4,
+    "summary": {
+      "path": "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/native-resource-actual/native-resource-session/resource-summary.json",
+      "sha256": "24e3d2a529714ffe3c7f0dc9d2fb31dadaf0c6874ee384152fb6580281bf3ee9",
+      "bytes": 5897
+    },
+    "phasePlan": [
+      "before-01",
+      "during-reader-01",
+      "during-reader-repeat-01",
+      "during-compose-01",
+      "during-account-cycle-01",
+      "after-01"
+    ],
+    "peakMetrics": {
+      "mainRssBytes": 328400896,
+      "mainOpenFileDescriptors": 17,
+      "mappedWebKitAggregateRssBytes": null,
+      "mappedWebKitAggregateOpenFileDescriptors": null,
+      "mappedWebKitChildren": null
+    },
+    "absoluteLimits": {
+      "status": "unavailable",
+      "mainStatus": "passed",
+      "mappedWebKitStatus": "unavailable",
+      "limitsRecordSha256": "2835168831433cc3e9bed4245d271da9059cf1749ee489dfb55f28a5fdd6af1d",
+      "claim": "Main-process RSS and file-descriptor ceilings are complete. Mapped WebKit values never establish a full WebKit resource pass."
+    },
+    "regression": {
+      "thresholdPercent": 20,
+      "status": "not_evaluated_no_compatible_baseline",
+      "claim": "Historical baseline comparison was not performed. No new or reset baseline and no 20 percent regression pass is claimed.",
+      "assessedMetrics": [],
+      "excludedMetrics": [
+        "historical comparison lacks an approved compatible-baseline receipt",
+        "mapped WebKit metrics because private responsible-process mapping is not a complete cohort contract"
+      ]
+    },
+    "largestGapMs": 5421576,
+    "userInterruptionRecorded": true,
+    "continuousSoakClaimed": false,
+    "webKitUnavailableReasons": ["main_responsibility_mismatch"],
+    "interpretation": "The six snapshots pass only their recorded main-process RSS/FD ceilings. All WebKit metrics remain null/unavailable, not zero or a resource pass."
+  },
+  "preservedPreparationFailure": {
+    "root": "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/native-resource-session",
+    "classification": "failed-before-sampling-on-root-URL-canonicalization",
+    "sessionStateExists": false,
+    "sampleCount": 0,
+    "originalObservedUrl": "tauri://localhost",
+    "correctedRootUrl": "tauri://localhost/",
+    "cleanupOrErasurePerformed": false,
+    "scope": "The failed initial directory and before/corrected main CUA AX receipts remain retained. The corrected resource session is a separate harness attempt."
+  },
+  "heldSync": {
+    "holdAcknowledgedAt": "2026-10-23T12:13:36.507Z",
+    "holdDeadlineAt": "2026-10-23T12:14:11.507Z",
+    "resumeAcknowledgedAt": "2026-10-23T12:13:55.029Z",
+    "origin": "Exact control-acknowledgement times supplied by the main agent in its handoff. The retained AX captures are independently hash-pinned below; no separate retained hold/resume acknowledgement artifact was supplied to this exporter.",
+    "captures": [
+      {
+        "name": "held-sync-start.ax.json",
+        "capturedAt": "2026-10-23T12:13:43.356Z",
+        "withinHoldWindow": true,
+        "syncDisabledVisible": true,
+        "composeSenderTwoVisible": false
+      },
+      {
+        "name": "held-sync-reader.ax.json",
+        "capturedAt": "2026-10-23T12:13:44.304Z",
+        "withinHoldWindow": true,
+        "syncDisabledVisible": true,
+        "composeSenderTwoVisible": false
+      },
+      {
+        "name": "held-sync-compose.ax.json",
+        "capturedAt": "2026-10-23T12:13:45.353Z",
+        "withinHoldWindow": true,
+        "syncDisabledVisible": false,
+        "composeSenderTwoVisible": true
+      }
+    ]
+  },
+  "fictionalInjectedReceipt": {
+    "acceptedAt": "2026-10-23T12:14:31.963333Z",
+    "sendAttempts": 1,
+    "acceptedDataCommands": 1,
+    "noExtraSends": true,
+    "scope": "One explicitly authorized message appended to the isolated fictional mailbox. No real provider or production mailbox mutation.",
+    "storeObservation": "The main agent reported the injected fictional row in Store and captured the delivered list and Reader. This export pins the injection and main CUA evidence; it did not rerun a Store query.",
+    "listCapture": "watcher-delivered-list.ax.json",
+    "readerCapture": "watcher-receipt-reader.ax.json",
+    "workerDiagnosticExcluded": "receipt-layout-after-watcher.ax.json was a separate worker diagnostic and is not used as native acceptance evidence here.",
+    "latencyClaim": "No transport-to-Reader latency or exhaustive supervisor/reconnect acceptance inferred."
+  },
+  "attachments": {
+    "status": "bounded-quit-restart-file-publication-evidence",
+    "stalledLiteral": {
+      "announcedWireBytes": 44,
+      "deliveredWireBytes": 12,
+      "withheldWireBytes": 32,
+      "closedOutcome": "client-eof"
+    },
+    "primaryExitCode": 0,
+    "restartedExitCode": 0,
+    "noAutomaticFilePublicationObservationSeconds": 36.091392040252686,
+    "absenceOfAllTransportRetriesProven": false,
+    "explicitSaveDecodedBytes": 32,
+    "explicitSaveDecodedSha256": "666dec5256feac267cd6c46b97107397c0a87fcde80a932321819f5a1cf2955e",
+    "unsafeAttachmentDecodedBytes": 28,
+    "unsafeAttachmentDecodedSha256": "1679a56fbd964b0463ec644f56fa9a3189d1402343de932a66b210586d00c02f",
+    "finalFiles": [
+      {
+        "name": "meeting-notes.txt",
+        "bytes": 32,
+        "sha256": "666dec5256feac267cd6c46b97107397c0a87fcde80a932321819f5a1cf2955e",
+        "mode": "0600",
+        "quarantinePresent": true,
+        "passed": true
+      },
+      {
+        "name": "meeting-notes (1).txt",
+        "bytes": 32,
+        "sha256": "666dec5256feac267cd6c46b97107397c0a87fcde80a932321819f5a1cf2955e",
+        "mode": "0600",
+        "quarantinePresent": true,
+        "passed": true
+      },
+      {
+        "name": "quarterly-report.pdf.command",
+        "bytes": 28,
+        "sha256": "1679a56fbd964b0463ec644f56fa9a3189d1402343de932a66b210586d00c02f",
+        "mode": "0600",
+        "quarantinePresent": true,
+        "passed": true
+      },
+      {
+        "name": "quarterly-report.pdf (1).command",
+        "bytes": 28,
+        "sha256": "1679a56fbd964b0463ec644f56fa9a3189d1402343de932a66b210586d00c02f",
+        "mode": "0600",
+        "quarantinePresent": true,
+        "passed": true
+      }
+    ],
+    "noPartialsReported": true,
+    "scope": "One explicit completed Save after restart and one unsafe individual Save, followed by Save all collision copies. Four exact files were recorded with mode 0600, no executable bits and quarantine. Full transport-attempt counting and absence of all automatic transport retries are not proven."
+  },
+  "otherFiniteObservations": {
+    "history": "Main CUA endpoints show expand-collapse-expand and the quoted-history marker; this alone does not establish every transition in the five-action plan or WebKit height bounds.",
+    "accountTwo": "Main CUA Reply/Forward compose sender fields retain account two. The detached Reader capture was blank, so it is not a detached Reader pass.",
+    "mailto": "All eleven main CUA cases showed the expected warning, Send-disabled and primary-From markers. No Send was invoked and full editing/submission semantics are not inferred.",
+    "sharedCli": "Eight retained read-only CLI metadata readers left the durable logical Store snapshot unchanged; this is separate from body rendering."
+  },
+  "artifactSets": {
+    "mainCuaAx": {
+      "root": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.Pnb9mp",
+      "files": [
+        {
+          "name": "before.ax.json",
+          "sha256": "17d3b556b9e081b8e23fb0c802fd52e4929fa37fae23e4264fafc6e4fd96104a",
+          "bytes": 2461
+        },
+        {
+          "name": "before-canonical.ax.json",
+          "sha256": "a598be09529d1d812505a33ed862691b58ea0a17f391f8fecf0b87a2edb33867",
+          "bytes": 2546
+        },
+        {
+          "name": "remote-before-consent.ax.json",
+          "sha256": "5481f79e36ac825398edea027627c09f9c6e5105fd07c885347137dbf5914db3",
+          "bytes": 7079
+        },
+        {
+          "name": "history-expand-1.ax.json",
+          "sha256": "6e9eeddcc76df2988736752cf7b913e00c9a31ad0d4ed6f52b5d39886094385b",
+          "bytes": 7743
+        },
+        {
+          "name": "history-collapse-1.ax.json",
+          "sha256": "7f52137a902a17fddfd80b58be53b41d2193859f623c60ddd679389a456b4b86",
+          "bytes": 7151
+        },
+        {
+          "name": "history-expand-3.ax.json",
+          "sha256": "13e70c0eff77d73aa1164dbfd80dedf7c6120ed0ca0dfcdc0e3cc7cd4c3a83a2",
+          "bytes": 7743
+        },
+        {
+          "name": "account-two-reply.ax.json",
+          "sha256": "afb2496d5220648b601690ccfba8e98133b804086e76382f239c1ef90e9b6351",
+          "bytes": 2407
+        },
+        {
+          "name": "account-two-forward.ax.json",
+          "sha256": "b87b5dca1dbc6a8e3a07bbff5bb8058c42feecbfd66c5383866d34019b4cc0c6",
+          "bytes": 2774
+        },
+        {
+          "name": "held-sync-start.ax.json",
+          "sha256": "f75f4e973032b66f881845fe598b4d0aa2e19f18ec7ffef250885789867ed9ae",
+          "bytes": 7781
+        },
+        {
+          "name": "held-sync-reader.ax.json",
+          "sha256": "b81c077a0431b60affc38fc87c4139096ab7ff01b4487f8203a71be4c9e49367",
+          "bytes": 4546
+        },
+        {
+          "name": "held-sync-compose.ax.json",
+          "sha256": "7c0f6589676abf43826d4abdfb1f3fb79ca8bdde1c824a63a339e176574b5e3f",
+          "bytes": 2302
+        },
+        {
+          "name": "remote-return-consent-reset.ax.json",
+          "sha256": "254ae8ea25f3eda4fa8294b243e311b9b0f2d53c561b5c26bdf5ae5501e1a709",
+          "bytes": 7568
+        },
+        {
+          "name": "watcher-delivered-list.ax.json",
+          "sha256": "b01ab27d50081df098e5ee670243b8a99af44e2eafba951be14cd2e6ec449a7a",
+          "bytes": 7812
+        },
+        {
+          "name": "watcher-receipt-reader.ax.json",
+          "sha256": "eaebf91118e28eb190ee66385a759e389e272c8441d667a3a89c5642a6fbb756",
+          "bytes": 5841
+        },
+        {
+          "name": "attachment-save-stalled.ax.json",
+          "sha256": "a12d3d26a6811cb1d12593b6750513e52942fa65edb667f7527caa6189399015",
+          "bytes": 7870
+        },
+        {
+          "name": "restart-no-save.ax.json",
+          "sha256": "17a3cea4d46b62b48c1f2ca59198e34e8b806f591eb30edeedbfb9ecc1a46364",
+          "bytes": 7837
+        },
+        {
+          "name": "attachment-explicit-retry.ax.json",
+          "sha256": "b8334c784e43d9107057aad0a96c6c3939917eddeb4560901223a8740fcee844",
+          "bytes": 7945
+        },
+        {
+          "name": "unsafe-individual-saved.ax.json",
+          "sha256": "f529126d8ecae0ca3bce75787e207c6deb67de1408a51fe52306b7297d3ddcd6",
+          "bytes": 7956
+        },
+        {
+          "name": "attachments-save-all.ax.json",
+          "sha256": "01b97dde4f784eaefd3becb3b0ec21d518637ebd994af340ed3cf00a0229165c",
+          "bytes": 7894
+        },
+        {
+          "name": "mailto-cr-to.ax.json",
+          "sha256": "a1cc693a415a872b178bc2f8ddae13aabd14372f3ceef937394a0f5a31f100fe",
+          "bytes": 2185
+        },
+        {
+          "name": "mailto-02.ax.json",
+          "sha256": "230b31df7db7436719e11a2d1018787b482ed547f0187a6c6be80ee26d8ef912",
+          "bytes": 2315
+        },
+        {
+          "name": "mailto-03.ax.json",
+          "sha256": "8dab6e965337af080eae43af6d7f2adc6e0f8426ad25c6dffe41af317d257baa",
+          "bytes": 2147
+        },
+        {
+          "name": "mailto-04.ax.json",
+          "sha256": "37a46f596601b90bbe31b4d468d1aceda2213078eddaa21b7ddb5f0c08801ea0",
+          "bytes": 2185
+        },
+        {
+          "name": "mailto-05.ax.json",
+          "sha256": "248d49c39ce9b739072928e764ae42ece5a71064ae4822022804952fa09abadc",
+          "bytes": 2315
+        },
+        {
+          "name": "mailto-06.ax.json",
+          "sha256": "d2a6f08e7446b477b8aaa9920bf4a7ecbc71c63927e31eae47fd0777001328c5",
+          "bytes": 2147
+        },
+        {
+          "name": "mailto-07.ax.json",
+          "sha256": "8f3454c2d794438703acc9bc54534a68a555eee68166bee5288b32d3682948ff",
+          "bytes": 2077
+        },
+        {
+          "name": "mailto-08.ax.json",
+          "sha256": "d32a102d188d7defb4632b25574c672c86f09b4ea73bbd1efbdca6f18680b703",
+          "bytes": 2207
+        },
+        {
+          "name": "mailto-09.ax.json",
+          "sha256": "4e941d7fe48984b618492d7794a23c23b8f27065a053d128eb43f4f0a2668255",
+          "bytes": 2042
+        },
+        {
+          "name": "mailto-10.ax.json",
+          "sha256": "2a253cbc4eb50df3f03c13deab8d51bf2ecbb26d9c46818d74d937c2a5b6a46b",
+          "bytes": 2072
+        },
+        {
+          "name": "mailto-11.ax.json",
+          "sha256": "e72848ffd940dd2a9ad35d26817e474a7b7c2b32ea05be09981d6b75d08476ef",
+          "bytes": 2108
+        }
+      ]
+    },
+    "mainCuaScreenshots": {
+      "root": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.Pnb9mp",
+      "files": [
+        {
+          "name": "held-sync-start.png",
+          "sha256": "237b4a005d2086c2a495556a29cfedfdce200a230bcd76e1b0dc61922bf60482",
+          "bytes": 553791
+        },
+        {
+          "name": "held-sync-reader.png",
+          "sha256": "0455c924352617fb14cc7d726fc4ad1786c5fc73c044087e0e7dff1c94935452",
+          "bytes": 390229
+        },
+        {
+          "name": "held-sync-compose.png",
+          "sha256": "e1841f7efa83b2a03900c2bc7769441c8d21c3df3e2003f59f6d3cb2aee4f779",
+          "bytes": 138261
+        },
+        {
+          "name": "watcher-receipt-reader.png",
+          "sha256": "704cbae954321b9d84dc765784201d45e840a7d11cac11e1c001c0272497f2c4",
+          "bytes": 432921
+        }
+      ]
+    },
+    "sourceAndNetwork": {
+      "root": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.Pnb9mp",
+      "files": [
+        {
+          "name": "source-before-build.json",
+          "sha256": "f6a4a553aa38974aceee534a0b728893b8f3da98bf05aa8ce7a7ba3963653b7f",
+          "bytes": 155
+        },
+        {
+          "name": "source-after-build.json",
+          "sha256": "c6d7e33459d2e1a498bd4003d7787394f218c074eb3cd786e4fbe862d54589cb",
+          "bytes": 380
+        },
+        {
+          "name": "source-after-run.json",
+          "sha256": "c6d7e33459d2e1a498bd4003d7787394f218c074eb3cd786e4fbe862d54589cb",
+          "bytes": 380
+        },
+        {
+          "name": "native-acceptance-plan.json",
+          "sha256": "346cb95c0403d6beac300205de5ad38fb786bc0caa170fa0063d3825c95ff1b7",
+          "bytes": 11693
+        },
+        {
+          "name": "network-before-consent.json",
+          "sha256": "04b777f44c9edac9f3c2caa536dee5c52cd555c4fa9293daf4f274b8ee070eea",
+          "bytes": 474
+        },
+        {
+          "name": "network-after-consent.json",
+          "sha256": "aac56c9419e22f5bcce70e860bc42f55043b0e6064acbd4769ba8cb5a1e1a1ab",
+          "bytes": 4607
+        },
+        {
+          "name": "network-settled-history.json",
+          "sha256": "f9cc669ea43520553419bcbb3cf1627f8de335ada6a6b20b583c29c642256b59",
+          "bytes": 4607
+        },
+        {
+          "name": "network-after-return.json",
+          "sha256": "f315e026764bf73e64996bbed268bee2772bff6e108835eac2c7fe2a9442ece6",
+          "bytes": 4607
+        }
+      ]
+    },
+    "attachments": {
+      "root": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.Pnb9mp",
+      "files": [
+        {
+          "name": "attachment-stall-before-quit.json",
+          "sha256": "3bf3381e6e4a004548e00316ec1fdbb9ddd96bbfc6618235056ae80dcad32c2f",
+          "bytes": 1635
+        },
+        {
+          "name": "attachment-interruption-state.json",
+          "sha256": "8dfe6ba249e9d35959c04ca1d89f562adfe1c93b2530a58ccc054f243b9c8f66",
+          "bytes": 1846
+        },
+        {
+          "name": "restart-no-automatic-file.json",
+          "sha256": "dfec44046f82395de71d962df32ee9650b381a7bfb9777d8b157d3cedb0a99a3",
+          "bytes": 2189
+        },
+        {
+          "name": "attachment-restart-launch.json",
+          "sha256": "672d191bd601c096a471e4024042817f97ea5171dc3ce2cc56d42564ebc35353",
+          "bytes": 1071
+        },
+        {
+          "name": "attachment-restart-exit.json",
+          "sha256": "32d4f612049854c08bc85d48b57177572fe22fdd2bb32f862162babed69d04c0",
+          "bytes": 60
+        },
+        {
+          "name": "attachment-files-verified.json",
+          "sha256": "f83a09f83d6754e548c447076ea7f3e60f6b69d4a2ddcf3bc2f21f4de03c8e8d",
+          "bytes": 955
+        },
+        {
+          "name": "app-exit-status.txt",
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "bytes": 2
+        }
+      ]
+    },
+    "injection": {
+      "root": "/private/var/folders/_q/1bcv1vh917s9zy1zn2_wvsgm0000gn/T/dakia-native-provider-reader.Pnb9mp",
+      "files": [
+        {
+          "name": "receipt-layout-injection-receipt.json",
+          "sha256": "8f5d5f86fc4a1a5745d00e80cc5cf4fe83bed542f2a7cc0cb7db4eb66dd5aaa7",
+          "bytes": 2491
+        },
+        {
+          "name": "receipt-layout-injection-journal.json",
+          "sha256": "af2c01af1f7d938d17dceed5a4e19b93581f2d99c3f955d212314fd8d90da606",
+          "bytes": 1077
+        }
+      ]
+    },
+    "resource": {
+      "root": "/private/tmp/dakia-mail-safety-resumed-20261023.fVPOQ0/native-resource-actual/native-resource-session",
+      "files": [
+        {
+          "name": "resource-summary.json",
+          "sha256": "24e3d2a529714ffe3c7f0dc9d2fb31dadaf0c6874ee384152fb6580281bf3ee9",
+          "bytes": 5897
+        },
+        {
+          "name": "runtime-manifest.json",
+          "sha256": "3adaaa6bf9c48b2203891fc35f1fbb2a7015d30ba121c8f5b67fcf0007db2d24",
+          "bytes": 2237
+        },
+        {
+          "name": "sample-list.json",
+          "sha256": "6dbfa801fa9d16a8d57c21d33f000a5d94e698b1dc607bbb763b1b0da24ad01a",
+          "bytes": 2815
+        },
+        {
+          "name": "predeclared-phase-plan.json",
+          "sha256": "6429ee113aee70b9969275921ecb6b096b2c3df4d71370da0d291eaa47ed6d22",
+          "bytes": 1022
+        },
+        {
+          "name": "limits.json",
+          "sha256": "2835168831433cc3e9bed4245d271da9059cf1749ee489dfb55f28a5fdd6af1d",
+          "bytes": 365
+        },
+        {
+          "name": "before-01-sample.json",
+          "sha256": "733265a3c8aeed6f4320b7157d980755719ef33ef798ee5e407491959b8d1b36",
+          "bytes": 6676
+        },
+        {
+          "name": "during-reader-01-sample.json",
+          "sha256": "35eccf631e6d258eb6f3b80fd248303380d51ac3bd35945cc3dc96713a55d223",
+          "bytes": 6690
+        },
+        {
+          "name": "during-reader-repeat-01-sample.json",
+          "sha256": "1a19fb847684a8575cd5be034f0a7bc435faac768cce788cebcedecb58965efa",
+          "bytes": 6704
+        },
+        {
+          "name": "during-compose-01-sample.json",
+          "sha256": "287300d4ba91f4a0b0b48ec0f087a78363d4bbccfaf1b859a1da728dd1306409",
+          "bytes": 6692
+        },
+        {
+          "name": "during-account-cycle-01-sample.json",
+          "sha256": "9a405a8a0bac559c8098c0fff2182c34a4e1b2701294fe1bd056061700b10276",
+          "bytes": 6704
+        },
+        {
+          "name": "after-01-sample.json",
+          "sha256": "b5e3b04688647dd9fe28783db120b6ee6f20259f391006231ac1a1bd6614948f",
+          "bytes": 6674
+        }
+      ]
+    }
+  },
+  "limitations": [
+    "Partial native evidence only. This does not close all69 original gaps or all catalogue assertions.",
+    "The user interruption produced a90-minute sampling gap. No continuous soak, long-term leak or controlled responsiveness verdict is claimed.",
+    "Main CUA endpoints during the acknowledged hold demonstrate accessible Reader/Compose controls while Sync was disabled. They do not establish a measured latency target.",
+    "Only main CUA receipt-delivery captures are used; the separate worker AX diagnostic is excluded.",
+    "No full WebKit cohort/resource pass, compatible-baseline regression pass, dark-mode fidelity, notification behavior, full13-fixture Reader pass, physical sleep/wake or release acceptance is claimed.",
+    "Later native failure fixes and later source identities require their own verification. They cannot retroactively turn this4853 snapshot into acceptance."
+  ],
+  "redaction": {
+    "rawMailCopied": false,
+    "credentialsCopied": false,
+    "controlNonceCopied": false,
+    "artifactBytesRemainPrivate": true
+  }
+}
