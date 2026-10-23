@@ -132,14 +132,17 @@ function validateInvocation(value, label, format) {
     fail(`${label} proxy invocation is invalid or failed`);
   }
   const args = value.arguments;
+  const skipFunctionsArguments = ["--skip-functions", "-skip-functions"];
+  const skipFunctionsCount = args.filter((argument) =>
+    skipFunctionsArguments.includes(argument),
+  ).length;
   if (format === "lcov") {
-    if (!args.includes("-format=lcov") || !args.includes("--skip-functions")) {
-      fail("Line-and-branch export was not LCOV with --skip-functions");
+    if (!args.includes("-format=lcov") || skipFunctionsCount !== 1) {
+      fail(
+        "Line-and-branch export was not LCOV with exactly one valid skip-functions argument",
+      );
     }
-  } else if (
-    args.includes("-format=lcov") ||
-    args.includes("--skip-functions")
-  ) {
+  } else if (args.includes("-format=lcov") || skipFunctionsCount !== 0) {
     fail("Function export must be JSON-compatible and include functions");
   }
   const profile = args.find((argument) =>

@@ -21,7 +21,7 @@ function sha256(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
-function fixture() {
+function fixture({ lcovSkipFunctionsArgument = "--skip-functions" } = {}) {
   const directory = mkdtempSync(
     join(tmpdir(), "dakia-rust-coverage-provenance-"),
   );
@@ -62,7 +62,7 @@ function fixture() {
       `-instr-profile=${profile}`,
       "-object",
       object,
-      "--skip-functions",
+      lcovSkipFunctionsArgument,
     ],
     {
       cwd: new URL("..", import.meta.url).pathname,
@@ -137,6 +137,49 @@ test("coverage provenance binds cargo's captured paired exports to source, profi
     );
   } finally {
     rmSync(paths.directory, { recursive: true, force: true });
+  }
+});
+
+test("coverage provenance accepts Cargo's captured single-dash LCOV skip-functions argument", () => {
+  const paths = fixture({ lcovSkipFunctionsArgument: "-skip-functions" });
+  try {
+    const events = readFileSync(paths.log, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    assert.deepEqual(
+      events[0].arguments.slice(-3),
+      ["-object", paths.object, "-skip-functions"].slice(-3),
+    );
+    assert.equal(events[0].arguments.includes("--skip-functions"), false);
+    const result = createRustCoverageProvenance(options(paths));
+    assert.equal(result.lineBranchReceipt.format, "lcov");
+    assert.equal(result.functionsReceipt.format, "json");
+  } finally {
+    rmSync(paths.directory, { recursive: true, force: true });
+  }
+});
+
+test("coverage provenance rejects either skip-functions spelling in the paired JSON export", () => {
+  for (const skipFunctionsArgument of ["--skip-functions", "-skip-functions"]) {
+    const paths = fixture();
+    try {
+      const events = readFileSync(paths.log, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      events[1].arguments.push(skipFunctionsArgument);
+      writeFileSync(
+        paths.log,
+        `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+      );
+      assert.throws(
+        () => createRustCoverageProvenance(options(paths)),
+        /Function export must be JSON-compatible and include functions/,
+      );
+    } finally {
+      rmSync(paths.directory, { recursive: true, force: true });
+    }
   }
 });
 
