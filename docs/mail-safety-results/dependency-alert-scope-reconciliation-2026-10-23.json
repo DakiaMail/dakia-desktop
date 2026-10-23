@@ -1,0 +1,248 @@
+{
+  "recordedAtUtc": "2026-10-23T08:33:11Z",
+  "kind": "dependency-audit-and-default-branch-alert-scope-reconciliation",
+  "sourceIdentity": {
+    "checkoutHead": "d813a25ee1542ed2eb63d89bbe0870e04a213a31",
+    "remoteMain": "e1da334ab5fd23ae5a685198d96072cd1e629740",
+    "checkoutState": "The checkout was dirty while the main-branch reconciliation and other programme work were in progress. This report is bound to the named dependency-input hashes, not to a clean Git tree or the historical 681d source manifest.",
+    "preRemediationInputs": {
+      "package-lock.json": "ec85e8d77a670963d49224d083cc9133b30763f048e8b520360f9c51c4bb5e1b",
+      "services/analytics/package-lock.json": "36ae9b0f62add061649ffa3ac7fad55d4af4d99b1b4ca3cad11c732a5fa115b4",
+      "Cargo.lock": "78e7136d6ff7a477e2317feb99a976a75376b1283a331babaca26b83c27f58b2",
+      "scripts/audit-dependencies.sh": "78a1949129f8863be0f70e4e54651552c537781aab07f3da7dce8ace5fe9503b",
+      ".cargo/audit.toml": "0a31dab852dead3b6c393c395475001792fde4cb008bad2c478d6776d0e52cc0"
+    }
+  },
+  "tools": {
+    "node": "v22.23.2",
+    "npm": "10.9.8",
+    "cargo": "1.89.0 (c24e10642 2025-06-23)",
+    "cargoAudit": "0.22.2"
+  },
+  "preRemediationResults": {
+    "rootNpm": {
+      "command": "npm audit --package-lock-only --ignore-scripts --audit-level=low --json",
+      "exitCode": 0,
+      "vulnerablePackageCounts": {
+        "info": 0,
+        "low": 0,
+        "moderate": 0,
+        "high": 0,
+        "critical": 0,
+        "total": 0
+      },
+      "dependencyCounts": {
+        "production": 56,
+        "development": 208,
+        "optional": 63,
+        "peer": 8,
+        "total": 263
+      },
+      "scope": "The root package-lock.json only. This result does not include services/analytics/package-lock.json, Cargo.lock, the fuzz lockfile or GitHub's default-branch snapshot."
+    },
+    "analyticsNpm": {
+      "command": "cd services/analytics && npm audit --package-lock-only --ignore-scripts --audit-level=low --json",
+      "exitCode": 1,
+      "vulnerablePackageCounts": {
+        "info": 0,
+        "low": 0,
+        "moderate": 2,
+        "high": 6,
+        "critical": 0,
+        "total": 8
+      },
+      "packages": {
+        "direct": {
+          "vitest": "4.1.11",
+          "wrangler": "4.126.0"
+        },
+        "transitive": {
+          "@vitest/mocker": "4.1.11",
+          "vite": "8.2.2",
+          "source-map-js": "1.2.1",
+          "miniflare": "5.20260825.0-alpha",
+          "sharp": "0.35.2",
+          "undici": "7.29.0"
+        }
+      },
+      "scope": "All affected packages are in the analytics package's development dependency graph. They affect test, local Worker emulation, type-generation, report and deployment tooling. They are not dependencies of the macOS application lockfile. This development classification does not make the findings passes."
+    },
+    "rust": {
+      "command": "DAKIA_CARGO_AUDIT_BIN=/private/tmp/dakia-mail-safety-tools/bin/cargo-audit ./scripts/audit-dependencies.sh",
+      "exitCode": 1,
+      "vendoredProvenanceChecks": 5,
+      "rustSec": {
+        "vulnerabilities": 0,
+        "allowedUnmaintainedWarnings": 10,
+        "deniedYankedWarnings": 1,
+        "deniedPackage": "clipboard-win 5.4.1"
+      },
+      "qualification": "The canonical gate currently fails. clipboard-win 5.4.1 is absent from the aarch64-apple-darwin graph and reachable on x86_64-pc-windows-msvc through tauri-plugin-clipboard-manager -> arboard, but a target-only finding is still a failure until the lockfile or gate is deliberately remediated. cargo-audit did not report the three current GitHub hickory-resolver GHSAs because they are not present in the refreshed RustSec result; zero RustSec vulnerabilities is therefore not evidence that the Cargo graph has no GitHub advisory findings."
+    }
+  },
+  "githubDefaultBranchAlerts": {
+    "query": "gh api repos/DakiaMail/dakia-desktop/dependabot/alerts --paginate, filtered to state=open",
+    "total": 31,
+    "severity": {
+      "high": 10,
+      "moderate": 15,
+      "low": 6
+    },
+    "ecosystem": {
+      "npm": 27,
+      "rust": 4
+    },
+    "manifestBreakdown": {
+      "package-lock.json": {
+        "count": 16,
+        "alertNumbers": [2, 3, 4, 5, 6, 9, 11, 12, 13, 17, 20, 21, 24, 25, 26, 38],
+        "reconciliation": "origin/main has the alerted development versions. The PR lock has source-map-js 1.2.2, undici 7.30.1, vitest and @vitest/mocker 4.1.12, browserslist 4.29.3 and baseline-browser-mapping 2.11.29. The live root audit reported zero vulnerabilities, so these 16 default-branch alerts are remediated in the tested PR lock scope but remain open against main until an accepted change reaches the default branch."
+      },
+      "services/analytics/package-lock.json": {
+        "count": 11,
+        "alertNumbers": [14, 19, 28, 29, 31, 33, 34, 39, 40, 41, 42],
+        "reconciliation": "The analytics lock is byte-equivalent between origin/main and this PR and remains vulnerable. The live npm audit also includes newly published advisory coverage beyond these 11 GitHub alerts, producing eight affected package records in the current lock."
+      },
+      "Cargo.lock": {
+        "count": 4,
+        "alertNumbers": [1, 35, 36, 37],
+        "reconciliation": "Alert 1 is glib 0.18.5 and alerts 35-37 are hickory-resolver 0.26.1. These versions are unchanged from origin/main in the PR lock."
+      }
+    }
+  },
+  "macosReachability": {
+    "hickory-resolver 0.26.1": {
+      "supportedTarget": "aarch64-apple-darwin",
+      "reachable": true,
+      "path": "dakia-core -> mail-auth 0.10.0 -> hickory-resolver 0.26.1",
+      "alerts": [
+        "GHSA-6w6g-hm98-mhgm: unbounded TC-retry resource-exhaustion denial of service, high",
+        "GHSA-6f2x-v7q7-m7m5: irrelevant CNAME records followed, moderate",
+        "GHSA-5j98-2g5x-46v6: lookup APIs obscure DNSSEC validation failures, high"
+      ],
+      "firstPatchedVersion": "0.26.2",
+      "risk": "This is a supported macOS runtime path used by mail authentication and DNS resolution. It is the highest-priority confirmed dependency remediation in this reconciliation."
+    },
+    "glib 0.18.5": {
+      "supportedTarget": "aarch64-apple-darwin",
+      "reachable": false,
+      "alert": "GHSA-wrw7-89jp-8q8g: VariantStrIter iterator unsoundness, moderate",
+      "allTargetPath": "Tauri GTK/Linux graph",
+      "gate": "scripts/audit-dependencies.sh already proves glib 0.18.5 absent from each supported target before applying the RUSTSEC-2024-0429 lockfile exception. GitHub Dependabot does not apply this target qualification."
+    },
+    "clipboard-win 5.4.1": {
+      "supportedTarget": "aarch64-apple-darwin",
+      "reachable": false,
+      "windowsPath": "dakia-desktop -> tauri-plugin-clipboard-manager 2.3.2 -> arboard 3.6.1 -> clipboard-win 5.4.1",
+      "finding": "The crate is yanked, not a reported vulnerability. It currently makes the canonical online Rust audit gate fail."
+    },
+    "analytics npm graph": {
+      "macosApplicationReachable": false,
+      "qualification": "This is a separately locked Cloudflare Worker tooling package. Wrangler and its Miniflare graph may execute on developer and CI machines and may hold deployment authority, so development scope reduces product-runtime reachability but does not justify ignoring the findings."
+    }
+  },
+  "remediationCandidates": {
+    "rustRuntime": {
+      "proposal": "Update only hickory-resolver 0.26.1 to the first patched 0.26.2 release, then run locked macOS target trees, the canonical dependency gate and mail-auth/provider integration tests.",
+      "dryRun": "cargo update --dry-run -p hickory-resolver --precise 0.26.2 reported exactly hickory-resolver 0.26.1 -> 0.26.2 and no lockfile write."
+    },
+    "rustYankedTargetOnly": {
+      "proposal": "Update only clipboard-win 5.4.1 to non-yanked 5.4.3 rather than weakening yanked-package policy, then rerun the canonical audit gate.",
+      "dryRun": "cargo update --dry-run -p clipboard-win --precise 5.4.3 reported exactly clipboard-win 5.4.1 -> 5.4.3 and no lockfile write."
+    },
+    "analytics": {
+      "proposal": "Update the analytics direct development constraints and lock to vitest 4.1.12 and wrangler 4.149.0, retaining the existing major versions. The resulting transitives are @vitest/mocker 4.1.12, vite 8.3.5, source-map-js 1.2.2, miniflare 5.20261006.1-alpha, sharp 0.35.5 and undici 7.29.1.",
+      "validation": "An isolated temporary package copy was updated with npm install --package-lock-only --ignore-scripts --no-audit vitest@4.1.12 wrangler@4.149.0. A fresh npm audit on that temporary lock exited 0 with zero vulnerabilities. The repository lock was not changed.",
+      "failedAutomation": "npm audit fix --dry-run --package-lock-only returned changed=0 and still reported all eight affected packages, so it was not accepted as remediation evidence."
+    }
+  },
+  "remediationApplied": {
+    "changedFiles": [
+      "Cargo.lock",
+      "services/analytics/package.json",
+      "services/analytics/package-lock.json"
+    ],
+    "currentInputHashes": {
+      "Cargo.lock": "cb62ba2c8d77d0e447a7866ceae0efa1556ddc089a8a8dd507af93ab45b3d6bc",
+      "services/analytics/package.json": "825f7d217cb8c6f2e7b0d684f37171743c29ef823af80aa9ecdd8d86a4444d0f",
+      "services/analytics/package-lock.json": "30bbb2f22db12ceb599c373dff957a8120c05f26df8dc1a0c8600756f577421b",
+      "package-lock.json": "ec85e8d77a670963d49224d083cc9133b30763f048e8b520360f9c51c4bb5e1b",
+      "scripts/audit-dependencies.sh": "78a1949129f8863be0f70e4e54651552c537781aab07f3da7dce8ace5fe9503b",
+      ".cargo/audit.toml": "0a31dab852dead3b6c393c395475001792fde4cb008bad2c478d6776d0e52cc0"
+    },
+    "rust": {
+      "versions": {
+        "hickory-resolver": "0.26.2",
+        "hickory-proto": "0.26.2",
+        "hickory-net": "0.26.2",
+        "clipboard-win": "5.4.3"
+      },
+      "initialCompileFailure": {
+        "command": "cargo check --locked --offline -p dakia-core",
+        "result": "failed deterministically after updating hickory-resolver alone",
+        "cause": "hickory-resolver 0.26.2 compiled against hickory-proto and hickory-net 0.26.1. Missing tls_exchange_with_bind_addr, BOGUS_CACHE_TTL, DnssecBogus, Truncated, ForeignClassRecord and is_connection_closed proved the family was not API-compatible as a mixed-version cohort.",
+        "disposition": "The failure is retained as evidence. hickory-proto and hickory-net were updated to the matching 0.26.2 release before acceptance."
+      },
+      "verification": [
+        {
+          "command": "cargo fetch --locked && cargo check --locked -p dakia-core",
+          "result": "passed; the production mail-auth -> hickory-resolver/proto/net API cohort compiled"
+        },
+        {
+          "command": "DAKIA_CARGO_AUDIT_BIN=/private/tmp/dakia-mail-safety-tools/bin/cargo-audit ./scripts/audit-dependencies.sh",
+          "result": "exit 0; five vendored provenance checks passed, no RustSec vulnerability or yanked-package failure, and ten configured unmaintained warnings remained"
+        },
+        {
+          "command": "cargo test --locked -p dakia-core unsubscribe_safety_tests -- --nocapture",
+          "result": "15 passed, zero failed after rerun with loopback permission"
+        }
+      ],
+      "sandboxQualification": "The first focused test invocation compiled successfully but five of fifteen tests failed because the sandbox denied fictional loopback socket binds with EPERM; ten non-socket cases passed. The same built test binary passed all fifteen outside the sandbox. This is an environment restriction, not a hidden product retry."
+    },
+    "analytics": {
+      "directVersions": {
+        "vitest": "4.1.12",
+        "wrangler": "4.149.0"
+      },
+      "resolvedSecurityRelevantTransitives": {
+        "@vitest/mocker": "4.1.12",
+        "vite": "8.3.5",
+        "source-map-js": "1.2.2",
+        "miniflare": "5.20261006.1-alpha",
+        "sharp": "0.35.5",
+        "undici": "7.29.1"
+      },
+      "verification": [
+        {
+          "command": "npm ci --ignore-scripts --no-audit",
+          "result": "passed; installed the exact analytics lock"
+        },
+        {
+          "command": "npm test",
+          "result": "one file and twelve tests passed"
+        },
+        {
+          "command": "npm audit --package-lock-only --ignore-scripts --audit-level=low --json",
+          "result": "exit 0; zero vulnerable packages across this analytics lock scope"
+        },
+        {
+          "command": "npm run types",
+          "result": "Wrangler binding/runtime type generation and tsc --noEmit passed"
+        },
+        {
+          "command": "npm run deploy:dry-run",
+          "result": "passed; bundled 8.81 KiB / gzip 3.03 KiB and exited without deployment"
+        }
+      ],
+      "sandboxQualification": "The first npm run types attempt generated project types but then failed because the sandbox denied Wrangler's preferences log path and a 127.0.0.1 listener. The escalated rerun passed and did not produce a worker-configuration.d.ts diff."
+    },
+    "scopeConclusion": "The PR dependency inputs now remediate the 16 root-lock alerts already cleared before this reconciliation, all current analytics npm audit findings, the three supported-macOS hickory-resolver alerts, and the yanked clipboard-win gate failure. The target-only glib alert remains open in GitHub because Dependabot scans the default Cargo.lock without the repository gate's supported-target reachability proof."
+  },
+  "limits": [
+    "Only Cargo.lock and the analytics package manifest and lock were changed. The root npm lock, audit policy, audit script and workflows were not changed.",
+    "No alert was dismissed or mutated in GitHub.",
+    "The root npm zero result must not be described as a whole-repository zero-vulnerability result.",
+    "The RustSec zero-vulnerability result must not be described as covering the three GitHub-only hickory-resolver advisories.",
+    "This is dependency evidence only. It does not establish source, coverage, performance, fuzzing, provider, native, packaging or release acceptance."
+  ]
+}
